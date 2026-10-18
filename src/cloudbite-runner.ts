@@ -187,9 +187,11 @@ def run_python(code, step):
 
 
 def write_file(path, content):
+    if not isinstance(path, str):
+        return 'rejected: path must be out/<name>.(md|txt|json|csv) and not reserved'
     if path in RESERVED:
         return 'rejected: %s is reserved and saved automatically by action=final; send the compact final action instead' % path
-    if not isinstance(path, str) or not EXTRA.match(path):
+    if not EXTRA.match(path):
         return 'rejected: path must be out/<name>.(md|txt|json|csv) and not reserved'
     if path not in extras and len(extras) >= MAX_EXTRA:
         return 'rejected: at most %d extra files' % MAX_EXTRA

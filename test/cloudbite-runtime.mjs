@@ -737,6 +737,25 @@ await check('real python runner: truncated final and reserved write get compact 
   assert.match(readFileSync(join(dir, 'out', 'analysis.md'), 'utf8').replace(/\r\n/g, '\n'), /^# Analysis\nexit 0$/);
 });
 
+await check('real python runner: object/list/null write paths are rejected without crashing the runner; the later final is collected', async () => {
+  const opinion = { direction: 'support', confidence: 61, summary: 'Paths were fixed after feedback.', evidence: ['three rejected writes'], assumptions: ['fixture'], nextActions: ['ship'] };
+  const BAD = [{ file: 'out/result.json' }, ['out/result.json'], null];
+  const w = freshWorld({ model: (req, turn) => turn < BAD.length
+    ? JSON.stringify({ action: 'write', path: BAD[turn], content: 'x' })
+    : JSON.stringify({ action: 'final', opinion, report: '# Market\n\nFinal after path feedback.' }) });
+  const { p, e, dir, procs } = await oneExpert(w);
+  assert.equal(p.status, 'completed', JSON.stringify(e.run.activity.map((a) => a.message)));
+  assert.deepEqual(procs.map((r) => r.code), [0], procs.map((r) => r.err).join('\n'));
+  assert.equal(w.nosana.length, 4, 'one call per turn, no extra retries');
+  for (const r of w.nosana.slice(1)) assert.equal(lastUser(r), 'rejected: path must be out/<name>.(md|txt|json|csv) and not reserved');
+  const msgs = e.run.activity.map((a) => a.message);
+  for (const t of [1, 2, 3]) assert.ok(msgs.includes(`sandbox: turn ${t}: rejected: path must be out/<name>.(md|txt|json|csv) and not reserved`), msgs.join('\n'));
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'out', 'result.json'), 'utf8')), opinion);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'out', 'manifest.json'), 'utf8')), { files: [] });
+  assert.ok(!existsSync(join(dir, 'out', 'error.txt')));
+  assert.deepEqual(e.run.opinion, opinion);
+});
+
 await check('real python runner: the last turn demands only the final; a tool action there is not run and the expert fails', async () => {
   const tool = (turn) => JSON.stringify({ action: 'python', code: `print(${turn})` });
   const finalOnly = (req) => /^This is the last turn\. Reply with only the compact final JSON object now: no python, no write/.test(lastUser(req));
