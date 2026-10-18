@@ -25,6 +25,8 @@
 
 3분 피치 원고: [영어](docs/pitch/3min.en.txt) · [한국어](docs/pitch/3min.ko.txt) · [리허설 메모](docs/pitch/rehearsal-notes.txt). 두 원고의 마지막에는 QR 신청·보안키 승인 안내가 포함되어 있습니다.
 
+제출용 통합 시나리오: [한국어](docs/pitch/submission-scenario.ko.txt) · [영어](docs/pitch/submission-scenario.en.txt). 공통 브리프, 6개 발표 장면, Daytona·Nosana 역할, QR 체험, 검증 증거와 다음 검증 과제를 함께 정리합니다.
+
 ## 참가자 체험용 QR
 
 [QR PNG](demo/cloudbite-sandbox-request.png) · [SVG](demo/cloudbite-sandbox-request.svg) · [영문 QR 안내 화면](demo/access-qr.html)
@@ -64,6 +66,10 @@ npm run check
 ```
 
 Cloudbite의 목적과 범위는 [구현 계약](docs/cloudbite/implementation-contract.md), 모듈 경계와 API는 [연동 계약](docs/cloudbite/api-contract.md)에 정리합니다. 기능별 검증 명령과 실행 결과는 각 작업 문서 및 [HANDOFF.md](HANDOFF.md)에 기록합니다. 설정과 연결을 확인하지 않은 실제 외부 실행은 통과했다고 기록하지 않습니다.
+
+## 선택 조교 모듈
+
+`agent_chatbot`의 [classroom-ta-agent](classroom-ta-agent/README.md)는 기존 실습실의 제한된 조교 API에 연결하는 별도 Python 봇입니다. 자체 OpenRouter 설정을 사용하며, 전문가 샌드박스 런타임의 Nosana 연결이나 12인 페르소나 레지스트리를 교체하지 않습니다. 기본 Cloudbite Worker가 이 봇을 자동 실행하지 않으며, 별도 실행·인증 설정이 필요합니다.
 
 ## 재사용한 기반
 
