@@ -18,7 +18,7 @@ Cloudbite now separates **the decision**, **provided evidence**, **original inde
 - Display names and document IDs are validated. Files are stored as data in `DECISION.md` and `evidence/documents.json`; a supplied filename never becomes an executable path.
 - PDF/OCR, DOCX, automatic repository ingestion, PubMed/Crossref retrieval, and URL fetching are not implemented by this release. Export relevant passages/tables to a supported text file; preserve source locations in that file.
 - Original sandbox limits are unchanged: six normal turns and at most eight inference calls per expert, including final repair calls. The separate second pass adds at most three calls per project.
-- Cross-review is opt-in, one paid attempt per project. Repeated completed/failed requests return the saved result without new calls; concurrent requests are rejected. A lost stale attempt is closed as failed on a subsequent POST and is never automatically rerun.
+- Cross-review is opt-in, one paid attempt per project. Repeated completed/failed requests return the saved result without new calls; concurrent requests are rejected. A lost stale attempt is closed as failed on a subsequent authenticated project read or POST and is never automatically rerun.
 - At most three completed reviewers are selected, preferring review/analyst/auditor roles. Each receives up to three other opinions; this is a **bounded partial review**, not an all-to-all discussion among 100 experts. Its verdicts are AI judgments, not calibrated correctness scores. A missing external source text should yield `insufficient`.
 
 ## Authority, isolation and retention
