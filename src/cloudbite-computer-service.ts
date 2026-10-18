@@ -253,8 +253,10 @@ export class ComputerService {
     r.status = 'starting'; r.error = null; r.reconcilePolls = 0; r.sessionEndsAt = this.d.now() + COMPUTER_SESSION_MS; r.desktop = 'not_running';
     await this.save(r); // ledger before mutation
     // Resources come from the prepared snapshot; no image/cpu/memory/disk here. Persistent: autoDeleteInterval -1.
+    // Raw REST POST /sandbox takes `env`; `envVars` is only the SDK option name and the wire API ignores it.
+    // https://www.daytona.io/docs/en/sandboxes/#environment-variables
     const body = { name, snapshot: a.snapshot, labels: computerLabels(r.ownerTag!, a.id), public: false,
-      autoStopInterval: COMPUTER_AUTO_STOP_MINUTES, autoDeleteInterval: -1, envVars: { VNC_RESOLUTION: '1920x1080' } };
+      autoStopInterval: COMPUTER_AUTO_STOP_MINUTES, autoDeleteInterval: -1, env: { VNC_RESOLUTION: '1920x1080' } };
     try {
       const sb = await this.d.daytona.create(dt, body);
       if (this.owned(r, sb)) this.adopt(r, sb); else { r.machine.created = 'unknown'; r.status = 'unknown'; }

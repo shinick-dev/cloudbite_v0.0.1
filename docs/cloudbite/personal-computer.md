@@ -113,7 +113,7 @@ node test/cloudbite-computer-ui.mjs
 
 갱신 기본 앱 이미지: cloudbite-computer-d2e6a902c06d (active). 현재 사용자 VM은 기존 파일·브라우저 프로필을 보존한 채 같은 시작 스크립트로 보정했다.
 
-- 사용자 VM을 재생성하지 않고 1920×1080으로 보정했다. 구형 base의 Xvfb 시작 크기가 최대 1024×768이므로 환경변수/RandR만으로는 커지지 않았다. configure-display.py가 dpkg-divert로 원본 Xvfb를 보존하고 시작 인자의 화면 0 크기를 보정한다. --remove로 복구 가능. 새 생성 요청에도 공식 envVars.VNC_RESOLUTION을 전달한다.
+- 사용자 VM을 재생성하지 않고 1920×1080으로 보정했다. 구형 base의 Xvfb 시작 크기가 최대 1024×768이므로 환경변수/RandR만으로는 커지지 않았다. configure-display.py가 dpkg-divert로 원본 Xvfb를 보존하고 시작 인자의 화면 0 크기를 보정한다. --remove로 복구 가능. 새 생성 요청에도 공식 raw REST env.VNC_RESOLUTION을 전달한다.
 - Selkies 수동 크기 1920×1080, 클라이언트 자동 크기 변경 잠금. 운영 영상 검증: 1440×900 브라우저에서 영상 1920×1080/CSS 1440×810, 390×844에서 영상 1920×1080/CSS 390×219.375. 양쪽 모두 16:9 유지.
 - 실제 bash -lc는 base nvm의 Claude 2.1.19를 선택했다. 고정 도구 경로를 PATH 앞에 두고 중복을 제거하며 bashrc의 nvm 초기화 뒤에 적용한다. CLI/로그인 아이콘은 고정 경로를 직접 호출한다. 실제 선택 버전 Claude 2.1.302, Codex 0.163.0 확인.
 - 브라우저가 기본 keyring을 만들라는 창에서 멈춰 localhost 콜백도 발송하지 않는 것을 화면으로 확인했다. 한 개인 세션 버스로 브라우저/CLI를 모으고, 기본 collection이 없을 때만 빈 비밀번호의 CloudBite Login을 준비한다. 개인 VM 파일시스템이 기존 정책과 같은 저장 경계다. 기존 다른 자격증명·보호 비밀번호는 읽거나 바꾸지 않는다. 재개 시 이 앱이 만든 collection만 빈 비밀번호로 잠금 해제한다.

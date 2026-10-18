@@ -94,8 +94,9 @@ await test('start writes the ledger first, creates a persistent labelled machine
   assert.equal(r.status, 'running'); assert.equal(r.machine.account, 'primary'); assert.equal(r.desktop, 'starting');
   const body = ops(w.fake, 'create')[0][1];
   assert.deepEqual(body, { name: `cloudbite-computer-primary-${OWNER}`, snapshot: 'cloudbite-computer-v1', labels: { 'cloudbite-computer': OWNER, 'cloudbite-computer-account': 'primary' },
-    public: false, autoStopInterval: 130, autoDeleteInterval: -1, envVars: { VNC_RESOLUTION: '1920x1080' } });
+    public: false, autoStopInterval: 130, autoDeleteInterval: -1, env: { VNC_RESOLUTION: '1920x1080' } });
   assert.ok(!('cpu' in body) && !('image' in body) && !('ephemeral' in body));
+  assert.ok(!('envVars' in body), 'raw REST create uses env, not the SDK envVars name');
   assert.equal(Date.parse(r.sessionEndsAt) - w.now, 2 * 3600_000);
   await w.svc.start(OWNER, { requestId: id, account: 'primary' });
   assert.equal(ops(w.fake, 'create').length, 1, 'replay does not mutate');
