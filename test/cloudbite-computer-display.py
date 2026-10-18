@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed 1920x1080 desktop of the CloudBite computer (images/cloudbite-computer/start-desktop.py).
+"""Fixed 1920x1080 desktop of the CloudBite computer (start-desktop.py and configure-display.py).
 
     python test/cloudbite-computer-display.py [SELKIES_ROOT]
 
@@ -10,6 +10,7 @@ resolved by Selkies' own settings parser in a child process and the resize gates
 checked in its source.  Without it those checks are reported as skipped, never passed.
 """
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -20,6 +21,7 @@ import types
 HERE = os.path.dirname(os.path.abspath(__file__))
 START = os.path.join(HERE, "..", "images", "cloudbite-computer", "start-desktop.py")
 INSTALL = os.path.join(HERE, "..", "images", "cloudbite-computer", "install_selkies.py")
+CONFIGURE = os.path.join(HERE, "..", "images", "cloudbite-computer", "configure-display.py")
 checks = 0
 
 
@@ -95,6 +97,68 @@ with tempfile.TemporaryDirectory() as tmp:
     with open(start.DISPLAY_CONFIG, "w") as fh:
         fh.write("{")
     ok(start.display_config() == "stale", "corrupt record is stale")
+
+# configure-display: the Xvfb wrapper forces screen 0 to 1920x1080 and keeps everything else.
+conf = load(CONFIGURE, "configure_display")
+wrapper = {"__name__": "cloudbite_xvfb_wrapper"}
+exec(compile(conf.WRAPPER, "xvfb-wrapper", "exec"), wrapper)
+rw = wrapper["rewrite"]
+base = [":0", "-screen", "0", "1024x768x24", "-ac", "-nolisten", "tcp"]
+ok(rw(base) == [":0", "-screen", "0", "1920x1080x24", "-ac", "-nolisten", "tcp"], "screen 0 geometry rewritten, other args kept")
+ok(rw([":0", "-screen", "0", "800x600x16"])[-1] == "1920x1080x16", "requested depth kept")
+ok(rw([":0", "-screen", "0", "800x600"])[-1] == "1920x1080x24", "missing depth becomes 24")
+ok(rw([":0", "-ac"]) == [":0", "-ac", "-screen", "0", "1920x1080x24"], "no screen arg gets the fixed screen")
+ok(rw([":0", "-screen", "1", "640x480x24"]) == [":0", "-screen", "1", "640x480x24", "-screen", "0", "1920x1080x24"],
+   "other screens untouched")
+ok(conf.WRAPPER.startswith("#!" + conf.PYTHON + "\n" + conf.MARKER) and repr(conf.REAL) in conf.WRAPPER,
+   "wrapper execs the diverted real Xvfb")
+
+
+def code_of(fn):
+    out = io.StringIO()
+    real = sys.stdout
+    sys.stdout = out
+    try:
+        fn()
+    except SystemExit:
+        pass
+    finally:
+        sys.stdout = real
+    lines = out.getvalue().strip().splitlines()
+    return json.loads(lines[-1]).get("code") if lines else None
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    conf.TARGET, conf.REAL = os.path.join(tmp, "Xvfb"), os.path.join(tmp, "Xvfb.cloudbite-real")
+    conf.PYTHON = sys.executable
+    diverts = []
+
+    def fake_divert(*args):
+        diverts.append(args)
+        if args == ("--add",):
+            os.replace(conf.TARGET, conf.REAL)
+        elif args == ("--remove",):
+            os.replace(conf.REAL, conf.TARGET)
+        return True
+    conf.divert = fake_divert
+    ok(code_of(conf.install) == "computer_display_xvfb_missing", "no Xvfb refuses")
+    with open(conf.TARGET, "w") as fh:
+        fh.write("ELF real xvfb")
+    ok(conf.install() is True and conf.installed(), "install diverts and writes the wrapper")
+    ok(open(conf.REAL).read() == "ELF real xvfb" and diverts == [("--add",)], "real binary diverted once")
+    ok(conf.install() is False and diverts == [("--add",)], "second install is a no-op")
+    with open(conf.TARGET, "w") as fh:
+        fh.write(conf.WRAPPER.replace("v1", "v0"))
+    ok(conf.install() is True and conf.installed() and diverts == [("--add",)], "stale wrapper rewritten without re-diverting")
+    with open(conf.TARGET, "w") as fh:
+        fh.write("ELF something else")
+    ok(code_of(conf.install) == "computer_display_target_unexpected", "foreign file in front of the diversion is not overwritten")
+    ok(code_of(conf.remove) == "computer_display_target_unexpected", "remove refuses to delete a foreign file")
+    with open(conf.TARGET, "w") as fh:
+        fh.write(conf.WRAPPER)
+    ok(conf.remove() is True and open(conf.TARGET).read() == "ELF real xvfb" and not os.path.exists(conf.REAL),
+       "remove restores the real binary")
+    ok(conf.remove() is False and not conf.installed(), "second remove is a no-op")
 
 # Selkies' own parser on the exact environment.
 root = (sys.argv[1:] or [os.environ.get("CLOUDBITE_SELKIES_ROOT", "")])[0]
