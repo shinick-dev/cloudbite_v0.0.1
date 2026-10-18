@@ -1,6 +1,6 @@
 // 만든 파일 — 직접 고치지 말 것. 소스: client/cloudbite-console.ts · client/cloudbite-console.css
 // 다시 만들기: node tools/build-cloudbite-console.mjs (--check 로 최신인지 확인)
-// esbuild 0.28.1 transform (ES2022, 묶지 않음) · ts sha256 b7d703f0a012fcc6f22a03f1fccd8ac8e4790196ae9b74efd54af29c1a98c75d · css sha256 4011bd989e214a66061c5d9fc7056446f7a31886ffffb1665e2edc44352b3194
+// esbuild 0.28.1 transform (ES2022, 묶지 않음) · ts sha256 3ec545706c7161f99dc87f8d6ca26d889cf0310f09aa0aac53772b932b87544d · css sha256 4011bd989e214a66061c5d9fc7056446f7a31886ffffb1665e2edc44352b3194
 // 라우팅(런타임 담당): GET / 와 /cloudbite → CLOUDBITE_HTML, CLOUDBITE_JS_PATH → CLOUDBITE_JS (text/javascript),
 // CLOUDBITE_CSS_PATH → CLOUDBITE_CSS (text/css). CSP 는 script-src 'self'; style-src 'self' 면 충분하다 (인라인 없음).
 export const CLOUDBITE_JS_PATH = "/cloudbite/console.js";
@@ -2057,7 +2057,7 @@ export const CLOUDBITE_JS = [
   "    }",
   "    if (gen !== S.gen) return;",
   "    if (!res.ok) {",
-  "      const msg = operator && res.status === 401 ? \"The temporary Cloudbite operator token was rejected or has expired. Ask the owner for a new link.\" : v && (res.status === 401 || res.status === 403) ? `Your visitor session was not accepted — it may have expired, been revoked or used its project. Request access again at ${REQUEST_PATH}. (Not switched to demo.)` : await errorText(res);",
+  "      const msg = operator && res.status === 401 ? \"The temporary Cloudbite operator token was rejected or has expired. Ask the owner for a new link.\" : v && (res.status === 401 || res.status === 403) ? `Your visitor session was not accepted — it may have expired, been revoked or used all its projects. Request access again at ${REQUEST_PATH}. (Not switched to demo.)` : await errorText(res);",
   "      if (gen !== S.gen) return;",
   "      S.run.phase = \"error\";",
   "      S.run.error = msg;",

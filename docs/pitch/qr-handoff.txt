@@ -21,8 +21,8 @@ PARTICIPANT
    cookie identifies your application; the request ID alone grants no access.
 3. When the host approves, use Continue to Cloudbite in that browser.
 4. Enter a shared project, choose up to five expert roles, then press Run experts.
-   Approval alone never starts compute. The approved trial permits one project
-   for one hour; pending requests expire after 30 minutes.
+   Approval alone never starts compute. The approved trial permits up to ten
+   projects in one hour; pending requests expire after 30 minutes.
 5. The project and its experts use independent workspaces. Other participants
    cannot recover your project by reusing the same client request ID.
 
@@ -36,8 +36,9 @@ OWNER
    project capabilities retain their existing 24-hour read/cancel policy.
 
 BOUNDS
-One approved project per visitor, up to five experts; existing global live limits
-still apply (two active projects, three expert workers per project at once).
+Up to ten projects per approved one-hour visitor session, up to five experts each;
+existing global live limits still apply (two active projects, three expert
+workers per project at once).
 Resource contention and provider errors are shown explicitly. No immediate
 successful Daytona + Nosana execution is promised by admission approval.
 

@@ -191,7 +191,7 @@ function visitorPage(root: HTMLElement): void {
           h('ol', null,
             h('li', null, h('strong', null, 'Send your request.'), h('span', null, 'Keep this page open. It checks for the host\'s answer every few seconds.')),
             h('li', null, h('strong', null, 'The host reviews it.'), h('span', null, 'The host approves or declines from the owner inbox. Requests wait up to 30 minutes.')),
-            h('li', null, h('strong', null, 'Open Cloudbite.'), h('span', null, 'An approved session lasts one hour: write one project brief, choose up to five AI experts, then run and inspect their work.'))),
+            h('li', null, h('strong', null, 'Open Cloudbite.'), h('span', null, 'An approved session lasts one hour and allows up to ten projects. For each, write one project brief, choose up to five AI experts, then run and inspect their work.'))),
           h('p', { class: 'ax-note' }, 'Nothing runs until you press Run experts in Cloudbite. Approval does not create resources by itself.')))));
   document.addEventListener('visibilitychange', () => { if (visible() && pending() && !timer && !checking) void check(); });
 
@@ -307,7 +307,7 @@ function ownerPage(root: HTMLElement): void {
   root.replaceChildren(header('Owner request inbox'),
     h('main', { class: 'ax-main' },
       h('h1', null, 'Cloudbite access requests'),
-      h('p', { class: 'ax-lead' }, 'Approve a visitor to give them a one-hour Cloudbite session with one project and up to five AI experts. Nothing runs until the visitor starts it.'),
+      h('p', { class: 'ax-lead' }, 'Approve a visitor to give them a one-hour Cloudbite session with up to ten projects and up to five AI experts per project. Nothing runs until the visitor starts it.'),
       h('section', { class: 'ax-panel', 'aria-label': 'Owner credential' }, tokenForm),
       h('section', { class: 'ax-panel', 'aria-labelledby': 'ax-inbox-h' },
         h('div', { class: 'ax-inbox-head' }, h('h2', { id: 'ax-inbox-h' }, 'Inbox'), state, refreshBtn), msg, list),

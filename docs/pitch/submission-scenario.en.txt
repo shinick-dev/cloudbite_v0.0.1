@@ -104,7 +104,7 @@ Public QR: demo/cloudbite-access-request.png; display demo/access-qr.html.
 1) The participant enters a name and project purpose, then keeps that browser open.
 2) The host opens the Cloudbite inbox with a private operator credential or valid
    Cloudbite admin session, reviews the application and presses Approve or Deny.
-3) Approval grants that browser one hour and one project with up to five experts.
+3) Approval grants that browser one hour and up to ten projects, each with up to five experts.
    Continue to Cloudbite opens the shared-brief and expert selection screen.
 4) The participant presses Run experts. Neither scanning nor approval starts compute.
 5) Requests and project identities are scoped to each visitor; other visitors cannot

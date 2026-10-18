@@ -624,6 +624,33 @@ await test('승인된 방문자: 실제 실행·설정이 열리고 자동 데�
   assert.equal(startBtnOf(env).disabled, true, 'quota used: no second run');
 });
 
+await test('10개 프로젝트 방문자: 첫 실행 뒤 서버가 9개 남음을 알리면 Run again 이 열리고, 10개 모두 쓰면 막힌다', async () => {
+  const env = visitorEnv(null, (url, init) => {
+    if (url === '/api/cloudbite/projects' && init.method === 'POST') return json(201, { project: liveProject('running', 'running'), accessToken: 'proj-scope-tok' });
+    if (url === '/api/cloudbite/projects/proj-1') return json(200, liveProject('completed', 'completed', { updatedAt: 5 }));
+    return json(404, {});
+  }, { bootstrap: (n) => json(200, { ...CATALOGUE, access: accessOf({ maxProjects: 10, usedProjects: n === 1 ? 0 : 1 }) }) });
+  await env.flush();
+  assert.match(env.root.textContent, /Visitor session: 10 of 10 projects left/);
+  pick(env, 'strategy');
+  startBtnOf(env).click(); await env.flush();
+  await env.advance(1500);
+  assert.equal(env.boots(), 2, 'finished visitor run re-reads the server access state');
+  assert.match(env.root.textContent, /9 of 10 projects left/);
+  assert.match(env.root.textContent, /Your visitor session can run again/);
+  const again = env.byText('BUTTON', 'Run again');
+  assert.ok(again, 'Run again offered');
+  assert.equal(again.disabled, false, 'nine projects left: the visitor may run again');
+  assert.equal(env.requests.filter(r => r.init.method === 'POST').length, 1, 'no automatic second run');
+
+  const spent = visitorEnv(accessOf({ maxProjects: 10, usedProjects: 10 }, false));
+  await spent.flush(); await spent.advance(30000);
+  assert.deepEqual(spent.requests.map(r => r.url), ['/api/cloudbite/bootstrap'], 'exhausted: no automatic demo or run');
+  assert.match(spent.root.textContent, /0 of 10 projects left/);
+  assert.match(spent.root.textContent, /no projects left/);
+  assert.equal(startBtnOf(spent).disabled, true);
+});
+
 await test('만료·취소·거절·대기·소진된 방문자 접근은 쓰지 않고 요청 링크를 보인다, 소진된 승인은 자동 데모 없이 막힌 실제 실행', async () => {
   for (const [over, re] of [[{ expiresAt: Date.now() - 1000 }, /has expired/], [{ status: 'revoked' }, /ended your visitor session/], [{ status: 'denied' }, /declined/], [{ status: 'pending' }, /still waiting/]]) {
     const env = visitorEnv(accessOf(over, false));

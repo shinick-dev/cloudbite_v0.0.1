@@ -99,7 +99,7 @@ The owner reviews applications at:
 Use the private owner file's inbox button; temporary operator access can approve
 without a physical-key tap. Never show that private QR to the audience.
 Participants keep the same browser open, then use Continue to Cloudbite after
-approval. The one-hour trial permits one expert project with up to five experts.
+approval. The one-hour trial permits up to ten expert projects, each with up to five experts.
 Approval does not start resources; the participant explicitly presses Run experts.
 Cloudbite projects are isolated per participant. This is access to the product,
 not a classroom workspace request. See qr-handoff.txt for the full handoff.

@@ -1293,7 +1293,7 @@ function boot(): void {
     if (gen !== S.gen) return;
     if (!res.ok) {
       const msg = operator && res.status === 401 ? 'The temporary Cloudbite operator token was rejected or has expired. Ask the owner for a new link.'
-        : v && (res.status === 401 || res.status === 403) ? `Your visitor session was not accepted — it may have expired, been revoked or used its project. Request access again at ${REQUEST_PATH}. (Not switched to demo.)`
+        : v && (res.status === 401 || res.status === 403) ? `Your visitor session was not accepted — it may have expired, been revoked or used all its projects. Request access again at ${REQUEST_PATH}. (Not switched to demo.)`
           : await errorText(res);
       if (gen !== S.gen) return;
       S.run!.phase = 'error'; S.run!.error = msg; renderAll();
