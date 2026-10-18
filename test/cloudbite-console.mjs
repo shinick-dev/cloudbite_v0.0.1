@@ -1286,7 +1286,7 @@ const suggestOf = (env) => env.all().find(n => n.className === 'cb-suggest');
 const poolBoxes = (env) => env.all().filter(n => /^xp:/.test(n.getAttribute('data-fk') || ''));
 const setObjective = (env, v) => { const o = env.all().find(n => n.id === 'cb-objective'); o.value = v; o.dispatch('input'); };
 
-await test('pool 정리: 깨진 pool 은 무시하고 bootstrap 은 산다, 중복 id·번호·형식 오류는 버리고 100개 상한, 화면은 권한을 만들지 않는다', () => {
+await test('pool 정리: 깨진 pool 은 무시하고 bootstrap 은 산다, 중복 id·번호·형식 오류는 버리고 카탈로그 200개 상한, 화면은 권한을 만들지 않는다', () => {
   for (const bad of [null, 'x', 7, { entries: 'no' }, { entries: [] }, { entries: [1, null, { id: 'pool-001' }] }]) {
     const b = core.normalizeBootstrap({ ...POOL_BOOT, pool: bad });
     assert.equal(b.pool, undefined, JSON.stringify(bad)); assert.equal(b.experts.length, 9);
@@ -1307,7 +1307,7 @@ await test('pool 정리: 깨진 pool 은 무시하고 bootstrap 은 산다, 중�
   ] };
   const p = core.normalizePool(raw, POOL_EXPERTS);
   const by = (n) => p.entries.find(e => e.catalogNumber === n);
-  assert.deepEqual(p.entries.map(e => e.catalogNumber), [1, 8, 9, 10, 31, 51, 57, 100], 'only valid, unique, numbered 1–100, sorted');
+  assert.deepEqual(p.entries.map(e => e.catalogNumber), [1, 8, 9, 10, 31, 51, 57, ...Array.from({ length: 101 }, (_, i) => 100 + i)], 'only valid, unique, numbered 1–200, sorted');
   assert.equal(new Set(p.entries.map(e => e.id)).size, p.entries.length);
   assert.equal(by(8).availability, 'planned'); assert.equal(by(8).expertId, undefined, 'unknown expertId is not runnable');
   assert.equal(by(9).availability, 'planned', 'second mapping of the same expert is not runnable');
@@ -1320,8 +1320,12 @@ await test('pool 정리: 깨진 pool 은 무시하고 bootstrap 은 산다, 중�
   assert.equal(by(51).mappingNote, 'related scope');
   assert.equal(by(31).keywords.length, 24); assert.equal(by(31).category, 'other');
   assert.deepEqual(p.priorityNumbers, [1], 'priority numbers must be accepted catalogue numbers');
-  const many = core.normalizePool({ entries: Array.from({ length: 140 }, (_, i) => poolEntry((i % 100) + 1, { id: `pool-${String(i).padStart(3, '0')}` })) }, POOL_EXPERTS);
-  assert.ok(many.entries.length <= 100);
+  const many = core.normalizePool({ entries: Array.from({ length: 260 }, (_, i) => poolEntry(i + 1)) }, POOL_EXPERTS);
+  assert.equal(many.entries.length, 200, 'catalogue bound 200, not the 100 selection bound');
+  assert.equal(many.entries.at(-1).catalogNumber, 200);
+  const pool120 = core.normalizePool({ ...POOL, entries: Array.from({ length: 120 }, (_, i) => poolEntry(i + 1)) }, POOL_EXPERTS);
+  assert.equal(pool120.entries.length, 120);
+  assert.deepEqual(pool120.entries.slice(100).map(e => e.id), Array.from({ length: 20 }, (_, i) => `pool-${101 + i}`), '101–120 kept');
   const full = core.normalizeBootstrap(POOL_BOOT).pool;
   assert.equal(full.entries.length, 100);
   assert.equal(full.entries.filter(e => e.availability === 'available').length, 9);
@@ -1354,6 +1358,18 @@ await test('옛 bootstrap (pool 없음): 카탈로그·제안은 숨고 기존 6
   assert.equal(poolBoxes(env).length, 0);
   assert.equal(env.all().filter(n => /^x:/.test(n.getAttribute('data-fk') || '')).length, 6);
   assert.ok(env.fk('xa:r6'));
+});
+
+await test('카탈로그 120 화면: 101–120 항목이 보이고, 탐색 줄은 카탈로그 규모와 프로젝트당 100명 한도를 구분한다 (KO/EN)', async () => {
+  const boot = { ...POOL_BOOT, pool: { ...POOL, entries: Array.from({ length: 120 }, (_, i) => poolEntry(i + 1)) } };
+  const env = fakeEnv({ fetchImpl: () => json(200, boot) });
+  await env.flush();
+  assert.match(poolDetailsOf(env).textContent, /Browse the role catalogue \(120 entries · 9 runnable now\)/);
+  const foot = () => env.all().find(n => n.className === 'cb-nav-foot').children[0].textContent;
+  assert.equal(foot(), 'Independent workspaces · 120 catalogue roles · up to 100 per project');
+  langBtn(env, 'ko').click(); await env.flush();
+  assert.equal(foot(), '독립 작업공간 · 카탈로그 역할 120종 · 프로젝트당 최대 100명');
+  assert.equal(core.DICT.en.navFoot(0, 100), 'Independent workspaces · Up to 100 experts per project', 'before the catalogue loads');
 });
 
 await test('역할 카탈로그: 접힌 채로 시작, 기본 6개는 그대로, 계획 역할은 잠겨 고를 수 없고 실행 가능 역할만 선택, 최대 5명', async () => {
@@ -1513,14 +1529,26 @@ await test('방문자 + 카탈로그: 제안은 세션 한도(3명)까지만, �
   assert.equal(cards(env), 0);
 });
 
-await test('실제 100종 bootstrap: 전 역할 유지, 새 산업·반도체·검토 역할 추천 가능, 5명 한도와 평가 전 상태 유지', async () => {
+await test('실제 bootstrap (카탈로그 120): 원래 100 역할 유지, 101–120 은 보이고 등록된 만큼만 실행 가능, 5명 한도와 평가 전 상태 유지', async () => {
   const bundled = await build({ stdin: { contents: "export { CLOUDBITE_POOL } from './src/cloudbite-pool.ts'; export { CLOUDBITE_EXPERTS } from './src/cloudbite-personas.ts';", resolveDir: process.cwd(), loader: 'ts' }, bundle: true, write: false, format: 'esm', platform: 'neutral' });
   const actual = await import('data:text/javascript;base64,' + Buffer.from(bundled.outputFiles[0].text).toString('base64'));
   const normalized = core.normalizeBootstrap({ experts: actual.CLOUDBITE_EXPERTS, pool: actual.CLOUDBITE_POOL, configuration: { liveReady: true, missing: [], maxExperts: 5 } });
-  assert.equal(normalized.experts.length, 100);
-  assert.equal(normalized.pool.entries.length, 100);
-  assert.ok(normalized.pool.entries.every(e => e.availability === 'available' && e.evaluation === 'unvalidated'));
-  assert.equal(normalized.pool.entries.filter(e => e.knowledge === 'metadata-derived').length, 4);
+  // 이 작업 폴더의 런타임은 100 역할일 수 있다 (101–120 지식 묶음은 통합 때 붙는다): 개수는 실제 카탈로그에서 읽는다
+  assert.equal(normalized.experts.length, actual.CLOUDBITE_EXPERTS.length);
+  assert.ok(normalized.experts.length >= 100);
+  assert.equal(normalized.pool.entries.length, 120);
+  assert.deepEqual(normalized.pool.entries.map(e => e.catalogNumber), Array.from({ length: 120 }, (_, i) => i + 1), 'no catalogue entry silently dropped');
+  assert.ok(normalized.pool.entries.every(e => e.evaluation === 'unvalidated'));
+  assert.ok(normalized.pool.entries.slice(0, 100).every(e => e.availability === 'available'));
+  for (const e of normalized.pool.entries.slice(100)) {
+    const runnable = normalized.experts.some(x => x.id === `cb-role-${e.catalogNumber}`);
+    assert.equal(e.availability, runnable ? 'available' : 'planned', e.id);
+    assert.equal(e.expertId, runnable ? `cb-role-${e.catalogNumber}` : undefined);
+  }
+  assert.equal(normalized.pool.entries.filter(e => e.availability === 'available').length, normalized.experts.length);
+  assert.equal(normalized.pool.entries.slice(0, 100).filter(e => e.knowledge === 'metadata-derived').length, 4);
+  assert.deepEqual([...new Set(normalized.pool.entries.slice(100).map(e => e.category))].sort(), ['biomedical-research', 'chemistry', 'clinical-medicine', 'pharmaceutical-science']);
+  assert.ok(normalized.pool.entries.slice(100).every(e => e.categoryLabel.ko && e.categoryLabel.en && e.categoryLabel.ko !== e.categoryLabel.en));
   const allowed = normalized.experts.map(e => e.id);
   for (const [objective, wanted] of [['frontend browser rendering', 'cb-role-022'], ['semiconductor synthesis RTL chiplet', 'cb-role-075'], ['healthcare interoperability clinical', 'cb-role-085'], ['pre-mortem failure', 'cb-role-095']]) {
     const selected = core.suggestTeam(objective, normalized.pool.entries, allowed, 5);
@@ -1816,6 +1844,28 @@ await test('Jev v1·v2 정리: 옛 v1 은 설명 없이 그대로, v2 는 7명 �
   const big = routeV2(ids, { evaluatedCount: 100 }, { ...harnessOf(ids), eligibleCount: 100, perspectives: [], selections: ids.map(expertId => ({ expertId, perspectiveIds: [], kind: 'additional-domain' })), excluded: [], warnings: [] });
   assert.equal(core.normalizeRoute(big, ids, 100).expertIds.length, 100);
   assert.equal(core.normalizeRoute(big, ids, 99), null);
+});
+
+await test('Jev v2 카탈로그 120: 평가·자격 후보·제외 목록은 카탈로그 한도(200)까지 받고, 선택은 여전히 100명까지', () => {
+  const all = Array.from({ length: 120 }, (_, i) => `cb-role-${String(i + 1).padStart(3, '0')}`);
+  const route = (team, over = {}, hover = {}) => routeV2(team, { evaluatedCount: 120, ...over }, { ...harnessOf(team), eligibleCount: team.length, perspectives: [],
+    selections: team.map(expertId => ({ expertId, perspectiveIds: [], kind: 'additional-domain' })), warnings: [],
+    excluded: all.filter(id => !team.includes(id)).map(expertId => ({ expertId, reason: 'below-threshold' })), ...hover });
+  // 120번째 역할 하나만 고르고 나머지 119개를 제외로 설명해도 (100 초과) 버리지 않는다
+  const late = core.normalizeRoute(route(['cb-role-120']), all, 5);
+  assert.deepEqual(late.expertIds, ['cb-role-120']);
+  assert.equal(late.harness.excluded.length, 119);
+  // 120명 모두 자격 있고 100명 선택, 20명은 한도로 제외
+  const hundred = all.slice(0, 100);
+  const full = core.normalizeRoute(route(hundred, {}, { eligibleCount: 120, excluded: all.slice(100).map(expertId => ({ expertId, reason: 'limit' })), warnings: ['actor-limit'] }), all, 100);
+  assert.equal(full.expertIds.length, 100); assert.equal(full.harness.eligibleCount, 120); assert.equal(full.harness.excluded.length, 20);
+  // 선택 101명은 카탈로그가 커도 거절, 자격 후보가 평가 수·카탈로그 한도를 넘으면 거절, 제외 목록 201개 거절
+  assert.equal(core.normalizeRoute(route(all.slice(0, 101)), all, 100), null);
+  assert.equal(core.normalizeRoute(route(['cb-role-120'], {}, { eligibleCount: 121 }), all, 5), null);
+  const huge = Array.from({ length: 201 }, (_, i) => `x-${i}`);
+  assert.equal(core.normalizeRoute(routeV2(['x-0'], { evaluatedCount: 300 }, { ...harnessOf(['x-0']), eligibleCount: 201, perspectives: [], selections: [{ expertId: 'x-0', perspectiveIds: [], kind: 'additional-domain' }], excluded: [], warnings: [] }), huge, 5), null, 'eligibleCount above 200');
+  assert.equal(core.normalizeRoute(routeV2(['x-0'], { evaluatedCount: 300 }, { ...harnessOf(['x-0']), eligibleCount: 1, perspectives: [], selections: [{ expertId: 'x-0', perspectiveIds: [], kind: 'additional-domain' }],
+    excluded: huge.slice(1).concat('x-extra').map(expertId => ({ expertId, reason: 'below-threshold' })), warnings: [] }), [...huge, 'x-extra'], 5), null, '201 exclusions');
 });
 
 await test('Jev v2 깨진 설명: 설명 없음·모르는 코드·카탈로그 밖 id·서로 어긋난 담당이면 팀 전체를 쓰지 않는다', () => {

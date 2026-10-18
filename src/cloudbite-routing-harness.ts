@@ -2,6 +2,7 @@
 // owns identities, the option-symbol mapping, thresholds, actor limits and the explanation. No fetch, no storage.
 // Team suitability is not answer confidence, and no peer output is shared or reviewed (peerReview: 'not-performed').
 import type { CloudbiteRoutingHarness, CloudbiteRoutingQuery } from './cloudbite-contract';
+import { CATALOGUE_MAX_ROLES, PROJECT_MAX_EXPERTS } from './cloudbite-catalogue-limits';
 
 export interface HarnessCandidate { id: string; name: string; domain: string; mission: string; summary: string; category: string }
 export interface HarnessAssessment { relevance: Record<string, number>; needs: Record<string, number> }
@@ -11,8 +12,10 @@ export const HARNESS_VERSION = 'project-team/v1';
 export const HARNESS_THRESHOLD = 0.65;
 /** A lower-ranked role is dropped only when an already selected role covers substantially all of its contribution. */
 export const HARNESS_OVERLAP_THRESHOLD = 0.85;
-export const HARNESS_MAX_CANDIDATES = 100;
-/** Each eligible role is compared with at most this many higher-ranked peers of its own category (<= 600 probes). */
+/** Every catalogue role is a candidate; the team itself is bounded separately by HARNESS_MAX_SELECTED. */
+export const HARNESS_MAX_CANDIDATES = CATALOGUE_MAX_ROLES;
+export const HARNESS_MAX_SELECTED = PROJECT_MAX_EXPERTS;
+/** Each eligible role is compared with at most this many higher-ranked peers of its own category (<= 6 per candidate). */
 export const HARNESS_PEERS = 6;
 export const HARNESS_WARNINGS = ['uncovered-perspectives', 'actor-limit', 'no-project-perspectives', 'coverage-rescue'] as const;
 export const HARNESS_ERRORS = Object.freeze({
@@ -196,7 +199,7 @@ function checkReview(r: HarnessReview, needed: readonly { id: string }[], eligib
 /** Needed perspectives first, then direct-redundancy pruning, then the actor limit; never invents coverage. */
 export function composeHarnessTeam(candidates: readonly HarnessCandidate[], assessment: HarnessAssessment, review: HarnessReview, max: number):
   { expertIds: string[]; matches: Array<{ expertId: string; relevance: number }>; harness: CloudbiteRoutingHarness } {
-  if (!Number.isInteger(max) || max < 1 || max > HARNESS_MAX_CANDIDATES) throw new Error(HARNESS_ERRORS.limit);
+  if (!Number.isInteger(max) || max < 1 || max > HARNESS_MAX_SELECTED) throw new Error(HARNESS_ERRORS.limit);
   const { eligible, needed, pairs } = plan(candidates, assessment);
   checkReview(review, needed, eligible, pairs, candidates);
   const rescued = new Set(Object.values(review.coverage).filter((id): id is string => id !== null && !eligible.some(c => c.id === id)));

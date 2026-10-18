@@ -1,9 +1,12 @@
-// The 100-role planning catalogue (docs/cloudbite/expert-pool-100.md) as an optional bootstrap field.
+// The planning catalogue as an optional bootstrap field: the original 100 roles (docs/cloudbite/expert-pool-100.md)
+// followed by research-document roles 101–120 (Falsify extension). The catalogue bound and the project team bound are
+// separate (cloudbite-catalogue-limits.ts).
 // A catalogue entry is not a runnable expert and not proof of expertise: only entries mapped to an actual
-// CLOUDBITE_EXPERTS id are 'available', and a project still selects runnable expert ids (max 5). Every entry is
+// CLOUDBITE_EXPERTS id are 'available', and a project still selects runnable expert ids (at most PROJECT_MAX_EXPERTS). Every entry is
 // unvalidated. Planned numbers are not runtime ids; pool-NNN ids can never be submitted as expertIds.
 import { findExpert } from './cloudbite-personas';
 import { KNOWLEDGE_PACKS } from './cloudbite-knowledge-registry';
+import { CATALOGUE_MAX_ROLES } from './cloudbite-catalogue-limits';
 
 export interface ExpertPoolEntry {
   id: string; catalogNumber: number; name: string; domain: string; category: string; categoryLabel: { ko: string; en: string };
@@ -12,8 +15,8 @@ export interface ExpertPoolEntry {
 }
 export interface ExpertPool { version: string; entries: ExpertPoolEntry[]; priorityNumbers: number[] }
 
-export const POOL_VERSION = 'expert-pool-100/2026-10-19';
-export const POOL_LIMITS = Object.freeze({ entries: 100, name: 80, mission: 240, keywords: 12, keyword: 40, note: 240 });
+export const POOL_VERSION = 'expert-pool-120/2026-10-19';
+export const POOL_LIMITS = Object.freeze({ entries: CATALOGUE_MAX_ROLES, name: 80, mission: 240, keywords: 12, keyword: 40, note: 240 });
 
 const CATEGORIES: Array<{ key: string; ko: string; en: string; domain: string }> = [
   { key: 'product-strategy', ko: '고객·제품·사업 전략', en: 'Customer, product and business strategy', domain: 'product' },
@@ -26,6 +29,11 @@ const CATEGORIES: Array<{ key: string; ko: string; en: string; domain: string }>
   { key: 'semiconductor', ko: '반도체·EDA', en: 'Semiconductors and EDA', domain: 'semiconductor-eda' },
   { key: 'industry', ko: '산업별 적용', en: 'Industry applications', domain: 'industry' },
   { key: 'review', ko: '근거 검증·반론·종합 판단', en: 'Evidence review, challenge and synthesis', domain: 'review' },
+  // Numbers above 100 name their category explicitly instead of following groups of ten.
+  { key: 'clinical-medicine', ko: '임상의학 근거', en: 'Clinical medicine evidence', domain: 'clinical-medicine' },
+  { key: 'biomedical-research', ko: '생의학 연구', en: 'Biomedical research', domain: 'biomedical-research' },
+  { key: 'pharmaceutical-science', ko: '약학·약리 과학', en: 'Pharmaceutical science', domain: 'pharmaceutical-science' },
+  { key: 'chemistry', ko: '화학', en: 'Chemistry', domain: 'chemistry' },
 ];
 
 // [plan number, plan name, scope, keywords]. Names and scopes follow the plan document.
@@ -132,6 +140,31 @@ const PLAN: Array<[number, string, string, string[]]> = [
   [100, 'Synthesis Editor', 'Final judgement that keeps agreement, disagreement and conditions.', ['synthesis', 'summary', 'consensus', 'disagreement', '종합']],
 ];
 
+// [plan number, plan name, scope, keywords, category]. Research-document review only: no diagnosis, treatment, dosing
+// or laboratory instructions. Appended after the released 100, whose numbers, names and categories stay unchanged.
+const RESEARCH_PLAN: Array<[number, string, string, string[], string]> = [
+  [101, 'Biomedical Research Methodologist', 'Study design, bias and whether reported methods support the stated claims of a paper.', ['research methodology', 'study design', 'bias', 'biomedical', '연구 방법론', '연구 설계'], 'biomedical-research'],
+  [102, 'Clinical Evidence Reviewer', 'Whether clinical claims in a document follow from the reported evidence; no patient advice.', ['clinical evidence', 'clinical claim', 'evidence grading', 'unsupported conclusion', '임상 근거', '임상 주장'], 'clinical-medicine'],
+  [103, 'Clinical Trial Methodologist', 'Trial registration, randomisation, endpoints and reporting completeness of trial papers.', ['clinical trial', 'randomization', 'endpoint', 'consort', '임상시험', '무작위'], 'clinical-medicine'],
+  [104, 'Epidemiologist', 'Observational designs, confounding and how population figures are reported and interpreted.', ['epidemiology', 'cohort', 'confounding', 'incidence', '역학', '교란'], 'clinical-medicine'],
+  [105, 'Biomedical Biostatistician', 'Rechecking reported statistics, tables and numeric consistency between text and tables.', ['biostatistics', 'p-value', 'confidence interval', 'table mismatch', '생물통계', '통계 오류'], 'biomedical-research'],
+  [106, 'Systematic Review & Meta-analysis Specialist', 'Search, inclusion, pooling and heterogeneity reporting in evidence syntheses.', ['systematic review', 'meta-analysis', 'prisma', 'heterogeneity', '체계적 문헌고찰', '메타분석'], 'clinical-medicine'],
+  [107, 'Pharmacology & Pharmacokinetics Scientist', 'Whether pharmacology and PK statements in a paper are consistent with its reported data; no dosing advice.', ['pharmacology', 'pharmacokinetics', 'half-life', 'exposure', '약리학', '약동학'], 'pharmaceutical-science'],
+  [108, 'Medicinal Chemist', 'Structure-activity claims and compound descriptions as reported; no synthesis routes.', ['medicinal chemistry', 'structure-activity', 'sar', 'lead compound', '의약화학', '구조활성'], 'chemistry'],
+  [109, 'Analytical Chemist', 'Reported analytical methods, calibration, units and measurement consistency.', ['analytical chemistry', 'calibration', 'hplc', 'mass spectrometry', '분석화학', '검량'], 'chemistry'],
+  [110, 'Chemical Identity & Structure Reviewer', 'Consistency of compound names, identifiers, formulas and structures across a document.', ['chemical identity', 'cas number', 'molecular formula', 'smiles', '화학 구조', '화합물 식별'], 'chemistry'],
+  [111, 'Molecular & Cell Biologist', 'Whether molecular and cell-biology conclusions follow from the reported experiments.', ['molecular biology', 'cell biology', 'western blot', 'gene expression', '분자생물학', '세포생물학'], 'biomedical-research'],
+  [112, 'Biochemist', 'Reported assays, kinetics and biochemical interpretation as written in a paper.', ['biochemistry', 'enzyme kinetics', 'assay', 'protein', '생화학', '효소'], 'biomedical-research'],
+  [113, 'Genomics & Bioinformatics Reviewer', 'Data availability, pipelines and reproducibility of genomic analyses as reported.', ['genomics', 'bioinformatics', 'sequencing', 'gwas', '유전체', '생물정보'], 'biomedical-research'],
+  [114, 'Preclinical & Translational Scientist', 'Whether animal or in-vitro findings are over-extrapolated to human conclusions.', ['preclinical', 'translational', 'animal model', 'in vitro', '전임상', '중개연구'], 'biomedical-research'],
+  [115, 'Toxicology Evidence Reviewer', 'How reported toxicity and safety findings are stated and supported; no exposure guidance.', ['toxicology', 'safety signal', 'adverse effect', 'noael', '독성학', '안전성'], 'pharmaceutical-science'],
+  [116, 'Scientific Image Integrity Reviewer', 'Signals of figure duplication or inconsistency that need human review; never an accusation.', ['image integrity', 'figure duplication', 'image manipulation', 'blot', '이미지 무결성', '그림 중복'], 'biomedical-research'],
+  [117, 'Biomedical Citation & Retraction Reviewer', 'Whether cited references exist, match their claims and are not retracted, checked only against retrieved records.', ['citation', 'reference check', 'retraction', 'fabricated reference', '인용 검증', '철회'], 'biomedical-research'],
+  [118, 'Research Integrity & Benchmark Curator', 'Benchmark labels, clean/mutant separation and needs-review handling for document-check evaluations.', ['research integrity', 'benchmark', 'label', 'needs-review', '연구 진실성', '벤치마크'], 'biomedical-research'],
+  [119, 'Immunology Research Reviewer', 'Immunology methods, markers and whether immune-response claims follow from reported data.', ['immunology', 'antibody', 'cytokine', 'flow cytometry', '면역학', '항체'], 'biomedical-research'],
+  [120, 'Chemical Biology Scientist', 'Probe, target-engagement and mechanism claims at the chemistry-biology boundary as reported.', ['chemical biology', 'chemical probe', 'target engagement', 'mechanism', '화학생물학', '표적 결합'], 'chemistry'],
+];
+
 /** Plan number → actual runtime expert id. Planned-only numbers have no id. */
 const MAPPING: Record<number, { expertId: string; note?: string }> = {
   1: { expertId: 'agency-product-manager' },
@@ -160,6 +193,8 @@ const MAPPING: Record<number, { expertId: string; note?: string }> = {
   99: { expertId: 'agency-product-feedback-synthesizer', note: 'Runs as the existing Feedback Synthesizer role, which covers related feedback-analysis scope; it is not a dedicated outcome-evaluation role.' },
   100: { expertId: 'cb-synthesis-editor' },
 };
+// Research roles use their specified runtime ids; until a deployment registers them they stay 'planned'.
+for (const [number] of RESEARCH_PLAN) MAPPING[number] = { expertId: `cb-role-${number}` };
 
 // Fill new runtime mappings from the actual pack registry while protecting all released ids.
 for (const pack of KNOWLEDGE_PACKS) {
@@ -184,8 +219,10 @@ function deepFreeze<T>(value: T): T {
 /** Builds the catalogue from the authoritative runtime experts: availability and knowledge come from findExpert only. */
 export function buildExpertPool(): ExpertPool {
   const priority = new Set(PRIORITY_NUMBERS);
-  const entries = PLAN.map(([number, name, mission, keywords]): ExpertPoolEntry => {
-    const category = CATEGORIES[Math.floor((number - 1) / 10)];
+  const plan = [...PLAN.map(([n, name, mission, keywords]) => [n, name, mission, keywords, CATEGORIES[Math.floor((n - 1) / 10)].key] as const), ...RESEARCH_PLAN];
+  if (plan.length > POOL_LIMITS.entries) throw new Error('Expert pool exceeds the catalogue bound');
+  const entries = plan.map(([number, name, mission, keywords, key]): ExpertPoolEntry => {
+    const category = CATEGORIES.find(c => c.key === key)!;
     const mapped = MAPPING[number];
     const expert = mapped ? findExpert(mapped.expertId) : undefined;
     const runtimeName = expert && expert.name !== name ? `Runs as runtime role "${expert.name}".` : '';

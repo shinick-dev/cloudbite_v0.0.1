@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { build } from 'esbuild';
 import { jevFixtureResponse } from './helpers/cloudbite-jev-provider.mjs';
-const b = await build({stdin:{contents:"export * from './src/cloudbite-routing.ts'; export {CLOUDBITE_EXPERTS} from './src/cloudbite-personas.ts'; export {CLOUDBITE_JS} from './src/cloudbite-page.ts'",resolveDir:process.cwd(),loader:'ts'},bundle:true,write:false,platform:'node',format:'esm'});
+const b = await build({stdin:{contents:"export * from './src/cloudbite-routing.ts'; export {CLOUDBITE_EXPERTS} from './src/cloudbite-personas.ts'; export {CLOUDBITE_JS} from './src/cloudbite-page.ts'; export * from './src/cloudbite-catalogue-limits.ts'; export {CB_MAX_EXPERTS} from './src/cloudbite-config.ts'",resolveDir:process.cwd(),loader:'ts'},bundle:true,write:false,platform:'node',format:'esm'});
 const m = await import('data:text/javascript;base64,'+Buffer.from(b.outputFiles[0].text).toString('base64'));
 const experts=m.CLOUDBITE_EXPERTS;
 const q=(over={})=>({title:'Routing question',objective:'Plan frontend and backend delivery for the project.',context:'Small team, four weeks.',requestId:'routing-test-001',...over});
@@ -15,7 +15,7 @@ function storage(){const data=new Map();let alarm=null,queue=Promise.resolve();r
 let passed=0;const test=async(name,fn)=>{await fn();passed++;console.log('ok '+name);};
 await test('assessment includes every real candidate and project perspectives, never full expert prompts or keys',()=>{
  const request=m.jevRoutingRequest(q(),experts);
- assert.equal(Object.keys(request.questions).filter(id=>id.startsWith('fit:')).length,100);
+ assert.equal(Object.keys(request.questions).filter(id=>id.startsWith('fit:')).length,experts.length);assert.ok(experts.length>=100);
  assert.ok(Object.keys(request.questions).some(id=>id.startsWith('need:')));
  assert.deepEqual(request.state.request,{title:q().title,objective:q().objective,context:q().context});
  assert.ok(!JSON.stringify(request).includes(experts[0].prompt));assert.ok(!JSON.stringify(request).includes('TEST-KEY'));
@@ -91,5 +91,33 @@ await test('actual engine metadata is accepted by the console across coverage, g
  for(const options of [{},{needs:{architecture:0.9},coverage:{architecture:'role_1'}},{needs:{privacy:0.95}},{needs:{architecture:0.9,implementation:0.85},coverage:{architecture:'role_1',implementation:'role_2'}}]){
   const result=await ask(fake(good,options),1);assert.equal(result.policyVersion,'jev-routing/v2');assert.ok(core.normalizeRoute(result,allowed,1),JSON.stringify(result.harness));
  }
+});
+// The worktree runtime may still hold 100 roles; synthesise the extra catalogue entries from real definitions.
+const grown=n=>[...experts,...Array.from({length:n-experts.length},(_,i)=>({...experts[i%experts.length],id:`cb-role-${experts.length+i+1}`,name:`Catalogue role ${experts.length+i+1}`}))];
+await test('catalogue bound 200 is separate from the 100-expert selection bound',async()=>{
+ assert.equal(m.CATALOGUE_MAX_ROLES,200);assert.equal(m.PROJECT_MAX_EXPERTS,100);assert.equal(m.CB_MAX_EXPERTS,m.PROJECT_MAX_EXPERTS);
+ const cat=grown(120);
+ const request=m.jevRoutingRequest(q(),cat);const fits=Object.keys(request.questions).filter(id=>id.startsWith('fit:'));
+ assert.equal(fits.length,120);assert.ok(fits.includes('fit:cb-role-120'),'role 120 is assessed, not truncated');
+ assert.equal(m.routingCandidates(cat).length,120);
+ // A role past the first 100 can win on its own merits; more than 100 exclusions are kept
+ const late=await m.askJev(q(),cat,'TEST-KEY',5,'a'.repeat(64),1000,fake({'cb-role-120':0.97}));
+ assert.deepEqual(late.expertIds,['cb-role-120']);assert.equal(late.evaluatedCount,120);assert.equal(late.harness.excluded.length,119);
+ // Everything relevant: still at most 100 selected, the rest are explicit limit exclusions
+ const all=await m.askJev(q(),cat,'TEST-KEY',100,'a'.repeat(64),1000,fake(Object.fromEntries(cat.map(e=>[e.id,0.9]))));
+ assert.equal(all.expertIds.length,100);assert.equal(all.harness.eligibleCount,120);
+ assert.equal(all.harness.excluded.filter(e=>e.reason==='limit').length,20);assert.ok(all.harness.warnings.includes('actor-limit'));
+ let core;vm.runInNewContext(m.CLOUDBITE_JS,{__cloudbiteTestHook:c=>{core=c;},crypto:globalThis.crypto});
+ const ids=cat.map(e=>e.id);
+ assert.equal(core.normalizeRoute(late,ids,5).harness.excluded.length,119,'console keeps >100 exclusions');
+ assert.equal(core.normalizeRoute(all,ids,100).expertIds.length,100,'console accepts a 120-role v2 decision');
+ for(const limit of [101,120])assert.equal((await m.askJev(q(),cat,'TEST-KEY',limit,'h',0,()=>{throw Error('must not call');})).status,400);
+ const router=new m.RoutingSession(storage(),cat,'TEST-KEY',()=>10000,fake(Object.fromEntries(cat.map(e=>[e.id,0.9]))));
+ assert.equal((await router.plan(q(),100)).expertIds.length,100);assert.equal((await router.plan(q({requestId:'routing-test-101'}),101)).status,400);
+});
+await test('a catalogue above 200 fails explicitly before any provider call instead of a silent prefix',async()=>{
+ let calls=0;const r=await m.askJev(q(),grown(201),'TEST-KEY',5,'h',0,async()=>{calls++;throw Error('must not call');});
+ assert.equal(r.status,503);assert.equal(calls,0);assert.equal(r.expertIds,undefined);
+ assert.equal((await m.askJev(q(),grown(200),'TEST-KEY',5,'h',0,fake({'cb-role-200':0.9}))).expertIds[0],'cb-role-200');
 });
 console.log(`cloudbite-routing: ${passed} checks passed`);

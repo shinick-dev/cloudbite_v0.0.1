@@ -11,6 +11,7 @@ import type {
 } from '../src/cloudbite-contract';
 import type { CloudbiteAccessRequest, CloudbiteAccessSession } from '../src/cloudbite-access-contract';
 import type { HistoryList, HistoryDetail, HistoryReport, HistoryIssue, HistoryFeedback } from '../src/cloudbite-history-contract';
+import type { CatalogueMaxRoles, ProjectMaxExperts } from '../src/cloudbite-catalogue-limits';
 
 type Mode = 'demo' | 'live';
 type View = 'home' | 'guide' | 'help' | 'settings' | 'history';
@@ -91,6 +92,10 @@ type Lang = 'en' | 'ko';
 const LANG_ORDER: Lang[] = ['ko', 'en'];
 const LANG_NAME: Record<Lang, string> = { ko: '한국어', en: 'English' };
 type Text = (m: Messages) => string;
+/** 서버와 같은 두 한도. 화면은 묶지 않고 변환되므로 값을 가져올 수 없어, 공유 리터럴 타입으로 어긋나면 타입 검사가 실패하게 한다.
+ *  카탈로그(보여 주고 Jev 가 평가하는 역할 수)와 프로젝트당 선택 인원은 서로 다른 한도다 */
+const CATALOGUE_MAX: CatalogueMaxRoles = 200;
+const PROJECT_MAX: ProjectMaxExperts = 100;
 
 const EN = {
   docTitle: 'Cloudbite — Expert sandbox workspace',
@@ -144,7 +149,7 @@ const EN = {
   sessionAria: 'Session',
   navAria: 'Primary', navLabel: 'Workspace',
   nav: { home: 'Home', guide: 'Guide', help: 'Help', settings: 'Settings', history: 'History' } as Record<View, string>,
-  navFoot: 'Independent workspaces · Up to 100 expert roles',
+  navFoot: (roles: number, max: number) => roles ? `Independent workspaces · ${roles} catalogue roles · up to ${max} per project` : `Independent workspaces · Up to ${max} experts per project`,
   requestAccess: 'Request visitor access',
   accessQr: 'Access QR',
   ownerInbox: 'Owner inbox',
@@ -489,7 +494,7 @@ const KO: Messages = {
   sessionAria: '세션',
   navAria: '주 메뉴', navLabel: '작업공간',
   nav: { home: '홈', guide: '안내', help: '도움말', settings: '설정', history: '사용 기록' },
-  navFoot: '독립 작업공간 · 전문가 역할 최대 100종',
+  navFoot: (roles, max) => roles ? `독립 작업공간 · 카탈로그 역할 ${roles}종 · 프로젝트당 최대 ${max}명` : `독립 작업공간 · 프로젝트당 전문가 최대 ${max}명`,
   requestAccess: '방문자 접근 요청',
   accessQr: '접근 QR',
   ownerInbox: '소유자 요청함',
@@ -913,7 +918,7 @@ function normalizeAccess(raw: unknown): CloudbiteAccessSession | undefined {
   const n = (v: unknown, max: number) => { const x = num(v); return x !== null && x >= 0 ? Math.min(Math.floor(x), max) : 0; };
   const request: CloudbiteAccessRequest = {
     id, status, name: str(r.name, 80), purpose: str(r.purpose, 1000), createdAt: n(r.createdAt, Number.MAX_SAFE_INTEGER), expiresAt: n(r.expiresAt, Number.MAX_SAFE_INTEGER),
-    maxExperts: n(r.maxExperts, 100), maxProjects: n(r.maxProjects, 100), usedProjects: n(r.usedProjects, 100),
+    maxExperts: n(r.maxExperts, PROJECT_MAX), maxProjects: n(r.maxProjects, 100), usedProjects: n(r.usedProjects, 100),
   };
   const recovery = ACCESS_RECOVERY.find(x => x === raw.recovery);
   return { request, canCreate: raw.canCreate === true && status === 'approved', ...(recovery ? { recovery } : {}) };
@@ -925,9 +930,9 @@ function approvedVisitor(a: CloudbiteAccessSession | undefined, now: number): Cl
   return r && r.status === 'approved' && r.expiresAt > now ? r : null;
 }
 
-const POOL_MAX = 100;
+const POOL_MAX = CATALOGUE_MAX;
 const POOL_KNOWLEDGE: PoolKnowledge[] = ['curated-knowledge', 'metadata-derived', 'none'];
-/** bootstrap.pool 정리. 서버 값이라도 의심한다: 항목 100개까지, id(pool-NNN)·번호(1–100)는 처음 것만, 이름 없는 항목은 버린다.
+/** bootstrap.pool 정리. 서버 값이라도 의심한다: 항목 카탈로그 한도(200)까지, id(pool-NNN)·번호(1–200)는 처음 것만, 이름 없는 항목은 버린다.
  *  실행 가능은 서버가 available 이라 하고 expertId 가 실제 카탈로그 역할이며 다른 항목이 먼저 가져가지 않았을 때뿐이다 — 아니면 계획 중.
  *  화면은 권한을 만들지 않는다: 평가는 늘 unvalidated, 지식 깊이는 실행 역할의 정의보다 높게 적지 않는다. 쓸 항목이 없으면 null */
 function normalizePool(raw: unknown, experts: ExpertDefinition[]): Pool | null {
@@ -985,7 +990,7 @@ function suggestTeam(brief: string, entries: PoolEntry[], runnable: string[], ma
   scored.sort((a, b) => b.matched.length - a.matched.length || Number(b.entry.priority) - Number(a.entry.priority) || a.entry.catalogNumber - b.entry.catalogNumber);
   const out: PoolPick[] = [];
   for (const s of scored) {
-    if (out.length >= Math.max(0, Math.min(100, max))) break;
+    if (out.length >= Math.max(0, Math.min(PROJECT_MAX, max))) break;
     if (seen.has(s.expertId)) continue;
     seen.add(s.expertId); out.push({ entryId: s.entryId, expertId: s.expertId, matched: s.matched });
   }
@@ -996,7 +1001,7 @@ function suggestTeam(brief: string, entries: PoolEntry[], runnable: string[], ma
 function normalizeRouting(raw: unknown): Routing | undefined {
   if (!isObj(raw) || raw.provider !== 'typesafe' || typeof raw.ready !== 'boolean') return undefined;
   const max = num(raw.maxExperts);
-  return { provider: 'typesafe', model: str(raw.model, 80).trim() || 'jev', ready: raw.ready, maxExperts: max !== null && max >= 1 ? Math.min(Math.floor(max), 100) : 5 };
+  return { provider: 'typesafe', model: str(raw.model, 80).trim() || 'jev', ready: raw.ready, maxExperts: max !== null && max >= 1 ? Math.min(Math.floor(max), PROJECT_MAX) : 5 };
 }
 
 /** Jev 경로 응답 정리. 고른 역할은 지금 카탈로그의 실제 id 이고, 겹치지 않고, 1명 이상 max 명 이하여야 한다 — 아니면 null 이며
@@ -1010,7 +1015,7 @@ function normalizeRoute(raw: unknown, allowed: string[], max: number): RouteResu
     if (typeof id !== 'string' || !ok.has(id) || ids.includes(id)) return null;
     ids.push(id);
   }
-  if (ids.length < 1 || ids.length > Math.min(100, max)) return null;
+  if (ids.length < 1 || ids.length > Math.min(PROJECT_MAX, max)) return null;
   const matches: RouteResult['matches'] = [];
   for (const x of raw.matches.slice(0, 200)) {
     if (!isObj(x) || typeof x.expertId !== 'string') return null;
@@ -1036,16 +1041,17 @@ function normalizeHarness(raw: unknown, allowed: Set<string>, ids: string[], eva
   if (!isObj(raw) || raw.version !== 'project-team/v1' || raw.peerReview !== 'not-performed') return null;
   if (!Array.isArray(raw.stages) || raw.stages.length !== 2 || raw.stages[0] !== 'assessment' || raw.stages[1] !== 'team-review') return null;
   const eligibleCount = raw.eligibleCount;
-  // 고른 역할은 전부 자격 있는 후보에서 나오고, 자격 후보는 평가한 역할을 넘지 않는다 (엔진 후보 한도 100)
-  if (!isCount(eligibleCount) || eligibleCount < ids.length || eligibleCount > Math.min(100, evaluatedCount)) return null;
+  // 고른 역할은 전부 자격 있는 후보에서 나오고, 자격 후보는 평가한 역할을 넘지 않는다 (엔진 후보 한도 = 카탈로그 한도 200).
+  // 제외 목록은 고르지 않은 평가 역할 전부라 선택 한도(100)가 아니라 카탈로그 한도로 묶는다
+  if (!isCount(eligibleCount) || eligibleCount < ids.length || eligibleCount > Math.min(CATALOGUE_MAX, evaluatedCount)) return null;
   if (!Array.isArray(raw.perspectives) || raw.perspectives.length > 32 || !Array.isArray(raw.selections) || !Array.isArray(raw.excluded)
-    || raw.excluded.length > 100 || !Array.isArray(raw.warnings) || raw.warnings.length > HARNESS_WARNINGS.length) return null;
+    || raw.excluded.length > CATALOGUE_MAX || !Array.isArray(raw.warnings) || raw.warnings.length > HARNESS_WARNINGS.length) return null;
   const chosen = new Set(ids);
   const perspectives: CloudbiteRoutingHarness['perspectives'] = [];
   for (const p of raw.perspectives) {
     if (!isObj(p) || typeof p.id !== 'string' || !HARNESS_ID.test(p.id) || perspectives.some(x => x.id === p.id)) return null;
     const name = typeof p.name === 'string' ? p.name.trim() : '';
-    if (!name || name.length > 80 || !isProb(p.need) || !HARNESS_STATUSES.includes(p.status as HarnessStatus) || !Array.isArray(p.expertIds) || p.expertIds.length > 100) return null;
+    if (!name || name.length > 80 || !isProb(p.need) || !HARNESS_STATUSES.includes(p.status as HarnessStatus) || !Array.isArray(p.expertIds) || p.expertIds.length > PROJECT_MAX) return null;
     const experts: string[] = [];
     for (const id of p.expertIds) {
       if (typeof id !== 'string' || !chosen.has(id) || experts.includes(id)) return null;
@@ -1107,7 +1113,7 @@ function normalizeBootstrap(raw: unknown): ConsoleBootstrap {
     experts,
     configuration: {
       liveReady: c.liveReady === true, missing: strList(c.missing, 80, 20),
-      maxExperts: max !== null && max >= 1 ? Math.min(Math.floor(max), 100) : 5,
+      maxExperts: max !== null && max >= 1 ? Math.min(Math.floor(max), PROJECT_MAX) : 5,
       ...(c.historyRetentionDays === 30 ? { historyRetentionDays: 30 } : {}),
       ...(routing ? { routing } : {}),
     },
@@ -1175,13 +1181,13 @@ function normalizeProject(raw: unknown): ConsoleProject | null {
   const id = str(raw.id, 120);
   if (!id) return null;
   const b = raw.brief;
-  const experts = raw.experts.slice(0, 100).map(normalizeExpertRun).filter((e): e is ConsoleExpert => e !== null);
+  const experts = raw.experts.slice(0, PROJECT_MAX).map(normalizeExpertRun).filter((e): e is ConsoleExpert => e !== null);
   const status = PROJECT_STATUSES.includes(raw.status as ProjectStatus) ? raw.status as ProjectStatus : statusFromExperts(experts);
   return {
     id, status, experts, createdAt: num(raw.createdAt) ?? 0, updatedAt: num(raw.updatedAt) ?? 0,
     brief: {
       title: str(b.title, LIMIT.title), objective: str(b.objective, LIMIT.objective), context: str(b.context, LIMIT.context),
-      expertIds: strList(b.expertIds, 80, 100), mode: b.mode === 'live' ? 'live' : 'demo', requestId: str(b.requestId, 120),
+      expertIds: strList(b.expertIds, 80, PROJECT_MAX), mode: b.mode === 'live' ? 'live' : 'demo', requestId: str(b.requestId, 120),
     },
   };
 }
@@ -1748,8 +1754,10 @@ function boot(): void {
     const server = S.boot.data?.configuration.maxExperts ?? 5;
     const session = !S.adminToken.trim() && !ownerAuthed() && visitor() ? visitor()!.maxExperts : server;
     const jev = autoRoute() ? routing()!.maxExperts : server;
-    return { min: 1, max: Math.max(1, Math.min(100, server, session, jev)) };
+    return { min: 1, max: Math.max(1, Math.min(PROJECT_MAX, server, session, jev)) };
   };
+  /** 탐색 줄의 카탈로그 규모: 계획 카탈로그가 있으면 그 항목 수, 없으면 실행 가능한 역할 수 (불러오기 전에는 0) */
+  const catalogueCount = () => S.boot.data?.pool?.entries.length ?? S.boot.data?.experts.length ?? 0;
   /** Jev 선택이 어떤 브리프·인원 한도의 것인지 (바뀌면 화면에 오래됐다고 알린다) */
   const routeKey = (q: { title: string; objective: string; context: string }) => [q.title, q.objective, q.context, limits().max].join('\n');
   const active = () => !!S.run && (S.run.phase === 'routing' || S.run.phase === 'starting' || S.run.phase === 'running' || S.run.phase === 'cancelling'
@@ -1977,6 +1985,8 @@ function boot(): void {
     h('div', { class: 'cb-page-head' }, tx('h2', { id: 'cb-history-h' }, () => HT().title), tx('p', null, () => HT().intro)), historyBody);
   const views: Record<View, HTMLElement> = { home: homeView, guide: guideView, help: helpView, settings: settingsView, history: historyView };
   const NAV: View[] = ['home', 'guide', 'help', 'settings', 'history'];
+  // 카탈로그 규모는 bootstrap 뒤에 정해지므로 언어 전환(bind)과 renderNav 둘 다 다시 채운다
+  const navFoot = bind(h('span'), (n, m) => { n.textContent = m.navFoot(catalogueCount(), PROJECT_MAX); });
   const navBtns = NAV.map(v => h('button', { type: 'button', class: 'cb-nav-btn', 'data-fk': `nav:${v}`, onclick: () => setView(v) }, icon(v === 'history' ? 'chart' : v), tx('span', null, m => m.nav[v])));
 
   root.replaceChildren(
@@ -1991,7 +2001,7 @@ function boot(): void {
     h('div', { class: 'cb-shell' },
       attr(h('nav', { class: 'cb-nav' }, tx('span', { class: 'cb-nav-label' }, m => m.navLabel),
         h('ul', { class: 'cb-nav-list' }, ...navBtns.map(b => h('li', null, b))),
-        h('div', { class: 'cb-nav-foot' }, tx('span', null, m => m.navFoot), pageLink(REQUEST_PATH, m => m.requestAccess),
+        h('div', { class: 'cb-nav-foot' }, navFoot, pageLink(REQUEST_PATH, m => m.requestAccess),
           pageLink('/cloudbite/access', m => m.accessQr, { target: '_blank', rel: 'noopener noreferrer' }), pageLink(OWNER_INBOX_PATH, m => m.ownerInbox))), 'aria-label', m => m.navAria),
       h('main', { class: 'cb-main' }, banner, homeView, guideView, helpView, settingsView, historyView)));
 
@@ -2017,6 +2027,7 @@ function boot(): void {
     NAV.forEach((v, i) => { navBtns[i].setAttribute('aria-current', v === S.view ? 'page' : 'false'); views[v].hidden = v !== S.view; });
     banner.hidden = modeBadge.hidden = S.view === 'history';
     LANG_ORDER.forEach((l, i) => langBtns[i].setAttribute('aria-pressed', String(l === lang)));
+    navFoot.textContent = M.navFoot(catalogueCount(), PROJECT_MAX);
   }
 
   /** Settings 의 소유자 로그인 줄. 서버가 돌려준 세션 상태만 보이고, 로그인 자체는 소유자 요청함(/cloudbite/requests)에서 한다 */
@@ -2172,7 +2183,7 @@ function boot(): void {
     moreLabel.textContent = m.allExperts(list.length);
     // 검색은 원문 요약과 화면 언어의 설명을 모두 본다
     const shown = q ? list.filter(e => `${e.name} ${e.domain} ${e.summary} ${roleBlurb(e)}`.toLowerCase().includes(q)) : rest;
-    moreBox.replaceChildren(...shown.slice(0, 120).map(e => opt(e, 'xa')));
+    moreBox.replaceChildren(...shown.slice(0, CATALOGUE_MAX).map(e => opt(e, 'xa')));
     if (!shown.length) moreBox.append(h('p', { class: 'cb-empty' }, m.noMatch));
     // 접힌 전체 목록에서 고른 역할도 늘 보이게 요약한다
     const coreIds = new Set(core.map(e => e.id));

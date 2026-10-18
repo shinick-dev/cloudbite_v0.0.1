@@ -4,6 +4,7 @@ import type { ExpertDefinition, CloudbiteRoutingDecision, CloudbiteRoutingQuery 
 import { CLOUDBITE_POOL } from './cloudbite-pool';
 import { boundedText } from './cloudbite-inference';
 import { CB_MAX_EXPERTS } from './cloudbite-config';
+import { CATALOGUE_MAX_ROLES } from './cloudbite-catalogue-limits';
 import { HARNESS_VERSION, harnessAssessmentRequest, parseHarnessAssessment, harnessReviewRequest, parseHarnessReview, composeHarnessTeam, type HarnessCandidate } from './cloudbite-routing-harness';
 
 export const JEV_MODEL = 'jev-1.13.0';
@@ -33,8 +34,9 @@ export function routingQuery(raw: unknown): CloudbiteRoutingQuery | RoutingFailu
   return { title: q.title, objective: q.objective, context: q.context, requestId: q.requestId };
 }
 
+/** Every runnable role, never a silent prefix. A catalogue above CATALOGUE_MAX_ROLES is refused by askJev instead. */
 export function routingCandidates(experts: readonly ExpertDefinition[]): HarnessCandidate[] {
-  return experts.slice(0, 100).map(expert => ({ id: expert.id, name: expert.name, domain: expert.domain,
+  return experts.map(expert => ({ id: expert.id, name: expert.name, domain: expert.domain,
     mission: plans.get(expert.id)?.mission ?? expert.summary.slice(0, 240), summary: expert.summary.slice(0, 600),
     category: plans.get(expert.id)?.category ?? expert.domain }));
 }
@@ -71,6 +73,7 @@ export async function askJev(query: CloudbiteRoutingQuery, experts: readonly Exp
   if (!routingReady(key)) return fail(503, 'Jev routing is not configured');
   if (!Number.isInteger(max) || max < 1 || max > CB_MAX_EXPERTS) return fail(400, 'invalid routing selection limit');
   const catalogue = routingCandidates(experts);
+  if (catalogue.length > CATALOGUE_MAX_ROLES) return fail(503, 'Jev routing catalogue exceeds its bound');
   if (!catalogue.length) return fail(422, 'No relevant expert matched; add a specific question and context');
   const assessmentResponse = await evaluateJev(harnessAssessmentRequest(query, catalogue), key, transport);
   if (isRoutingFailure(assessmentResponse)) return assessmentResponse;

@@ -7,7 +7,7 @@ const load = async contents => {
  const b = await build({ stdin: { contents, resolveDir: process.cwd(), loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'esm' });
  return import('data:text/javascript;base64,' + Buffer.from(b.outputFiles[0].text).toString('base64'));
 };
-const m = await load("export {CLOUDBITE_EXPERTS} from './src/cloudbite-personas.ts';export {CLOUDBITE_POOL} from './src/cloudbite-pool.ts'");
+const m = await load("export {CLOUDBITE_EXPERTS} from './src/cloudbite-personas.ts';export {CLOUDBITE_POOL} from './src/cloudbite-pool.ts';export {CATALOGUE_MAX_ROLES} from './src/cloudbite-catalogue-limits.ts'");
 const FIXTURE = 'test/fixtures/cloudbite-routing-projects.json';
 const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8'));
 const cases = fixture.cases;
@@ -88,9 +88,10 @@ await test('expected perspectives are known contract IDs and outcomes are consis
  assert.equal(cases.filter(c => 'finiteAnswer' in c).length, 1);
 });
 await test('every referenced expert ID exists in the current real catalogue with a pool category', () => {
- assert.equal(experts.size, 100);
+ // 100 released roles, plus research roles 101–120 once a deployment registers them; never above the catalogue bound
+ assert.ok(experts.size >= 100 && experts.size <= m.CATALOGUE_MAX_ROLES);
  for (const c of cases) {
-  unique(c.candidateExpertIds, c.id + ' candidates'); assert.ok(c.candidateExpertIds.length <= 100);
+  unique(c.candidateExpertIds, c.id + ' candidates'); assert.ok(c.candidateExpertIds.length <= m.CATALOGUE_MAX_ROLES);
   for (const id of c.candidateExpertIds) { assert.ok(experts.has(id), `${c.id}: unknown expert ${id}`); assert.ok(category.get(id), `${c.id}: no category ${id}`); }
  }
  for (const id of ['probably-primetime-sta', 'cb-role-072', 'cb-role-075', 'cb-role-076']) assert.equal(category.get(id), 'semiconductor', id);

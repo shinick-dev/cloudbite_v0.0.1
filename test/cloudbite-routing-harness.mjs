@@ -55,7 +55,7 @@ await test('assessment uses pinned model, stable fit/need keys, typed Nouls and 
   assert.deepEqual(P, ['architecture', 'implementation', 'validation', 'performance', 'security', 'privacy', 'user-value', 'commercial', 'finance', 'delivery', 'assumptions', 'decision', 'regulatory', 'operability']);
 });
 await test('invalid candidate sets fail closed with a fixed error', () => {
-  const tooMany = Array.from({ length: 101 }, (_, i) => cand('r' + i, 'x'));
+  const tooMany = Array.from({ length: m.HARNESS_MAX_CANDIDATES + 1 }, (_, i) => cand('r' + i, 'x'));
   for (const cs of [[], tooMany, [team[0], team[0]], [cand('../../x', 'a')], [cand('__proto__', 'a')], [{ ...team[0], summary: 1 }], null])
     throwsFixed(() => m.harnessAssessmentRequest(q, cs), m.HARNESS_ERRORS.candidates);
 });
@@ -101,6 +101,32 @@ await test('probe graph stays bounded for 100 same-category eligible roles', () 
   assert.ok(keys.length <= 600); assert.equal(keys.length, 579);
   const right = new Map(); for (const k of keys) { const r = k.split(':')[2]; right.set(r, (right.get(r) ?? 0) + 1); }
   assert.ok(Math.max(...right.values()) === 6);
+});
+await test('catalogue bound (200 candidates) is separate from the selected-team bound (100)', () => {
+  assert.equal(m.HARNESS_MAX_CANDIDATES, 200); assert.equal(m.HARNESS_MAX_SELECTED, 100);
+  const full = Array.from({ length: m.HARNESS_MAX_CANDIDATES }, (_, i) => cand('b' + String(i).padStart(3, '0'), 'c' + (i % 20)));
+  assert.equal(Object.keys(m.harnessAssessmentRequest(q, full).questions).filter(k => k.startsWith('fit:')).length, 200, 'all 200 assessed');
+  // 120 broad nonredundant roles: every one assessed and eligible, the team stops at 100 and the other 20 are explicit limit exclusions
+  const cs = full.slice(0, 120);
+  const { a, out } = run(Object.fromEntries(cs.map(c => [c.id, 0.9])), {}, {}, {}, m.HARNESS_MAX_SELECTED, cs);
+  assert.equal(Object.keys(a.relevance).length, 120);
+  assert.equal(out.harness.eligibleCount, 120);
+  assert.equal(out.expertIds.length, 100);
+  assert.deepEqual(out.expertIds, cs.slice(0, 100).map(c => c.id), 'ties keep catalogue order');
+  assert.deepEqual(out.harness.excluded.map(e => [e.expertId, e.reason]), cs.slice(100).map(c => [c.id, 'limit']));
+  assert.ok(out.harness.warnings.includes('actor-limit'));
+  // Roles beyond the first 100 are not truncated away: a top-ranked role numbered 120 is selected
+  const late = run({ [cs[119].id]: 0.99, [cs[0].id]: 0.7 }, {}, {}, {}, 5, cs).out;
+  assert.deepEqual(late.expertIds, [cs[119].id, cs[0].id]);
+  // More than 100 exclusions are reported, not cut off
+  assert.equal(late.harness.excluded.length, 118); assert.ok(late.harness.excluded.every(e => e.reason === 'below-threshold'));
+  for (const max of [m.HARNESS_MAX_SELECTED + 1, 120, 200]) throwsFixed(() => m.composeHarnessTeam(cs, a, m.parseHarnessReview({ model: MODEL, answers: {} }, cs, assessed({}, {}, cs)), max), m.HARNESS_ERRORS.limit);
+});
+await test('probe graph stays bounded (6 per role) at the 200-role catalogue bound', () => {
+  const many = Array.from({ length: 200 }, (_, i) => cand('s' + String(i).padStart(3, '0'), 'one'));
+  const a = assessed(Object.fromEntries(many.map((c, i) => [c.id, 0.99 - i * 0.0015])), {}, many);
+  const keys = Object.keys(m.harnessReviewRequest(q, many, a).questions);
+  assert.equal(keys.length, 15 + 6 * 194); assert.ok(keys.length <= 6 * 200);
 });
 await test('review parsing maps symbols to real ids or null and fails closed otherwise', () => {
   const a = assessed(fitAll, needSome), body = m.harnessReviewRequest(q, team, a);
