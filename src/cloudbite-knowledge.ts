@@ -13,7 +13,9 @@ const SOURCE_ID = /^[a-zA-Z0-9_-]{1,80}$/;
 /** Role deliverables: a stricter subset of the runtime's collectable extras (cloudbite-validate extraArtifactPath). */
 const ARTIFACT_PATH = /^out\/[a-z0-9][a-z0-9-]{0,47}\.(md|json|csv)$/;
 const RESERVED_ARTIFACTS: ReadonlySet<string> = new Set(['out/result.json', 'out/report.md', 'out/manifest.json', 'out/knowledge.json']);
-const MAX_ARTIFACTS = 4;
+// Collection reserves result.json, report.md and the automatic knowledge audit before role deliverables.
+// CB_ARTIFACT_FILES is six; keep this leaf module free of the config -> State type dependency.
+const MAX_ARTIFACTS = 3;
 
 type Card = PhaseOneKnowledgePack['cards'][number];
 type Source = PhaseOneKnowledgePack['sources'][number];

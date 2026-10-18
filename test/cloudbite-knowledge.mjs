@@ -43,7 +43,7 @@ const broken = [
   ['reserved knowledge audit', p => { p.artifacts[0].path = 'out/knowledge.json'; }],
   ['duplicate artifact path', p => { p.artifacts = [p.artifacts[0], { ...p.artifacts[0] }]; }],
   ['unsupported artifact extension', p => { p.artifacts[0].path = 'out/cases.jsonl'; }],
-  ['too many artifacts', p => { p.artifacts = Array.from({ length: 5 }, (_, i) => ({ ...base.artifacts[0], path: `out/a${i}.md` })); }],
+  ['four role artifacts leave no collection slot for the knowledge audit', p => { p.artifacts = Array.from({ length: 4 }, (_, i) => ({ ...base.artifacts[0], path: `out/a${i}.md` })); }],
   ['no artifacts', p => { p.artifacts = []; }],
   ['empty artifact label', p => { p.artifacts[0].label = ' '; }],
   ['unbounded artifact guidance', p => { p.artifacts[0].guidance = 'x'.repeat(601); }],

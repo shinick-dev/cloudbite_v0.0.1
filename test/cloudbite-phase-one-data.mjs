@@ -26,7 +26,7 @@ for (const p of packs) {
   assert.deepEqual(Object.keys(p).sort(), PACK_KEYS, p.expertId + ' keys');
   for (const k of ['name', 'domain', 'summary', 'mission', 'instructions', 'version']) assert.ok(typeof p[k] === 'string' && p[k].trim().length > 0, p.expertId + ' ' + k);
   assert.ok(nonEmptyStrings(p.questions, 3) && nonEmptyStrings(p.methods, 3) && nonEmptyStrings(p.limitations, 2) && nonEmptyStrings(p.tools), p.expertId + ' lists');
-  assert.ok(p.artifacts.length >= 1 && p.artifacts.length <= 4 && p.artifacts.every(a => /^out\/[a-z0-9-]+\.(md|json|csv)$/.test(a.path) && !['out/result.json', 'out/report.md', 'out/manifest.json', 'out/knowledge.json'].includes(a.path) && a.label && a.guidance.length > 20), p.expertId + ' artifacts');
+  assert.ok(p.artifacts.length >= 1 && p.artifacts.length <= 3 && p.artifacts.every(a => /^out\/[a-z0-9-]+\.(md|json|csv)$/.test(a.path) && !['out/result.json', 'out/report.md', 'out/manifest.json', 'out/knowledge.json'].includes(a.path) && a.label && a.guidance.length > 20), p.expertId + ' artifacts (one collection slot is reserved for the knowledge audit)');
   for (const a of p.artifacts) { assert.ok(!artifactPaths.has(a.path), a.path + ' artifact path unique across roles'); artifactPaths.add(a.path); }
   // Sources: at least two per pack, well-formed, honest check status.
   assert.ok(p.sources.length >= 2, p.expertId + ' sources');
