@@ -29,9 +29,9 @@ Worker, `wrangler.cloudbite.jsonc` (`cloudbite-v001`, `workers_dev` only, no rou
 | `CLOUDBITE_DAYTONA_API_URL` | var | Daytona API base (https) |
 | `CLOUDBITE_DAYTONA_API_KEY` | secret | Daytona key for Cloudbite's organization |
 | `CLOUDBITE_DAYTONA_SNAPSHOT` | var, optional | snapshot with `python3`; default Daytona image otherwise |
-| `CLOUDBITE_NOSANA_BASE_URL` | var | OpenAI-compatible base, e.g. `…/v1` |
+| `CLOUDBITE_NOSANA_BASE_URL` | var | OpenAI-compatible base; production uses the official gateway `https://inference.nosana.com/v1` |
 | `CLOUDBITE_NOSANA_API_KEY` | secret | Nosana key — server-side only |
-| `CLOUDBITE_NOSANA_MODEL` | var | model id |
+| `CLOUDBITE_NOSANA_MODEL` | var | model id from the gateway's live `/v1/models` catalogue (it changes) |
 | `CLOUDBITE_GATEWAY_URL` | var | this Worker's workers.dev origin, reachable from sandboxes |
 | `CLOUDBITE_ALLOW_HTTP` | dev var | `1` allows `http://localhost` URLs |
 | `MASTER_KEY`, `SETUP_TOKEN` | secrets | existing State auth (register an admin key on this Worker) |
@@ -66,6 +66,10 @@ Each step persists a claim id first and applies its result only if that claim is
 - **runner**: deletes the capability file after reading it; up to 6 model turns via the gateway; actions `python`
   (subprocess, 20 s, ./work, empty env), `write` (flat `out/<name>.(md|txt|json|csv)`, ≤ 4 files), `final` (validated opinion +
   report). Writes `out/result.json`, `out/report.md`, `out/manifest.json`, `out/done`; posts activity and `complete`.
+  Every callback sends `User-Agent: Cloudbite-Runner/0.0.1`: Cloudflare refuses Python urllib's default UA (403, error
+  1010) before the Worker runs. A failed inference call ends the run with one `error` activity and `out/error.txt` naming a
+  local category and allowlisted HTTP status only (e.g. `model provider returned an error (HTTP 502)`) — never the upstream
+  body, model output or credentials. No retry and no other provider.
 - **`out/result.json` is a flat `ExpertOpinion`** — exactly the workspace's `RESULT.schema.json`: the six properties
   `direction`, `confidence` (integer 0–100, self-assessed), `summary` (1–2000), `evidence`/`assumptions`/`nextActions`
   (1–12 non-empty strings ≤ 600 each), nothing else. It carries no expert id or schema wrapper: identity is the sandbox/run

@@ -18,7 +18,7 @@ export function runnerCapability(gateway: string, project: string, run: string, 
 
 export const CB_RUNNER_PY = String.raw`#!/usr/bin/env python3
 """Cloudbite expert runner: bounded model/tool loop inside this sandbox (stdlib only)."""
-import json, os, re, subprocess, sys, time, urllib.request, urllib.error
+import json, os, re, socket, subprocess, sys, time, urllib.request, urllib.error
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(ROOT, 'out')
@@ -36,6 +36,15 @@ TOOL_SECONDS = 20
 TOOL_OUTPUT = 4000
 MAX_EXTRA = 4
 MAX_FILE = 32 * 1024
+# An honest, explicit User-Agent: Cloudflare refuses urllib's default one (403, error 1010) before the Worker runs.
+USER_AGENT = 'Cloudbite-Runner/0.0.1'
+# Inference failures are reported by local category only: never the upstream body, model output or credentials.
+INFERENCE_HTTP = {
+    400: 'request rejected by the gateway', 401: 'runner capability rejected or expired',
+    403: 'gateway refused the runner request', 404: 'gateway route not found', 410: 'this expert run has ended',
+    413: 'request too large for the gateway', 429: 'inference rate or budget limit reached',
+    502: 'model provider returned an error', 503: 'inference is not configured on the server',
+    504: 'model provider unreachable or timed out'}
 
 cap = None
 calls = 0
@@ -46,7 +55,7 @@ def post(action, payload, timeout=30):
     url = '%s/p/_cloudbite/worker/%s/%s/%s' % (cap['gateway'], cap['project'], cap['run'], action)
     data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(url, data=data, method='POST', headers={
-        'content-type': 'application/json', 'authorization': 'Bearer ' + cap['token']})
+        'content-type': 'application/json', 'authorization': 'Bearer ' + cap['token'], 'user-agent': USER_AGENT})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read(64 * 1024).decode('utf-8') or '{}')
 
@@ -64,6 +73,24 @@ def infer(messages):
         raise RuntimeError('inference budget exhausted')
     calls += 1
     return str(post('inference', {'messages': messages}, timeout=90).get('content', ''))
+
+
+def inference_failure(e):
+    """A bounded, allowlisted description of an inference failure; e's own text is never used."""
+    if isinstance(e, urllib.error.HTTPError):
+        code = e.code if isinstance(e.code, int) else 0
+        if code in INFERENCE_HTTP:
+            return '%s (HTTP %d)' % (INFERENCE_HTTP[code], code)
+        return 'unexpected gateway status (HTTP %dxx)' % (code // 100) if 100 <= code <= 599 else 'unexpected gateway status'
+    if isinstance(e, (socket.timeout, TimeoutError)):
+        return 'gateway call timed out'
+    if isinstance(e, urllib.error.URLError):
+        return 'gateway unreachable'
+    if isinstance(e, ValueError):
+        return 'gateway returned an invalid response'
+    if isinstance(e, RuntimeError):
+        return 'local inference budget exhausted'
+    return 'unexpected runner error (%s)' % type(e).__name__
 
 
 def first_json(text):
@@ -220,7 +247,9 @@ def main():
         try:
             reply = infer(messages)
         except Exception as e:
-            finish('error', error='inference failed: %s' % type(e).__name__)
+            reason = 'turn %d: inference failed: %s' % (step, inference_failure(e))
+            activity('error', reason)
+            finish('error', error=reason)
             return 1
         messages.append({'role': 'assistant', 'content': reply[:8000]})
         act = first_json(reply)

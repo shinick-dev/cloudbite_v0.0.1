@@ -71,7 +71,7 @@ function memStorage(w) {
 }
 
 function makeWorld(opts = {}) {
-  const w = { M, now: 1_800_000_000_000, sandboxes: new Map(), posts: 0, deletes: [], creating: 0, maxCreating: 0, nosana: [], fetches: [], dirs: tmp, runner: opts.runner ?? 'python', procs: [], ...opts };
+  const w = { M, now: 1_800_000_000_000, sandboxes: new Map(), posts: 0, deletes: [], creating: 0, maxCreating: 0, nosana: [], fetches: [], uas: [], dirs: tmp, runner: opts.runner ?? 'python', procs: [], ...opts };
   const objects = new Map();
   class TestProject extends w.M.CloudbiteProject { clock() { return w.now; } }
   w.ns = { getByName(name) { if (!objects.has(name)) { const storage = memStorage(w); objects.set(name, new TestProject({ storage, id: { name } }, w.env)); objects.get(name).storage = storage; } return objects.get(name); } };
@@ -182,8 +182,13 @@ function script(req) {
   return JSON.stringify({ action: 'final', opinion: { direction: id === 'risk' ? 'concern' : 'support', confidence: 72, summary: `${id} summary`, evidence: ['computed 45 in sandbox'], assumptions: ['fixture'], nextActions: ['pilot'] }, report: `# ${id} report\n\nBased on the python tool.` });
 }
 
-// Local gateway: sandbox runner → http://127.0.0.1:<port>/p/_cloudbite/worker/... → Worker router
+// Local gateway: sandbox runner → http://127.0.0.1:<port>/p/_cloudbite/worker/... → Worker router.
+// Like Cloudflare's edge in production, it refuses urllib's default User-Agent (403, error code 1010) before the Worker.
+const RUNNER_UA = 'Cloudbite-Runner/0.0.1';
 const server = createServer(async (req, res) => {
+  const ua = req.headers['user-agent'] ?? '';
+  W?.uas.push(ua);
+  if (/^Python-urllib\//.test(ua)) { res.writeHead(403, { 'content-type': 'text/plain' }); res.end('error code: 1010'); return; }
   const chunks = []; for await (const c of req) chunks.push(c);
   const r = await W.M.default.fetch(new Request('https://gw.test' + req.url, { method: req.method, headers: Object.fromEntries(Object.entries(req.headers).filter(([k]) => k !== 'host' && k !== 'connection' && k !== 'content-length')), body: chunks.length ? Buffer.concat(chunks) : undefined }), W.env, { waitUntil() {} });
   res.writeHead(r.status, { 'content-type': 'application/json' }); res.end(Buffer.from(await r.arrayBuffer()));
@@ -293,6 +298,9 @@ await check('live run: distinct sandbox per expert, persona placement, real pyth
   }
   assert.equal(ex.find((e) => e.run.expertId === 'risk').run.opinion.direction, 'concern');
   assert.deepEqual([...w.deletes].sort(), [...ids].sort());
+  // every runner callback (activity, inference, complete) went through with the explicit runner User-Agent
+  assert.ok(w.uas.length >= 3 * 4, 'runner callbacks reached the gateway');
+  assert.deepEqual([...new Set(w.uas)], [RUNNER_UA]);
   // secrets never reached sandbox files, the model input or the public project
   for (const [, text] of allText(w)) for (const s of SECRETS) assert.ok(!text.includes(s));
   for (const req of w.nosana) { assert.equal(req.model, 'fake-model'); assert.ok(req.max_tokens <= 1200); for (const s of SECRETS) assert.ok(!JSON.stringify(req).includes(s)); }
@@ -560,6 +568,48 @@ await check('real catalogue: runner refuses a non-canonical final (fractional co
   assert.equal(p.status, 'failed'); assert.equal(e.run.status, 'failed'); assert.equal(e.run.opinion, undefined);
   assert.ok(e.run.activity.some((a) => /final rejected: confidence must be an integer/.test(a.message)));
   assert.ok(!existsSync(join(sbDir(w, e.run.sandboxId), 'out', 'result.json')));
+});
+
+await check('runner gateway: urllib default User-Agent is refused like the Cloudflare edge; the runner sends its own', async () => {
+  const w = freshWorld({ runner: 'none' });
+  const { caps: [a] } = await manualRun(w);
+  const probe = (headers) => new Promise((resolve) => {
+    const code = `import json,sys,urllib.request,urllib.error
+req=urllib.request.Request(sys.argv[1],data=b'{}',method='POST',headers=json.loads(sys.argv[2]))
+try:
+  urllib.request.urlopen(req,timeout=10); print(200)
+except urllib.error.HTTPError as e: print(e.code, e.read().decode())`;
+    const p = spawn(PY, ['-I', '-c', code, `http://127.0.0.1:${PORT}/p/_cloudbite/worker/${a.project}/${a.run}/activity`, JSON.stringify(headers)], { env: { PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT ?? '' } });
+    let out = ''; p.stdout.on('data', (d) => (out += d)); p.on('close', () => resolve(out.trim()));
+  });
+  assert.equal(await probe({ 'content-type': 'application/json' }), '403 error code: 1010', 'default urllib UA blocked before the Worker');
+  // the explicit runner UA reaches the Worker, which then rejects the missing capability itself
+  assert.match(await probe({ 'content-type': 'application/json', 'user-agent': RUNNER_UA }), /^401 /);
+  assert.match(M.CB_RUNNER_PY, /USER_AGENT = 'Cloudbite-Runner\/0\.0\.1'/);
+  assert.match(M.CB_RUNNER_PY, /'user-agent': USER_AGENT/);
+});
+
+await check('real python runner: upstream inference failure is visible as a bounded category, never the upstream body or a secret', async () => {
+  const w = freshWorld({ nosanaFail: true });
+  const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['market'] }), headers: admin });
+  const obj = await project(w, created);
+  const p = await drive(w, obj, (p) => p.status !== 'running', 2000);
+  await Promise.all(w.procs);
+  const [e] = await experts(obj);
+  assert.equal(p.status, 'failed'); assert.equal(e.run.status, 'failed'); assert.equal(e.run.opinion, undefined);
+  assert.equal(w.nosana.length, 1, 'no retries or fallback provider');
+  const msgs = e.run.activity.map((a) => a.message);
+  assert.ok(msgs.some((m) => /model call 1 failed: inference upstream failed \(500\)/.test(m)), msgs.join('\n'));
+  assert.ok(e.run.activity.some((a) => a.kind === 'error' && a.message === 'sandbox: turn 1: inference failed: model provider returned an error (HTTP 502)'), msgs.join('\n'));
+  const err = readFileSync(join(sbDir(w, e.run.sandboxId), 'out', 'error.txt'), 'utf8');
+  assert.equal(err, 'turn 1: inference failed: model provider returned an error (HTTP 502)');
+  assert.ok(!existsSync(join(sbDir(w, e.run.sandboxId), 'out', 'result.json')), 'no fabricated opinion');
+  const read = await call(w, 'GET', `/api/cloudbite/projects/${created.j.project.id}`, { headers: { authorization: 'Bearer ' + created.j.accessToken } });
+  for (const text of [read.text, JSON.stringify(e), ...allText(w).map(([, t]) => t)]) {
+    assert.ok(!text.includes('upstream says') && !text.includes('internal trace'), 'upstream body never reflected');
+    for (const s of SECRETS) assert.ok(!text.includes(s));
+  }
+  assert.deepEqual([...new Set(w.uas)], [RUNNER_UA]);
 });
 
 server.close();
