@@ -69,4 +69,4 @@ activity errors. KO switching preserved the question, all six results and their 
 
 Cleanup was checked through all three owning account credentials: each of the six sandbox GETs returned
 404, and each organization listed zero sandboxes with this QA project label. No test attempted 100 real
-concurrent sandboxes. The synthetic history record is removed after verification.
+concurrent sandboxes. The coordinator deleted only this synthetic history record through the UI, verified its source returned 404 and its ID was absent from the scoped history index, then restored the default Jev question screen.
