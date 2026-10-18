@@ -45,9 +45,12 @@ changes namespaces; any refusal exits non-zero with the reason and nothing deplo
   that never reached `main`, is not detected.
 - Environment variables that Wrangler itself reads are passed through as-is.
 
-`npm run test:cloudbite:computer` runs the eleven Computer JavaScript suites plus the Python display and installer
-checks. Python uses `-B` so testing does not leave bytecode files that would dirty the release worktree. The display
+`npm run test:cloudbite:computer` runs the eleven Computer JavaScript suites plus the Python display, installer,
+sign-in and keyring checks. Python uses `-B` so testing does not leave bytecode files that would dirty the release worktree. The display
 test reports skipped Selkies checks when that package is absent; the installer reports platform-specific skips.
+
+The [unified release acceptance](unified-release.md) records the restored workflow, preserved Computer release,
+production version, actual expert/cross-review checks and remaining verification limits.
 
 ## Tests
 
