@@ -22,7 +22,7 @@ import { vaultApi } from './vault-api';
 import { providerProxy } from './provider-proxy';
 import { publicGet } from './public-get';
 import { cloudbiteRoute } from './cloudbite-api';
-import { cloudbiteAliasPath, cloudbiteIdentity } from './cloudbite-origin';
+import { cloudbiteAliasPath, cloudbiteIdentity, retiredCloudbiteOrigin } from './cloudbite-origin';
 import { isFail, sha, type Env, type State } from './state';
 
 export { State } from './state';
@@ -134,6 +134,8 @@ export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
     const path = url.pathname;
+    const retired = retiredCloudbiteOrigin(req, env);
+    if (retired) return retired;
     // Preserve the existing workers.dev origin, data and gateway. Only this configured alias receives a
     // request-local origin; Durable Objects retain their original environment and namespaces.
     if (url.origin !== env.ORIGIN && !path.startsWith('/p/')) {

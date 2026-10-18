@@ -9,7 +9,12 @@ The custom domain attaches to the existing cloudbite-v001 Worker. State, Cloudbi
 CloudbiteAccess namespaces, stored projects, approval policy, credentials and sandbox gateway
 remain unchanged. No gw-shinick, k.shinick.dev, lab.shinick.dev or account-wide workers.dev
 subdomain changes. Only Cloudbite and its registration assets/APIs are exposed on the new host.
-The original workers.dev application and all its existing links remain available.
+The original workers.dev public application is retired. Its browser pages redirect to the
+same path on cloudbite.shinick.dev. Its old browser APIs return 410 with the new origin;
+credential-bearing requests are never replayed across origins. CLOUDBITE_CANONICAL_ONLY=1
+enables this policy. The old hostname remains technically reachable for the security-key
+RP document and authenticated /p/ sandbox gateway paths only. Do not disable workers_dev
+or delete cloudbite-v001: the custom domain uses that same Worker and its existing data.
 
 Zone routing prerequisite: the existing *.shinick.dev/* -> gw-shinick route takes priority
 over Custom Domains. A narrower cloudbite.shinick.dev/* -> Workers disabled (no script)
@@ -27,11 +32,11 @@ from the custom origin. HTTP POST Origin must still match the receiving origin e
 
 Chrome supports Related Origin Requests from version 128:
 https://developer.chrome.com/blog/passkeys-updates-chrome-129
-Browsers without this feature can use the original owner inbox:
-https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/requests
+Use an up-to-date browser with this feature for existing security keys on the new origin.
 
 Cookies and browser-local project history are origin-specific. An existing logged-in browser
-must sign in once at the new host; its old login and original project links remain valid.
+must sign in once at the new host. Old links redirect, but origin-local project history and
+visitor cookies do not transfer. Old credential records and server-side project data remain.
 Logging out revokes the specific owner session, as before; it does not log out other browsers
 or a separately authenticated origin. Visitor approval records share the same inbox but a
 visitor must keep using the origin where they requested access (cookies do not migrate).

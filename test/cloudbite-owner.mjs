@@ -97,7 +97,7 @@ async function call(w, method, path, { body, headers = {}, raw, base = w.env.ORI
   if (body !== undefined) { init.body = raw ?? JSON.stringify(body); init.headers['content-type'] ??= 'application/json'; }
   const r = await M.default.fetch(new Request(base + path, init), w.env, { waitUntil() {} });
   const text = await r.text(); let j = null; try { j = JSON.parse(text); } catch {}
-  return { status: r.status, j, text, cookie: r.headers.get('set-cookie') };
+  return { status: r.status, j, text, cookie: r.headers.get('set-cookie'), location: r.headers.get('location') };
 }
 const ORIGIN = { origin: ORIGIN_URL };
 const jar = (setCookie) => setCookie.split(';')[0];
@@ -506,6 +506,33 @@ await check('custom hostname: reject mismatched HTTP Origin, forged RP/origin an
   const reg = await at('/api/register/options', { setup: 'test-only-setup' });
   assert.equal(reg.status, 200, reg.text); assert.equal(reg.j.rp.id, RP);
   assert.equal((await at('/api/register/options', { setup: 'test-only-setup' }, ORIGIN_URL)).status, 403);
+});
+
+await check('retired origin: old pages redirect to canonical host, APIs cannot mutate; RP document and gateway survive', async () => {
+  const alias = 'https://cloudbite.example';
+  const w = world({ CLOUDBITE_PUBLIC_ORIGIN: alias, CLOUDBITE_CANONICAL_ONLY: '1' }); await w.enroll();
+  for (const path of ['/', '/cloudbite?lang=ko', '/cloudbite/requests?lang=en', '/register', '/cloudbite/access', '//evil.test/']) {
+    const r = await call(w, 'GET', path);
+    assert.equal(r.status, 308, path);
+    assert.equal(new URL(r.location).origin, alias);
+    assert.equal(r.location, alias + path);
+  }
+  assert.equal((await call(w, 'HEAD', '/')).location, alias + '/');
+  for (const [method, path] of [['GET', '/api/cloudbite/bootstrap'], ['POST', '/api/cloudbite/projects'], ['POST', '/api/cloudbite/access/policy'], ['POST', '/api/register/options']]) {
+    const r = await call(w, method, path, { body: method === 'POST' ? {} : undefined, headers: ORIGIN });
+    assert.equal(r.status, 410, path); assert.equal(r.j.url, alias); assert.equal(r.location, null);
+  }
+  assert.deepEqual((await call(w, 'GET', '/.well-known/webauthn')).j.origins, [ORIGIN_URL, alias]);
+  const gw = await call(w, 'GET', '/p/_cloudbite/worker/cb' + '0'.repeat(32) + '/e0/activity');
+  assert.equal(gw.status, 405, gw.text); assert.equal(gw.location, null);
+  assert.equal((await call(w, 'GET', '/', { base: alias })).status, 200);
+  assert.equal((await call(w, 'GET', '/', { base: 'https://evil.test' })).status, 404);
+  const o = await call(w, 'POST', '/api/cloudbite/owner/options', { base: alias, body: {}, headers: { origin: alias } });
+  assert.equal(o.status, 200); assert.equal(o.j.rpId, RP);
+  const l = await call(w, 'POST', '/api/cloudbite/owner/login', { base: alias, body: { response: w.key.get(o.j, { origin: alias }) }, headers: { origin: alias } });
+  assert.equal(l.status, 200, l.text);
+  const inbox = await call(w, 'GET', '/api/cloudbite/access/requests', { base: alias, headers: { cookie: jar(l.cookie) } });
+  assert.equal(inbox.status, 200, inbox.text);
 });
 
 console.log(`\n${count} checks passed`);

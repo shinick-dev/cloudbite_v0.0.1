@@ -21,6 +21,7 @@
     "RP_ID": "cloudbite-v001.ai-gongbu.workers.dev",
     "ORIGIN": "https://cloudbite-v001.ai-gongbu.workers.dev",
     "CLOUDBITE_PUBLIC_ORIGIN": "https://cloudbite.shinick.dev",
+    "CLOUDBITE_CANONICAL_ONLY": "1",
     // Legacy lab hosts are disabled here: a non-routable placeholder origin and no seat domain.
     "LAB_ORIGIN": "https://lab.cloudbite.invalid",
     // Gateway the sandbox runner calls (/p/_cloudbite/worker/…). Same workers.dev host.

@@ -2,7 +2,7 @@
 
 하나의 프로젝트를 서로 다른 전문가 AI가 독립된 Daytona 샌드박스에서 수행하는 작업 공간입니다. 프로젝트 책임자는 전문가의 페르소나·작업 지시·활동·산출물을 보고 다음 결정을 내립니다.
 
-운영 앱: https://cloudbite-v001.ai-gongbu.workers.dev · [온라인 제출물](https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite-hacksprint-submission). 독립 Worker의 배포·접근 범위는 [운영 문서](docs/cloudbite/production.txt)에 정리합니다.
+운영 앱: https://cloudbite.shinick.dev · [온라인 제출물](https://cloudbite.shinick.dev/cloudbite-hacksprint-submission). 독립 Worker의 배포·접근 범위는 [운영 문서](docs/cloudbite/production.txt)에 정리합니다.
 
 ## 제품 흐름
 
@@ -35,7 +35,7 @@
 
 [QR PNG](demo/cloudbite-access-request.png) · [SVG](demo/cloudbite-access-request.svg) · [영문 QR 안내](demo/access-qr.html)
 
-공개 QR은 `https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/request`를 엽니다. 이름과 체험 목적을 신청하면 진행자가 `https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/requests`에서 승인합니다. 승인 후 같은 브라우저에서 Cloudbite에 들어가 공통 프로젝트와 전문가를 선택해 실행합니다. 1시간 동안 프로젝트 최대 10개를 체험하며, 프로젝트마다 최대 5명의 전문가를 선택할 수 있습니다. 승인은 외부 자원을 자동 생성하지 않습니다.
+공개 QR은 `https://cloudbite.shinick.dev/cloudbite/request`를 엽니다. 이름과 체험 목적을 신청하면 진행자가 `https://cloudbite.shinick.dev/cloudbite/requests`에서 승인합니다. 승인 후 같은 브라우저에서 Cloudbite에 들어가 공통 프로젝트와 전문가를 선택해 실행합니다. 1시간 동안 프로젝트 최대 10개를 체험하며, 프로젝트마다 최대 5명의 전문가를 선택할 수 있습니다. 승인은 외부 자원을 자동 생성하지 않습니다.
 
 운영자는 `/cloudbite/requests`에서 이 Cloudbite 도메인에 등록한 보안키로 로그인합니다. Cloudbite 전용 로그인 유지 세션은 새로고침·새 탭·브라우저 재시작 뒤에도 복원되며, 명시적 로그아웃은 서버의 세션을 폐기합니다. 브라우저 쿠키 삭제나 해당 키 삭제 시에는 재인증해야 합니다. 기존 공부방·금고의 8시간 관리자 세션은 그대로입니다. 처음 키를 등록할 때는 비공개 설정 토큰이 필요하며, 임시 운영자 토큰은 고급 설정의 대체 접속 수단으로 남습니다. 비공개 설정 파일과 운영자 QR을 청중에게 공개하지 마세요.
 

@@ -104,6 +104,7 @@ export interface Env {
   RP_ID: string;
   ORIGIN: string;
   CLOUDBITE_PUBLIC_ORIGIN?: string; // Exact HTTPS Cloudbite alias; does not change legacy hosts or DO identities.
+  CLOUDBITE_CANONICAL_ONLY?: string; // 1: retire old public app; retain RP document and sandbox gateway.
   SETUP_TOKEN?: string;
   MASTER_KEY?: string;      // 32바이트 base64url. 저장된 공급자 키를 암호화한다
   ALLOW_SHORT_TTL?: string; // dev 전용: 만료 테스트용 초단기 TTL 허용

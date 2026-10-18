@@ -1,10 +1,15 @@
 Cloudbite production
 
-App: https://cloudbite-v001.ai-gongbu.workers.dev
-Submission: https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite-hacksprint-submission
+App: https://cloudbite.shinick.dev
+Submission: https://cloudbite.shinick.dev/cloudbite-hacksprint-submission
 Worker: cloudbite-v001 (top-level environment)
 Config: wrangler.cloudbite.jsonc
 Account: 96aee9d5fb56f2efc3d90e147a67f558
+
+Current public host: cloudbite.shinick.dev (see custom-domain.txt). The old workers.dev
+app pages redirect to the new hostname; its browser APIs return 410. workers_dev remains
+enabled only because the original WebAuthn RP document and sandbox gateway depend on it.
+Do not delete the Worker or its Durable Objects to remove the old public URL.
 
 This is a separate Worker with its own State and CloudbiteProject SQLite Durable
 Objects. No original gw-shinick DNS, secrets, security keys or lab data were copied
