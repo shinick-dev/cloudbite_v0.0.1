@@ -6,7 +6,7 @@
 // 화면 문구는 한국어·영어 사전(EN·KO)에서 온다 (2026-10-18 사용자 요청: 머리의 KO / EN 전환). 언어는 ?lang= 주소에만 두고,
 // 서버·모델이 돌려준 내용(브리프·보고서·파일·페르소나·서버 오류)과 브라우저 데모 결과물은 받은·만든 그대로 보이고 번역하지 않는다.
 import type {
-  CloudbiteBootstrap, ExpertActivity, ExpertArtifact, ExpertDefinition, ExpertOpinion, ExpertRun, ExpertStatus,
+  CloudbiteBootstrap, CloudbiteRoutingHarness, ExpertActivity, ExpertArtifact, ExpertDefinition, ExpertOpinion, ExpertRun, ExpertStatus,
   OpinionDirection, ProjectBrief, ProjectRun, ProjectStatus,
 } from '../src/cloudbite-contract';
 import type { CloudbiteAccessRequest, CloudbiteAccessSession } from '../src/cloudbite-access-contract';
@@ -43,11 +43,20 @@ interface Pool { version: string; entries: PoolEntry[]; priorityNumbers: number[
 /** bootstrap.configuration.routing (선택): 서버가 TypeSafe Jev 로 브리프에 맞는 역할을 고를 수 있는지. 키는 서버에만 있다.
  *  공유 계약에 들어오기 전까지 여기 둔다 (조정자의 계약과 같은 모양) */
 interface Routing { provider: 'typesafe'; model: string; ready: boolean; maxExperts: number }
-/** POST /api/cloudbite/route 응답. relevance 는 역할별 선택 적합도이지 전문가의 확신도·정확도가 아니다 */
+/** POST /api/cloudbite/route 응답. relevance 는 역할별 선택 적합도이지 전문가의 확신도·정확도가 아니다.
+ *  v1 은 팀 설명이 없고, v2 는 검증된 project-team/v1 설명(harness)이 반드시 붙는다 */
 interface RouteResult {
-  provider: 'typesafe'; model: string; policyVersion: 'jev-routing/v1'; evaluatedCount: number; threshold: number;
+  provider: 'typesafe'; model: string; policyVersion: 'jev-routing/v1' | 'jev-routing/v2'; evaluatedCount: number; threshold: number;
   expertIds: string[]; matches: Array<{ expertId: string; relevance: number }>; queryHash: string; expiresAt: number;
+  harness?: CloudbiteRoutingHarness;
 }
+type HarnessStatus = CloudbiteRoutingHarness['perspectives'][number]['status'];
+type HarnessReason = CloudbiteRoutingHarness['excluded'][number]['reason'];
+/** 팀 설명의 고정 코드. 여기 없는 경고·상태·이유가 오면 v2 팀 전체를 쓰지 않는다 (모르는 코드를 짐작해 그리지 않는다) */
+const HARNESS_WARNINGS = ['uncovered-perspectives', 'limited-perspectives', 'actor-limit'] as const;
+type HarnessWarning = typeof HARNESS_WARNINGS[number];
+const HARNESS_STATUSES: HarnessStatus[] = ['covered', 'limited', 'uncovered'];
+const HARNESS_REASONS: HarnessReason[] = ['overlap', 'limit', 'below-threshold'];
 /** pool·routing 은 선택 필드다 — 없는 옛 bootstrap 이면 화면은 예전 역할 고르기만 보인다 */
 type ConsoleBootstrap = CloudbiteBootstrap & { pool?: Pool; configuration: CloudbiteBootstrap['configuration'] & { routing?: Routing } };
 /** 규칙 기반 팀 제안의 한 줄: 브리프에서 찾은 카탈로그 키워드가 근거다 (모델 판단·점수 아님) */
@@ -226,6 +235,32 @@ const EN = {
   routeCancelled: 'Routing stopped. Nothing was started.',
   routeNetwork: 'Could not reach the server to choose experts. Nothing was started. (Not switched to manual selection or demo.)',
   stepRouted: 'Experts chosen by Jev',
+  // Jev 팀 설명 (jev-routing/v2 의 project-team/v1). 고정 코드만 이 사전으로 옮기고, 모델이 쓴 글은 근거로 보이지 않는다
+  teamCoverage: (covered: number, limited: number, uncovered: number) => `Perspectives: ${covered} covered · ${limited} limited · ${uncovered} not covered`,
+  teamGaps: (names: string) => `Not covered by this team: ${names}`,
+  teamLimitedList: (names: string) => `Only partly covered: ${names}`,
+  teamWarning: {
+    'uncovered-perspectives': 'Some needed perspectives have no suitable role in the catalogue, so this team does not cover them.',
+    'limited-perspectives': 'Some needed perspectives are only partly covered by this team.',
+    'actor-limit': 'The expert limit was reached, so some suitable roles were left out.',
+  } as Record<HarnessWarning, string>,
+  teamCovers: (names: string) => `covers ${names}`,
+  teamAdditional: 'additional domain',
+  teamWhy: 'Why this team',
+  teamRationale: 'These are team-composition judgments. Each percentage is how well a role suits this brief — not how confident or accurate its answer will be.',
+  teamNoPeer: 'No peer verification happened: every selected role runs as an independent advisor and does not see or review the work of the others.',
+  teamEligible: (eligible: number, evaluated: number) => `${eligible} of ${plural(evaluated, 'evaluated role')} were eligible.`,
+  teamPerspectivesTitle: 'Perspectives',
+  teamPerspective: (name: string, need: string, status: string) => `${name} — need ${need}, ${status}`,
+  teamStatus: { covered: 'covered', limited: 'limited', uncovered: 'not covered' } as Record<HarnessStatus, string>,
+  teamBy: (names: string) => ` by ${names}`,
+  teamExcludedTitle: 'Left out',
+  teamReason: { overlap: 'overlaps with', limit: 'expert limit reached', 'below-threshold': 'below the suitability threshold' } as Record<HarnessReason, string>,
+  teamPerspectiveName: {
+    architecture: 'Architecture', implementation: 'Implementation', validation: 'Validation', performance: 'Performance', security: 'Security',
+    privacy: 'Privacy', 'user-value': 'User value', commercial: 'Commercial', finance: 'Finance', delivery: 'Delivery', assumptions: 'Assumptions',
+    decision: 'Decision', regulatory: 'Regulatory', operability: 'Operability',
+  } as Record<string, string>,
   needExpert: 'Choose at least one expert to run.',
   nextDemo: 'Next run: browser demo, simulated in this tab.',
   nextLive: 'Next run: live run on server sandboxes.',
@@ -540,6 +575,31 @@ const KO: Messages = {
   routeCancelled: '전문가 고르기를 멈췄습니다. 아무것도 시작하지 않았습니다.',
   routeNetwork: '전문가를 고르려고 서버에 연결하지 못했습니다. 아무것도 시작하지 않았습니다. (직접 선택이나 데모로 바꾸지 않았습니다.)',
   stepRouted: 'Jev가 전문가 선택',
+  teamCoverage: (covered, limited, uncovered) => `관점: 충족 ${covered} · 일부 ${limited} · 미충족 ${uncovered}`,
+  teamGaps: (names) => `이 팀이 다루지 못하는 관점: ${names}`,
+  teamLimitedList: (names) => `일부만 다루는 관점: ${names}`,
+  teamWarning: {
+    'uncovered-perspectives': '필요한 관점 가운데 카탈로그에 맞는 역할이 없는 것이 있어, 이 팀은 그 관점을 다루지 않습니다.',
+    'limited-perspectives': '필요한 관점 가운데 이 팀이 일부만 다루는 것이 있습니다.',
+    'actor-limit': '전문가 인원 한도에 닿아 맞는 역할 일부를 뺐습니다.',
+  },
+  teamCovers: (names) => `담당: ${names}`,
+  teamAdditional: '추가 분야',
+  teamWhy: '이 팀을 고른 이유',
+  teamRationale: '팀 구성에 대한 판단입니다. 각 백분율은 역할이 이 브리프에 얼마나 맞는지이며, 그 역할 답변의 확신도나 정확도가 아닙니다.',
+  teamNoPeer: '서로 검증하지 않았습니다: 고른 역할은 모두 독립 자문으로 실행되며 다른 역할의 결과를 보거나 검토하지 않습니다.',
+  teamEligible: (eligible, evaluated) => `평가한 역할 ${evaluated}명 가운데 ${eligible}명이 후보였습니다.`,
+  teamPerspectivesTitle: '관점',
+  teamPerspective: (name, need, status) => `${name} — 필요도 ${need}, ${status}`,
+  teamStatus: { covered: '충족', limited: '일부', uncovered: '미충족' },
+  teamBy: (names) => ` · ${names}`,
+  teamExcludedTitle: '뺀 역할',
+  teamReason: { overlap: '역할이 겹침:', limit: '인원 한도', 'below-threshold': '적합도 기준 미달' },
+  teamPerspectiveName: {
+    architecture: '아키텍처', implementation: '구현', validation: '검증', performance: '성능', security: '보안',
+    privacy: '개인정보', 'user-value': '사용자 가치', commercial: '사업성', finance: '재무', delivery: '일정·전달', assumptions: '가정',
+    decision: '의사결정', regulatory: '규제', operability: '운영성',
+  },
   needExpert:'실행하려면 전문가를 한 명 이상 고르세요.',
   nextDemo: '다음 실행: 브라우저 데모, 이 탭 안에서 시뮬레이션합니다.',
   nextLive: '다음 실행: 서버 샌드박스에서 실제 실행합니다.',
@@ -940,7 +1000,9 @@ function normalizeRouting(raw: unknown): Routing | undefined {
 /** Jev 경로 응답 정리. 고른 역할은 지금 카탈로그의 실제 id 이고, 겹치지 않고, 1명 이상 max 명 이하여야 한다 — 아니면 null 이며
  *  화면은 그 팀으로 아무것도 만들지 않는다. matches 는 고른 역할의 적합도만 남긴다 (카탈로그 밖 id 는 버린다) */
 function normalizeRoute(raw: unknown, allowed: string[], max: number): RouteResult | null {
-  if (!isObj(raw) || raw.provider !== 'typesafe' || raw.policyVersion !== 'jev-routing/v1' || !Array.isArray(raw.expertIds) || !Array.isArray(raw.matches)) return null;
+  if (!isObj(raw) || raw.provider !== 'typesafe' || !Array.isArray(raw.expertIds) || !Array.isArray(raw.matches)) return null;
+  const policyVersion = raw.policyVersion;
+  if (policyVersion !== 'jev-routing/v1' && policyVersion !== 'jev-routing/v2') return null;
   const ok = new Set(allowed), ids: string[] = [];
   for (const id of raw.expertIds) {
     if (typeof id !== 'string' || !ok.has(id) || ids.includes(id)) return null;
@@ -956,7 +1018,73 @@ function normalizeRoute(raw: unknown, allowed: string[], max: number): RouteResu
   }
   const evaluatedCount = num(raw.evaluatedCount), threshold = num(raw.threshold), expiresAt = num(raw.expiresAt), queryHash = str(raw.queryHash, 200);
   if (evaluatedCount === null || threshold === null || expiresAt === null || !queryHash) return null;
-  return { provider: 'typesafe', model: str(raw.model, 80), policyVersion: 'jev-routing/v1', evaluatedCount, threshold, expertIds: ids, matches, queryHash, expiresAt };
+  const base: RouteResult = { provider: 'typesafe', model: str(raw.model, 80), policyVersion, evaluatedCount, threshold, expertIds: ids, matches, queryHash, expiresAt };
+  // v1(옛 기록 호환)에는 설명이 없다 — 붙어 와도 쓰지 않는다. v2 는 설명이 없거나 깨졌으면 팀 전체를 쓰지 않는다
+  if (policyVersion === 'jev-routing/v1') return base;
+  const harness = normalizeHarness(raw.harness, ok, ids, evaluatedCount);
+  return harness ? { ...base, harness } : null;
+}
+
+const HARNESS_ID = /^[a-z][a-z0-9-]{0,47}$/;
+const isProb = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1;
+const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0;
+/** project-team/v1 팀 설명 정리 (jev-routing/v2 에서만). 고정 코드·실제 카탈로그 id·서로 맞는 담당 관계만 받고, 하나라도 어긋나면 null.
+ *  관점 이름은 서버가 정한 고정 목록의 표시용 글이며 화면은 글자로만 그린다. 모르는 추가 필드는 버린다 */
+function normalizeHarness(raw: unknown, allowed: Set<string>, ids: string[], evaluatedCount: number): CloudbiteRoutingHarness | null {
+  if (!isObj(raw) || raw.version !== 'project-team/v1' || raw.peerReview !== 'not-performed') return null;
+  if (!Array.isArray(raw.stages) || raw.stages.length !== 2 || raw.stages[0] !== 'assessment' || raw.stages[1] !== 'team-review') return null;
+  const eligibleCount = raw.eligibleCount;
+  // 고른 역할은 전부 자격 있는 후보에서 나오고, 자격 후보는 평가한 역할을 넘지 않는다 (엔진 후보 한도 100)
+  if (!isCount(eligibleCount) || eligibleCount < ids.length || eligibleCount > Math.min(100, evaluatedCount)) return null;
+  if (!Array.isArray(raw.perspectives) || raw.perspectives.length > 32 || !Array.isArray(raw.selections) || !Array.isArray(raw.excluded)
+    || raw.excluded.length > 100 || !Array.isArray(raw.warnings) || raw.warnings.length > HARNESS_WARNINGS.length) return null;
+  const chosen = new Set(ids);
+  const perspectives: CloudbiteRoutingHarness['perspectives'] = [];
+  for (const p of raw.perspectives) {
+    if (!isObj(p) || typeof p.id !== 'string' || !HARNESS_ID.test(p.id) || perspectives.some(x => x.id === p.id)) return null;
+    const name = typeof p.name === 'string' ? p.name.trim() : '';
+    if (!name || name.length > 80 || !isProb(p.need) || !HARNESS_STATUSES.includes(p.status as HarnessStatus) || !Array.isArray(p.expertIds) || p.expertIds.length > 100) return null;
+    const experts: string[] = [];
+    for (const id of p.expertIds) {
+      if (typeof id !== 'string' || !chosen.has(id) || experts.includes(id)) return null;
+      experts.push(id);
+    }
+    const status = p.status as HarnessStatus;
+    // 담당이 있는데 빈 관점이라 하거나, 담당 없이 채웠다고 하면 서로 어긋난다
+    if ((status === 'covered' && experts.length === 0) || (status === 'uncovered' && experts.length > 0)) return null;
+    perspectives.push({ id: p.id, name, need: p.need, status, expertIds: experts });
+  }
+  const selections: CloudbiteRoutingHarness['selections'] = [];
+  for (const x of raw.selections) {
+    if (!isObj(x) || typeof x.expertId !== 'string' || !chosen.has(x.expertId) || selections.some(y => y.expertId === x.expertId)) return null;
+    if ((x.kind !== 'coverage' && x.kind !== 'additional-domain') || !Array.isArray(x.perspectiveIds) || x.perspectiveIds.length > 32) return null;
+    const pids: string[] = [];
+    for (const pid of x.perspectiveIds) {
+      const p = typeof pid === 'string' ? perspectives.find(y => y.id === pid) : undefined;
+      if (!p || pids.includes(p.id) || !p.expertIds.includes(x.expertId)) return null;
+      pids.push(p.id);
+    }
+    if (x.kind === 'coverage' && pids.length === 0) return null;
+    selections.push({ expertId: x.expertId, perspectiveIds: pids, kind: x.kind });
+  }
+  // 고른 역할마다 기여 설명이 정확히 하나 있고, 관점에 적힌 담당자는 그 역할의 설명에도 그 관점이 있다
+  if (selections.length !== ids.length) return null;
+  for (const p of perspectives) for (const id of p.expertIds) if (!selections.find(y => y.expertId === id)!.perspectiveIds.includes(p.id)) return null;
+  const excluded: CloudbiteRoutingHarness['excluded'] = [];
+  for (const x of raw.excluded) {
+    if (!isObj(x) || typeof x.expertId !== 'string' || !allowed.has(x.expertId) || chosen.has(x.expertId) || excluded.some(y => y.expertId === x.expertId)) return null;
+    if (!HARNESS_REASONS.includes(x.reason as HarnessReason)) return null;
+    const reason = x.reason as HarnessReason;
+    if (x.coveredBy !== undefined && (typeof x.coveredBy !== 'string' || !chosen.has(x.coveredBy))) return null;
+    if (reason === 'overlap' && x.coveredBy === undefined) return null;
+    excluded.push({ expertId: x.expertId, reason, ...(typeof x.coveredBy === 'string' ? { coveredBy: x.coveredBy } : {}) });
+  }
+  const warnings: HarnessWarning[] = [];
+  for (const w of raw.warnings) {
+    if (!HARNESS_WARNINGS.includes(w as HarnessWarning) || warnings.includes(w as HarnessWarning)) return null;
+    warnings.push(w as HarnessWarning);
+  }
+  return { version: 'project-team/v1', stages: ['assessment', 'team-review'], eligibleCount, perspectives, selections, excluded, warnings, peerReview: 'not-performed' };
 }
 
 function normalizeBootstrap(raw: unknown): ConsoleBootstrap {
@@ -1537,6 +1665,8 @@ function boot(): void {
     routeMode: 'auto' as 'auto' | 'manual',
     /** 마지막 Jev 선택과 그때의 브리프 열쇠. 화면 표시용일 뿐 — 다음 실행은 늘 새로 고르고, 이 팀을 선택(S.selected)에 넣지 않는다 */
     route: null as null | { key: string; result: RouteResult | null },
+    /** Jev 팀 설명 접힘 상태. 다시 그려도 사용자가 연 상태를 지키고, 새로 고를 때 접는다 */
+    teamOpen: false,
     run: null as null | {
       mode: Mode; phase: 'routing' | 'starting' | 'running' | 'cancelling' | 'done' | 'error'; project: ConsoleProject | null;
       accessToken: string; error: Text | null; startedAt: number; pollErrors: number;
@@ -2071,15 +2201,51 @@ function boot(): void {
     else if (r) {
       // 적합도는 0–1 이면 백분율로, 다른 척도면 숫자 그대로 (전문가 확신도·정확도로 적지 않는다)
       const fit = (v: number) => v >= 0 && v <= 1 ? `${Math.round(v * 100)}%` : String(Math.round(v * 100) / 100);
+      const t = r.harness;
       kids.push(h('p', { class: 'cb-label' }, m.jevChosen(r.expertIds.length)),
         h('ol', { class: 'cb-suggest-list', 'aria-label': m.jevListAria }, ...r.expertIds.map(id => {
           const match = r.matches.find(x => x.expertId === id);
-          return h('li', null, h('span', { class: 'cb-opt-name' }, findDef(id)?.name ?? id),
-            match ? h('span', { class: 'cb-opt-desc' }, m.jevSuitability(fit(match.relevance))) : null);
+          const sel = t?.selections.find(x => x.expertId === id);
+          const role = sel ? sel.perspectiveIds.length ? m.teamCovers(sel.perspectiveIds.map(pid => perspectiveName(t!, pid)).join(', ')) : m.teamAdditional : '';
+          const desc = [match ? m.jevSuitability(fit(match.relevance)) : '', role].filter(Boolean).join(' · ');
+          return h('li', null, h('span', { class: 'cb-opt-name' }, findDef(id)?.name ?? id), desc ? h('span', { class: 'cb-opt-desc' }, desc) : null);
         })));
+      if (t) kids.push(...teamExplanation(t, r, fit));
       if (!busy && S.route!.key !== routeKey({ title: titleIn.value.trim(), objective: objectiveIn.value.trim(), context: contextIn.value.trim() })) kids.push(h('p', { class: 'cb-help' }, m.jevStale));
     }
     fill(jevBody, ...kids);
+  }
+
+  /** 관점 표시 이름: 아는 고정 id 는 지금 언어로, 아니면 서버가 보낸 이름을 글자 그대로 */
+  function perspectiveName(t: CloudbiteRoutingHarness, id: string): string {
+    return M.teamPerspectiveName[id] ?? t.perspectives.find(p => p.id === id)?.name ?? id;
+  }
+
+  /** v2 팀 설명: 짧은 관점 요약·빈 관점·한도 경고는 늘 보이고, 관점별 필요도·뺀 역할·읽기 전용 근거는 접힌 상자에 둔다 */
+  function teamExplanation(t: CloudbiteRoutingHarness, r: RouteResult, fit: (v: number) => string): Kid[] {
+    const m = M, name = (id: string) => findDef(id)?.name ?? id;
+    const by = (status: HarnessStatus) => t.perspectives.filter(p => p.status === status);
+    const uncovered = by('uncovered'), limited = by('limited');
+    const kids: Kid[] = [h('p', { class: 'cb-help cb-team-coverage' }, m.teamCoverage(by('covered').length, limited.length, uncovered.length))];
+    // normalizeHarness 가 고정 코드만 남겼다
+    const warns = t.warnings.map(w => m.teamWarning[w as HarnessWarning]);
+    if (uncovered.length) warns.push(m.teamGaps(uncovered.map(p => perspectiveName(t, p.id)).join(', ')));
+    if (limited.length) warns.push(m.teamLimitedList(limited.map(p => perspectiveName(t, p.id)).join(', ')));
+    if (warns.length) kids.push(h('div', { class: 'cb-warn cb-team-warn', role: 'note' }, ...warns.map(w => h('p', null, w))));
+    const box = h('details', { class: 'cb-disclosure cb-quiet cb-team-why', open: S.teamOpen },
+      h('summary', null, icon('chevron'), h('span', null, m.teamWhy)),
+      h('div', { class: 'cb-disclosure-body' },
+        h('p', { class: 'cb-help' }, m.teamRationale),
+        h('p', { class: 'cb-help' }, m.teamNoPeer),
+        h('p', { class: 'cb-help' }, m.teamEligible(t.eligibleCount, r.evaluatedCount)),
+        t.perspectives.length ? h('p', { class: 'cb-label' }, m.teamPerspectivesTitle) : null,
+        t.perspectives.length ? h('ul', { class: 'cb-team-list' }, ...t.perspectives.map(p => h('li', null,
+          m.teamPerspective(perspectiveName(t, p.id), fit(p.need), m.teamStatus[p.status]), p.expertIds.length ? m.teamBy(p.expertIds.map(name).join(', ')) : ''))) : null,
+        t.excluded.length ? h('p', { class: 'cb-label' }, m.teamExcludedTitle) : null,
+        t.excluded.length ? h('ul', { class: 'cb-team-list' }, ...t.excluded.map(x => h('li', null,
+          `${name(x.expertId)} — ${m.teamReason[x.reason]}${x.coveredBy ? ` ${name(x.coveredBy)}` : ''}`))) : null));
+    box.addEventListener('toggle', () => { S.teamOpen = box.open; });
+    return [...kids, box];
   }
 
   /** 자동(Jev) ↔ 직접 고르기. 실행 중에는 바꾸지 않는다. 직접 고른 선택은 그대로 두고 Jev 팀을 선택에 넣지 않는다 */
@@ -2723,7 +2889,7 @@ function boot(): void {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (adminToken) headers['x-admin-token'] = adminToken;
     const key = routeKey(brief), max = limits().max, allowed = catalogue().map(e => e.id);
-    S.route = { key, result: null };
+    S.route = { key, result: null }; S.teamOpen = false;
     const fail = (msg: Text) => { S.run!.phase = 'error'; S.run!.error = msg; renderAll(); };
     let res: Response;
     try {

@@ -222,6 +222,9 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .cb-suggest-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
 .cb-suggest-list li { display: flex; flex-direction: column; gap: 1px; }
 .cb-suggest-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.cb-team-why { margin-top: 4px; }
+.cb-team-why .cb-disclosure-body { display: flex; flex-direction: column; gap: 6px; }
+.cb-team-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
 .cb-form-foot { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--line); padding-top: 18px; }
 .cb-form-foot .cb-formmsg { margin-top: 0; }
 .cb-startnote { display: flex; flex-direction: column; gap: 6px; }

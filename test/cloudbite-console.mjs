@@ -1779,4 +1779,144 @@ await test('옛 bootstrap (routing 없음): Jev 상자는 숨고 경로를 부�
   assert.ok(!('routing' in body)); assert.ok(body.expertIds.length >= 1);
 });
 
+// ───────── Jev 팀 설명 (jev-routing/v2 + project-team/v1, 공유 계약 CloudbiteRoutingHarness)
+const TEAM_IDS = ['t0', 't1', 't2', 't3', 't4', 't5', 't6'];
+const TEAM_BOOT = { experts: [...TEAM_IDS, 't7', 't8'].map((id, i) => ({ id, name: i === 2 ? EVIL : `Role ${i}`, domain: `d${i}`, summary: 's', prompt: 'p', tools: [], outputs: [], source: {} })),
+  configuration: { liveReady: true, missing: [], maxExperts: 9, routing: { ...ROUTING, maxExperts: 9 } } };
+const harnessOf = (ids = TEAM_IDS, over = {}) => ({
+  version: 'project-team/v1', stages: ['assessment', 'team-review'], eligibleCount: 9,
+  perspectives: [
+    { id: 'architecture', name: 'Architecture', need: 0.9, status: 'covered', expertIds: [ids[0], ids[1]] },
+    { id: 'security', name: 'Security', need: 0.8, status: 'covered', expertIds: [ids[2]] },
+    { id: 'finance', name: 'Finance', need: 0.7, status: 'limited', expertIds: [ids[3]] },
+    { id: 'regulatory', name: EVIL, need: 0.75, status: 'uncovered', expertIds: [] },
+    { id: 'custom-scope', name: 'Chip timing closure', need: 0.66, status: 'covered', expertIds: [ids[4]] },
+  ],
+  selections: ids.map((expertId, i) => i === 0 || i === 1 ? { expertId, perspectiveIds: ['architecture'], kind: 'coverage' } : i === 2 ? { expertId, perspectiveIds: ['security'], kind: 'coverage' }
+    : i === 3 ? { expertId, perspectiveIds: ['finance'], kind: 'coverage' } : i === 4 ? { expertId, perspectiveIds: ['custom-scope'], kind: 'coverage' } : { expertId, perspectiveIds: [], kind: 'additional-domain' }),
+  excluded: [{ expertId: 't7', reason: 'overlap', coveredBy: ids[0] }, { expertId: 't8', reason: 'limit' }],
+  warnings: ['uncovered-perspectives', 'actor-limit'], peerReview: 'not-performed', ...over });
+const routeV2 = (ids = TEAM_IDS, over = {}, harness = harnessOf(ids)) => routeOk(ids, { policyVersion: 'jev-routing/v2', evaluatedCount: 9, harness, ...over });
+const ALL_TEAM = [...TEAM_IDS, 't7', 't8'];
+
+await test('Jev v1·v2 정리: 옛 v1 은 설명 없이 그대로, v2 는 7명 팀과 고정 코드 설명을 함께 받는다', () => {
+  const v1 = core.normalizeRoute(routeOk(['t0', 't1']), ALL_TEAM, 9);
+  assert.equal(v1.policyVersion, 'jev-routing/v1'); assert.equal(v1.harness, undefined);
+  const v1extra = core.normalizeRoute(routeOk(['t0'], { harness: { anything: true } }), ALL_TEAM, 9);
+  assert.ok(v1extra && v1extra.harness === undefined, 'v1 never carries a team explanation');
+  const v2 = core.normalizeRoute(routeV2(), ALL_TEAM, 9);
+  assert.equal(v2.policyVersion, 'jev-routing/v2');
+  assert.deepEqual(v2.expertIds, TEAM_IDS, 'selected expert ids and order preserved');
+  assert.deepEqual(v2.harness, harnessOf(), 'valid explanation kept exactly');
+  const extra = core.normalizeRoute(routeV2(TEAM_IDS, {}, { ...harnessOf(), debug: 'raw model text' }), ALL_TEAM, 9);
+  assert.ok(!('debug' in extra.harness), 'unknown fields dropped');
+  // 100명 한도 유지
+  const ids = Array.from({ length: 100 }, (_, i) => `role-${i}`);
+  const big = routeV2(ids, { evaluatedCount: 100 }, { ...harnessOf(ids), eligibleCount: 100, perspectives: [], selections: ids.map(expertId => ({ expertId, perspectiveIds: [], kind: 'additional-domain' })), excluded: [], warnings: [] });
+  assert.equal(core.normalizeRoute(big, ids, 100).expertIds.length, 100);
+  assert.equal(core.normalizeRoute(big, ids, 99), null);
+});
+
+await test('Jev v2 깨진 설명: 설명 없음·모르는 코드·카탈로그 밖 id·서로 어긋난 담당이면 팀 전체를 쓰지 않는다', () => {
+  const H = harnessOf();
+  const p = (i, o) => H.perspectives.map((x, j) => j === i ? { ...x, ...o } : x);
+  const sel = (i, o) => H.selections.map((x, j) => j === i ? { ...x, ...o } : x);
+  const bad = {
+    'no harness': routeOk(TEAM_IDS, { policyVersion: 'jev-routing/v2', evaluatedCount: 9 }),
+    'unknown policy': routeV2(TEAM_IDS, { policyVersion: 'jev-routing/v3' }),
+    'harness version': routeV2(TEAM_IDS, {}, { ...H, version: 'project-team/v2' }),
+    'stages': routeV2(TEAM_IDS, {}, { ...H, stages: ['assessment'] }),
+    'peer review claimed': routeV2(TEAM_IDS, {}, { ...H, peerReview: 'performed' }),
+    'unknown warning': routeV2(TEAM_IDS, {}, { ...H, warnings: ['team-is-perfect'] }),
+    'duplicate warning': routeV2(TEAM_IDS, {}, { ...H, warnings: ['actor-limit', 'actor-limit'] }),
+    'unknown status': routeV2(TEAM_IDS, {}, { ...H, perspectives: p(0, { status: 'verified' }) }),
+    'unknown reason': routeV2(TEAM_IDS, {}, { ...H, excluded: [{ expertId: 't7', reason: 'worse-answer' }] }),
+    'unknown kind': routeV2(TEAM_IDS, {}, { ...H, selections: sel(5, { kind: 'lead' }) }),
+    'foreign excluded id': routeV2(TEAM_IDS, {}, { ...H, excluded: [{ expertId: 'ghost', reason: 'limit' }] }),
+    'excluded but selected': routeV2(TEAM_IDS, {}, { ...H, excluded: [{ expertId: 't0', reason: 'limit' }] }),
+    'foreign coveredBy': routeV2(TEAM_IDS, {}, { ...H, excluded: [{ expertId: 't7', reason: 'overlap', coveredBy: 't8' }] }),
+    'overlap without coveredBy': routeV2(TEAM_IDS, {}, { ...H, excluded: [{ expertId: 't7', reason: 'overlap' }] }),
+    'perspective cites unselected role': routeV2(TEAM_IDS, {}, { ...H, perspectives: p(1, { expertIds: ['t8'] }) }),
+    'covered without experts': routeV2(TEAM_IDS, {}, { ...H, perspectives: p(1, { expertIds: [] }), selections: sel(2, { perspectiveIds: [], kind: 'additional-domain' }) }),
+    'uncovered with experts': routeV2(TEAM_IDS, {}, { ...H, perspectives: p(3, { expertIds: ['t5'] }) }),
+    'selection claims unlisted perspective': routeV2(TEAM_IDS, {}, { ...H, selections: sel(5, { perspectiveIds: ['security'], kind: 'coverage' }) }),
+    'perspective owner missing it': routeV2(TEAM_IDS, {}, { ...H, selections: sel(2, { perspectiveIds: [], kind: 'additional-domain' }) }),
+    'coverage without perspectives': routeV2(TEAM_IDS, {}, { ...H, selections: sel(5, { kind: 'coverage' }) }),
+    'missing selection': routeV2(TEAM_IDS, {}, { ...H, selections: H.selections.slice(0, 6) }),
+    'selection for foreign id': routeV2(TEAM_IDS, {}, { ...H, selections: [...H.selections, { expertId: 'ghost', perspectiveIds: [], kind: 'additional-domain' }] }),
+    'need out of range': routeV2(TEAM_IDS, {}, { ...H, perspectives: p(0, { need: 1.5 }) }),
+    'malformed perspective id': routeV2(TEAM_IDS, {}, { ...H, perspectives: p(4, { id: '<x>' }), selections: sel(4, { perspectiveIds: ['<x>'] }) }),
+    'eligible below team': routeV2(TEAM_IDS, {}, { ...H, eligibleCount: 3 }),
+    'eligible above evaluated': routeV2(TEAM_IDS, {}, { ...H, eligibleCount: 10 }),
+  };
+  for (const [why, body] of Object.entries(bad)) assert.equal(core.normalizeRoute(body, ALL_TEAM, 9), null, why);
+});
+
+await test('Jev v2 화면 (소유자·실제 실행): 7명 팀을 그대로 만들고, 관점 요약·빈 관점·한도 경고는 보이며 근거는 접힌 상자에, 글자로만 그린다', async () => {
+  const env = jevEnv(jevServer([], { route: () => json(200, routeV2()) }), { owner: OWNER_IN, boot: TEAM_BOOT });
+  await env.flush();
+  startBtnOf(env).click(); await env.flush();
+  assert.equal(projectPosts(env).length, 1);
+  const pb = JSON.parse(projectPosts(env)[0].init.body);
+  assert.deepEqual(pb.expertIds, TEAM_IDS, '7-role team created as chosen');
+  assert.deepEqual(Object.keys(pb), ['title', 'objective', 'context', 'requestId', 'mode', 'expertIds', 'routing'], 'no team explanation sent back');
+  await env.advance(1500);
+  const box = jevBoxOf(env), text = box.textContent;
+  assert.ok(text.includes(EN.jevChosen(7)));
+  assert.ok(text.includes(EN.teamCoverage(3, 1, 1)), 'concise coverage');
+  assert.ok(text.includes(EN.teamWarning['uncovered-perspectives']) && text.includes(EN.teamWarning['actor-limit']), 'fixed warnings translated');
+  assert.ok(text.includes(EN.teamGaps('Regulatory')), 'gap uses the localized fixed label, not server text');
+  assert.ok(text.includes(EN.teamLimitedList('Finance')));
+  assert.ok(text.includes(EN.teamCovers('Architecture')) && text.includes(EN.teamAdditional));
+  assert.ok(text.includes(EN.teamCovers('Chip timing closure')), 'unknown perspective id falls back to its name as text');
+  const why = [...box.walk()].find(n => n.tagName === 'DETAILS' && /cb-team-why/.test(n.className));
+  assert.ok(why, 'detail lives in a disclosure');
+  const whyText = why.textContent;
+  assert.ok(whyText.includes(EN.teamRationale) && whyText.includes(EN.teamNoPeer), 'suitability vs answer confidence, no peer verification');
+  assert.ok(whyText.includes(EN.teamEligible(9, 9)));
+  assert.ok(whyText.includes(`Role 7 — ${EN.teamReason.overlap} Role 0`) && whyText.includes(`Role 8 — ${EN.teamReason.limit}`));
+  assert.ok(!text.slice(0, text.indexOf(EN.teamWhy)).includes(EN.teamRationale), 'rationale is not shown outside the disclosure');
+  assert.ok([...box.walk()].every(n => n.tagName !== 'IMG' && n.tagName !== 'SCRIPT'), 'catalogue names rendered as text');
+  assert.equal(env.ctx.__pwn, undefined);
+});
+
+await test('Jev v2 KO/EN: 고르는 중 언어를 바꿔도 팀·requestId 가 그대로이고 설명은 그 언어의 고정 문구로 다시 그린다', async () => {
+  const held = heldRoute();
+  const env = jevEnv(jevServer([], { route: () => held.promise }), { owner: OWNER_IN, boot: TEAM_BOOT });
+  await env.flush();
+  startBtnOf(env).click(); await env.flush();
+  langBtn(env, 'ko').click(); await env.flush();
+  held.release(200, routeV2()); await env.flush();
+  const rb = JSON.parse(routeReqs(env)[0].init.body), pb = JSON.parse(projectPosts(env)[0].init.body);
+  assert.equal(pb.requestId, rb.requestId); assert.deepEqual(pb.expertIds, TEAM_IDS);
+  let text = jevBoxOf(env).textContent;
+  assert.ok(text.includes(KO.teamCoverage(3, 1, 1)) && text.includes(KO.teamGaps('규제')) && text.includes(KO.teamWarning['actor-limit']));
+  assert.ok(text.includes(KO.teamNoPeer) && text.includes(KO.teamCovers('아키텍처')));
+  langBtn(env, 'en').click(); await env.flush();
+  text = jevBoxOf(env).textContent;
+  assert.ok(text.includes(EN.teamCoverage(3, 1, 1)) && !text.includes(KO.teamNoPeer));
+  assert.equal(routeReqs(env).length, 1, 'language switch never re-routes');
+  assert.deepEqual(JSON.parse(projectPosts(env)[0].init.body).expertIds, TEAM_IDS);
+});
+
+await test('Jev v2 깨진 설명 화면: 만들지 않고 이유를 보이며 팀·설명을 그리지 않는다, 취소 뒤 늦은 v2 팀도 버린다', async () => {
+  const env = jevEnv(jevServer([], { route: () => json(200, routeV2(TEAM_IDS, {}, { ...harnessOf(), warnings: ['unknown-code'] })) }), { owner: OWNER_IN, boot: TEAM_BOOT });
+  await env.flush();
+  startBtnOf(env).click(); await env.flush(); await env.advance(30000);
+  assert.equal(projectPosts(env).length, 0, 'malformed v2 team never launched');
+  assert.ok(formMsgOf(env).includes(EN.routeInvalid));
+  assert.ok(!jevBoxOf(env).textContent.includes(EN.jevChosen(7)) && !jevBoxOf(env).textContent.includes(EN.teamWhy));
+  assert.equal(cards(env), 0);
+
+  const held = heldRoute();
+  const env2 = jevEnv(jevServer([], { route: () => held.promise }), { owner: OWNER_IN, boot: TEAM_BOOT });
+  await env2.flush();
+  startBtnOf(env2).click(); await env2.flush();
+  env2.fk('stop').click(); await env2.flush();
+  held.release(200, routeV2()); await env2.flush(); await env2.advance(30000);
+  assert.equal(projectPosts(env2).length, 0, 'cancelled v2 route never creates');
+  assert.ok(formMsgOf(env2).includes(EN.routeCancelled));
+  assert.ok(!jevBoxOf(env2).textContent.includes(EN.teamWhy), 'late explanation not shown');
+});
+
 console.log(`cloudbite-console: ${pass} passed`);
