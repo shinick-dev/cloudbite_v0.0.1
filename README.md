@@ -21,6 +21,19 @@ npm run dev
 
 기본 개발 주소는 `http://localhost:8808/cloudbite`입니다. 공개 데모는 모의 실행으로 명확히 표시하며 실제 Daytona·Nosana 자원을 만들지 않습니다. 실제 실행에 필요한 서버 설정과 권한은 [실행 엔진 문서](docs/cloudbite/runtime.md)를 참고하세요. 구성 파일은 `wrangler.cloudbite.jsonc`입니다.
 
+## 실제 Daytona 실행 데모
+
+`demo/run-council.ps1`은 전문가 역할마다 **실제 Daytona 샌드박스를 생성하고**, 그 안에서 분석 코드를 실행한 뒤 결과를 집계합니다. 모의 실행이 아니라 원격 샌드박스 실행입니다.
+
+```powershell
+.\demo\run-council.ps1        # 실행 후 샌드박스 자동 정리
+.\demo\run-council.ps1 -Keep  # 샌드박스 유지
+```
+
+- 산출물: `demo/evidence.json` (샌드박스 ID·호스트·생성/실행 소요 시간·확신도)
+- 데모 진행 순서는 [demo/DEMO.md](demo/DEMO.md)를 참고합니다.
+- 확신도는 결정론적 시뮬레이션 값이며, 실제 모델 추론 확률이 아닙니다. 실제 추론은 Nosana 연동 단계에서 붙입니다.
+
 ## 개발과 검증
 
 ```powershell

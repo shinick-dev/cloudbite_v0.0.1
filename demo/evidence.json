@@ -1,0 +1,65 @@
+{
+  "generatedAt": "2026-10-18T15:51:03.7889983+09:00",
+  "mode": "live-daytona",
+  "snapshot": "daytona-small",
+  "brief": "100명의 AI 전문가 자문 서비스를 이번 분기에 출시할지 결정한다.",
+  "meanConfidence": 0.71,
+  "stanceCount": [
+    {
+      "conditional": 1
+    },
+    {
+      "support": 2
+    }
+  ],
+  "results": [
+    {
+      "role": "product",
+      "name": "제품 전략가",
+      "focus": "시장 적합성과 출시 시점",
+      "stance": "support",
+      "confidence": 0.73,
+      "host": "5c9d4787-ba56-40f8-bb88-4d04318e729f",
+      "python": "3.14.6",
+      "brief_chars": 38,
+      "risk_hits": 0,
+      "first_action": "시장 적합성과 출시 시점 관점에서 2주 파일럿 검증",
+      "sandbox": "council-product-li10hn",
+      "createdMs": 905,
+      "execMs": 1779,
+      "cleaned": true
+    },
+    {
+      "role": "security",
+      "name": "보안 책임자",
+      "focus": "자격증명과 샌드박스 격리 위험",
+      "stance": "conditional",
+      "confidence": 0.56,
+      "host": "03ff3e15-258a-4348-beee-0911235ad24f",
+      "python": "3.14.6",
+      "brief_chars": 38,
+      "risk_hits": 0,
+      "first_action": "자격증명과 샌드박스 격리 위험 관점에서 2주 파일럿 검증",
+      "sandbox": "council-security-li10hn",
+      "createdMs": 823,
+      "execMs": 1736,
+      "cleaned": true
+    },
+    {
+      "role": "pricing",
+      "name": "가격 분석가",
+      "focus": "원가 구조와 지불 의향",
+      "stance": "support",
+      "confidence": 0.84,
+      "host": "eea5f2c6-e9b3-4464-8211-aa0e5b0cee50",
+      "python": "3.14.6",
+      "brief_chars": 38,
+      "risk_hits": 0,
+      "first_action": "원가 구조와 지불 의향 관점에서 2주 파일럿 검증",
+      "sandbox": "council-pricing-li10hn",
+      "createdMs": 810,
+      "execMs": 1809,
+      "cleaned": true
+    }
+  ]
+}

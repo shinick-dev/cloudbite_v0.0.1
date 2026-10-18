@@ -18,4 +18,4 @@ The user selected a shared project worked on by expert personas in separate Dayt
 
 Integrate the three bounded worker candidates; inspect authority and cleanup flow; run focused checks and actual local browser validation. Update this file with exact candidate and accepted evidence. The source repository and original production deployment remain outside this task's mutation scope.
 
-The user requested two collaborator invitations. `dragon03050` has been invited with Write permission; the invitation is pending acceptance. The other requested collaborator needs a verified GitHub username because public email search did not resolve an account. Do not put private email addresses into this public repository.
+The user requested two collaborator invitations. `dragon03050` and `kimhk01` have both been invited with Write permission; the invitations are pending acceptance. Do not put private email addresses into this public repository.
