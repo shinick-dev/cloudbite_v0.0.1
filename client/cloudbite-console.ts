@@ -6,8 +6,8 @@
 // 화면 문구는 한국어·영어 사전(EN·KO)에서 온다 (2026-10-18 사용자 요청: 머리의 KO / EN 전환). 언어는 ?lang= 주소에만 두고,
 // 서버·모델이 돌려준 내용(브리프·보고서·파일·페르소나·서버 오류)과 브라우저 데모 결과물은 받은·만든 그대로 보이고 번역하지 않는다.
 import type {
-  CloudbiteBootstrap, CloudbiteRoutingHarness, ExpertActivity, ExpertArtifact, ExpertDefinition, ExpertOpinion, ExpertRun, ExpertStatus,
-  OpinionDirection, ProjectBrief, ProjectRun, ProjectStatus,
+  CloudbiteBootstrap, CloudbiteRoutingHarness, CrossReviewFinding, CrossReviewReport, DecisionFrame, EvidenceClaim, ExpertActivity, ExpertArtifact,
+  ExpertDefinition, ExpertOpinion, ExpertRun, ExpertStatus, OpinionDirection, ProjectBrief, ProjectCrossReview, ProjectDocument, ProjectRun, ProjectStatus,
 } from '../src/cloudbite-contract';
 import type { CloudbiteAccessRequest, CloudbiteAccessSession } from '../src/cloudbite-access-contract';
 import type { HistoryList, HistoryDetail, HistoryReport, HistoryIssue, HistoryFeedback } from '../src/cloudbite-history-contract';
@@ -16,7 +16,8 @@ import type { CatalogueMaxRoles, ProjectMaxExperts } from '../src/cloudbite-cata
 type Mode = 'demo' | 'live';
 type View = 'home' | 'guide' | 'help' | 'settings' | 'history';
 type ConsoleExpert = ExpertRun & { invalidOpinion?: boolean };
-type ConsoleProject = Omit<ProjectRun, 'experts'> & { experts: ConsoleExpert[] };
+/** invalidCrossReview: 서버가 이 콘솔이 읽을 수 없는 교차 검토를 보냈다 (그리지 않고 그렇다고 밝힌다) */
+type ConsoleProject = Omit<ProjectRun, 'experts'> & { experts: ConsoleExpert[]; invalidCrossReview?: boolean };
 interface Limits { min: number; max: number }
 interface FormInput { title: string; objective: string; context: string; expertIds: string[] }
 interface DemoStep {
@@ -82,6 +83,17 @@ const STREAM_ROWS = 400;
 const CORE_ROLES = 6;
 /** 역할 카탈로그를 펼쳤을 때 한 번에 보이는 줄 수 (Show more 로 늘린다) */
 const POOL_PAGE = 24;
+/** 결정 세부 정보(선택): 칸마다 한 줄에 한 항목, 최대 8줄·줄마다 300자. 서버 계약 DecisionFrame 과 같은 여섯 칸 */
+type DecisionField = keyof DecisionFrame;
+const DECISION_FIELDS: DecisionField[] = ['options', 'constraints', 'successCriteria', 'knownFacts', 'assumptions', 'unknowns'];
+const DECISION = { items: 8, chars: 300 };
+/** 프로젝트 근거 파일(선택): 글자 파일만, 최대 6개·파일마다 8,000자·합계 24,000자. id 는 남은 순서대로 doc-1..doc-6 */
+const DOCS = { files: 6, chars: 8000, total: 24000 };
+const DOC_EXT = /\.(?:txt|md|markdown|csv|json)$/i;
+/** 확장자가 맞아도 브라우저가 알려 준 형식이 글자가 아니면 받지 않는다 (Windows 는 .csv 를 vnd.ms-excel 로 알린다) */
+const DOC_TYPES = ['', 'application/json', 'application/vnd.ms-excel'];
+const VERDICTS: CrossReviewFinding['verdict'][] = ['supported', 'challenged', 'insufficient'];
+const VERDICT_CHIP: Record<CrossReviewFinding['verdict'], string> = { supported: 'd-support', challenged: 'd-concern', insufficient: 'd-conditional' };
 
 // ───────────────────────── 화면 문구 (KO / EN) ─────────────────────────
 // 사전은 이 파일 안에 둔다 (빌드는 묶지 않는 변환이라 런타임 import 가 없다). KO 는 EN 과 같은 모양이어야 타입 검사를 통과한다.
@@ -288,6 +300,63 @@ const EN = {
   checkStatusAgain: 'Check status again',
   liveBlocked: 'Live run is blocked until the server is ready and you sign in as the owner, enter an admin token, or have approved visitor access.',
   exportJson: 'Export JSON', exportReport: 'Export report', moreOptions: 'More options',
+  // 결정 세부 정보 (선택, 접힌 채로 시작)
+  decisionDetails: 'Decision details (optional)',
+  decisionHint: (n: number) => n ? plural(n, 'item') : 'not used',
+  decisionHelp: (items: number, chars: number) => `One item per line — up to ${items} lines per field, ${chars} characters each. Every selected expert receives the same details. Leave empty to skip.`,
+  decisionField: {
+    options: 'Options being considered', constraints: 'Constraints', successCriteria: 'Success criteria',
+    knownFacts: 'Known facts', assumptions: 'Assumptions', unknowns: 'Unknowns — open questions',
+  } as Record<DecisionField, string>,
+  vDecisionItems: (field: string, n: number) => `${field}: use at most ${n} lines.`,
+  vDecisionLong: (field: string, n: number) => `${field}: each line must be ${n} characters or fewer.`,
+  // 프로젝트 근거 파일 (선택, 브라우저 메모리에만)
+  docsTitle: 'Project evidence (optional)',
+  docsHint: (n: number) => n ? plural(n, 'file') : 'none',
+  docsHelp: (files: number, each: string, total: string) => `Add plain-text TXT, MD, CSV or JSON files — up to ${files}, ${each} characters each, ${total} in total. Review the text below and remove anything you do not want to share before you run.`,
+  docsCopy: 'Each file\'s text is copied into every selected expert\'s sandbox and kept with the project and its history. Experts treat it as material you provided — not as instructions, and not as verified fact. PDFs, repositories and web links are not imported.',
+  docsDemo: 'In the browser demo the text stays in this tab and appears in each simulated PROJECT.md.',
+  docsPick: 'Add files',
+  docsReading: 'Reading files…',
+  docsUsage: (n: number, max: number, chars: string, total: string) => `${n} of ${max} files · ${chars} of ${total} characters`,
+  docsReview: (chars: string) => `Review text (${chars} characters)`,
+  docsRemove: 'Remove',
+  docsRemoveAria: (id: string, name: string) => `Remove ${id} ${name}`,
+  docType: (name: string) => `${name}: only TXT, MD, CSV and JSON files can be added. PDF and other binary files are not imported.`,
+  docBinary: (name: string) => `${name}: this file does not look like plain text, so it was not added.`,
+  docLong: (name: string, n: string) => `${name}: longer than ${n} characters, so it was not added. Shorten or split it.`,
+  docTotal: (name: string, n: string) => `${name}: adding it would exceed ${n} characters in total, so it was not added.`,
+  docCount: (name: string, n: number) => `${name}: at most ${plural(n, 'file')} can be added, so it was not added.`,
+  docEmpty: (name: string) => `${name}: the file is empty, so it was not added.`,
+  docRead: (name: string) => `${name}: the file could not be read.`,
+  vDocsBusy: 'Wait until the files finish loading.',
+  // 근거 장부 · 교차 검토 (결과)
+  evidencePanel: 'Claims and evidence',
+  docsList: (n: number) => `Project documents (${n})`,
+  ledgerSummary: (n: number, linked: number) => `Claim ledger — ${plural(n, 'claim')}, ${linked} linked`,
+  ledgerNote: 'Linked means a cited source ID was found in this project\'s documents or in the expert\'s knowledge pack. It does not mean the claim is true, and it is not a calibrated quality score.',
+  ledgerEmpty: 'The server reported no claims for this project.',
+  claimStatus: { linked: 'Source ID found', unlinked: 'No source ID found' } as Record<EvidenceClaim['status'], string>,
+  refDoc: (id: string, name: string) => `${id} · ${name} — show source text`,
+  refDocMissing: (id: string) => `${id} — not among this project's documents`,
+  refKnowledge: (id: string, available: boolean) => `Knowledge source ${id} — ${available ? 'listed in the knowledge pack (metadata only; not checked against the claim)' : 'not found in the knowledge pack'}`,
+  demoNoLedger: 'Browser demo: no claim ledger or cross-review is produced. The documents stay with this simulated project in this tab.',
+  reviewTitle: 'Cross-review',
+  reviewExplain: 'Optional server-side second pass on Nosana: reviewers read the other experts\' submitted evidence and mark items supported, challenged or insufficient. It makes up to 3 extra model calls, creates no sandbox and leaves the original opinions unchanged. Verdicts are model judgments, not verified facts.',
+  reviewBtn: 'Run cross-review', reviewRetry: 'Run cross-review again', reviewRunning: 'Cross-review running…',
+  reviewNeed: 'Cross-review needs a finished live run with at least 2 completed experts.',
+  reviewServerRunning: 'The server reports a cross-review in progress.',
+  reviewDone: (t: string) => `Cross-review completed at ${t}. The original opinions are unchanged.`,
+  reviewFailed: (e: string) => `Cross-review failed${e ? `: ${e}` : '.'} The original opinions are unchanged. Each project gets one cross-review attempt.`,
+  reviewRequestFailed: (e: string) => `Could not run the cross-review: ${e} Nothing was changed.`,
+  reviewNetwork: 'Could not reach the server to run the cross-review. Nothing was changed.',
+  reviewInvalid: 'The server returned a cross-review this console cannot read, so it is not shown.',
+  reviewPollStopped: 'Stopped checking the cross-review status. Reopen the project from History to see the result.',
+  reviewSaved: 'Saved cross-review (read-only).',
+  reviewBy: (name: string) => `Reviewer: ${name}`,
+  reviewFinding: (target: string, n: number) => `${target} · evidence ${n}`,
+  verdict: { supported: 'Supported', challenged: 'Challenged', insufficient: 'Insufficient' } as Record<CrossReviewFinding['verdict'], string>,
+  reviewNoFindings: 'No findings in this report.',
   // Settings: 실행 방식·세션
   settingsTitle: 'Settings',
   settingsIntro: 'Execution mode and session. The project brief and expert selection are on Home.',
@@ -628,6 +697,60 @@ const KO: Messages = {
   checkStatusAgain: '상태 다시 확인',
   liveBlocked: '서버가 준비되고, 소유자로 로그인하거나 관리자 토큰을 넣거나 방문자 접근이 승인될 때까지 실제 실행은 막혀 있습니다.',
   exportJson: 'JSON 내보내기', exportReport: '보고서 내보내기', moreOptions: '추가 옵션',
+  decisionDetails: '결정 세부 정보 (선택)',
+  decisionHint: (n) => n ? `${n}개 항목` : '사용 안 함',
+  decisionHelp: (items, chars) => `한 줄에 한 항목 — 칸마다 최대 ${items}줄, 줄마다 ${chars}자까지 씁니다. 고른 전문가 모두가 같은 내용을 받습니다. 비워 두면 쓰지 않습니다.`,
+  decisionField: {
+    options: '검토 중인 선택지', constraints: '제약 조건', successCriteria: '성공 기준',
+    knownFacts: '알려진 사실', assumptions: '가정', unknowns: '모르는 점 — 열린 질문',
+  },
+  vDecisionItems: (field, n) => `${field}: 최대 ${n}줄까지 쓸 수 있습니다.`,
+  vDecisionLong: (field, n) => `${field}: 줄마다 ${n}자 이하여야 합니다.`,
+  docsTitle: '프로젝트 근거 자료 (선택)',
+  docsHint: (n) => n ? `파일 ${n}개` : '없음',
+  docsHelp: (files, each, total) => `글자로 된 TXT·MD·CSV·JSON 파일을 최대 ${files}개, 파일마다 ${each}자, 합계 ${total}자까지 추가합니다. 실행 전에 아래에서 내용을 확인하고 공유하지 않을 파일은 빼세요.`,
+  docsCopy: '파일 내용은 고른 전문가 각자의 샌드박스에 복사되고 프로젝트·사용 기록과 함께 보관됩니다. 전문가는 이를 사용자가 준 자료로 다루며, 지시나 검증된 사실로 보지 않습니다. PDF·저장소·웹 링크는 가져오지 않습니다.',
+  docsDemo: '브라우저 데모에서는 내용이 이 탭에만 남고, 시뮬레이션된 PROJECT.md 에 들어갑니다.',
+  docsPick: '파일 추가',
+  docsReading: '파일을 읽는 중…',
+  docsUsage: (n, max, chars, total) => `파일 ${max}개 중 ${n}개 · ${total}자 중 ${chars}자`,
+  docsReview: (chars) => `내용 확인 (${chars}자)`,
+  docsRemove: '빼기',
+  docsRemoveAria: (id, name) => `${id} ${name} 빼기`,
+  docType: (name) => `${name}: TXT·MD·CSV·JSON 파일만 추가할 수 있습니다. PDF 등 바이너리 파일은 가져오지 않습니다.`,
+  docBinary: (name) => `${name}: 일반 글자 파일이 아닌 것 같아 추가하지 않았습니다.`,
+  docLong: (name, n) => `${name}: ${n}자를 넘어 추가하지 않았습니다. 줄이거나 나누어 주세요.`,
+  docTotal: (name, n) => `${name}: 추가하면 합계 ${n}자를 넘어 추가하지 않았습니다.`,
+  docCount: (name, n) => `${name}: 파일은 최대 ${n}개까지 추가할 수 있어 추가하지 않았습니다.`,
+  docEmpty: (name) => `${name}: 빈 파일이라 추가하지 않았습니다.`,
+  docRead: (name) => `${name}: 파일을 읽지 못했습니다.`,
+  vDocsBusy: '파일을 다 읽을 때까지 기다려 주세요.',
+  evidencePanel: '주장과 근거',
+  docsList: (n) => `프로젝트 자료 (${n})`,
+  ledgerSummary: (n, linked) => `주장 장부 — 주장 ${n}개, 연결 ${linked}개`,
+  ledgerNote: '연결됨은 인용한 출처 ID가 이 프로젝트의 자료나 전문가의 지식 자료에서 발견됐다는 뜻입니다. 주장이 사실이라는 뜻이 아니며, 보정된 품질 점수도 아닙니다.',
+  ledgerEmpty: '서버가 이 프로젝트에서 보고한 주장이 없습니다.',
+  claimStatus: { linked: '출처 ID 발견', unlinked: '출처 ID 없음' },
+  refDoc: (id, name) => `${id} · ${name} — 원문 보기`,
+  refDocMissing: (id) => `${id} — 이 프로젝트의 자료에 없음`,
+  refKnowledge: (id, available) => `지식 출처 ${id} — ${available ? '지식 자료 목록에 있음 (메타데이터만, 주장과 대조하지 않음)' : '지식 자료에서 찾지 못함'}`,
+  demoNoLedger: '브라우저 데모: 주장 장부와 교차 검토를 만들지 않습니다. 자료는 이 탭의 시뮬레이션 프로젝트에만 남습니다.',
+  reviewTitle: '교차 검토',
+  reviewExplain: '선택 사항인 서버 측 Nosana 2차 검토입니다. 검토자가 다른 전문가가 낸 근거를 읽고 항목마다 뒷받침됨·이의 있음·근거 부족으로 표시합니다. 모델 호출을 최대 3번 더 하고, 샌드박스는 만들지 않으며, 원래 의견은 바꾸지 않습니다. 판정은 모델의 판단이며 검증된 사실이 아닙니다.',
+  reviewBtn: '교차 검토 실행', reviewRetry: '교차 검토 다시 실행', reviewRunning: '교차 검토 중…',
+  reviewNeed: '교차 검토는 완료된 전문가가 2명 이상인, 끝난 실제 실행에서만 할 수 있습니다.',
+  reviewServerRunning: '서버가 교차 검토를 진행 중이라고 알렸습니다.',
+  reviewDone: (t) => `${t}에 교차 검토를 마쳤습니다. 원래 의견은 그대로입니다.`,
+  reviewFailed: (e) => `교차 검토가 실패했습니다${e ? `: ${e}` : '.'} 원래 의견은 그대로입니다. 교차 검토는 프로젝트마다 한 번만 시도합니다.`,
+  reviewRequestFailed: (e) => `교차 검토를 실행하지 못했습니다: ${e} 아무것도 바뀌지 않았습니다.`,
+  reviewNetwork: '교차 검토를 위해 서버에 연결하지 못했습니다. 아무것도 바뀌지 않았습니다.',
+  reviewInvalid: '서버가 이 콘솔에서 읽을 수 없는 교차 검토를 보내 보여 주지 않습니다.',
+  reviewPollStopped: '교차 검토 상태 확인을 멈췄습니다. 사용 기록에서 프로젝트를 다시 열어 결과를 보세요.',
+  reviewSaved: '저장된 교차 검토 (읽기 전용)',
+  reviewBy: (name) => `검토자: ${name}`,
+  reviewFinding: (target, n) => `${target} · 근거 ${n}`,
+  verdict: { supported: '뒷받침됨', challenged: '이의 있음', insufficient: '근거 부족' },
+  reviewNoFindings: '이 보고서에는 판정 항목이 없습니다.',
   settingsTitle: '설정',
   settingsIntro: '실행 방식과 세션입니다. 프로젝트 브리프와 전문가 선택은 홈에 있습니다.',
   modeHeading: '실행 방식',
@@ -1183,12 +1306,17 @@ function normalizeProject(raw: unknown): ConsoleProject | null {
   const b = raw.brief;
   const experts = raw.experts.slice(0, PROJECT_MAX).map(normalizeExpertRun).filter((e): e is ConsoleExpert => e !== null);
   const status = PROJECT_STATUSES.includes(raw.status as ProjectStatus) ? raw.status as ProjectStatus : statusFromExperts(experts);
+  const decision = normalizeDecision(b.decision), documents = normalizeDocuments(b.documents), evidenceClaims = normalizeClaims(raw.evidenceClaims);
+  const review = raw.crossReview === undefined || raw.crossReview === null ? undefined : normalizeCrossReview(raw.crossReview);
   return {
     id, status, experts, createdAt: num(raw.createdAt) ?? 0, updatedAt: num(raw.updatedAt) ?? 0,
     brief: {
       title: str(b.title, LIMIT.title), objective: str(b.objective, LIMIT.objective), context: str(b.context, LIMIT.context),
       expertIds: strList(b.expertIds, 80, PROJECT_MAX), mode: b.mode === 'live' ? 'live' : 'demo', requestId: str(b.requestId, 120),
+      ...(decision ? { decision } : {}), ...(documents ? { documents } : {}),
     },
+    ...(evidenceClaims ? { evidenceClaims } : {}),
+    ...(review ? { crossReview: review } : review === null ? { invalidCrossReview: true } : {}),
   };
 }
 
@@ -1202,8 +1330,122 @@ function statusFromExperts(experts: ConsoleExpert[]): ProjectStatus {
   return experts.some(e => e.status === 'cancelled') ? 'cancelled' : 'failed';
 }
 
+// ───────────────── 결정 세부 정보 · 근거 자료 · 주장 장부 · 교차 검토 (전부 선택) ─────────────────
+
+/** 천 단위 쉼표. 두 언어 모두 같은 모양을 쓴다 */
+function group(n: number): string { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+
+/** 여섯 칸의 글을 한 줄 한 항목으로 나눈다. 빈 줄은 버리고, 모든 칸이 비면 frame 이 없다 (선택 필드를 보내지 않는다) */
+function parseDecision(texts: Partial<Record<DecisionField, string>>): { frame?: DecisionFrame; issues: FormIssue[] } {
+  const issues: FormIssue[] = [];
+  const frame = {} as DecisionFrame;
+  let any = false;
+  for (const f of DECISION_FIELDS) {
+    const items = (texts[f] ?? '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    if (items.length > DECISION.items) issues.push({ field: 'decision', text: m => m.vDecisionItems(m.decisionField[f], DECISION.items) });
+    if (items.some(s => s.length > DECISION.chars)) issues.push({ field: 'decision', text: m => m.vDecisionLong(m.decisionField[f], DECISION.chars) });
+    frame[f] = items;
+    if (items.length) any = true;
+  }
+  return any ? { frame, issues } : { issues };
+}
+
+/** 브라우저 메모리에만 있는 근거 파일. key 는 화면 안에서만 쓰고, 보내는 id 는 남은 순서대로 doc-1.. 이다 */
+interface DocDraft { key: number; name: string; content: string }
+const docName = (name: string) => clip(name.trim() || 'file', 120);
+/** 읽기 전에 거른다: 이름의 확장자, 브라우저가 알려 준 형식, 대략적인 크기 (UTF-8 한 글자는 최대 4바이트) */
+function docProblem(f: { name: string; type: string; size: number }): Text | null {
+  const name = docName(f.name);
+  if (!DOC_EXT.test(f.name) || !(f.type.startsWith('text/') || DOC_TYPES.includes(f.type))) return m => m.docType(name);
+  if (f.size === 0) return m => m.docEmpty(name);
+  if (f.size > DOCS.chars * 4) return m => m.docLong(name, group(DOCS.chars));
+  return null;
+}
+/** 읽은 글을 받아들일지 정한다. 제어 문자·깨진 UTF-8 이 있으면 바이너리로 보고, 한도는 이미 받은 파일과 합쳐서 잰다 */
+function docAccept(rawName: string, raw: string, docs: Array<{ content: string }>): { doc: { name: string; content: string } } | { error: Text } {
+  const name = docName(rawName);
+  const content = raw.replace(/^﻿/, '').replace(/\r\n?/g, '\n');
+  if (/[\u0000-\u0008\u000E-\u001F\u007F�]/.test(content)) return { error: m => m.docBinary(name) };
+  if (!content.trim()) return { error: m => m.docEmpty(name) };
+  if (content.length > DOCS.chars) return { error: m => m.docLong(name, group(DOCS.chars)) };
+  if (docs.length >= DOCS.files) return { error: m => m.docCount(name, DOCS.files) };
+  if (docs.reduce((n, d) => n + d.content.length, 0) + content.length > DOCS.total) return { error: m => m.docTotal(name, group(DOCS.total)) };
+  return { doc: { name, content } };
+}
+/** 보낼 문서 목록. 빼고 남은 순서대로 doc-1..doc-6 을 다시 매긴다 (출처 정보는 선택이라 보내지 않는다) */
+function docsPayload(docs: Array<{ name: string; content: string }>): ProjectDocument[] {
+  return docs.map((d, i) => ({ id: `doc-${i + 1}`, name: d.name, content: d.content }));
+}
+
+function normalizeDecision(raw: unknown): DecisionFrame | undefined {
+  if (!isObj(raw)) return undefined;
+  const frame = {} as DecisionFrame;
+  let any = false;
+  for (const f of DECISION_FIELDS) { frame[f] = strList(raw[f], DECISION.chars, DECISION.items); if (frame[f].length) any = true; }
+  return any ? frame : undefined;
+}
+function normalizeDocuments(raw: unknown): ProjectDocument[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const docs: ProjectDocument[] = [];
+  for (const d of raw.slice(0, DOCS.files)) {
+    if (!isObj(d) || typeof d.content !== 'string') continue;
+    const id = str(d.id, 40), origin = str(d.origin, 200);
+    if (!id) continue;
+    docs.push({ id, name: str(d.name, 120, id), content: clip(d.content, DOCS.chars), ...(origin ? { origin } : {}) });
+  }
+  return docs.length ? docs : undefined;
+}
+/** 서버의 주장 장부. 빈 배열은 "주장 없음"으로 남기고, 없는 필드와 구별한다 */
+function normalizeClaims(raw: unknown): EvidenceClaim[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const claims: EvidenceClaim[] = [];
+  for (const [i, c] of raw.slice(0, 200).entries()) {
+    if (!isObj(c)) continue;
+    const text = str(c.text, 600).trim(), expertId = str(c.expertId, 80);
+    if (!text || !expertId) continue;
+    const references: EvidenceClaim['references'] = [];
+    if (Array.isArray(c.references)) {
+      for (const r of c.references.slice(0, 20)) {
+        const id = isObj(r) ? str(r.id, 120) : '';
+        if (isObj(r) && id && (r.kind === 'document' || r.kind === 'knowledge')) references.push({ kind: r.kind, id, available: r.available === true });
+      }
+    }
+    claims.push({ id: str(c.id, 120, `claim-${i + 1}`), expertId, text, references, status: c.status === 'linked' ? 'linked' : 'unlinked' });
+  }
+  return claims;
+}
+const REVIEW_STATUSES: ProjectCrossReview['status'][] = ['running', 'completed', 'failed'];
+/** 교차 검토. 실행 위치·상태·판정 중 하나라도 모르는 값이면 전체를 null 로 돌려 그리지 않는다 (짐작해 그리지 않는다) */
+function normalizeCrossReview(raw: unknown): ProjectCrossReview | null {
+  if (!isObj(raw) || raw.execution !== 'server-nosana' || !REVIEW_STATUSES.includes(raw.status as ProjectCrossReview['status'])) return null;
+  if (raw.reports !== undefined && !Array.isArray(raw.reports)) return null;
+  const reports: CrossReviewReport[] = [];
+  for (const r of ((raw.reports as unknown[] | undefined) ?? []).slice(0, 8)) {
+    if (!isObj(r) || !Array.isArray(r.findings)) return null;
+    const reviewerExpertId = str(r.reviewerExpertId, 80);
+    if (!reviewerExpertId) return null;
+    const findings: CrossReviewFinding[] = [];
+    for (const f of r.findings.slice(0, 40)) {
+      if (!isObj(f) || !VERDICTS.includes(f.verdict as CrossReviewFinding['verdict'])) return null;
+      const targetExpertId = str(f.targetExpertId, 80), evidenceIndex = num(f.evidenceIndex);
+      if (!targetExpertId || evidenceIndex === null || evidenceIndex < 0 || !Number.isInteger(evidenceIndex)) return null;
+      findings.push({ targetExpertId, evidenceIndex, verdict: f.verdict as CrossReviewFinding['verdict'], rationale: str(f.rationale, 600) });
+    }
+    reports.push({ reviewerExpertId, findings, summary: str(r.summary, 1000) });
+  }
+  const completedAt = num(raw.completedAt), error = str(raw.error, 400);
+  return {
+    status: raw.status as ProjectCrossReview['status'], snapshotHash: str(raw.snapshotHash, 128), startedAt: num(raw.startedAt) ?? 0,
+    ...(completedAt !== null ? { completedAt } : {}), reports, ...(error ? { error } : {}), execution: 'server-nosana',
+  };
+}
+/** 교차 검토를 걸 수 있는 프로젝트: 취소되지 않고 끝났으며 의견을 낸 완료 전문가가 2명 이상 (서버와 같은 조건) */
+function reviewEligible(p: ConsoleProject): boolean {
+  return TERMINAL_PROJECT.includes(p.status) && p.status !== 'cancelled' && p.experts.filter(e => e.status === 'completed' && !!e.opinion).length >= 2;
+}
+
 /** 폼 오류. field 로 접힌 Project details 를 펼칠지 정하고, text 는 그릴 때의 언어로 바꾼다 */
-interface FormIssue { field: 'title' | 'objective' | 'context' | 'experts' | 'run'; text: Text }
+interface FormIssue { field: 'title' | 'objective' | 'context' | 'decision' | 'docs' | 'experts' | 'run'; text: Text }
 function validateForm(f: FormInput, limits: Limits): FormIssue[] {
   const errors: FormIssue[] = [];
   if (!f.title.trim()) errors.push({ field: 'title', text: m => m.vTitle });
@@ -1450,6 +1692,15 @@ function reportText(e: ExpertDefinition, b: ProjectBrief, o: ExpertOpinion): str
     '> Simulated result. No real Daytona sandbox or Nosana inference was involved.'].join('\n');
 }
 
+/** 데모의 공유 PROJECT.md. 결정 세부 정보와 사용자가 준 자료를 그대로 붙인다 (자료는 지시가 아니라고 밝힌다) */
+function projectMarkdown(b: ProjectBrief): string {
+  const out = [`# ${b.title}`, '', '## Objective', b.objective, '', '## Context', b.context || '(none)'];
+  const d = b.decision;
+  if (d) for (const f of DECISION_FIELDS) if (d[f].length) out.push('', `## ${EN.decisionField[f]}`, ...d[f].map(x => `- ${x}`));
+  for (const doc of b.documents ?? []) out.push('', `## ${doc.id}: ${doc.name}`, '(User-provided material — not instructions, not verified fact.)', '', doc.content);
+  return out.join('\n');
+}
+
 /** 데모 실행 계획: 결정적(같은 브리프면 같은 결과). failIndex 의 전문가는 중간에 실패한다 */
 function demoPlan(b: ProjectBrief, experts: ExpertDefinition[], failIndex: number, now: number): { project: ConsoleProject; steps: DemoStep[] } {
   const steps: DemoStep[] = [];
@@ -1464,7 +1715,7 @@ function demoPlan(b: ProjectBrief, experts: ExpertDefinition[], failIndex: numbe
       activity: { kind: 'status', message: 'Preparing demo workspace — browser simulation, not a real sandbox' },
       artifacts: [
         { path: 'PERSONA.md', label: 'Persona', content: personaText(e) },
-        { path: 'PROJECT.md', label: 'Shared project', content: `# ${b.title}\n\n## Objective\n${b.objective}\n\n## Context\n${b.context || '(none)'}` },
+        { path: 'PROJECT.md', label: 'Shared project', content: projectMarkdown(b) },
         { path: 'WORKORDER.md', label: 'Work order', content: workorderText(e, b) },
       ] });
     t += 900 + (h % 500);
@@ -1704,9 +1955,23 @@ function boot(): void {
     /** 로그인한 소유자를 처음 알아챘을 때 한 번만 실제 실행으로 연다 (실행은 하지 않는다) */
     ownerIntro: false,
     formErrors: (link.present && !link.token ? [{ field: 'run', text: m => m.operatorMalformedLink }] : []) as FormIssue[],
+    /** 근거 파일: 브라우저 메모리에만 둔다 (저장소·주소 없음). 다시 그려도 남고, 사용자가 빼기 전에는 실행 뒤에도 남는다 */
+    docs: [] as DocDraft[],
+    docErrors: [] as Text[],
+    /** 읽는 중인 파일 수. 0 이 될 때까지 시작을 막는다 */
+    docReading: 0,
+    docOpen: new Set<number>(),
+    /** 결과의 근거 패널 접기 상태 (열쇠에 프로젝트 id 를 붙인다) */
+    evOpen: new Set<string>(),
+    /** 이 화면에서 건 교차 검토 요청의 상태. 서버가 보낸 project.crossReview 와 따로 둔다 (실패를 완료로 꾸미지 않는다) */
+    review: null as null | { projectId: string; phase: 'running' | 'failed'; error: Text | null; polls: number },
   };
   let timers: number[] = [];
   let pollTimer = 0;
+  let reviewTimer = 0;
+  let docKey = 0, docRev = 0, docSig = '';
+  /** 파일은 하나씩 차례로 읽는다: 늦게 끝난 읽기가 한도 계산을 앞지르지 않는다 */
+  let docQueue: Promise<void> = Promise.resolve();
   let accessTimer = 0, accessTries = 0;
   let lastAnnounce = '';
   const H = {
@@ -1759,7 +2024,10 @@ function boot(): void {
   /** 탐색 줄의 카탈로그 규모: 계획 카탈로그가 있으면 그 항목 수, 없으면 실행 가능한 역할 수 (불러오기 전에는 0) */
   const catalogueCount = () => S.boot.data?.pool?.entries.length ?? S.boot.data?.experts.length ?? 0;
   /** Jev 선택이 어떤 브리프·인원 한도의 것인지 (바뀌면 화면에 오래됐다고 알린다) */
-  const routeKey = (q: { title: string; objective: string; context: string }) => [q.title, q.objective, q.context, limits().max].join('\n');
+  const routeKey = (q: { title: string; objective: string; context: string; decision?: DecisionFrame; documents?: ProjectDocument[] }) =>
+    [q.title, q.objective, q.context, limits().max, JSON.stringify(q.decision ?? null), JSON.stringify(q.documents ?? null)].join('\n');
+  /** 선택 필드: 있을 때만 보낸다. 경로 묻기와 프로젝트 만들기가 같은 값을 보내 서버가 같은 확장 브리프로 해시한다 */
+  const briefExtras = (b: { decision?: DecisionFrame; documents?: ProjectDocument[] }) => ({ ...(b.decision ? { decision: b.decision } : {}), ...(b.documents ? { documents: b.documents } : {}) });
   const active = () => !!S.run && (S.run.phase === 'routing' || S.run.phase === 'starting' || S.run.phase === 'running' || S.run.phase === 'cancelling'
     || (S.run.phase === 'error' && !!S.run.project && !TERMINAL_PROJECT.includes(S.run.project.status)));
   /** 실패한 실행의 정리를 아직 확인하지 못한 방문자: Check again 으로 서버 상태를 다시 읽을 수 있다 */
@@ -1875,12 +2143,44 @@ function boot(): void {
     h('div', { class: 'cb-disclosure-body cb-fields' },
       h('div', { class: 'cb-field' }, tx('label', { for: 'cb-title', class: 'cb-label' }, m => m.projectName), titleIn, counter(titleIn, LIMIT.title)),
       h('div', { class: 'cb-field' }, tx('label', { for: 'cb-context', class: 'cb-label' }, m => m.contextLabel), contextIn, counter(contextIn, LIMIT.context))));
+  // 결정 세부 정보 (선택): 목표 아래 접힌 상자. 여섯 칸, 한 줄에 한 항목
+  const decisionIns = {} as Record<DecisionField, HTMLTextAreaElement>;
+  for (const f of DECISION_FIELDS) {
+    const ta = h('textarea', { id: `cb-dec-${f}`, rows: 3, maxlength: DECISION.items * (DECISION.chars + 1), 'aria-describedby': 'cb-dec-help', 'data-fk': `dec:${f}` });
+    ta.addEventListener('input', () => { renderDecisionHint(); if (S.route?.result) renderJev(); });
+    decisionIns[f] = ta;
+  }
+  const decisionTexts = () => Object.fromEntries(DECISION_FIELDS.map(f => [f, decisionIns[f].value])) as Record<DecisionField, string>;
+  const currentExtras = () => briefExtras({ decision: parseDecision(decisionTexts()).frame, documents: S.docs.length ? docsPayload(S.docs) : undefined });
+  const decisionHint = h('span', { class: 'cb-summary-hint' });
+  const decisionDetails = h('details', { class: 'cb-disclosure cb-decision' },
+    h('summary', null, icon('chevron'), tx('span', null, m => m.decisionDetails), decisionHint),
+    h('div', { class: 'cb-disclosure-body' },
+      bind(h('p', { id: 'cb-dec-help', class: 'cb-help' }), (n, m) => { n.textContent = m.decisionHelp(DECISION.items, DECISION.chars); }),
+      h('div', { class: 'cb-fields cb-decision-fields' }, ...DECISION_FIELDS.map(f =>
+        h('div', { class: 'cb-field' }, tx('label', { for: `cb-dec-${f}`, class: 'cb-label' }, m => m.decisionField[f]), decisionIns[f])))));
+  // 프로젝트 근거 자료 (선택): 글자 파일만 브라우저 메모리로 읽고, 보내기 전에 내용을 보이고 뺄 수 있게 한다
+  const docsInput = h('input', { id: 'cb-docs-file', type: 'file', multiple: true, hidden: true, tabindex: '-1',
+    accept: '.txt,.md,.markdown,.csv,.json,text/plain,text/markdown,text/csv,application/json' });
+  docsInput.addEventListener('change', () => { const files = Array.from(docsInput.files ?? []); docsInput.value = ''; addFiles(files); });
+  const docsPick = h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'docs-pick', 'aria-describedby': 'cb-docs-help',
+    onclick: () => { if (!active()) docsInput.click(); } }, tx('span', null, m => m.docsPick));
+  const docsHint = h('span', { class: 'cb-summary-hint' });
+  const docsCopyNote = h('p', { class: 'cb-help' });
+  const docsUsage = h('p', { class: 'cb-help cb-docs-usage', 'aria-live': 'polite' });
+  const docsErr = h('div', { class: 'cb-formmsg cb-docs-err', role: 'alert' });
+  const docsList = h('ol', { class: 'cb-doc-list' });
+  const docsDetails = h('details', { class: 'cb-disclosure cb-docs' },
+    h('summary', null, icon('chevron'), tx('span', null, m => m.docsTitle), docsHint),
+    h('div', { class: 'cb-disclosure-body' },
+      bind(h('p', { id: 'cb-docs-help', class: 'cb-help' }), (n, m) => { n.textContent = m.docsHelp(DOCS.files, group(DOCS.chars), group(DOCS.total)); }),
+      docsCopyNote, h('div', { class: 'cb-docs-row' }, docsPick, docsUsage), docsInput, docsErr, docsList));
   const modeLine = h('span');
   const startNote = h('div', { class: 'cb-startnote' });
   const historyNotice = tx('p', { class: 'cb-help cb-history-notice' }, () => HT().notice);
   const form = attr(h('form', { class: 'cb-form', novalidate: true },
     h('div', { class: 'cb-field cb-objective' }, tx('label', { for: 'cb-objective', class: 'cb-label' }, m => m.objectiveLabel), objectiveIn, counter(objectiveIn, LIMIT.objective)),
-    staExampleBtn, projDetails,
+    staExampleBtn, projDetails, decisionDetails, docsDetails,
     h('div', { class: 'cb-team' }, jevBox, manualBox, poolDetails, catalogueNote),
     h('div', { class: 'cb-form-foot' }, formMsg, startNote,
       historyNotice,
@@ -1979,7 +2279,11 @@ function boot(): void {
         tx('p', { class: 'cb-help' }, m => m.legacyNote),
         tx('a', { href: '/lab' }, m => m.legacyLink))));
 
-  const homeView = h('div', { class: 'cb-view cb-home', id: 'cb-view-home' }, h('div', { class: 'cb-center' }, projectCard, wsPanel), aside);
+  // ── 주장과 근거 (프로젝트가 생긴 뒤, 보일 것이 있을 때만): 자료 원문 · 주장 장부 · 교차 검토. 전부 접힌 채로 시작한다
+  const evidenceBody = h('div', { class: 'cb-evidence-body' });
+  const evidencePanel = h('section', { class: 'cb-panel cb-evidence', 'aria-labelledby': 'cb-ev-h' },
+    h('div', { class: 'cb-panel-head' }, tx('h2', { id: 'cb-ev-h' }, m => m.evidencePanel)), evidenceBody);
+  const homeView = h('div', { class: 'cb-view cb-home', id: 'cb-view-home' }, h('div', { class: 'cb-center' }, projectCard, wsPanel, evidencePanel), aside);
   const historyBody = h('div', { class: 'cb-history-body' });
   const historyView = h('section', { class: 'cb-view cb-history', id: 'cb-view-history', 'aria-labelledby': 'cb-history-h' },
     h('div', { class: 'cb-page-head' }, tx('h2', { id: 'cb-history-h' }, () => HT().title), tx('p', null, () => HT().intro)), historyBody);
@@ -2019,7 +2323,7 @@ function boot(): void {
     keepFocus(() => {
       // 오른쪽 패널은 프로젝트가 생긴 뒤에만: 그 전에는 편집 영역 한 열
       homeView.className = `cb-view cb-home${S.run?.project ? ' has-rail' : ''}`;
-      renderNav(); renderControls(); renderCatalogue(); renderWork(); renderProgress(); renderSynth(); renderHistory();
+      renderNav(); renderControls(); renderCatalogue(); renderWork(); renderEvidence(); renderProgress(); renderSynth(); renderHistory();
     });
   }
 
@@ -2088,12 +2392,13 @@ function boot(): void {
     const busy = active();
     staExampleBtn.hidden = !catalogue().some(e => e.id === 'probably-primetime-sta');
     staExampleBtn.disabled = busy;
-    for (const n of [titleIn, objectiveIn, contextIn, failIn, tokenIn, filterIn]) n.disabled = busy;
+    for (const n of [titleIn, objectiveIn, contextIn, failIn, tokenIn, filterIn, ...DECISION_FIELDS.map(f => decisionIns[f])]) n.disabled = busy;
+    renderDecisionHint(); renderDocs(busy);
     const liveReady = S.boot.status === 'ready' && !!cfg?.liveReady && liveCredential();
     const auto = autoRoute(), rt = routing();
     const none = !auto && S.selected.size === 0;
     // 시작 버튼은 편집 영역 끝의 하나뿐이다. 전문가를 고르지 않았거나 Jev 를 쓸 수 없으면 이유를 보이고 잠근다
-    startBtn.disabled = busy || (!demo && !liveReady) || none || (auto && (!rt!.ready || !routeCredential()));
+    startBtn.disabled = busy || S.docReading > 0 || (!demo && !liveReady) || none || (auto && (!rt!.ready || !routeCredential()));
     startLabel.textContent = S.run?.phase === 'routing' ? m.routingLabel : S.run?.phase === 'starting' ? m.starting : busy ? m.running
       : S.run ? (demo ? m.runAgainDemo : m.runAgain) : (demo ? m.runExpertsDemo : m.runExperts);
     if (auto && !busy) modeLine.textContent += m.nextJev(limits().max);
@@ -2224,7 +2529,7 @@ function boot(): void {
           return h('li', null, h('span', { class: 'cb-opt-name' }, findDef(id)?.name ?? id), desc ? h('span', { class: 'cb-opt-desc' }, desc) : null);
         })));
       if (t) kids.push(...teamExplanation(t, r, fit));
-      if (!busy && S.route!.key !== routeKey({ title: titleIn.value.trim(), objective: objectiveIn.value.trim(), context: contextIn.value.trim() })) kids.push(h('p', { class: 'cb-help' }, m.jevStale));
+      if (!busy && S.route!.key !== routeKey({ title: titleIn.value.trim(), objective: objectiveIn.value.trim(), context: contextIn.value.trim(), ...currentExtras() })) kids.push(h('p', { class: 'cb-help' }, m.jevStale));
     }
     fill(jevBody, ...kids);
   }
@@ -2662,6 +2967,217 @@ function boot(): void {
       h('thead', null, h('tr', null, ...heads.map(x => h('th', { scope: 'col' }, x)))),
       h('tbody', null, ...rows.map(row => h('tr', null, ...row.map(x => h('td', null, x)))))));
   }
+  // ── 결정 세부 정보 · 근거 자료 (편집 영역)
+  function renderDecisionHint(): void {
+    decisionHint.textContent = M.decisionHint(DECISION_FIELDS.reduce((n, f) => n + decisionIns[f].value.split('\n').filter(x => x.trim()).length, 0));
+  }
+  /** 근거 파일 목록. 바뀐 것이 있을 때만 다시 그려 펼친 원문·스크롤이 진행 조회마다 흔들리지 않는다 */
+  function renderDocs(busy: boolean): void {
+    const sig = `${lang}|${S.mode}|${busy}|${S.docReading}|${docRev}`;
+    if (sig === docSig) return;
+    docSig = sig;
+    const m = M;
+    const chars = S.docs.reduce((n, d) => n + d.content.length, 0);
+    docsHint.textContent = m.docsHint(S.docs.length);
+    docsCopyNote.textContent = S.mode === 'demo' ? `${m.docsCopy} ${m.docsDemo}` : m.docsCopy;
+    docsUsage.textContent = S.docReading ? m.docsReading : m.docsUsage(S.docs.length, DOCS.files, group(chars), group(DOCS.total));
+    docsPick.disabled = busy || S.docs.length >= DOCS.files;
+    fill(docsErr, ...S.docErrors.map(e => h('p', null, e(m))));
+    fill(docsList, ...S.docs.map((d, i) => {
+      const id = `doc-${i + 1}`;
+      const text = h('details', { class: 'cb-disclosure cb-quiet', open: S.docOpen.has(d.key) },
+        h('summary', null, icon('chevron'), m.docsReview(group(d.content.length))), h('pre', { class: 'cb-doc-text' }, d.content));
+      text.addEventListener('toggle', () => { if (text.open) S.docOpen.add(d.key); else S.docOpen.delete(d.key); });
+      return h('li', { class: 'cb-doc' },
+        h('div', { class: 'cb-doc-head' }, h('span', { class: 'cb-tag' }, id), h('strong', { class: 'cb-doc-name' }, d.name),
+          h('button', { type: 'button', class: 'cb-ghost', 'data-fk': `doc-rm:${d.key}`, disabled: busy, 'aria-label': m.docsRemoveAria(id, d.name), onclick: () => removeDoc(d.key) }, m.docsRemove)),
+        text);
+    }));
+  }
+  /** 고른 파일을 거르고 차례로 읽는다. 읽는 동안 언어를 바꾸거나 다른 파일을 빼도 된다: 한도는 읽기가 끝난 순간의 목록으로 잰다 */
+  function addFiles(files: File[]): void {
+    if (active() || !files.length) return;
+    S.docErrors = []; docRev++;
+    for (const file of files) {
+      const problem = docProblem({ name: file.name, type: file.type || '', size: file.size });
+      if (problem) { S.docErrors.push(problem); continue; }
+      S.docReading++;
+      docQueue = docQueue.then(async () => {
+        let text: string | null = null;
+        try { text = await file.text(); } catch { /* 아래에서 읽기 오류 */ }
+        S.docReading--;
+        if (text === null) S.docErrors.push(m => m.docRead(docName(file.name)));
+        else {
+          const r = docAccept(file.name, text, S.docs);
+          if ('error' in r) S.docErrors.push(r.error); else S.docs.push({ key: ++docKey, ...r.doc });
+        }
+        docRev++;
+        keepFocus(renderControls);
+      });
+    }
+    keepFocus(renderControls);
+  }
+  /** 파일을 뺀다. 남은 파일은 보낼 때 doc-1.. 로 다시 매겨진다. 포커스는 다음 빼기 버튼, 없으면 파일 추가로 */
+  function removeDoc(key: number): void {
+    if (active()) return;
+    const i = S.docs.findIndex(d => d.key === key);
+    if (i < 0) return;
+    S.docs.splice(i, 1); S.docOpen.delete(key); S.docErrors = []; docRev++;
+    renderControls();
+    const next = S.docs[i] ?? S.docs[i - 1];
+    const target = next ? root!.querySelector(`[data-fk="doc-rm:${next.key}"]`) as HTMLElement | null : null;
+    (target ?? docsPick).focus();
+  }
+
+  // ── 주장과 근거 (결과): 지금 실행과 사용 기록 상세가 같은 그리기를 쓴다. 사용 기록은 읽기 전용(실행 버튼 없음)
+  function evDisclosure(opened: Set<string>, key: string, cls: string, summary: Kid[], ...content: Kid[]): HTMLDetailsElement {
+    const box = h('details', { class: `cb-disclosure ${cls}`, open: opened.has(key) }, h('summary', null, icon('chevron'), ...summary), ...content);
+    box.addEventListener('toggle', () => { if (box.open) opened.add(key); else opened.delete(key); });
+    return box;
+  }
+  const expertName = (p: ConsoleProject, id: string) => p.experts.find(e => e.expertId === id)?.name ?? findDef(id)?.name ?? id;
+
+  function evidenceKids(p: ConsoleProject, opened: Set<string>, prefix: string, interactive: boolean): Kid[] {
+    const m = M, kids: Kid[] = [];
+    const docs = p.brief.documents ?? [];
+    const d = p.brief.decision;
+    if (d) kids.push(evDisclosure(opened, `${prefix}decision`, 'cb-quiet', [h('span', null, m.decisionDetails)],
+      h('dl', { class: 'cb-decision-view' }, ...DECISION_FIELDS.filter(f => d[f].length).flatMap(f =>
+        [h('dt', null, m.decisionField[f]), h('dd', null, h('ul', null, ...d[f].map(x => h('li', null, x))))]))));
+    if (docs.length) kids.push(evDisclosure(opened, `${prefix}docs`, 'cb-quiet', [h('span', null, m.docsList(docs.length))],
+      h('ul', { class: 'cb-doc-list' }, ...docs.map(doc => h('li', { class: 'cb-doc' },
+        evDisclosure(opened, `${prefix}doc:${doc.id}`, 'cb-quiet', [h('span', { class: 'cb-tag' }, doc.id), ' ', h('span', null, doc.name)],
+          h('pre', { class: 'cb-doc-text' }, doc.content)))))));
+    if (p.brief.mode === 'demo') { if (kids.length) kids.push(h('p', { class: 'cb-help' }, m.demoNoLedger)); return kids; }
+    const claims = p.evidenceClaims;
+    if (claims) {
+      const linked = claims.filter(c => c.status === 'linked').length;
+      kids.push(evDisclosure(opened, `${prefix}ledger`, 'cb-quiet cb-ledger', [h('span', null, m.ledgerSummary(claims.length, linked))],
+        h('p', { class: 'cb-help' }, m.ledgerNote),
+        claims.length ? h('ol', { class: 'cb-claims' }, ...claims.map(c => h('li', { class: 'cb-claim' },
+          h('div', { class: 'cb-claim-head' }, h('strong', null, expertName(p, c.expertId)),
+            h('span', { class: `cb-tag ${c.status === 'linked' ? 'is-avail' : 'is-unval'}` }, m.claimStatus[c.status])),
+          h('p', { class: 'cb-claim-text' }, c.text),
+          c.references.length ? h('ul', { class: 'cb-refs' }, ...c.references.map(r => {
+            if (r.kind === 'knowledge') return h('li', null, m.refKnowledge(r.id, r.available));
+            const doc = docs.find(x => x.id === r.id);
+            return h('li', null, doc
+              ? evDisclosure(opened, `${prefix}ref:${c.id}:${r.id}`, 'cb-quiet', [h('span', null, m.refDoc(doc.id, doc.name))], h('pre', { class: 'cb-doc-text' }, doc.content))
+              : m.refDocMissing(r.id));
+          })) : null)))
+          : h('p', { class: 'cb-help' }, m.ledgerEmpty)));
+    }
+    const review = reviewKids(p, interactive);
+    if (review.length) kids.push(h('section', { class: 'cb-review', 'aria-labelledby': `${prefix}review-h` },
+      h('h3', { id: `${prefix}review-h` }, m.reviewTitle), ...review));
+    return kids;
+  }
+
+  function reviewKids(p: ConsoleProject, interactive: boolean): Kid[] {
+    const m = M, cr = p.crossReview;
+    const local = interactive && S.review?.projectId === p.id ? S.review : null;
+    const run = interactive ? S.run : null;
+    const canAsk = !!run && run.mode === 'live' && !!run.accessToken && run.project?.id === p.id && !active() && reviewEligible(p);
+    if (!cr && !p.invalidCrossReview && !local && !(interactive && run?.mode === 'live' && TERMINAL_PROJECT.includes(p.status))) return [];
+    const kids: Kid[] = [h('p', { class: 'cb-help' }, m.reviewExplain)];
+    if (!interactive && (cr || p.invalidCrossReview)) kids.push(h('p', { class: 'cb-help' }, m.reviewSaved));
+    if (p.invalidCrossReview) kids.push(h('p', { class: 'cb-warn' }, m.reviewInvalid));
+    const running = local?.phase === 'running' || cr?.status === 'running';
+    if (running) kids.push(h('p', { class: 'cb-help', role: 'status' }, local?.phase === 'running' ? m.reviewRunning : m.reviewServerRunning));
+    else if (local?.phase === 'failed' && local.error) kids.push(h('p', { class: 'cb-warn', role: 'alert' }, local.error(m)));
+    if (cr?.status === 'failed') kids.push(h('p', { class: 'cb-warn' }, m.reviewFailed(cr.error ?? '')));
+    if (cr?.status === 'completed') kids.push(h('p', { class: 'cb-ok' }, m.reviewDone(hhmm(cr.completedAt ?? cr.startedAt))));
+    // 버튼은 실제로 걸 수 있을 때만 (서버는 프로젝트마다 한 번만 시도한다): 이미 결과가 있거나 진행 중이면 없다
+    if (interactive && !cr && !p.invalidCrossReview && !running) {
+      if (canAsk) kids.push(h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'review-run', onclick: () => { void runCrossReview(); } },
+        local?.phase === 'failed' ? m.reviewRetry : m.reviewBtn));
+      else if (run?.mode === 'live' && TERMINAL_PROJECT.includes(p.status) && !reviewEligible(p)) kids.push(h('p', { class: 'cb-help' }, m.reviewNeed));
+    }
+    for (const r of cr?.reports ?? []) {
+      kids.push(h('article', { class: 'cb-review-report', 'aria-label': m.reviewBy(expertName(p, r.reviewerExpertId)) },
+        h('h4', null, m.reviewBy(expertName(p, r.reviewerExpertId))),
+        r.summary ? h('p', null, r.summary) : null,
+        r.findings.length ? h('ol', { class: 'cb-findings' }, ...r.findings.map(f => {
+          const target = p.experts.find(e => e.expertId === f.targetExpertId);
+          const quoted = target?.opinion?.evidence[f.evidenceIndex];
+          return h('li', { class: 'cb-finding' },
+            h('div', { class: 'cb-finding-head' }, h('span', { class: `cb-chip ${VERDICT_CHIP[f.verdict]}` }, m.verdict[f.verdict]),
+              h('strong', null, m.reviewFinding(expertName(p, f.targetExpertId), f.evidenceIndex + 1))),
+            quoted ? h('blockquote', { class: 'cb-finding-evidence' }, quoted) : null,
+            f.rationale ? h('p', null, f.rationale) : null);
+        })) : h('p', { class: 'cb-help' }, m.reviewNoFindings)));
+    }
+    return kids;
+  }
+
+  function renderEvidence(): void {
+    const p = S.run?.project;
+    const kids = p ? evidenceKids(p, S.evOpen, `${p.id}:`, true) : [];
+    evidencePanel.hidden = !kids.length;
+    fill(evidenceBody, ...kids);
+  }
+
+  /** 사용자가 누를 때만 교차 검토를 건다 (자동·유료 재시도 없음). 프로젝트 bearer 와 같은 출처 요청, 빈 JSON 본문 {} */
+  async function runCrossReview(): Promise<void> {
+    const run = S.run, p = run?.project;
+    if (!run || !p || run.mode !== 'live' || !run.accessToken || active() || !reviewEligible(p) || p.crossReview || S.review?.phase === 'running') return;
+    const gen = S.gen, id = p.id;
+    S.review = { projectId: id, phase: 'running', error: null, polls: 0 };
+    renderEvidence();
+    const failed = (msg: Text) => { if (gen !== S.gen || S.run?.project?.id !== id) return; S.review = { projectId: id, phase: 'failed', error: msg, polls: 0 }; keepFocus(renderEvidence); };
+    let res: Response;
+    try {
+      res = await fetch(`/api/cloudbite/projects/${encodeURIComponent(id)}/review`, { method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        headers: { authorization: `Bearer ${run.accessToken}`, 'content-type': 'application/json' }, body: '{}' });
+    } catch {
+      return failed(m => m.reviewNetwork);
+    }
+    if (gen !== S.gen || S.run?.project?.id !== id) return;
+    // 409 는 이미 진행 중이거나 걸 수 없는 상태다: 서버의 지금 프로젝트를 읽어 그대로 보인다 (짐작해 완료로 꾸미지 않는다)
+    if (res.status === 409) {
+      const msg = await errorText(res);
+      return reviewRead(gen, id, msg);
+    }
+    if (!res.ok) { const msg = await errorText(res); return failed(m => m.reviewRequestFailed(msg(m))); }
+    let body: unknown = null;
+    try { body = await res.json(); } catch { /* 아래에서 형식 오류 */ }
+    if (gen !== S.gen || S.run?.project?.id !== id) return;
+    adoptReview(gen, id, body, () => failed(m => m.reviewInvalid));
+  }
+  /** 서버가 돌려준 ProjectRun 을 받아들인다. 교차 검토가 진행 중이면 조회를 이어 가고, 끝났으면 서버의 완료·실패를 그대로 둔다 */
+  function adoptReview(gen: number, id: string, body: unknown, invalid: () => void): void {
+    const next = normalizeProject(isObj(body) && isObj(body.project) ? body.project : body);
+    if (!next || next.id !== id || !S.run?.project) return invalid();
+    S.run.project = next;
+    if (next.crossReview?.status === 'running') {
+      const polls = (S.review?.projectId === id ? S.review.polls : 0) + 1;
+      if (polls > 30) { S.review = { projectId: id, phase: 'failed', error: m => m.reviewPollStopped, polls }; renderAll(); return; }
+      S.review = { projectId: id, phase: 'running', error: null, polls };
+      clearTimeout(reviewTimer);
+      reviewTimer = setTimeout(() => { void reviewRead(gen, id, null); }, 3000) as unknown as number;
+    } else if (next.crossReview || next.invalidCrossReview) S.review = null;
+    else S.review = { projectId: id, phase: 'failed', error: m => m.reviewInvalid, polls: 0 };
+    renderAll();
+  }
+  /** 프로젝트를 다시 읽어 교차 검토 상태를 본다. why 는 409 의 서버 설명: 검토가 없으면 그 이유를 실패로 보인다 */
+  async function reviewRead(gen: number, id: string, why: Text | null): Promise<void> {
+    const run = S.run;
+    if (gen !== S.gen || run?.project?.id !== id) return;
+    const failed = (msg: Text) => { if (gen !== S.gen || S.run?.project?.id !== id) return; S.review = { projectId: id, phase: 'failed', error: msg, polls: 0 }; renderAll(); };
+    let res: Response;
+    try {
+      res = await fetch(`/api/cloudbite/projects/${encodeURIComponent(id)}`, { credentials: 'same-origin', cache: 'no-store', headers: { authorization: `Bearer ${run.accessToken}` } });
+    } catch { return failed(why ? m => m.reviewRequestFailed(why(m)) : m => m.reviewNetwork); }
+    if (gen !== S.gen || S.run?.project?.id !== id) return;
+    if (!res.ok) { const msg = await errorText(res); return failed(m => m.reviewRequestFailed((why ?? msg)(m))); }
+    let body: unknown = null;
+    try { body = await res.json(); } catch { /* 아래에서 형식 오류 */ }
+    if (gen !== S.gen || S.run?.project?.id !== id) return;
+    const next = normalizeProject(body);
+    if (why && next && next.id === id && !next.crossReview && !next.invalidCrossReview) { S.run!.project = next; return failed(m => m.reviewRequestFailed(why(m))); }
+    adoptReview(gen, id, body, () => failed(m => m.reviewInvalid));
+  }
+
   function historyDisclosure(key: string, title: string, ...content: Kid[]): HTMLDetailsElement {
     const box = h('details', { class: 'cb-disclosure cb-history-disclosure', open: H.opened.has(key) }, h('summary', null, icon('chevron'), title), ...content);
     box.addEventListener('toggle', () => { if (box.open) H.opened.add(key); else H.opened.delete(key); });
@@ -2737,6 +3253,8 @@ function boot(): void {
         } else if (e.error) article.append(h('p', { class: 'cb-warn' }, e.error));
         detail.append(article);
       }
+      const saved = normalizeProject(p);
+      if (saved) detail.append(...evidenceKids(saved, H.opened, `${p.id}:ev:`, false).filter((k): k is Node | string => !!k));
       detail.append(h('p', { class: 'cb-help' }, t.qualityNote));
       if (H.deleteId === p.id) detail.append(h('div', { class: 'cb-history-delete', role: 'group', 'aria-label': t.confirm }, h('p', null, t.confirm),
         h('button', { type: 'button', class: 'cb-secondary', disabled: H.mutation, onclick: () => { void deleteHistory(p.id); } }, t.deleteYes),
@@ -2843,7 +3361,10 @@ function boot(): void {
     for (const e of list) { if (S.selected.size >= 4) break; S.selected.add(e.id); }
   }
 
-  function clearTimers(): void { for (const t of timers) clearTimeout(t); timers = []; clearTimeout(pollTimer); pollTimer = 0; clearTimeout(accessTimer); accessTimer = 0; }
+  function clearTimers(): void {
+    for (const t of timers) clearTimeout(t); timers = []; clearTimeout(pollTimer); pollTimer = 0; clearTimeout(accessTimer); accessTimer = 0;
+    clearTimeout(reviewTimer); reviewTimer = 0;
+  }
 
   /** 방문자 실행이 끝나면 서버가 아는 접근 상태(canCreate)를 다시 읽는다. 실패한 실행의 정리 확인을 기다리는 동안만
    *  잠깐씩 다시 본다. 버튼만 다시 열 뿐 실행·데모는 자동으로 시작하지 않고, 실패 기록은 사용자가 다시 시작할 때까지 둔다 */
@@ -2865,6 +3386,9 @@ function boot(): void {
     // Jev 가 고를 때는 직접 고른 선택을 보지도 보내지도 않는다. Jev 를 쓸 수 없으면 직접 고르기로 몰래 바꾸지 않고 막는다
     const auto = autoRoute();
     S.formErrors = validateForm(f, limits()).filter(e => !auto || e.field !== 'experts');
+    const dec = parseDecision(decisionTexts());
+    S.formErrors.push(...dec.issues);
+    if (S.docReading) S.formErrors.push({ field: 'docs', text: m => m.vDocsBusy });
     if (auto) {
       if (!routing()!.ready) S.formErrors.push({ field: 'run', text: m => m.jevUnavailable });
       else if (!routeCredential()) S.formErrors.push({ field: 'run', text: m => m.jevNeedAccess });
@@ -2878,11 +3402,14 @@ function boot(): void {
     if (S.formErrors.length) {
       // 접힌 Project details 안의 입력이 문제면 펼쳐서 고칠 곳을 보인다
       if (S.formErrors.some(e => e.field === 'title' || e.field === 'context')) projDetails.open = true;
+      if (S.formErrors.some(e => e.field === 'decision')) decisionDetails.open = true;
+      if (S.formErrors.some(e => e.field === 'docs')) docsDetails.open = true;
       renderControls(); return;
     }
     clearTimers();
     const gen = ++S.gen;
-    const brief: ProjectBrief = { ...f, mode: S.mode, requestId: crypto.randomUUID() };
+    const brief: ProjectBrief = { ...f, mode: S.mode, requestId: crypto.randomUUID(), ...briefExtras({ decision: dec.frame, documents: S.docs.length ? docsPayload(S.docs) : undefined }) };
+    S.review = null;
     S.artifactCache.clear(); S.hiddenRows.clear(); S.focusExpert = ''; S.artifactPath = ''; S.artifactPicked = false; lastAnnounce = '';
     S.run = { mode: S.mode, phase: auto ? 'routing' : 'starting', project: null, accessToken: '', error: null, startedAt: Date.now(), pollErrors: 0,
       routed: auto, viaVisitor: viaVisitor(), viaOwner: viaOwner() };
@@ -2907,7 +3434,7 @@ function boot(): void {
     let res: Response;
     try {
       res = await fetch('/api/cloudbite/route', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers,
-        body: JSON.stringify({ title: brief.title, objective: brief.objective, context: brief.context, requestId: brief.requestId }) });
+        body: JSON.stringify({ title: brief.title, objective: brief.objective, context: brief.context, requestId: brief.requestId, ...briefExtras(brief) }) });
     } catch {
       if (gen !== S.gen) return;
       return fail(m => m.routeNetwork);
@@ -2981,7 +3508,7 @@ function boot(): void {
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (adminToken) headers['x-admin-token'] = adminToken;
     const payload = routed
-      ? { title: brief.title, objective: brief.objective, context: brief.context, requestId: brief.requestId, mode: brief.mode, expertIds: brief.expertIds, routing: 'jev' }
+      ? { title: brief.title, objective: brief.objective, context: brief.context, requestId: brief.requestId, mode: brief.mode, expertIds: brief.expertIds, ...briefExtras(brief), routing: 'jev' }
       : brief;
     let res: Response;
     try {
@@ -3236,7 +3763,7 @@ function boot(): void {
   void first.then(() => { if (!S.run && recheckable() && !accessTimer) accessTimer = setTimeout(() => refreshAccess(true), ACCESS_RECHECK_MS) as unknown as number; });
 }
 
-const CloudbiteCore = { normalizeBootstrap, normalizePool, normalizeRouting, normalizeRoute, suggestTeam, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, artifactContent, domainLabel, DEMO_EXPERTS,
+const CloudbiteCore = { parseDecision, docProblem, docAccept, docsPayload, normalizeCrossReview, reviewEligible, projectMarkdown, normalizeBootstrap, normalizePool, normalizeRouting, normalizeRoute, suggestTeam, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, artifactContent, domainLabel, DEMO_EXPERTS,
   pickLang, withLang, normalizeOwnerSession, DICT, ROLE_KO };
 const hook = (globalThis as { __cloudbiteTestHook?: (core: typeof CloudbiteCore) => void }).__cloudbiteTestHook;
 if (typeof hook === 'function') hook(CloudbiteCore);
