@@ -169,7 +169,7 @@ await test('Markdown 보고서는 데모 표시와 제외 개수를 담는다', 
 // ───────── 가짜 DOM 으로 화면 동작
 class Node_ {
   constructor(doc, tag) { this.doc = doc; this.tagName = tag.toUpperCase(); this.children = []; this.attrs = {}; this.listeners = {}; this.parent = null;
-    this.className = ''; this._text = ''; this.value = ''; this.checked = false; this.disabled = false; this.hidden = false; this.style = {}; }
+    this.className = ''; this._text = ''; this.value = ''; this.checked = false; this.disabled = false; this.hidden = false; this.open = false; this.style = {}; }
   get textContent() { return this._text + this.children.map(c => typeof c === 'string' ? c : c.textContent).join(''); }
   set textContent(v) { this.children = []; this._text = String(v); }
   setAttribute(k, v) { this.attrs[k] = String(v); if (k === 'id') this.id = String(v); }
@@ -228,13 +228,43 @@ const CATALOGUE = {
   ],
   configuration: { liveReady: true, missing: [], maxExperts: 5 },
 };
+/** 시작 버튼은 하나다: 편집 영역 끝의 data-fk="start" (Run experts / Run again, 데모면 "in demo mode") */
+const startBtnOf = (env) => env.fk('start');
+const setupOf = (env) => env.all().find(n => n.id === 'cb-setup');
+const cards = (env) => env.all().filter(n => n.className.startsWith('cb-card ')).length;
+const view = (env, v) => env.all().find(n => n.id === `cb-view-${v}`);
+/** 편집 영역 안(시작 버튼 옆)의 오류 */
+const formMsgOf = (env) => [...setupOf(env).walk()].find(n => n.className === 'cb-formmsg').textContent;
+/** 첫 화면에는 자동 데모가 없다. 사용자가 시작 버튼을 눌러야 데모가 돈다 */
+async function startDemo(env) {
+  await env.flush();
+  const start = startBtnOf(env);
+  assert.equal(start.textContent, 'Run experts in demo mode', 'demo start is explicitly labelled');
+  start.click(); await env.flush();
+}
 
-await test('첫 화면: 카탈로그를 읽고 명시적 데모를 바로 시작, 적대적 문자열은 글자로만 그린다', async () => {
+await test('첫 화면: 프로젝트 설정만 보이고 자동 데모가 없다, 데모는 직접 시작, 적대적 문자열은 글자로만 그린다', async () => {
   const env = fakeEnv({ fetchImpl: (url) => url === '/api/cloudbite/bootstrap' ? json(200, CATALOGUE) : json(404, { error: 'x' }) });
   await env.flush();
   const text = env.root.textContent;
   assert.match(text, /Browser demo/); assert.match(text, /simulated activity and files; no Daytona or Nosana calls/);
-  assert.ok(env.all().some(n => n.className.startsWith('cb-card ')), 'expert workspace cards visible immediately');
+  assert.equal(setupOf(env).hidden, false, 'setup visible on landing');
+  assert.equal(env.all().find(n => n.tagName === 'H2' && n.id === 'cb-project-h').textContent, 'Project brief');
+  assert.equal(env.all().find(n => n.className.startsWith('cb-panel cb-workspace')).hidden, true, 'no empty workspace');
+  assert.equal(env.all().find(n => n.className === 'cb-aside').hidden, true, 'no empty progress/synthesis rail');
+  assert.equal(view(env, 'home').className, 'cb-view cb-home', 'single setup column');
+  assert.equal(env.fk('setup').hidden, true, 'no Edit project before a run');
+  assert.equal(env.fk('stop').hidden, true, 'no Stop before a run');
+  assert.equal(env.all().filter(n => n.getAttribute('data-fk') === 'start').length, 1, 'exactly one start action');
+  assert.equal(cards(env), 0);
+  await env.advance(30000);
+  assert.equal(cards(env), 0, 'nothing starts by itself');
+  assert.equal(env.requests.length, 1);
+  await startDemo(env);
+  assert.ok(cards(env) > 0, 'expert cards once the demo starts');
+  assert.equal(setupOf(env).hidden, true, 'setup collapses on start');
+  assert.equal(env.fk('setup').textContent, 'Edit project');
+  assert.equal(view(env, 'home').className, 'cb-view cb-home has-rail', 'right rail only during a run');
   await env.advance(30000);
   assert.ok(env.root.textContent.includes(EVIL), 'hostile name rendered as literal text');
   assert.ok(!env.all().some(n => ['IMG', 'SCRIPT', 'SVG'].includes(n.tagName)), 'no element created from content');
@@ -246,17 +276,19 @@ await test('첫 화면: 카탈로그를 읽고 명시적 데모를 바로 시작
 
 await test('데모 취소: 타이머를 멈추고 나중에 완료되지 않는다, 다시 실행하면 새 결과', async () => {
   const env = fakeEnv({ fetchImpl: () => json(200, CATALOGUE) });
-  await env.flush();
+  await startDemo(env);
   await env.advance(2500);
   const cancel = env.byText('BUTTON', 'Stop');
-  assert.equal(cancel.disabled, false);
+  assert.equal(cancel.disabled, false); assert.equal(env.fk('stop').hidden, false, 'Stop shown while active');
   cancel.click(); await env.flush();
   assert.equal(env.pendingTimers(), 0, 'all demo timers cleared');
   await env.advance(60000);
   assert.match(env.root.textContent, /Cancelled/);
   assert.match(env.root.textContent, /0 \/ 4 valid opinions/);
   assert.ok(!env.root.textContent.includes('Submitted out/result.json'));
-  const again = env.byText('BUTTON', 'Run again');
+  assert.equal(env.fk('stop').hidden, true, 'Stop hidden once inactive');
+  const again = startBtnOf(env);
+  assert.equal(again.textContent, 'Run again in demo mode');
   assert.equal(again.disabled, false);
   again.click(); await env.flush();
   await env.advance(30000);
@@ -265,7 +297,7 @@ await test('데모 취소: 타이머를 멈추고 나중에 완료되지 않는�
 
 await test('작업공간 탭: 파일 탭은 실제 파일 내용을, 페르소나 탭은 역할 정의를 보여 준다', async () => {
   const env = fakeEnv({ fetchImpl: () => json(200, CATALOGUE) });
-  await env.flush(); await env.advance(30000);
+  await startDemo(env); await env.advance(30000);
   env.all().find(n => n.getAttribute('data-fk') === 'tab:artifacts').click();
   const pre = env.all().find(n => n.tagName === 'PRE');
   assert.match(pre.textContent, /## Recommendation: /, 'default file is out/report.md content');
@@ -286,7 +318,6 @@ function liveEnv(handlers) {
 }
 async function goLive(env, token = 'adm-secret-123') {
   await env.flush();
-  env.byText('BUTTON', 'Stop').click(); await env.flush(); // 첫 화면 데모를 멈춘다
   env.byText('BUTTON', 'Live run').click(); await env.flush();
   const tok = env.all().find(n => n.id === 'cb-token');
   tok.value = token; tok.dispatch('input'); await env.flush();
@@ -299,11 +330,12 @@ await test('실제 실행: 관리자 토큰 헤더로 만들고 범위 토큰으
   const env = liveEnv((url, init) => {
     if (url === '/api/cloudbite/projects' && init.method === 'POST') return json(201, { project: liveProject('running', 'running'), accessToken: 'proj-scope-tok' });
     if (url === '/api/cloudbite/projects/proj-1') return json(200, liveProject('completed', 'completed', { updatedAt: 5 }));
-    if (url.startsWith('/api/cloudbite/projects/proj-1/artifact')) return Promise.resolve({ ok: true, status: 200, text: async () => '# Live report ' + EVIL });
+    // 서버 계약: {path, label, bytes, content} JSON 봉투 (src/cloudbite-project.ts artifact())
+    if (url.startsWith('/api/cloudbite/projects/proj-1/artifact')) return json(200, { path: 'out/report.md', label: 'Report', bytes: 40, content: '# Live report ' + EVIL });
     return json(404, { error: 'nope' });
   });
   await goLive(env);
-  const start = env.byText('BUTTON', 'Run experts') || env.byText('BUTTON', 'Run again');
+  const start = startBtnOf(env);
   assert.equal(start.disabled, false);
   start.click(); await env.flush();
   const post = env.requests.find(r => r.init.method === 'POST' && r.url === '/api/cloudbite/projects');
@@ -321,19 +353,23 @@ await test('실제 실행: 관리자 토큰 헤더로 만들고 범위 토큰으
   const art = env.requests.find(r => r.url.includes('/artifact?'));
   assert.equal(art.url, '/api/cloudbite/projects/proj-1/artifact?expert=strategy&path=out%2Freport.md');
   assert.equal(art.init.headers.authorization, 'Bearer proj-scope-tok');
-  assert.ok(env.root.textContent.includes('# Live report ' + EVIL));
+  const pre = env.all().find(n => n.tagName === 'PRE');
+  assert.equal(pre.textContent, '# Live report ' + EVIL, 'envelope content shown, not the JSON envelope');
+  assert.ok(!env.root.textContent.includes('"bytes"'));
   assert.ok(!env.all().some(n => n.tagName === 'IMG'));
+  assert.equal(setupOf(env).hidden, true, 'successful start collapses setup');
+  assert.ok(env.fk('export-md') && env.fk('export-json'), 'exports once a project exists');
   for (const k of ['localStorage', 'sessionStorage', 'indexedDB']) assert.equal(env.ctx[k], undefined);
 });
 
 await test('실제 실행 실패는 오류로 보여 주고 데모로 몰래 바꾸지 않는다', async () => {
   const env = liveEnv(() => json(503, { error: 'DAYTONA_API_KEY missing' }));
   await goLive(env);
-  const cardsBefore = env.all().filter(n => n.className.startsWith('cb-card ')).length;
-  (env.byText('BUTTON', 'Run again') || env.byText('BUTTON', 'Run experts')).click(); await env.flush();
+  startBtnOf(env).click(); await env.flush();
   assert.match(env.root.textContent, /The server run configuration is not ready\. — DAYTONA_API_KEY missing/);
   assert.equal(env.all().filter(n => n.className.startsWith('cb-card ')).length, 0, 'no demo cards substituted');
-  assert.ok(cardsBefore > 0);
+  assert.equal(setupOf(env).hidden, false, 'failed create keeps the setup open to fix and retry');
+  assert.match(formMsgOf(env), /DAYTONA_API_KEY missing/, 'error shown next to the start action');
   assert.match(env.root.textContent, /Live run — server-reported activity/);
   await env.advance(60000);
   assert.equal(env.requests.filter(r => r.url === '/api/cloudbite/projects').length, 1, 'no automatic retry/fallback');
@@ -348,7 +384,7 @@ await test('취소 뒤 늦게 도착한 조회 응답은 버린다, 제출 중�
     return json(404, {});
   });
   await goLive(env);
-  const start = env.byText('BUTTON', 'Run again') || env.byText('BUTTON', 'Run experts');
+  const start = startBtnOf(env);
   start.click();
   assert.equal(start.disabled, true, 'disabled while in flight');
   await env.flush();
@@ -365,26 +401,26 @@ await test('취소 뒤 늦게 도착한 조회 응답은 버린다, 제출 중�
 await test('형식이 깨진 생성 응답은 오류가 된다, 준비 안 된 서버는 실제 실행을 막고 설정 이름만 보여 준다', async () => {
   const env = liveEnv(() => json(201, { project: { id: 'x' }, accessToken: '' }));
   await goLive(env);
-  (env.byText('BUTTON', 'Run again') || env.byText('BUTTON', 'Run experts')).click(); await env.flush();
+  startBtnOf(env).click(); await env.flush();
   assert.match(env.root.textContent, /The server response has an invalid format/);
 
   const env2 = fakeEnv({ fetchImpl: () => json(200, { ...CATALOGUE, configuration: { liveReady: false, missing: ['NOSANA_BASE_URL', 'DAYTONA_API_KEY'], maxExperts: 5 } }) });
   await goLive(env2, 'tok');
   assert.match(env2.root.textContent, /Live run is not ready/);
   assert.ok(env2.all().some(n => n.tagName === 'CODE' && n.textContent === 'NOSANA_BASE_URL'));
-  assert.equal((env2.byText('BUTTON', 'Run again') || env2.byText('BUTTON', 'Run experts')).disabled, true);
+  assert.equal(startBtnOf(env2).disabled, true);
 });
 
 await test('bootstrap 실패 시 데모는 내장 역할로 돌고 그 사실을 밝힌다', async () => {
   const env = fakeEnv({ fetchImpl: () => Promise.reject(new Error('offline')) });
   await env.flush(); await env.advance(2000);
   assert.match(env.root.textContent, /6 built-in demo roles/);
+  await startDemo(env);
   await env.advance(30000);
   assert.match(env.root.textContent, /4 \/ 4 valid opinions/);
 });
 
 // ───────── 파란·흰 콘솔 화면 구성 (탐색·실행 기록·전체 화면·진행 수)
-const view = (env, v) => env.all().find(n => n.id === `cb-view-${v}`);
 const streamRowsShown = (env) => env.all().filter(n => n.tagName === 'LI' && n.className.startsWith('cb-row ')).length;
 
 await test('왼쪽 탐색: Home 이 기본, Guide·Help·Settings 는 실제 내용을 보여 주고 Settings 에 실행 방식이 있다', async () => {
@@ -407,9 +443,14 @@ await test('왼쪽 탐색: Home 이 기본, Guide·Help·Settings 는 실제 내
   assert.ok([...settings.walk()].some(n => n.id === 'cb-token'), 'admin token input lives in Settings');
   env.fk('nav:home').click();
   assert.equal(view(env, 'home').hidden, false);
-  // 프로젝트 편집 영역은 접혀 있다가 Edit project 로 열린다 (기존 입력란·전문가 선택 유지)
-  const setup = env.all().find(n => n.id === 'cb-setup');
+  // 실행 전에는 편집 영역이 열려 있고, 실행을 시작하면 접히며 Edit project 로 다시 연다 (기존 입력란·전문가 선택 유지)
+  const setup = setupOf(env);
+  assert.equal(setup.hidden, false);
+  assert.ok(!env.all().some(n => n.tagName === 'A' && n.attrs.href === '/lab' && n.parent?.className === 'cb-nav-foot'), 'no legacy lab link in the nav footer');
+  assert.ok([...view(env, 'settings').walk()].some(n => n.tagName === 'A' && n.textContent === 'Open the legacy lab'), 'legacy lab stays in Settings');
+  await startDemo(env);
   assert.equal(setup.hidden, true);
+  assert.equal(env.fk('setup').getAttribute('aria-expanded'), 'false');
   env.fk('setup').click();
   assert.equal(setup.hidden, false);
   assert.equal(env.fk('setup').getAttribute('aria-expanded'), 'true');
@@ -419,25 +460,31 @@ await test('왼쪽 탐색: Home 이 기본, Guide·Help·Settings 는 실제 내
 await test('진행 수는 선택한 전문가 수와 맞는다 (4명 선택 → 4명 기준, 완료 후 4 / 4)', async () => {
   const env = fakeEnv({ fetchImpl: () => json(200, CATALOGUE) });
   await env.flush();
-  assert.match(env.root.textContent, /4 of max 5 selected/);
+  assert.match(env.root.textContent, /4 selected · up to 5/);
+  await startDemo(env);
   assert.match(env.root.textContent, /0 of 4 experts finished/);
   assert.ok(!/1 \/ 5|of 5 experts finished/.test(env.root.textContent));
   await env.advance(30000);
   assert.match(env.root.textContent, /4 of 4 experts finished/);
-  assert.match(env.root.textContent, /4 \/ 4experts finished/);
   assert.equal(env.all().filter(n => n.className.startsWith('cb-step is-done')).length, 5, 'all observed steps done');
 });
 
 await test('전체 화면: 버튼으로 켜고 Escape·Exit full screen·다른 화면 이동으로 끈다', async () => {
   const env = fakeEnv({ fetchImpl: () => json(200, CATALOGUE) });
-  await env.flush();
+  await startDemo(env);
   const panel = env.all().find(n => n.className.startsWith('cb-panel cb-workspace'));
+  const log = env.all().find(n => n.id === 'cb-log');
   const full = env.fk('full');
   assert.equal(full.textContent, 'Full screen');
+  assert.ok(!log.open, 'execution activity starts collapsed');
   full.click();
   assert.match(panel.className, /is-full/); assert.equal(full.textContent, 'Exit full screen'); assert.equal(full.getAttribute('aria-pressed'), 'true');
+  assert.equal(log.open, true, 'full screen opens the execution activity');
   env.doc.key('Escape');
   assert.doesNotMatch(panel.className, /is-full/); assert.equal(full.textContent, 'Full screen');
+  assert.equal(log.open, false, 'Escape returns the log to its previous state');
+  log.open = true; full.click(); env.doc.key('Escape');
+  assert.equal(log.open, true, 'a log the user opened stays open');
   full.click(); full.click();
   assert.doesNotMatch(panel.className, /is-full/);
   full.click(); env.fk('nav:help').click();
@@ -446,7 +493,7 @@ await test('전체 화면: 버튼으로 켜고 Escape·Exit full screen·다른 
 
 await test('Clear view 는 보이는 창만 비우고, 새 줄은 계속 들어오며, 기록·파일은 그대로, Restore history 로 되돌린다', async () => {
   const env = fakeEnv({ fetchImpl: () => json(200, CATALOGUE) });
-  await env.flush(); await env.advance(4000);
+  await startDemo(env); await env.advance(4000);
   const before = streamRowsShown(env);
   assert.ok(before > 0, 'stream shows reported activity');
   assert.equal(env.fk('restore').disabled, true);
@@ -469,9 +516,14 @@ await test('Clear view 는 보이는 창만 비우고, 새 줄은 계속 들어�
 
 await test('실행 기록은 읽기 전용 표시다: 입력란·명령 프롬프트·CLI 선택이 없다', async () => {
   const env = fakeEnv({ fetchImpl: () => json(200, CATALOGUE) });
-  await env.flush(); await env.advance(3000);
-  const stream = env.all().find(n => n.className === 'cb-stream');
-  assert.ok(stream.textContent.includes('Execution stream') && stream.textContent.includes('read-only'));
+  await startDemo(env); await env.advance(3000);
+  const stream = env.all().find(n => n.id === 'cb-log');
+  assert.equal(stream.tagName, 'DETAILS', 'execution activity sits behind a native disclosure');
+  assert.ok(stream.textContent.includes('Execution activity') && stream.textContent.includes('read-only'));
+  stream.open = true;
+  await env.advance(3000);
+  assert.equal(env.all().find(n => n.id === 'cb-log'), stream, 'disclosure is not recreated on updates');
+  assert.equal(stream.open, true, 'open state survives updates');
   assert.ok(![...stream.walk()].some(n => ['INPUT', 'TEXTAREA', 'SELECT'].includes(n.tagName)));
   assert.ok(!/\w+@\w+[:$]|\$ $/m.test(stream.textContent));
   assert.match(stream.textContent, /simulated · running · \d+ active · \d+ events?/);
@@ -529,7 +581,8 @@ await test('운영자 링크: 요청 전에 조각을 지우고, 실제 실행 �
   for (const k of ['localStorage', 'sessionStorage', 'indexedDB']) assert.equal(env.ctx[k], undefined);
   assert.equal(env.doc.cookie, undefined);
   // 사용자가 직접 Run experts 를 눌러야 시작한다
-  const start = env.byText('BUTTON', 'Run experts');
+  const start = startBtnOf(env);
+  assert.equal(start.textContent, 'Run experts');
   assert.equal(start.disabled, false);
   start.click(); await env.flush();
   const post = env.requests.find(r => r.init.method === 'POST');
@@ -552,20 +605,22 @@ await test('운영자 링크: 형식이 틀려도 지우고 토큰을 받지 않
 
   const { env } = operatorEnv(`#operator=${OP_TOKEN}`, () => json(401, { error: 'admin session required' }));
   await env.flush();
-  env.byText('BUTTON', 'Run experts').click(); await env.flush();
+  startBtnOf(env).click(); await env.flush();
   assert.match(env.root.textContent, /temporary Cloudbite operator token was rejected or has expired/);
   assert.ok(!env.root.textContent.includes(OP_TOKEN));
   env.byText('BUTTON', 'Clear token').click(); await env.flush();
   assert.equal(env.all().find(n => n.id === 'cb-token').value, '');
   assert.match(env.root.textContent, /No admin token/);
-  assert.equal((env.byText('BUTTON', 'Run again') || env.byText('BUTTON', 'Run experts')).disabled, true, 'live blocked without a token');
+  assert.equal(startBtnOf(env).disabled, true, 'live blocked without a token');
 });
 
 await test('location·history 가 없는 환경과 조각 없는 공개 데모는 그대로 동작한다', async () => {
   const { env, bar } = operatorEnv('');
   await env.flush(); await env.advance(30000);
   assert.ok(!bar.log.some(([k]) => k !== 'fetch'), 'nothing to erase');
-  assert.match(env.root.textContent, /4 \/ 4 valid opinions/, 'public browser demo still auto-starts');
+  assert.equal(cards(env), 0, 'public demo waits for the user');
+  await startDemo(env); await env.advance(30000);
+  assert.match(env.root.textContent, /4 \/ 4 valid opinions/, 'public browser demo runs once started');
   const env2 = fakeEnv({ globals: { location: { hash: `#operator=${OP_TOKEN}` } }, fetchImpl: () => json(200, CATALOGUE) });
   await env2.flush();
   assert.equal(env2.all().find(n => n.id === 'cb-token').value, OP_TOKEN, 'no history/replace: still consumed, nothing thrown');
@@ -584,9 +639,7 @@ function visitorEnv(access, handlers = () => json(404, {}), { bootstrap } = {}) 
   env.boots = () => boots;
   return env;
 }
-const startBtnOf = (env) => env.byText('BUTTON', 'Run experts') || env.byText('BUTTON', 'Run again');
 const pick = (env, id) => { const x = env.fk(`x:${id}`); x.checked = true; x.dispatch('change'); };
-const cards = (env) => env.all().filter(n => n.className.startsWith('cb-card ')).length;
 
 await test('승인된 방문자: 실제 실행·설정이 열리고 자동 데모·자동 실행 없이 직접 고른 역할로 쿠키만으로 만든다', async () => {
   const env = visitorEnv(null, (url, init) => {
@@ -599,13 +652,14 @@ await test('승인된 방문자: 실제 실행·설정이 열리고 자동 데�
   assert.equal(cards(env), 0);
   assert.equal(env.byText('BUTTON', 'Live run').getAttribute('aria-pressed'), 'true');
   assert.equal(env.all().find(n => n.id === 'cb-setup').hidden, false, 'project setup open');
-  assert.match(env.root.textContent, /0 of max 3 selected/, 'min(5, server, session) experts');
+  assert.match(env.root.textContent, /0 selected · up to 3/, 'min(5, server, session) experts');
   assert.equal(env.all().find(n => n.className === 'cb-profile-name').textContent, 'Mina');
   assert.match(env.root.textContent, /Visitor session: 1 of 1 project left/);
   assert.match(env.root.textContent, /Visitor session · ends \d\d:\d\d/);
   assert.equal(env.doc.cookie, undefined);
+  assert.equal(startBtnOf(env).disabled, true, 'zero experts: start disabled');
+  assert.match(env.root.textContent, /Choose at least one expert/);
   startBtnOf(env).click(); await env.flush();
-  assert.match(env.root.textContent, /Select at least 1 expert/);
   assert.equal(env.requests.length, 1);
   pick(env, 'strategy'); pick(env, 'biz');
   const start = startBtnOf(env);
@@ -638,8 +692,8 @@ await test('10개 프로젝트 방문자: 첫 실행 뒤 서버가 9개 남음�
   assert.equal(env.boots(), 2, 'finished visitor run re-reads the server access state');
   assert.match(env.root.textContent, /9 of 10 projects left/);
   assert.match(env.root.textContent, /Your visitor session can run again/);
-  const again = env.byText('BUTTON', 'Run again');
-  assert.ok(again, 'Run again offered');
+  const again = startBtnOf(env);
+  assert.equal(again.textContent, 'Run again', 'Run again offered');
   assert.equal(again.disabled, false, 'nine projects left: the visitor may run again');
   assert.equal(env.requests.filter(r => r.init.method === 'POST').length, 1, 'no automatic second run');
 
@@ -655,8 +709,8 @@ await test('만료·취소·거절·대기·소진된 방문자 접근은 쓰지
   for (const [over, re] of [[{ expiresAt: Date.now() - 1000 }, /has expired/], [{ status: 'revoked' }, /ended your visitor session/], [{ status: 'denied' }, /declined/], [{ status: 'pending' }, /still waiting/]]) {
     const env = visitorEnv(accessOf(over, false));
     await env.flush();
-    assert.ok(cards(env) > 0, 'not treated as a visitor: public demo stays');
-    env.byText('BUTTON', 'Stop').click(); await env.flush();
+    assert.equal(env.byText('BUTTON', 'Browser demo').getAttribute('aria-pressed'), 'true', 'not treated as a visitor: public demo mode stays');
+    assert.equal(cards(env), 0, 'and nothing starts by itself');
     env.byText('BUTTON', 'Live run').click(); await env.flush();
     assert.match(env.root.textContent, re);
     assert.ok(env.all().some(n => n.tagName === 'A' && n.attrs.href === '/cloudbite/request' && n.textContent === 'Request visitor access' && n.parent.className === 'cb-warn'));
@@ -688,24 +742,24 @@ await test('방문자 생성이 401 이면 오류와 요청 안내, 데모·재�
   assert.match(env.root.textContent, /Live run — server-reported activity/);
 });
 
-await test('bootstrap 이 늦으면 먼저 돈 자동 데모만 멈추고 방문자 설정을 연다, 직접 시작한 데모는 그대로 둔다', async () => {
+await test('bootstrap 이 늦어도 아무것도 자동 시작하지 않고 방문자 설정을 연다, 직접 시작한 데모는 그대로 둔다', async () => {
   let release;
   const env = visitorEnv(null, undefined, { bootstrap: () => new Promise(r => { release = () => r({ ok: true, status: 200, json: async () => ({ ...CATALOGUE, access: accessOf() }) }); }) });
   await env.flush(); await env.advance(2500);
-  assert.ok(cards(env) > 0, 'automatic demo started while bootstrap was slow');
+  assert.equal(cards(env), 0, 'no automatic demo while bootstrap is slow');
   release(); await env.flush();
-  assert.equal(cards(env), 0, 'automatic demo reset');
-  assert.equal(env.pendingTimers(), 0, 'demo timers cleared');
+  assert.equal(cards(env), 0);
+  assert.equal(env.pendingTimers(), 0, 'no demo timers');
   assert.equal(env.byText('BUTTON', 'Live run').getAttribute('aria-pressed'), 'true');
-  assert.match(env.root.textContent, /0 of max 3 selected/);
+  assert.match(env.root.textContent, /0 selected · up to 3/);
   await env.advance(30000);
   assert.deepEqual(env.requests.map(r => r.url), ['/api/cloudbite/bootstrap']);
 
   let release2;
   const env2 = visitorEnv(null, undefined, { bootstrap: () => new Promise(r => { release2 = () => r({ ok: true, status: 200, json: async () => ({ ...CATALOGUE, access: accessOf() }) }); }) });
-  await env2.flush(); await env2.advance(2500);
-  env2.byText('BUTTON', 'Stop').click(); await env2.flush();
-  env2.byText('BUTTON', 'Run again').click(); await env2.flush(); // 사용자가 직접 시작
+  await env2.flush(); await env2.advance(500);
+  await startDemo(env2); // 사용자가 직접 시작
+  await env2.advance(2000);
   release2(); await env2.flush();
   assert.ok(cards(env2) > 0, 'manual demo kept');
   assert.equal(env2.byText('BUTTON', 'Browser demo').getAttribute('aria-pressed'), 'true');
@@ -718,7 +772,7 @@ await test('관리자 토큰이 있으면 방문자 쿠키보다 우선해 헤�
   await env.flush();
   const tok = env.all().find(n => n.id === 'cb-token');
   tok.value = 'adm-secret-123'; tok.dispatch('input'); await env.flush();
-  assert.match(env.root.textContent, /of max 5 selected/, 'admin path uses the server limit');
+  assert.match(env.root.textContent, /selected · up to 5/, 'admin path uses the server limit');
   assert.equal(env.all().find(n => n.className === 'cb-profile-name').textContent, 'Operator');
   for (const id of ['strategy', 'biz', 'trust', 'ux']) pick(env, id);
   startBtnOf(env).click(); await env.flush();
@@ -726,7 +780,9 @@ await test('관리자 토큰이 있으면 방문자 쿠키보다 우선해 헤�
 
   const pub = visitorEnv({ request: null, canCreate: false });
   await pub.flush(); await pub.advance(30000);
-  assert.match(pub.root.textContent, /4 \/ 4 valid opinions/, 'public browser demo still auto-starts');
+  assert.equal(cards(pub), 0, 'public demo waits for the user');
+  await startDemo(pub); await pub.advance(30000);
+  assert.match(pub.root.textContent, /4 \/ 4 valid opinions/, 'public browser demo runs once started');
   assert.ok(!/Request visitor access.*has expired|no projects left/.test(pub.root.textContent));
 });
 
@@ -753,8 +809,9 @@ await test('방문자 실행이 실패하면 서버 상태를 다시 읽고, can
   assert.equal(env.boots(), 2, 'bootstrap re-read after the terminal failure');
   assert.match(env.root.textContent, /0 \/ 1 valid opinions/, 'failure evidence stays on screen');
   assert.match(env.root.textContent, /Failed: 0 valid opinions, 1 failed/);
-  assert.match(env.root.textContent, /Your visitor session can run again\. Nothing starts until you select Run again\./);
-  const again = env.byText('BUTTON', 'Run again');
+  assert.match(env.root.textContent, /Your visitor session can run again\. Nothing starts until you open Edit project and select Run again\./);
+  const again = startBtnOf(env);
+  assert.equal(again.textContent, 'Run again');
   assert.equal(again.disabled, false);
   assert.equal(cards(env), 1, 'no demo substituted');
   await env.advance(120000);
@@ -823,7 +880,91 @@ await test('관리자 실행이 실패해도 Run again 은 그대로 열리고 �
   startBtnOf(env).click(); await env.flush(); await env.advance(1500);
   assert.match(env.root.textContent, /0 \/ 1 valid opinions/);
   assert.equal(env.requests.filter(r => r.url === '/api/cloudbite/bootstrap').length, 1);
-  assert.equal(env.byText('BUTTON', 'Run again').disabled, false, 'owner run-again stays possible');
+  assert.equal(startBtnOf(env).disabled, false, 'owner run-again stays possible');
+  assert.equal(startBtnOf(env).textContent, 'Run again');
+});
+
+await test('파일 봉투: content 만 꺼내고, 형식이 틀리면 null', () => {
+  assert.equal(core.artifactContent({ path: 'out/report.md', label: 'R', bytes: 3, content: 'abc' }, 'out/report.md'), 'abc');
+  assert.equal(core.artifactContent({ content: '' }, 'out/report.md'), '');
+  for (const bad of [null, 'abc', [], { path: 'out/report.md' }, { content: 5 }, { path: 'other.md', content: 'x' }])
+    assert.equal(core.artifactContent(bad, 'out/report.md'), null, JSON.stringify(bad));
+  assert.equal(core.domainLabel('design.ui-ux'), 'Ui ux');
+  assert.equal(core.domainLabel('product.management'), 'Management');
+  assert.equal(core.domainLabel('제품 전략'), '제품 전략', 'human text unchanged');
+});
+
+await test('실제 실행 파일: 깨진 봉투는 봉투 글자 대신 오류와 Load again 을 보이고, 다시 불러오면 내용을 보인다', async () => {
+  let artCalls = 0;
+  const env = liveEnv((url, init) => {
+    if (url === '/api/cloudbite/projects' && init.method === 'POST') return json(201, { project: liveProject('running', 'running'), accessToken: 'tok' });
+    if (url === '/api/cloudbite/projects/proj-1') return json(200, liveProject('completed', 'completed', { updatedAt: 5 }));
+    if (url.includes('/artifact?')) {
+      artCalls++;
+      if (artCalls === 1) return json(200, { path: 'out/report.md', label: 'Report', bytes: 9 }); // content 없음
+      if (artCalls === 2) return Promise.resolve({ ok: true, status: 200, json: async () => { throw new SyntaxError('bad json'); }, text: async () => '<html>' });
+      return json(200, { path: 'out/report.md', label: 'Report', bytes: 9, content: 'Real body' });
+    }
+    return json(404, {});
+  });
+  await goLive(env);
+  startBtnOf(env).click(); await env.flush(); await env.advance(1500);
+  env.fk('tab:artifacts').click(); await env.flush();
+  const warn = () => env.all().find(n => n.className === 'cb-warn' && /unexpected format/.test(n.textContent));
+  assert.ok(warn(), 'missing content is an explicit error');
+  assert.ok(!env.all().some(n => n.tagName === 'PRE'), 'envelope is never shown as file text');
+  assert.ok(!env.root.textContent.includes('"bytes"'));
+  env.fk('file-reload').click(); await env.flush();
+  assert.ok(warn(), 'invalid JSON is an explicit error');
+  env.fk('file-reload').click(); await env.flush();
+  assert.equal(env.all().find(n => n.tagName === 'PRE').textContent, 'Real body');
+  assert.equal(artCalls, 3);
+});
+
+const BIG = { ...CATALOGUE, experts: [
+  ...['Product Strategist', 'Business Model Analyst', 'UX Researcher', 'Growth Marketer', 'Security Reviewer', 'Data Scientist', 'Legal Counsel', 'Pricing Specialist']
+    .map((name, i) => ({ id: `r${i}`, name, domain: i === 7 ? 'strategy.pricing' : `team.role-${i}`, summary: i === 6 ? 'Checks contracts and regulatory exposure.' : '', prompt: 'p', tools: [], outputs: [], source: {} })),
+] };
+await test('역할 고르기: 기본 6개만 보이고 나머지는 All experts 접기 안에서 검색으로 찾으며, 숨은 선택은 요약된다', async () => {
+  const env = fakeEnv({ fetchImpl: () => json(200, BIG) });
+  await env.flush();
+  const coreIds = env.all().filter(n => /^x:/.test(n.getAttribute('data-fk') || '')).map(n => n.getAttribute('data-fk'));
+  assert.deepEqual(coreIds, ['x:r0', 'x:r1', 'x:r2', 'x:r3', 'x:r4', 'x:r5'], 'six core roles');
+  const more = env.all().find(n => n.tagName === 'DETAILS' && /cb-more/.test(n.className));
+  assert.ok(!more.open, 'the rest is folded');
+  assert.match(more.textContent, /All experts \(8\)/);
+  assert.ok(env.fk('xa:r6') && env.fk('xa:r7'), 'every other role is selectable inside');
+  assert.match(env.root.textContent, /Checks contracts and regulatory exposure\./, 'plain description');
+  assert.match(env.root.textContent, /Pricing/, 'machine domain becomes a readable label');
+  assert.ok(!/strategy\.pricing|team\.role-/.test(env.root.textContent), 'no machine domain strings');
+  const search = env.all().find(n => n.id === 'cb-filter');
+  search.value = 'pricing'; search.dispatch('input');
+  assert.ok(env.fk('xa:r7') && !env.fk('xa:r6'), 'search narrows the list');
+  search.value = 'strategist'; search.dispatch('input');
+  assert.ok(env.fk('xa:r0'), 'search also finds core roles');
+  search.value = ''; search.dispatch('input');
+  const hidden = env.fk('xa:r6'); hidden.checked = true; hidden.dispatch('change');
+  const also = env.all().find(n => n.className === 'cb-alsosel');
+  assert.equal(also.hidden, false);
+  assert.equal(also.textContent, 'Also selected from All experts: Legal Counsel');
+  assert.ok(!env.all().some(n => n.className.includes('cb-catalogue') && n.style.maxHeight), 'no nested scroll box');
+  assert.match(env.root.textContent, /5 selected · up to 5/);
+});
+
+await test('Project details: 이름·맥락은 접기 안에 있고, 그 칸이 틀리면 펼쳐서 오류를 보인다', async () => {
+  const env = fakeEnv({ fetchImpl: () => json(200, CATALOGUE) });
+  await env.flush();
+  const details = env.all().find(n => n.tagName === 'DETAILS' && n.textContent.startsWith('Project details'));
+  const inside = [...details.walk()].map(n => n.id);
+  assert.ok(inside.includes('cb-title') && inside.includes('cb-context') && !inside.includes('cb-objective'), 'objective first, name/context folded');
+  assert.ok(!details.open);
+  const title = env.all().find(n => n.id === 'cb-title');
+  title.value = ' '; title.dispatch('input');
+  startBtnOf(env).click(); await env.flush();
+  assert.equal(details.open, true, 'opened to show the field with the error');
+  assert.equal(cards(env), 0, 'nothing started');
+  assert.match(formMsgOf(env), /project name/i);
+  assert.equal(setupOf(env).hidden, false);
 });
 
 console.log(`cloudbite-console: ${pass} passed`);

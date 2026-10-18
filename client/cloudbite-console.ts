@@ -46,6 +46,8 @@ const TERMINAL_EXPERT: ExpertStatus[] = ['completed', 'failed', 'cancelled'];
 const TERMINAL_PROJECT: ProjectStatus[] = ['completed', 'partial', 'failed', 'cancelled'];
 const LIMIT = { title: 120, objective: 1500, context: 3000 };
 const STREAM_ROWS = 400;
+/** 편집 영역에 처음부터 보이는 역할 수. 나머지는 All experts 접기 상자에서 찾는다 */
+const CORE_ROLES = 6;
 
 // ───────────────────────── 값 정리 (서버·모델이 보낸 것은 전부 의심한다) ─────────────────────────
 
@@ -62,6 +64,18 @@ function hash(s: string): number {
   return h >>> 0;
 }
 function plural(n: number, one: string, many = `${one}s`): string { return `${n} ${n === 1 ? one : many}`; }
+/** 카탈로그의 기계용 분야 이름(strategy.pricing, design.ui-ux)을 읽을 수 있는 말로. 이미 사람이 쓴 말이면 그대로 */
+function domainLabel(d: string): string {
+  if (!/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/.test(d)) return d;
+  const last = d.slice(d.lastIndexOf('.') + 1).replace(/-/g, ' ');
+  return last.charAt(0).toUpperCase() + last.slice(1);
+}
+/** 파일 응답 봉투 {path, label, bytes, content} 에서 내용만 꺼낸다. 형식이 다르거나 다른 파일이면 null */
+function artifactContent(body: unknown, path: string): string | null {
+  if (!isObj(body) || typeof body.content !== 'string') return null;
+  if (body.path !== undefined && body.path !== path) return null;
+  return clip(body.content, 200_000);
+}
 
 // 임시 Cloudbite 운영자 토큰 (docs/cloudbite/temporary-operator.txt): 서버(src/cloudbite-operator.ts)와 같은 모양만 받는다
 const OPERATOR_TOKEN = /^cbo_[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/;
@@ -444,15 +458,16 @@ function demoWork(e: ExpertDefinition, b: ProjectBrief, h: number): DemoWork {
       const pick = h % 3;
       direction = (['support', 'conditional', 'concern'] as const)[pick];
       confidence = jitter(52, 25);
-      summary = `${DIRECTION_LABEL[direction]} opinion from a ${e.domain} perspective. Reviewed the premises of objective ${obj} against the role's criteria.`;
+      const field = domainLabel(e.domain).toLowerCase();
+      summary = `${DIRECTION_LABEL[direction]} opinion from a ${field} perspective. Reviewed the premises of objective ${obj} against the role's criteria.`;
       steps = [
-        ['tool', `read_file PROJECT.md — extract issues from a ${e.domain} perspective`],
-        ['thought', `List the largest uncertainty by ${e.domain} criteria`],
+        ['tool', `read_file PROJECT.md — extract issues from a ${field} perspective`],
+        ['thought', `List the largest uncertainty by ${field} criteria`],
         ['tool', 'write_file out/notes.md — role review notes'],
       ];
       evidence = [`Objective ${obj}`, `Context ${ctx}`];
       assumptions = ['Role definition is based on catalogue metadata'];
-      nextActions = [`Validate the key ${e.domain} assumptions`];
+      nextActions = [`Validate the key ${field} assumptions`];
     }
   }
   confidence = Math.max(0, Math.min(100, confidence));
@@ -617,7 +632,10 @@ function boot(): void {
       viaVisitor: boolean;
     },
     view: 'home' as View,
-    setupOpen: link.present,
+    /** 프로젝트 브리프 편집 영역. 실행 전에는 늘 열려 있고, 실행이 실제로 시작되면 접힌다 (오류가 나면 다시 열린다) */
+    setupOpen: true,
+    /** 사용자가 Settings 에서 실행 방식을 직접 골랐다 — 방문자 소개가 그 선택을 바꾸지 않는다 */
+    modePicked: false,
     full: false,
     /** "Clear view" 때 화면에서만 숨긴 실행 기록 줄. 프로젝트 기록·파일은 그대로 둔다 */
     hiddenRows: new Set<string>(),
@@ -629,8 +647,6 @@ function boot(): void {
     artifactCache: new Map<string, { state: 'loading' | 'ok' | 'error'; text: string }>(),
     /** 승인된 방문자를 처음 알아챘을 때 한 번만 실제 실행·프로젝트 설정으로 연다 */
     visitorIntro: false,
-    /** 첫 화면 자동 데모의 세대 번호 (0 = 없음). 사용자가 직접 시작한 데모는 건드리지 않는다 */
-    autoDemoGen: 0,
     formErrors: (link.present && !link.token ? ['The temporary Cloudbite operator link is malformed. It was removed from the address bar; ask the owner for a new link.'] : []) as string[],
   };
   let timers: number[] = [];
@@ -677,37 +693,44 @@ function boot(): void {
   const checkAgain = () => h('button', { type: 'button', class: 'cb-ghost', onclick: () => refreshAccess(true) }, 'Check again');
   const findDef = (id: string) => catalogue().find(e => e.id === id) ?? DEMO_EXPERTS.find(e => e.id === id);
 
-  // ── 고정 뼈대 (입력란은 한 번만 만들어 포커스·입력 중 글자를 잃지 않는다)
+  // ── 고정 뼈대 (입력란·접기 상자는 한 번만 만들어 포커스·입력 중 글자·열림 상태를 잃지 않는다)
   const titleIn = h('input', { id: 'cb-title', type: 'text', maxlength: LIMIT.title, autocomplete: 'off', value: 'Launch a 100-expert AI advisory room' });
-  const objectiveIn = h('textarea', { id: 'cb-objective', rows: 3, maxlength: LIMIT.objective });
+  const objectiveIn = h('textarea', { id: 'cb-objective', rows: 4, maxlength: LIMIT.objective });
   objectiveIn.value = 'Decide whether launching a 100-expert AI advisory room for startup teams on a partially paid model within 4 weeks makes sense, and what to watch out for.';
   const contextIn = h('textarea', { id: 'cb-context', rows: 3, maxlength: LIMIT.context });
   contextIn.value = 'Early users are startup teams of 5–20 people. Every opinion should show its evidence and sources. Team data will not be uploaded.';
+  // 글자 수는 입력 중(포커스)이거나 한도에 가까울 때만 보인다 (CSS)
   const counter = (inp: HTMLInputElement | HTMLTextAreaElement, max: number) => {
     const c = h('span', { class: 'cb-count', 'aria-hidden': 'true' });
-    const upd = () => { c.textContent = `${inp.value.length} / ${max}`; };
+    const upd = () => { c.textContent = `${inp.value.length} / ${max}`; c.className = `cb-count${inp.value.length > max * 0.9 ? ' is-near' : ''}`; };
     inp.addEventListener('input', upd); upd();
     return c;
   };
-  for (const inp of [titleIn, objectiveIn]) inp.addEventListener('input', () => { if (!S.run) renderControls(); });
+  for (const inp of [titleIn, objectiveIn]) inp.addEventListener('input', () => { if (!active()) renderControls(); });
   const tokenIn = h('input', { id: 'cb-token', type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: 'Existing admin session token' });
   tokenIn.value = S.adminToken;
   tokenIn.addEventListener('input', () => { S.adminToken = tokenIn.value; renderControls(); renderProgress(); });
   const failIn = h('input', { id: 'cb-fail', type: 'checkbox' });
   failIn.addEventListener('change', () => { S.failSim = failIn.checked; });
-  const filterIn = h('input', { id: 'cb-filter', type: 'search', placeholder: 'Search roles or domains', autocomplete: 'off', 'aria-label': 'Search experts' });
+  const filterIn = h('input', { id: 'cb-filter', type: 'search', placeholder: 'Search all roles', autocomplete: 'off', 'aria-label': 'Search all experts' });
   filterIn.addEventListener('input', () => renderCatalogue());
 
   const modeDemo = h('button', { type: 'button', class: 'cb-seg', 'aria-pressed': 'true', onclick: () => setMode('demo') }, 'Browser demo');
   const modeLive = h('button', { type: 'button', class: 'cb-seg', 'aria-pressed': 'false', onclick: () => setMode('live') }, 'Live run');
-  const startBtn = h('button', { type: 'button', class: 'cb-primary', onclick: () => startRun() });
+  const startBtn = h('button', { type: 'button', class: 'cb-primary cb-start', 'data-fk': 'start', onclick: () => startRun() });
   const startLabel = h('span');
   startBtn.append(icon('play'), startLabel);
-  const cancelBtn = h('button', { type: 'button', class: 'cb-secondary', onclick: () => cancelRun() });
+  const cancelBtn = h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'stop', onclick: () => cancelRun() });
   const cancelLabel = h('span');
   cancelBtn.append(icon('stop'), cancelLabel);
   const formMsg = h('div', { class: 'cb-formmsg', role: 'alert' });
-  const catalogueBox = h('div', { class: 'cb-catalogue', role: 'group', 'aria-labelledby': 'cb-cat-label' });
+  const runMsg = h('div', { class: 'cb-formmsg', role: 'alert' });
+  const coreBox = h('div', { class: 'cb-catalogue', role: 'group', 'aria-labelledby': 'cb-cat-label' });
+  const moreBox = h('div', { class: 'cb-catalogue', role: 'group', 'aria-label': 'All experts' });
+  const moreLabel = h('span');
+  const moreDetails = h('details', { class: 'cb-disclosure cb-more' },
+    h('summary', null, icon('chevron'), moreLabel), h('div', { class: 'cb-disclosure-body' }, filterIn, moreBox));
+  const alsoSel = h('p', { class: 'cb-alsosel' });
   const catalogueNote = h('p', { class: 'cb-help' });
   const selCount = h('span', { class: 'cb-selcount' });
   const liveStatus = h('div', { class: 'cb-live-status' });
@@ -719,16 +742,23 @@ function boot(): void {
   const demoBox = h('div', { class: 'cb-demoopts' },
     h('label', { class: 'cb-check' }, failIn, ' Simulate one expert failing'));
 
+  const detailsHint = h('span', { class: 'cb-summary-hint' });
+  const projDetails = h('details', { class: 'cb-disclosure' },
+    h('summary', null, icon('chevron'), h('span', null, 'Project details'), detailsHint),
+    h('div', { class: 'cb-disclosure-body cb-fields' },
+      h('div', { class: 'cb-field' }, h('label', { for: 'cb-title', class: 'cb-label' }, 'Project name'), titleIn, counter(titleIn, LIMIT.title)),
+      h('div', { class: 'cb-field' }, h('label', { for: 'cb-context', class: 'cb-label' }, 'Context (optional)'), contextIn, counter(contextIn, LIMIT.context))));
   const modeLine = h('span');
-  const form = h('form', { class: 'cb-form', novalidate: true, 'aria-label': 'Project setup' },
-    h('div', { class: 'cb-field' }, h('label', { for: 'cb-title', class: 'cb-label' }, 'Project name'), titleIn, counter(titleIn, LIMIT.title)),
-    h('div', { class: 'cb-field' }, h('label', { for: 'cb-context', class: 'cb-label' }, 'Context (optional)'), contextIn, counter(contextIn, LIMIT.context)),
-    h('div', { class: 'cb-field is-wide' }, h('label', { for: 'cb-objective', class: 'cb-label' }, 'Objective — what should the experts decide or produce?'), objectiveIn, counter(objectiveIn, LIMIT.objective)),
-    h('div', { class: 'cb-field is-wide' },
+  const startNote = h('div', { class: 'cb-startnote' });
+  const form = h('form', { class: 'cb-form', novalidate: true, 'aria-label': 'Project brief' },
+    h('div', { class: 'cb-field cb-objective' }, h('label', { for: 'cb-objective', class: 'cb-label' }, 'Objective — what should the experts decide or produce?'), objectiveIn, counter(objectiveIn, LIMIT.objective)),
+    projDetails,
+    h('div', { class: 'cb-team', role: 'group', 'aria-labelledby': 'cb-cat-label' },
       h('div', { class: 'cb-label-row' }, h('span', { id: 'cb-cat-label', class: 'cb-label' }, 'Choose experts'), selCount),
-      filterIn, catalogueBox, catalogueNote),
-    h('div', { class: 'cb-mode-line' }, icon('settings'), modeLine,
-      h('button', { type: 'button', class: 'cb-ghost', onclick: () => setView('settings') }, 'Change in Settings')));
+      coreBox, alsoSel, moreDetails, catalogueNote),
+    h('div', { class: 'cb-form-foot' }, formMsg, startNote,
+      h('div', { class: 'cb-start-row' }, startBtn,
+        h('p', { class: 'cb-mode-line' }, modeLine, ' ', h('button', { type: 'button', class: 'cb-link', onclick: () => setView('settings') }, 'Change in Settings')))));
   form.addEventListener('submit', ev => { ev.preventDefault(); startRun(); });
 
   // ── 머리 (네이비 70px)
@@ -738,65 +768,73 @@ function boot(): void {
   const banner = h('p', { class: 'cb-banner' });
   const live = h('div', { class: 'cb-sr', 'aria-live': 'polite' });
 
-  // ── 현재 프로젝트 카드
-  const projTitle = h('h2', { id: 'cb-project-h', class: 'cb-project-title' });
+  // ── 프로젝트 카드: 편집 중에는 "Project brief" 입력, 실행이 시작되면 제목·목표 요약과 상태
+  const projTitle = h('h2', { id: 'cb-project-h', class: 'cb-project-title', tabindex: '-1' });
   const projObjective = h('p', { class: 'cb-project-obj' });
   const projStatus = h('span', { class: 'cb-pill' });
   const projMeta = h('div', { class: 'cb-project-meta' });
   const setupLabel = h('span');
-  const setupBtn = h('button', { type: 'button', class: 'cb-ghost', 'aria-expanded': 'false', 'aria-controls': 'cb-setup', 'data-fk': 'setup',
-    onclick: () => { S.setupOpen = !S.setupOpen; renderControls(); if (S.setupOpen && !active()) titleIn.focus(); } }, icon('edit'), setupLabel);
-  const dlJson = h('button', { type: 'button', class: 'cb-ghost', onclick: () => download('json') }, icon('download'), h('span', null, 'Export JSON'));
-  const dlMd = h('button', { type: 'button', class: 'cb-ghost', onclick: () => download('md') }, icon('download'), h('span', null, 'Export report'));
+  const setupBtn = h('button', { type: 'button', class: 'cb-secondary', 'aria-expanded': 'true', 'aria-controls': 'cb-setup', 'data-fk': 'setup',
+    onclick: () => { S.setupOpen = !S.setupOpen; renderControls(); if (S.setupOpen && !active()) objectiveIn.focus(); } }, icon('edit'), setupLabel);
+  const dlJson = h('button', { type: 'button', class: 'cb-ghost', 'data-fk': 'export-json', onclick: () => download('json') }, icon('download'), h('span', null, 'Export JSON'));
+  const dlMd = h('button', { type: 'button', class: 'cb-ghost', 'data-fk': 'export-md', onclick: () => download('md') }, icon('download'), h('span', null, 'Export report'));
+  const moreOpts = h('details', { class: 'cb-menu' }, h('summary', null, 'More options', icon('chevron')), h('div', { class: 'cb-menu-body' }, dlJson));
+  const projActions = h('div', { class: 'cb-project-actions' }, dlMd, moreOpts);
+  const projBody = h('div', { class: 'cb-project-body' }, projObjective, projMeta, projActions);
   const setup = h('div', { id: 'cb-setup', class: 'cb-setup' }, form);
   const projectCard = h('section', { class: 'cb-panel cb-project', 'aria-labelledby': 'cb-project-h' },
-    h('div', { class: 'cb-project-top' },
-      h('div', { class: 'cb-project-text' }, h('span', { class: 'cb-eyebrow' }, 'Current project'), projTitle, projObjective), projStatus),
-    projMeta,
-    h('div', { class: 'cb-project-actions' }, startBtn, cancelBtn, setupBtn, h('span', { class: 'cb-spacer' }), dlMd, dlJson),
-    formMsg, setup);
+    h('div', { class: 'cb-project-top' }, projTitle, projStatus, h('span', { class: 'cb-spacer' }), cancelBtn, setupBtn),
+    runMsg, projBody, setup);
 
-  // ── 전문가 작업공간 (실행 기록 + 파일)
+  // ── 전문가 작업공간 (프로젝트가 생긴 뒤에만): 전문가 목록 · 의견·파일 · 접히는 실행 기록
   const wsSub = h('p', { class: 'cb-ws-sub' });
   const fullLabel = h('span'), fullIcon = h('span');
-  const fullBtn = h('button', { type: 'button', class: 'cb-tool', 'data-fk': 'full', onclick: () => setFull(!S.full) }, fullIcon, fullLabel);
+  const fullBtn = h('button', { type: 'button', class: 'cb-tool', 'data-fk': 'full', 'aria-controls': 'cb-log', onclick: () => setFull(!S.full) }, fullIcon, fullLabel);
   const clearBtn = h('button', { type: 'button', class: 'cb-tool', 'data-fk': 'clear', onclick: () => clearView() }, icon('clear'), h('span', null, 'Clear view'));
   const restoreBtn = h('button', { type: 'button', class: 'cb-tool', 'data-fk': 'restore', onclick: () => restoreView() }, icon('history'), h('span', null, 'Restore history'));
+  const wsErrors = h('div', { class: 'cb-ws-errors', role: 'alert' });
   const roster = h('div', { class: 'cb-roster', role: 'group', 'aria-label': 'Experts in this project' });
   const streamState = h('span', { class: 'cb-stream-state' });
-  const streamLog = h('ol', { class: 'cb-stream-log', role: 'log', 'aria-label': 'Execution stream', tabindex: '0' });
+  const streamErr = h('span', { class: 'cb-stream-err' });
+  const streamLog = h('ol', { class: 'cb-stream-log', role: 'log', 'aria-label': 'Execution activity', tabindex: '0' });
   const streamNote = h('p', { class: 'cb-stream-note' });
   const inspector = h('div', { class: 'cb-inspector' });
+  const activityLog = h('details', { class: 'cb-disclosure cb-log', id: 'cb-log' },
+    h('summary', null, icon('chevron'), h('span', { class: 'cb-log-title' }, 'Execution activity'), h('span', { class: 'cb-stream-ro' }, 'read-only'), streamErr, streamState),
+    h('div', { class: 'cb-stream' }, h('div', { class: 'cb-stream-bar' }, icon('pulse'), h('span', null, 'Reported by each expert, oldest first'), h('span', { class: 'cb-spacer' }), clearBtn, restoreBtn),
+      streamLog, streamNote));
   const wsPanel = h('section', { class: 'cb-panel cb-workspace', 'aria-labelledby': 'cb-ws-h' },
     h('div', { class: 'cb-ws-head' },
       h('div', { class: 'cb-ws-title' }, h('h2', { id: 'cb-ws-h' }, 'Expert workspace'), wsSub),
-      h('div', { class: 'cb-ws-actions' }, fullBtn, clearBtn, restoreBtn)),
-    roster,
-    h('div', { class: 'cb-stream' },
-      h('div', { class: 'cb-stream-bar' }, icon('pulse'), h('span', { class: 'cb-stream-title' }, 'Execution stream'), h('span', { class: 'cb-stream-ro' }, 'read-only'), streamState),
-      streamLog, streamNote),
-    inspector);
+      h('div', { class: 'cb-ws-actions' }, fullBtn)),
+    wsErrors, roster, inspector, activityLog);
 
-  // ── 오른쪽: 진행 · 할 일 · 종합
+  // ── 오른쪽 (실행 뒤에만): 결과가 있으면 종합이 맨 위, 진행 · 지금 할 일
   const progressBody = h('div');
+  const stepsBody = h('ol', { class: 'cb-steps' });
+  const progressPanel = h('section', { class: 'cb-panel', 'aria-labelledby': 'cb-prog-h' }, h('div', { class: 'cb-panel-head' }, h('h2', { id: 'cb-prog-h' }, 'Progress')), progressBody,
+    h('details', { class: 'cb-disclosure cb-quiet' }, h('summary', null, icon('chevron'), h('span', null, 'Progress details')), stepsBody));
   const tipBody = h('div');
+  const tipPanel = h('section', { class: 'cb-tip', 'aria-labelledby': 'cb-tip-h' }, h('div', { class: 'cb-tip-head' }, icon('tip'), h('h2', { id: 'cb-tip-h' }, 'What to do now')), tipBody);
+  const synthTag = h('span', { class: 'cb-badge is-demo' }, 'Simulated');
   const synth = h('div', { class: 'cb-synth-body' });
-  const aside = h('aside', { class: 'cb-aside', 'aria-label': 'Progress and decision' },
-    h('section', { class: 'cb-panel', 'aria-labelledby': 'cb-prog-h' }, h('div', { class: 'cb-panel-head' }, h('h2', { id: 'cb-prog-h' }, 'Project progress')), progressBody),
-    h('section', { class: 'cb-tip', 'aria-labelledby': 'cb-tip-h' }, h('div', { class: 'cb-tip-head' }, icon('tip'), h('h2', { id: 'cb-tip-h' }, 'What to do now')), tipBody),
-    h('section', { class: 'cb-panel cb-synth', 'aria-labelledby': 'cb-synth-h' }, h('div', { class: 'cb-panel-head' }, icon('chart'), h('h2', { id: 'cb-synth-h' }, 'Synthesis & confidence')), synth));
+  const confBody = h('div');
+  const synthPanel = h('section', { class: 'cb-panel cb-synth', 'aria-labelledby': 'cb-synth-h' },
+    h('div', { class: 'cb-panel-head' }, icon('chart'), h('h2', { id: 'cb-synth-h' }, 'Synthesis'), synthTag), synth,
+    h('details', { class: 'cb-disclosure cb-quiet' }, h('summary', null, icon('chevron'), h('span', null, 'Confidence details')), confBody));
+  const aside = h('aside', { class: 'cb-aside', 'aria-label': 'Progress and decision' }, progressPanel, tipPanel, synthPanel);
 
   // ── Guide · Help · Settings (기존 안내·설정 내용을 실제로 보여 준다)
   const guideStep = (n: number, title: string, text: string) => h('li', null, h('span', { class: 'cb-guide-n' }, String(n)), h('h3', null, title), h('p', null, text));
   const goHome = h('button', { type: 'button', class: 'cb-primary', onclick: () => setView('home') }, icon('home'), h('span', null, 'Back to Home'));
   const guideView = h('section', { class: 'cb-view cb-page', id: 'cb-view-guide', 'aria-labelledby': 'cb-guide-h' },
-    h('div', { class: 'cb-page-head' }, h('h2', { id: 'cb-guide-h' }, 'Guide'), h('p', null, 'How a Cloudbite project runs, from brief to decision.')),
+    h('div', { class: 'cb-page-head' }, h('h2', { id: 'cb-guide-h' }, 'Guide'), h('p', null, 'How a Cloudbite project runs: brief, team, run, results.')),
     h('ol', { class: 'cb-guide-steps' },
-      guideStep(1, 'Write the shared brief', 'On Home, open Edit project. Give the project a name, the objective the experts should judge and optional context. Every expert receives the same brief.'),
-      guideStep(2, 'Choose up to five experts', 'Pick roles from the catalogue in Project setup. Each selected expert works in its own isolated workspace with its own persona and work order. Three to five experts are recommended.'),
-      guideStep(3, 'Run in demo or live mode', 'Browser demo simulates the run inside this tab. Live run asks the server to create one Daytona sandbox per expert, with inference configured on the server. Choose the mode in Settings.'),
-      guideStep(4, 'Watch the execution stream', 'The stream lists the activity each expert reports — status changes, tool steps, notes and files. It is read-only: you cannot type commands into it.'),
-      guideStep(5, 'Inspect files and personas', 'Select an expert to open available run artifacts, activity and its role definition. A work order may be shown as a labelled preview. Browser-demo files are simulated.'),
+      guideStep(1, 'Write the shared brief', 'On Home, start with the objective the experts should judge. Project details holds the project name and optional context. Every expert receives the same brief.'),
+      guideStep(2, 'Choose up to five experts', 'Pick roles under Choose experts; All experts lists the whole catalogue with search. Each selected expert works in its own isolated workspace with its own persona and work order. Three to five experts are recommended.'),
+      guideStep(3, 'Run in demo or live mode', 'Browser demo simulates the run inside this tab. Live run asks the server to create one Daytona sandbox per expert, with inference configured on the server. Choose the mode in Settings. Nothing runs until you select the run button.'),
+      guideStep(4, 'Read each expert\'s result', 'Select an expert to read its opinion, report and other files, activity and role definition. A work order may be shown as a labelled preview. Browser-demo files are simulated.'),
+      guideStep(5, 'Check the execution activity', 'Execution activity lists what each expert reported — status changes, tool steps, notes and files. It is read-only: you cannot type commands into it. Errors are also shown above the experts.'),
       guideStep(6, 'Review the synthesis', 'The right panel counts only completed, valid opinions. Failed, pending and cancelled experts are listed separately. Export a report or JSON when you are done.')),
     h('div', null, goHome));
 
@@ -804,15 +842,15 @@ function boot(): void {
   const helpView = h('section', { class: 'cb-view cb-page', id: 'cb-view-help', 'aria-labelledby': 'cb-help-h' },
     h('div', { class: 'cb-page-head' }, h('h2', { id: 'cb-help-h' }, 'Help'), h('p', null, 'What the console shows, and what it does not claim.')),
     h('div', { class: 'cb-faq' },
-      faq('Is the browser demo real?', 'No. The browser demo is a deterministic simulation that runs in this tab. It creates no Daytona sandbox and makes no Nosana inference call. Its results change with the wording of your brief, but they are scripted.'),
+      faq('Is the browser demo real?', 'No. The browser demo is a deterministic simulation that runs in this tab only after you start it. It creates no Daytona sandbox and makes no Nosana inference call. Its results change with the wording of your brief, but they are scripted.'),
       faq('What does confidence mean?', 'Each expert reports its own confidence from 0 to 100. It is a self-assessment, not calibrated accuracy or independent agreement. Failed, pending, cancelled and invalid results are excluded from the average.'),
       faq('Why is Live run disabled?', 'Live run needs the server to be configured and either an existing admin session token or an approved, unexpired visitor session with a project left. Visitors can request access at /cloudbite/request. If the server is not ready, Settings lists the missing setting names. API keys are never entered in this console.'),
       faq('How many experts can run?', 'Up to five experts per project, with up to three working at once. The catalogue currently has twelve roles. A hundred-expert room is a future concept, not a verified capacity.'),
-      faq('What do Clear view and Full screen do?', 'Clear view only empties the visible stream window; new activity keeps arriving and the project history and files stay intact. Restore history brings the hidden rows back. Full screen expands the workspace; press Escape or Exit full screen to return.'),
+      faq('What do Clear view and Full screen do?', 'Clear view, inside Execution activity, only empties the visible activity window; new activity keeps arriving and the project history and files stay intact. Restore history brings the hidden rows back. Full screen expands the workspace with its activity; press Escape or Exit full screen to return.'),
       faq('Where is my data kept?', 'Admin and operator tokens live only in this tab\'s memory. An approved visitor session is kept by the server in an HttpOnly cookie that this page cannot read. Exports are generated in the browser as downloads and state whether they come from a demo or a live run.')));
 
   const settingsView = h('section', { class: 'cb-view cb-page', id: 'cb-view-settings', 'aria-labelledby': 'cb-settings-h' },
-    h('div', { class: 'cb-page-head' }, h('h2', { id: 'cb-settings-h' }, 'Settings'), h('p', null, 'Execution mode and session. Project details and expert selection are under Home → Edit project.')),
+    h('div', { class: 'cb-page-head' }, h('h2', { id: 'cb-settings-h' }, 'Settings'), h('p', null, 'Execution mode and session. The project brief and expert selection are on Home.')),
     h('div', { class: 'cb-settings' },
       h('section', { class: 'cb-panel', 'aria-labelledby': 'cb-mode-h' }, h('h2', { id: 'cb-mode-h' }, 'Execution mode'),
         h('div', { class: 'cb-segs', role: 'group', 'aria-label': 'Execution mode' }, modeDemo, modeLive),
@@ -840,12 +878,12 @@ function boot(): void {
       h('nav', { class: 'cb-nav', 'aria-label': 'Primary' }, h('span', { class: 'cb-nav-label' }, 'Workspace'),
         h('ul', { class: 'cb-nav-list' }, ...navBtns.map(b => h('li', null, b))),
         h('div', { class: 'cb-nav-foot' }, h('span', null, 'Up to 5 experts per project · 3 run at once'), h('a', { href: '/cloudbite/request' }, 'Request visitor access'),
-          h('a', { href: '/cloudbite/access', target: '_blank', rel: 'noopener noreferrer' }, 'Access QR'), h('a', { href: '/lab' }, 'Legacy lab'))),
+          h('a', { href: '/cloudbite/access', target: '_blank', rel: 'noopener noreferrer' }, 'Access QR'))),
       h('main', { class: 'cb-main' }, banner, homeView, guideView, helpView, settingsView)));
 
   document.addEventListener('keydown', ev => { if ((ev as KeyboardEvent).key === 'Escape' && S.full) { ev.preventDefault(); setFull(false); } });
 
-  // ── 렌더 (동적 영역만 다시 그린다. 포커스는 data-fk 로 되돌린다)
+  // ── 렌더 (동적 영역만 다시 그린다. 포커스는 data-fk 로 되돌린다. 접기 상자는 다시 만들지 않아 열림 상태가 남는다)
   function keepFocus(fn: () => void): void {
     const a = document.activeElement as HTMLElement | null;
     const key = a && a.getAttribute ? a.getAttribute('data-fk') : null;
@@ -853,7 +891,13 @@ function boot(): void {
     if (key) { const n = root!.querySelector(`[data-fk="${CSS.escape(key)}"]`) as HTMLElement | null; if (n) n.focus(); }
   }
 
-  function renderAll(): void { keepFocus(() => { renderNav(); renderControls(); renderCatalogue(); renderWork(); renderProgress(); renderSynth(); }); }
+  function renderAll(): void {
+    keepFocus(() => {
+      // 오른쪽 패널은 프로젝트가 생긴 뒤에만: 그 전에는 편집 영역 한 열
+      homeView.className = `cb-view cb-home${S.run?.project ? ' has-rail' : ''}`;
+      renderNav(); renderControls(); renderCatalogue(); renderWork(); renderProgress(); renderSynth();
+    });
+  }
 
   function renderNav(): void {
     NAV.forEach(([v], i) => { navBtns[i].setAttribute('aria-current', v === S.view ? 'page' : 'false'); views[v].hidden = v !== S.view; });
@@ -873,11 +917,11 @@ function boot(): void {
       : v ? `Visitor session · ends ${hhmm(v.expiresAt)}` : 'No admin token';
     tokenLabel.textContent = operator ? 'Temporary Cloudbite operator token (Cloudbite runs only)' : 'Admin token';
     banner.textContent = runMode === 'demo'
-      ? 'Browser demo — simulated activity and files; no Daytona or Nosana calls.'
+      ? 'Browser demo — simulated activity and files; no Daytona or Nosana calls. Nothing runs until you start it.'
       : 'Live run — server-reported activity. Confidence is self-assessed.';
     banner.className = `cb-banner ${runMode === 'demo' ? 'is-demo' : 'is-live'}`;
-    modeLine.textContent = demo ? 'Next run: Browser demo (simulated in this tab).'
-      : `Next run: Live run (server sandboxes${viaVisitor() ? ', using your approved visitor session' : ''}).`;
+    modeLine.textContent = demo ? 'Next run: browser demo, simulated in this tab.'
+      : `Next run: live run on server sandboxes${viaVisitor() ? ', using your approved visitor session' : ''}.`;
     demoBox.hidden = !demo; liveBox.hidden = demo;
     const cfg = S.boot.data?.configuration;
     const liveKids: Kid[] = [];
@@ -894,61 +938,110 @@ function boot(): void {
     if (recheckable()) liveKids.push(checkAgain());
     liveStatus.replaceChildren(...liveKids.filter((k): k is Node => !!k));
     clearTokenBtn.hidden = !S.adminToken;
+
     const busy = active();
     for (const n of [titleIn, objectiveIn, contextIn, failIn, tokenIn, filterIn]) n.disabled = busy;
-    const liveBlocked = !demo && (S.boot.status !== 'ready' || !cfg?.liveReady || !liveCredential());
-    startBtn.disabled = busy || liveBlocked;
-    startLabel.textContent = S.run?.phase === 'starting' ? 'Starting…' : busy ? 'Running…' : S.run ? 'Run again' : 'Run experts';
-    cancelBtn.disabled = !busy || S.run?.phase === 'cancelling' || S.run?.phase === 'starting';
+    const liveReady = S.boot.status === 'ready' && !!cfg?.liveReady && liveCredential();
+    const none = S.selected.size === 0;
+    // 시작 버튼은 편집 영역 끝의 하나뿐이다. 전문가를 고르지 않았으면 이유를 보이고 잠근다
+    startBtn.disabled = busy || (!demo && !liveReady) || none;
+    startLabel.textContent = S.run?.phase === 'starting' ? 'Starting…' : busy ? 'Running…'
+      : `${S.run ? 'Run again' : 'Run experts'}${demo ? ' in demo mode' : ''}`;
+    cancelBtn.hidden = !busy;
+    cancelBtn.disabled = S.run?.phase === 'cancelling' || S.run?.phase === 'starting';
     cancelLabel.textContent = S.run?.phase === 'cancelling' ? 'Stopping…' : 'Stop';
-    if (S.formErrors.length) S.setupOpen = true;
+
+    // 편집 영역: 실행 전·검증 오류·만들기 실패 때는 열려 있다. 접기·펴기 버튼은 실행이 있을 때만
+    const p = S.run?.project;
+    if (!S.run || S.formErrors.length || (S.run.phase === 'error' && !p)) S.setupOpen = true;
     setup.hidden = !S.setupOpen;
+    setupBtn.hidden = !S.run;
     setupBtn.setAttribute('aria-expanded', String(S.setupOpen));
     setupLabel.textContent = S.setupOpen ? 'Hide project setup' : 'Edit project';
-    const msgs = [...S.formErrors];
-    if (S.run?.error) msgs.push(S.run.error);
-    formMsg.replaceChildren(...msgs.map(m => h('p', null, m)));
-    const p = S.run?.project;
-    dlJson.disabled = dlMd.disabled = !p;
-    selCount.textContent = `${S.selected.size} of max ${limits().max} selected`;
-    // 프로젝트 카드: 실행 중이면 서버·데모가 돌려준 브리프, 아니면 지금 입력한 브리프
-    projTitle.textContent = clip(p?.brief.title || titleIn.value.trim() || 'Untitled project', 120);
-    projObjective.textContent = p?.brief.objective || objectiveIn.value.trim() || 'Add an objective in Edit project.';
+    detailsHint.textContent = clip(titleIn.value.trim() || 'Name required', 60);
+
+    const formKids = S.formErrors.map(m => h('p', null, m));
+    if (S.run?.error && !p) formKids.push(h('p', null, S.run.error));
+    fill(formMsg, ...formKids);
+    const runKids: Kid[] = [];
+    if (S.run?.error && p) runKids.push(h('p', null, S.run.error));
+    if (S.run && p && S.run.phase === 'error' && S.run.pollErrors >= 4) runKids.push(h('button', { type: 'button', class: 'cb-ghost', onclick: () => {
+      const r = S.run;
+      if (!r?.project || r.phase !== 'error') return;
+      r.phase = 'running'; r.error = ''; r.pollErrors = 0; renderAll(); void poll(S.gen);
+    } }, 'Check status again'));
+    fill(runMsg, ...runKids);
+
+    // 시작 버튼 옆 안내: 이유가 있을 때만 (전문가 없음, 방문자 사용량, 실제 실행을 막는 이유)
+    const notes: Kid[] = [];
+    if (!busy) {
+      if (none) notes.push(h('p', { class: 'cb-need' }, 'Choose at least one expert to run.'));
+      if (!demo && v && !S.adminToken.trim()) notes.push(h('p', { class: 'cb-help' }, 'Visitor session: ', h('strong', null, `${visitorLeft()} of ${plural(v.maxProjects, 'project')} left`),
+        ` · up to ${plural(v.maxExperts, 'expert')} each · ends ${hhmm(v.expiresAt)}`));
+      if (!demo && S.boot.status !== 'loading' && !liveReady) notes.push(h('p', { class: 'cb-warn' },
+        problem || 'Live run is blocked until the server is ready and an admin token is entered or visitor access is approved.', ' ',
+        h('button', { type: 'button', class: 'cb-link', onclick: () => setView('settings') }, 'Open Settings')), recheckable() ? checkAgain() : null);
+    }
+    fill(startNote, ...notes);
+
+    selCount.textContent = `${S.selected.size} selected · up to ${limits().max}`;
+    // 접힌 카드는 실행한 프로젝트의 브리프를 보인다 (편집 중에는 같은 제목·목표를 되풀이하지 않는다)
+    projTitle.textContent = S.setupOpen ? 'Project brief' : clip(p?.brief.title || titleIn.value.trim() || 'Untitled project', 120);
+    projStatus.hidden = !S.run;
     const pst = p ? p.status : S.run?.phase === 'starting' ? 'running' : S.run?.phase === 'error' ? 'failed' : 'draft';
     projStatus.textContent = S.run?.phase === 'starting' ? 'Starting' : PROJECT_STATUS_LABEL[pst];
     projStatus.className = `cb-pill p-${pst}`;
+    projBody.hidden = S.setupOpen || !S.run;
+    projObjective.textContent = p?.brief.objective || objectiveIn.value.trim();
+    projActions.hidden = !p;
+    dlJson.disabled = dlMd.disabled = !p;
     const meta: Kid[] = [];
     if (p) {
       const done = p.experts.filter(e => TERMINAL_EXPERT.includes(e.status)).length;
       const valid = p.experts.filter(e => e.status === 'completed' && e.opinion).length;
       meta.push(h('span', null, h('strong', null, `${done} of ${plural(p.experts.length, 'expert')}`), ' finished'),
         h('span', null, h('strong', null, String(valid)), ' valid ', valid === 1 ? 'opinion' : 'opinions'));
-    } else meta.push(h('span', null, h('strong', null, plural(S.selected.size, 'expert')), ' selected'));
-    meta.push(h('span', null, 'Mode: ', h('strong', null, runMode === 'demo' ? 'Browser demo' : 'Live run')));
+    }
     if (v && !S.adminToken.trim()) meta.push(h('span', null, 'Visitor session: ', h('strong', null, `${visitorLeft()} of ${plural(v.maxProjects, 'project')} left`), ` · ends ${hhmm(v.expiresAt)}`));
     if (p && S.run?.mode === 'live') meta.push(h('span', null, 'Project ', h('code', null, clip(p.id, 24))));
     fill(projMeta, ...meta);
   }
 
+  /** 짧은 설명: 카탈로그 요약을 쓰고, 없으면 기계용 분야 이름(product.management)을 사람이 읽는 말로 바꾼다 */
+  function roleBlurb(e: ExpertDefinition): string { return e.summary.trim() || domainLabel(e.domain); }
+
   function renderCatalogue(): void {
     const list = catalogue();
+    const core = list.slice(0, CORE_ROLES), rest = list.slice(CORE_ROLES);
     const q = filterIn.value.trim().toLowerCase();
-    const shown = list.filter(e => !q || `${e.name} ${e.domain} ${e.summary}`.toLowerCase().includes(q)).slice(0, 120);
     const busy = active();
     const full = S.selected.size >= limits().max;
-    catalogueBox.replaceChildren(...shown.map(e => {
+    // prefix: 기본 역할(x) · 전체 목록(xa). 같은 역할이 두 번 보여도 선택 상태는 S.selected 하나다
+    const opt = (e: ExpertDefinition, prefix: string) => {
       const on = S.selected.has(e.id);
-      const cb = h('input', { type: 'checkbox', id: `cb-x-${e.id}`, 'data-fk': `x:${e.id}`, checked: on, disabled: busy || (!on && full) });
+      const id = `cb-${prefix}-${e.id}`;
+      const cb = h('input', { type: 'checkbox', id, 'data-fk': `${prefix}:${e.id}`, checked: on, disabled: busy || (!on && full) });
       cb.addEventListener('change', () => {
         if (cb.checked) S.selected.add(e.id); else S.selected.delete(e.id);
         S.formErrors = []; keepFocus(() => { renderCatalogue(); renderControls(); renderProgress(); });
       });
-      return h('label', { class: `cb-expert-opt${on ? ' is-on' : ''}`, for: `cb-x-${e.id}` }, cb,
-        h('span', { class: 'cb-opt-text' }, h('span', { class: 'cb-opt-name' }, e.name), h('span', { class: 'cb-opt-domain' }, e.domain)));
-    }));
-    if (!shown.length) catalogueBox.append(h('p', { class: 'cb-empty' }, list.length ? 'No roles match your search.' : S.mode === 'live' ? 'The server catalogue is empty, so a live run is not possible.' : 'No roles available.'));
+      return h('label', { class: `cb-expert-opt${on ? ' is-on' : ''}`, for: id }, cb,
+        h('span', { class: 'cb-opt-text' }, h('span', { class: 'cb-opt-name' }, e.name), h('span', { class: 'cb-opt-desc' }, roleBlurb(e))));
+    };
+    coreBox.replaceChildren(...core.map(e => opt(e, 'x')));
+    if (!list.length) coreBox.append(h('p', { class: 'cb-empty' }, S.mode === 'live' ? 'The server catalogue is empty, so a live run is not possible.' : 'No roles available.'));
+    moreDetails.hidden = rest.length === 0;
+    moreLabel.textContent = `All experts (${list.length})`;
+    const shown = q ? list.filter(e => `${e.name} ${e.domain} ${e.summary}`.toLowerCase().includes(q)) : rest;
+    moreBox.replaceChildren(...shown.slice(0, 120).map(e => opt(e, 'xa')));
+    if (!shown.length) moreBox.append(h('p', { class: 'cb-empty' }, 'No roles match your search.'));
+    // 접힌 전체 목록에서 고른 역할도 늘 보이게 요약한다
+    const coreIds = new Set(core.map(e => e.id));
+    const hiddenSel = [...S.selected].filter(id => !coreIds.has(id)).map(id => findDef(id)?.name ?? id);
+    alsoSel.textContent = hiddenSel.length ? `Also selected from All experts: ${hiddenSel.join(', ')}` : '';
+    alsoSel.hidden = !hiddenSel.length;
     catalogueNote.textContent = catalogueIsBuiltin() ? 'The server catalogue is empty or unreachable, so the demo uses 6 built-in demo roles.'
-      : `${list.length}-role catalogue${list.length > shown.length ? ` · ${shown.length} shown` : ''} · 3–5 experts recommended.`;
+      : full ? `Maximum of ${plural(limits().max, 'expert')} reached. Clear one to choose another.` : '3–5 experts are recommended.';
   }
 
   function statusDot(s: ExpertStatus): HTMLElement { return h('span', { class: `cb-dot s-${s}`, 'aria-hidden': 'true' }); }
@@ -963,27 +1056,24 @@ function boot(): void {
   function renderWork(): void {
     const p = S.run?.project;
     restoreBtn.disabled = S.hiddenRows.size === 0;
+    // 프로젝트가 생기기 전에는 빈 작업공간·기록을 보이지 않는다
+    wsPanel.hidden = !S.run || !p;
     if (!S.run || !p) {
-      roster.replaceChildren();
-      wsSub.textContent = !S.run ? 'Experts appear here once the project starts.' : S.run.phase === 'error' ? 'The project did not start.' : 'Creating expert workspaces…';
-      streamState.textContent = S.run?.phase === 'starting' ? 'starting…' : 'idle';
-      const msg = S.run?.phase === 'error' ? S.run.error : S.run ? 'The server is preparing expert workspaces.' : 'The execution stream shows each expert\'s reported activity once a project starts.';
-      streamLog.replaceChildren(h('li', { class: S.run?.phase === 'error' ? 'cb-stream-empty k-error' : 'cb-stream-empty' }, msg));
-      streamNote.textContent = '';
-      clearBtn.disabled = true;
-      inspector.replaceChildren();
+      if (S.full) paintFull(false);
+      roster.replaceChildren(); inspector.replaceChildren(); wsErrors.replaceChildren(); streamLog.replaceChildren();
       return;
     }
     if (!S.focusExpert || !p.experts.some(e => e.id === S.focusExpert)) S.focusExpert = p.experts[0]?.id ?? '';
+    // 실패는 접힌 기록 안에 숨기지 않고 전문가 목록 위에 보인다
+    const failed = p.experts.filter(e => e.status === 'failed' || e.invalidOpinion);
+    fill(wsErrors, ...failed.map(e => h('p', { class: 'cb-warn' }, h('strong', null, e.name), ` — ${e.error ? `failed: ${e.error}` : e.invalidOpinion ? 'result had an invalid format and is excluded' : 'failed'}`)));
     roster.replaceChildren(...p.experts.map(e => h('button', { type: 'button', class: `cb-card s-${e.status}${e.id === S.focusExpert ? ' is-focus' : ''}`, 'data-fk': `card:${e.id}`,
       'aria-pressed': String(e.id === S.focusExpert), onclick: () => { if (S.focusExpert !== e.id) S.artifactPicked = false; S.focusExpert = e.id; keepFocus(renderWork); } },
       h('span', { class: 'cb-card-head' }, statusDot(e.status), h('span', { class: 'cb-card-name' }, e.name)),
       h('span', { class: 'cb-card-foot' }, h('span', { class: 'cb-card-status' }, STATUS_LABEL[e.status]),
         e.opinion ? h('span', { class: `cb-chip d-${e.opinion.direction}` }, `${DIRECTION_LABEL[e.opinion.direction]} ${e.opinion.confidence}%`) : null,
         e.invalidOpinion ? h('span', { class: 'cb-chip d-invalid' }, 'Invalid format') : null))));
-    const fe = p.experts.find(e => e.id === S.focusExpert);
-    const def = fe ? findDef(fe.expertId) : undefined;
-    wsSub.textContent = fe ? [fe.name, def?.domain, fe.sandboxId ? (S.run.mode === 'demo' ? `demo workspace ${fe.sandboxId}` : `sandbox ${fe.sandboxId}`) : 'workspace pending', STATUS_LABEL[fe.status]].filter(Boolean).join(' · ') : '';
+    wsSub.textContent = 'Select an expert to read its opinion, report and files.';
 
     // 실행 기록: 모든 전문가가 보고한 활동을 시간순으로. 숨긴 줄은 화면에서만 뺀다
     const rows = streamRows(p);
@@ -992,6 +1082,9 @@ function boot(): void {
     const working = p.experts.filter(e => !TERMINAL_EXPERT.includes(e.status) && e.status !== 'queued').length;
     const phase = S.run.phase === 'cancelling' ? 'stopping' : PROJECT_STATUS_LABEL[p.status].toLowerCase();
     streamState.textContent = `${S.run.mode === 'demo' ? 'simulated · ' : ''}${phase} · ${working} active · ${plural(rows.length, 'event')}`;
+    const errs = rows.filter(r => r.kind === 'error').length;
+    streamErr.textContent = errs ? plural(errs, 'error') : '';
+    streamErr.hidden = !errs;
     const atBottom = streamLog.scrollHeight - streamLog.scrollTop - streamLog.clientHeight < 48;
     if (!shown.length) {
       streamLog.replaceChildren(h('li', { class: 'cb-stream-empty' }, S.hiddenRows.size
@@ -1032,7 +1125,6 @@ function boot(): void {
         h('li', { class: `k-${a.kind}` }, h('span', { class: 'cb-act-kind' }, KIND_LABEL[a.kind]),
           h('span', { class: 'cb-act-msg' }, a.message), h('time', { class: 'cb-act-at' }, clock(a.at)))))
         : h('p', { class: 'cb-empty' }, 'No activity yet.');
-      if (e.error) body = h('div', null, h('p', { class: 'cb-warn' }, `Error: ${e.error}`), body);
     } else if (S.tab === 'artifacts') {
       body = artifactView(p, e);
     } else if (S.tab === 'workorder') {
@@ -1043,8 +1135,11 @@ function boot(): void {
       body = def ? h('div', null, h('pre', { class: 'cb-file' }, personaText(def))) : h('p', { class: 'cb-empty' }, 'This role was not found in the catalogue.');
     }
     const op = e.opinion;
+    const where = e.sandboxId ? (S.run?.mode === 'demo' ? `demo workspace ${e.sandboxId}` : `sandbox ${e.sandboxId}`) : 'workspace pending';
     fill(inspector,
-      h('div', { class: 'cb-detail-head' }, statusDot(e.status), h('h3', null, e.name), h('span', { class: 'cb-help' }, def?.summary ?? '')),
+      h('div', { class: 'cb-detail-head' }, statusDot(e.status), h('h3', null, e.name), h('span', { class: 'cb-help' }, `${STATUS_LABEL[e.status]} · ${where}`)),
+      def?.summary ? h('p', { class: 'cb-help cb-detail-sum' }, def.summary) : null,
+      e.error ? h('p', { class: 'cb-warn' }, `Error: ${e.error}`) : null,
       op ? h('div', { class: `cb-opinion d-${op.direction}` }, h('span', { class: `cb-chip d-${op.direction}` }, `${DIRECTION_LABEL[op.direction]} · self-assessed ${op.confidence}%`),
         h('p', null, op.summary)) : null,
       tablist, h('div', { id: 'cb-tabpanel', role: 'tabpanel', 'aria-labelledby': `cb-tab-${S.tab}`, class: 'cb-tabpanel' }, body));
@@ -1065,67 +1160,51 @@ function boot(): void {
       if (!c) { fetchArtifact(p.id, e.expertId, a.path, key); view = h('p', { class: 'cb-help' }, 'Loading file…'); }
       else if (c.state === 'loading') view = h('p', { class: 'cb-help' }, 'Loading file…');
       else if (c.state === 'error') view = h('div', null, h('p', { class: 'cb-warn' }, c.text),
-        h('button', { type: 'button', class: 'cb-ghost', onclick: () => { S.artifactCache.delete(key); renderWork(); } }, 'Load again'));
+        h('button', { type: 'button', class: 'cb-ghost', 'data-fk': 'file-reload', onclick: () => { S.artifactCache.delete(key); keepFocus(renderWork); } }, 'Load again'));
       else view = h('pre', { class: 'cb-file', tabindex: '0', 'aria-label': `${a.path} contents` }, c.text || '(empty file)');
     } else view = h('p', { class: 'cb-empty' }, 'This file was reported without its contents.');
     return h('div', { class: 'cb-artifacts' }, list, view);
   }
 
   function renderProgress(): void {
-    const p = S.run?.project;
-    const run = S.run;
+    const run = S.run, p = run?.project;
+    aside.hidden = !run || !p;
+    if (!run || !p) { progressBody.replaceChildren(); stepsBody.replaceChildren(); tipBody.replaceChildren(); return; }
     // 진행 단계는 관찰된 상태에서만 만든다 (클릭으로 완료되는 단계 없음)
     type StepState = 'done' | 'active' | 'pending' | 'blocked';
     const step = (label: string, state: StepState, n = '') => h('li', { class: `cb-step is-${state}` },
       h('span', { class: 'cb-step-mark', 'aria-hidden': 'true' }, state === 'done' ? icon('check') : null),
       h('span', null, label, h('span', { class: 'cb-sr' }, ` — ${state}`)), h('span', { class: 'cb-step-n' }, n));
-    if (!run) {
-      fill(progressBody, h('div', { class: 'cb-progress-num' }, h('span', { class: 'cb-big' }, String(S.selected.size)), h('span', { class: 'cb-help' }, `${S.selected.size === 1 ? 'expert' : 'experts'} selected · not started`)),
-        h('ol', { class: 'cb-steps' }, step('Brief submitted', 'pending'), step('Workspaces prepared', 'pending'), step('Experts working', 'pending'), step('Opinions submitted', 'pending'), step('Synthesis ready', 'pending')));
-    } else if (!p) {
-      fill(progressBody, h('div', { class: 'cb-progress-num' }, h('span', { class: 'cb-big' }, '0'), h('span', { class: 'cb-help' }, run.phase === 'error' ? 'project not created' : 'creating project…')),
-        h('ol', { class: 'cb-steps' }, step('Brief submitted', run.phase === 'error' ? 'blocked' : 'active'), step('Workspaces prepared', 'pending'), step('Experts working', 'pending'), step('Opinions submitted', 'pending'), step('Synthesis ready', 'pending')));
-    } else {
-      const n = p.experts.length;
-      const started = p.experts.filter(e => e.status !== 'queued').length;
-      const working = p.experts.filter(e => e.status === 'running' || e.status === 'provisioning').length;
-      const done = p.experts.filter(e => TERMINAL_EXPERT.includes(e.status)).length;
-      const a = aggregate(p);
-      const terminal = TERMINAL_PROJECT.includes(p.status);
-      const stopped = p.status === 'cancelled' || p.status === 'failed';
-      const bar = h('div', { class: 'cb-bar', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': n, 'aria-valuenow': done, 'aria-label': 'Experts finished' },
-        ...p.experts.map(e => h('span', { class: `cb-bar-seg s-${e.status}`, title: `${e.name}: ${STATUS_LABEL[e.status]}` })));
-      fill(progressBody,
-        h('div', { class: 'cb-progress-num' }, h('span', { class: 'cb-big' }, `${done} / ${n}`), h('span', { class: 'cb-help' }, `experts finished · ${PROJECT_STATUS_LABEL[p.status].toLowerCase()}`)),
-        bar,
-        h('ol', { class: 'cb-steps' },
-          step('Brief submitted', 'done'),
-          step('Workspaces prepared', started === n ? 'done' : stopped ? 'blocked' : 'active', `${started}/${n}`),
-          step('Experts working', done === n ? 'done' : stopped ? 'blocked' : working ? 'active' : 'pending', working ? `${working} active` : ''),
-          step('Opinions submitted', a.valid + a.failed + a.cancelled + a.invalid === n ? (a.valid ? 'done' : 'blocked') : a.valid ? 'active' : stopped ? 'blocked' : 'pending', `${a.valid} valid`),
-          step('Synthesis ready', terminal ? (a.valid ? 'done' : 'blocked') : a.valid ? 'active' : 'pending', a.failed ? `${a.failed} failed` : '')));
-    }
+    const n = p.experts.length;
+    const started = p.experts.filter(e => e.status !== 'queued').length;
+    const working = p.experts.filter(e => e.status === 'running' || e.status === 'provisioning').length;
+    const done = p.experts.filter(e => TERMINAL_EXPERT.includes(e.status)).length;
+    const a = aggregate(p);
+    const terminal = TERMINAL_PROJECT.includes(p.status);
+    const stopped = p.status === 'cancelled' || p.status === 'failed';
+    const bar = h('div', { class: 'cb-bar', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': n, 'aria-valuenow': done, 'aria-label': 'Experts finished' },
+      ...p.experts.map(e => h('span', { class: `cb-bar-seg s-${e.status}`, title: `${e.name}: ${STATUS_LABEL[e.status]}` })));
+    fill(progressBody,
+      h('p', { class: 'cb-progress-num' }, h('strong', null, `${done} of ${n}`), ` experts finished · ${PROJECT_STATUS_LABEL[p.status].toLowerCase()}${working ? ` · ${working} working` : ''}`),
+      bar);
+    fill(stepsBody,
+      step('Brief submitted', 'done'),
+      step('Workspaces prepared', started === n ? 'done' : stopped ? 'blocked' : 'active', `${started}/${n}`),
+      step('Experts working', done === n ? 'done' : stopped ? 'blocked' : working ? 'active' : 'pending', working ? `${working} active` : ''),
+      step('Opinions submitted', a.valid + a.failed + a.cancelled + a.invalid === n ? (a.valid ? 'done' : 'blocked') : a.valid ? 'active' : stopped ? 'blocked' : 'pending', `${a.valid} valid`),
+      step('Synthesis ready', terminal ? (a.valid ? 'done' : 'blocked') : a.valid ? 'active' : 'pending', a.failed ? `${a.failed} failed` : ''));
     // 지금 할 일
-    const cfg = S.boot.data?.configuration;
     const tips: Kid[] = [];
-    const go = (label: string, v: View) => h('button', { type: 'button', class: 'cb-ghost', onclick: () => setView(v) }, label);
-    if (!run) {
-      tips.push(h('p', null, 'Check the brief with Edit project, choose up to five experts, then select Run experts.'));
-      if (S.mode === 'live' && viaVisitor() && visitorCanRun()) tips.push(h('p', null, 'Your visitor session is approved. Nothing runs until you choose experts and select Run experts.'));
-      if (S.mode === 'live' && (!cfg?.liveReady || !liveCredential())) tips.push(h('p', null, accessProblem() || 'Live run is blocked until the server is ready and an admin token is entered or visitor access is approved.'), go('Open Settings', 'settings'));
-    } else if (run.phase === 'starting') tips.push(h('p', null, run.mode === 'demo' ? 'Starting the browser simulation…' : 'Asking the server to create one sandbox per expert…'));
-    else if (run.phase === 'error' && !p) tips.push(h('p', null, 'The project could not start. Read the error on the project card, fix it and run again. Nothing was switched to demo mode.'));
-    else if (p && active()) {
-      tips.push(h('p', null, run.mode === 'demo' ? 'The simulated experts are working. Select an expert above the stream to open its files.'
+    if (active()) {
+      tips.push(h('p', null, run.mode === 'demo' ? 'The simulated experts are working. Select an expert to open its files.'
         : 'Experts are working in separate sandboxes. Select an expert to read its files; the synthesis updates as valid opinions arrive.'));
       if (run.error) tips.push(h('p', null, run.error));
-    } else if (p) {
-      const a = aggregate(p);
-      tips.push(h('p', null, a.valid ? 'Results are in. Read the synthesis below, check any dissent, then export a report.'
-        : 'No valid opinions to synthesise. Check the errors in the execution stream and run again.'));
+    } else {
+      tips.push(h('p', null, a.valid ? 'Results are in. Read the synthesis, check any dissent, then export a report.'
+        : 'No valid opinions to synthesise. Check the errors shown above the experts, then edit the project and run again.'));
       if (a.failed || a.invalid) tips.push(h('p', null, `${plural(a.failed + a.invalid, 'expert')} did not produce a valid opinion and ${a.failed + a.invalid === 1 ? 'is' : 'are'} excluded.`));
       if (run.viaVisitor && !S.adminToken.trim() && S.boot.status === 'ready') {
-        tips.push(h('p', null, visitorCanRun() ? 'Your visitor session can run again. Nothing starts until you select Run again.' : accessProblem() || 'Your visitor session cannot start another run.'));
+        tips.push(h('p', null, visitorCanRun() ? 'Your visitor session can run again. Nothing starts until you open Edit project and select Run again.' : accessProblem() || 'Your visitor session cannot start another run.'));
         if (recheckable()) tips.push(checkAgain());
       }
     }
@@ -1134,34 +1213,41 @@ function boot(): void {
 
   function renderSynth(): void {
     const p = S.run?.project;
-    if (!p) { synth.replaceChildren(h('p', { class: 'cb-empty' }, S.run ? 'Completed opinions are synthesised once the project exists.' : 'No project has run yet.')); return; }
+    if (!p) { synthPanel.hidden = true; synth.replaceChildren(); confBody.replaceChildren(); return; }
     const a = aggregate(p);
+    const terminal = TERMINAL_PROJECT.includes(p.status);
+    // 빈 종합 카드는 보이지 않는다. 유효한 의견이 생기면 종합을 맨 위로 올린다 (노드를 옮길 뿐 다시 만들지 않는다)
+    synthPanel.hidden = !a.valid && !terminal;
+    const order = a.valid ? [synthPanel, progressPanel, tipPanel] : [progressPanel, tipPanel, synthPanel];
+    if (order.some((n, i) => aside.children[i] !== n)) aside.append(...order);
+    synthTag.hidden = S.run?.mode !== 'demo';
     const total = a.valid || 1;
     const segs = DIRECTIONS.filter(d => a.counts[d] > 0).map(d => {
       const s = h('span', { class: `cb-dist-seg d-${d}` }, `${Math.round(a.counts[d] / total * 100)}%`);
       s.style.flexGrow = String(a.counts[d]);
       return s;
     });
-    const maxB = Math.max(1, ...a.buckets);
     fill(synth,
+      h('div', { class: 'cb-recommend' }, h('h3', null, 'Suggested decision'), h('p', { class: 'cb-headline' }, a.headline)),
       h('div', { class: 'cb-tally' }, h('span', { class: 'cb-big' }, String(a.valid)), h('span', null, ` / ${a.selected} valid opinions`)),
       h('p', { class: 'cb-counts' }, `Failed ${a.failed} · queued/working ${a.pending} · cancelled ${a.cancelled}${a.invalid ? ` · invalid format ${a.invalid}` : ''} — only completed, valid opinions are counted.`),
       a.valid ? h('div', { class: 'cb-dist', role: 'img', 'aria-label': DIRECTIONS.map(d => `${DIRECTION_LABEL[d]} ${a.counts[d]}`).join(', ') }, ...segs) : null,
-      h('ul', { class: 'cb-legend' }, ...DIRECTIONS.map(d => h('li', null, h('span', { class: `cb-sw d-${d}`, 'aria-hidden': 'true' }), `${DIRECTION_LABEL[d]} `, h('strong', null, String(a.counts[d]))))),
-      h('div', { class: 'cb-recommend' }, h('h3', null, 'Suggested decision'), h('p', { class: 'cb-headline' }, a.headline),
-        a.actions.length ? h('ol', { class: 'cb-actions-list' }, ...a.actions.map(x => h('li', null, h('span', null, x.text),
-          h('span', { class: 'cb-help' }, `${x.names.join(', ')}${x.count > 1 ? ` · shared by ${x.count}` : ''}`)))) : null),
+      a.valid ? h('ul', { class: 'cb-legend' }, ...DIRECTIONS.map(d => h('li', null, h('span', { class: `cb-sw d-${d}`, 'aria-hidden': 'true' }), `${DIRECTION_LABEL[d]} `, h('strong', null, String(a.counts[d]))))) : null,
+      a.actions.length ? h('div', { class: 'cb-next' }, h('h3', null, 'Suggested next actions'), h('ol', { class: 'cb-actions-list' }, ...a.actions.map(x => h('li', null, h('span', null, x.text),
+        h('span', { class: 'cb-help' }, `${x.names.join(', ')}${x.count > 1 ? ` · shared by ${x.count}` : ''}`))))) : null,
       a.disagreement ? h('div', { class: 'cb-dispute' }, h('h3', null, 'Dissent'),
         ...a.supportVoices.slice(0, 1).map(v => h('blockquote', { class: 'd-support' }, h('span', { class: 'cb-chip d-support' }, `Support · ${v.name} ${v.confidence}%`), h('p', null, v.summary))),
         ...a.concernVoices.slice(0, 1).map(v => h('blockquote', { class: 'd-concern' }, h('span', { class: 'cb-chip d-concern' }, `Concern · ${v.name} ${v.confidence}%`), h('p', null, v.summary))))
         : a.valid > 1 ? h('p', { class: 'cb-help' }, 'No point has drawn both support and concern yet.') : null,
-      h('div', { class: 'cb-conf' }, h('h3', null, 'Self-assessed confidence'),
-        h('p', { class: 'cb-help' }, a.meanConfidence === null ? 'No completed, valid opinions yet.' : `Mean ${a.meanConfidence}% · each role's self-assessment, not calibrated accuracy.`),
-        h('div', { class: 'cb-hist', role: 'img', 'aria-label': `Confidence distribution ${a.buckets.map((n, i) => `${i * 20}–${i * 20 + 20}%: ${n}`).join(', ')}` },
-          ...a.buckets.map((n, i) => { const col = h('span', { class: 'cb-hist-col' }, h('span', { class: 'cb-hist-n' }, n ? String(n) : ''));
-            const bar = h('span', { class: 'cb-hist-bar' }); bar.style.height = `${Math.round(n / maxB * 100)}%`; col.append(bar, h('span', { class: 'cb-hist-x' }, i === 4 ? '80–100' : `${i * 20}–${i * 20 + 19}`)); return col; }))));
+      h('p', { class: 'cb-help cb-conf-line' }, a.meanConfidence === null ? 'No completed, valid opinions yet.' : `Mean self-assessed confidence ${a.meanConfidence}% — not calibrated accuracy.`));
+    const maxB = Math.max(1, ...a.buckets);
+    fill(confBody,
+      h('p', { class: 'cb-help' }, 'Each role reports its own confidence from 0 to 100. It is a self-assessment, not calibrated accuracy or independent agreement. Failed, pending, cancelled and invalid results are excluded.'),
+      h('div', { class: 'cb-hist', role: 'img', 'aria-label': `Confidence distribution ${a.buckets.map((n, i) => `${i * 20}–${i * 20 + 20}%: ${n}`).join(', ')}` },
+        ...a.buckets.map((n, i) => { const col = h('span', { class: 'cb-hist-col' }, h('span', { class: 'cb-hist-n' }, n ? String(n) : ''));
+          const bar = h('span', { class: 'cb-hist-bar' }); bar.style.height = `${Math.round(n / maxB * 100)}%`; col.append(bar, h('span', { class: 'cb-hist-x' }, i === 4 ? '80–100' : `${i * 20}–${i * 20 + 19}`)); return col; })));
     const phrase = `${PROJECT_STATUS_LABEL[p.status]}: ${plural(a.valid, 'valid opinion')}, ${a.failed} failed`;
-    if (TERMINAL_PROJECT.includes(p.status) && phrase !== lastAnnounce) { lastAnnounce = phrase; live.textContent = phrase; }
+    if (terminal && phrase !== lastAnnounce) { lastAnnounce = phrase; live.textContent = phrase; }
   }
 
   // ── 동작
@@ -1172,7 +1258,11 @@ function boot(): void {
   }
 
   function setFull(on: boolean): void { paintFull(on); fullBtn.focus(); }
+  /** 전체 화면은 실행 기록을 펼쳐 보이고, 끝나면 사용자가 두었던 열림 상태로 되돌린다 */
+  let logWasOpen = false;
   function paintFull(on: boolean): void {
+    if (on && !S.full) { logWasOpen = activityLog.open; activityLog.open = true; }
+    else if (!on && S.full) activityLog.open = logWasOpen;
     S.full = on;
     wsPanel.className = `cb-panel cb-workspace${on ? ' is-full' : ''}`;
     root!.className = `cb-root${on ? ' is-fullscreen' : ''}`;
@@ -1197,7 +1287,9 @@ function boot(): void {
 
   function setMode(m: Mode): void {
     if (active() || S.mode === m) return;
-    S.mode = m; S.formErrors = [];
+    S.mode = m; S.formErrors = []; S.modePicked = true;
+    // 방문자의 실제 실행에는 데모 기본 선택을 넘기지 않는다 (숨은 유료 선택 없음)
+    if (m === 'live' && viaVisitor()) S.selected.clear();
     const ids = new Set(catalogue().map(e => e.id));
     for (const id of [...S.selected]) if (!ids.has(id)) S.selected.delete(id);
     if (!S.selected.size && m === 'demo') defaultSelection();
@@ -1226,8 +1318,8 @@ function boot(): void {
     });
   }
 
-  /** auto = 첫 화면이 스스로 시작한 데모 (visitorIntro 가 이것만 멈출 수 있다) */
-  function startRun(auto = false): void {
+  /** 실행은 사용자가 시작 버튼을 눌렀을 때만 시작한다 (첫 화면 자동 데모 없음) */
+  function startRun(): void {
     if (active()) return;
     const f: FormInput = { title: titleIn.value.trim(), objective: objectiveIn.value.trim(), context: contextIn.value.trim(), expertIds: [...S.selected] };
     S.formErrors = validateForm(f, limits());
@@ -1237,15 +1329,24 @@ function boot(): void {
         if (isOperatorToken(S.adminToken) && !OPERATOR_TOKEN.test(S.adminToken.trim())) S.formErrors.push('The temporary Cloudbite operator token is malformed. Clear it and use a new link.');
       } else if (!visitorCanRun()) S.formErrors.push(accessProblem() || 'Enter the admin token in Settings, or request visitor access at /cloudbite/request.');
     }
-    if (S.formErrors.length) { renderControls(); return; }
+    if (S.formErrors.length) {
+      // 접힌 Project details 안의 입력이 문제면 펼쳐서 고칠 곳을 보인다
+      if (S.formErrors.some(m => /project name|context/i.test(m))) projDetails.open = true;
+      renderControls(); return;
+    }
     clearTimers();
     const gen = ++S.gen;
     const brief: ProjectBrief = { ...f, mode: S.mode, requestId: crypto.randomUUID() };
     S.artifactCache.clear(); S.hiddenRows.clear(); S.focusExpert = ''; S.artifactPath = ''; S.artifactPicked = false; lastAnnounce = '';
     S.run = { mode: S.mode, phase: 'starting', project: null, accessToken: '', error: '', startedAt: Date.now(), pollErrors: 0, viaVisitor: viaVisitor() };
-    S.autoDemoGen = auto && S.mode === 'demo' ? gen : 0;
-    if (S.mode === 'demo') startDemo(gen, brief); else void startLive(gen, brief);
+    if (S.mode === 'demo') { startDemo(gen, brief); S.setupOpen = false; } else void startLive(gen, brief);
     renderAll();
+    settleFocus();
+  }
+
+  /** 편집 영역이 접혀 시작 버튼이 사라졌으면 포커스를 프로젝트 제목으로 옮긴다 */
+  function settleFocus(): void {
+    if (!S.setupOpen && document.activeElement === startBtn) projTitle.focus();
   }
 
   function startDemo(gen: number, brief: ProjectBrief): void {
@@ -1306,11 +1407,12 @@ function boot(): void {
     const project = isObj(body) ? normalizeProject(body.project) : null;
     const token = isObj(body) ? str(body.accessToken, 2000) : '';
     if (!project || !token) { S.run!.phase = 'error'; S.run!.error = 'The server response has an invalid format.'; renderAll(); return; }
-    S.run!.project = project; S.run!.accessToken = token;
+    S.run!.project = project; S.run!.accessToken = token; S.setupOpen = false; // 실제로 시작됐으니 편집 영역을 접는다
     if (v) v.usedProjects = Math.min(v.maxProjects, v.usedProjects + 1); // 서버가 센 사용량을 화면에도 반영한다
     S.run!.phase = TERMINAL_PROJECT.includes(project.status) ? 'done' : 'running';
     if (S.run!.phase === 'running') schedulePoll(gen, 1200);
     renderAll();
+    settleFocus();
     if (S.run!.phase === 'done' && v) refreshAccess(true);
   }
 
@@ -1351,17 +1453,10 @@ function boot(): void {
   function pollFailed(gen: number, msg: string): void {
     const run = S.run!;
     run.pollErrors++;
-    if (run.pollErrors >= 4) { run.phase = 'error'; run.error = `${msg} Stopped checking the status.`; renderAll(); appendRetry(gen); return; }
+    if (run.pollErrors >= 4) { run.phase = 'error'; run.error = `${msg} Stopped checking the status.`; renderAll(); return; } // Check status again 은 renderControls 가 그린다
     run.error = `${msg} Checking again… (${run.pollErrors}/3)`;
     renderControls(); renderProgress();
     schedulePoll(gen, 1500 * 2 ** run.pollErrors);
-  }
-
-  function appendRetry(gen: number): void {
-    formMsg.append(h('button', { type: 'button', class: 'cb-ghost', onclick: () => {
-      if (gen !== S.gen || !S.run?.project) return;
-      S.run.phase = 'running'; S.run.error = ''; S.run.pollErrors = 0; renderAll(); void poll(gen);
-    } }, 'Check status again'));
   }
 
   async function cancelRun(): Promise<void> {
@@ -1401,9 +1496,18 @@ function boot(): void {
     try {
       const res = await fetch(`/api/cloudbite/projects/${encodeURIComponent(projectId)}/artifact?expert=${encodeURIComponent(expertId)}&path=${encodeURIComponent(path)}`,
         { credentials: 'same-origin', cache: 'no-store', headers: { authorization: `Bearer ${token}` } });
-      const text = res.ok ? clip(await res.text(), 200_000) : await errorText(res);
-      if (gen !== S.gen) return;
-      S.artifactCache.set(key, { state: res.ok ? 'ok' : 'error', text });
+      if (!res.ok) {
+        const msg = await errorText(res);
+        if (gen !== S.gen) return;
+        S.artifactCache.set(key, { state: 'error', text: msg });
+      } else {
+        // 서버는 {path, label, bytes, content} JSON 봉투를 돌려준다. 봉투를 글자로 보이지 않고 내용만 꺼낸다
+        let body: unknown;
+        try { body = await res.json(); } catch { body = undefined; }
+        if (gen !== S.gen) return;
+        const content = artifactContent(body, path);
+        S.artifactCache.set(key, content === null ? { state: 'error', text: 'The server returned this file in an unexpected format, so it is not shown.' } : { state: 'ok', text: content });
+      }
     } catch {
       if (gen !== S.gen) return;
       S.artifactCache.set(key, { state: 'error', text: 'Could not load the file.' });
@@ -1443,35 +1547,28 @@ function boot(): void {
     renderAll();
   }
 
-  /** 승인된 방문자를 처음 알아챘을 때 한 번: 자동으로 시작된 데모만 멈추고 실제 실행·프로젝트 설정을 연다.
-   *  역할은 방문자가 직접 고르고, 유료 실행·데모는 자동으로 시작하지 않는다. 사용자가 직접 시작한 실행은 건드리지 않는다 */
+  /** 승인된 방문자를 처음 알아챘을 때 한 번: 실제 실행·프로젝트 설정을 연다. Settings 에서 직접 고른 실행 방식은 바꾸지 않는다.
+   *  역할은 방문자가 직접 고르고(기본 선택 없음), 유료 실행·데모는 자동으로 시작하지 않는다. 사용자가 시작한 실행은 건드리지 않는다 */
   function visitorIntro(): boolean {
-    if (S.visitorIntro || link.present || S.adminToken.trim() || !visitor()) return false;
-    if (S.run && S.run.mode === 'demo' && S.autoDemoGen !== 0) { // 직접 시작한 실행은 startRun 이 autoDemoGen 을 0 으로 둔다
-      S.gen++; clearTimers();
-      S.run = null; S.hiddenRows.clear(); S.focusExpert = ''; S.artifactPath = ''; S.artifactPicked = false; lastAnnounce = '';
-    }
-    if (active()) return false;
-    S.visitorIntro = true; S.autoDemoGen = 0;
-    S.mode = 'live'; S.setupOpen = true; S.formErrors = []; S.selected.clear();
+    if (S.visitorIntro || link.present || S.adminToken.trim() || !visitor() || active()) return false;
+    S.visitorIntro = true;
+    if (!S.modePicked) S.mode = 'live';
+    S.setupOpen = true; S.formErrors = [];
+    if (S.mode !== 'live') return false;
+    S.selected.clear();
     return true;
   }
 
-  // 첫 화면부터 전문가가 각자 작업공간에서 일하는 모습을 보인다: 내장 예시 브리프로 데모를 바로 시작한다 (명시적 데모 표시)
+  // 첫 화면은 예시 브리프와 기본 역할을 채운 편집 영역이다. 데모·실제 실행 모두 사용자가 시작 버튼을 눌러야 시작한다
   paintFull(false);
   defaultSelection();
   renderAll();
-  // 카탈로그를 잠깐(최대 1.5초) 기다렸다가 시작한다. 늦으면 내장 데모 역할로 먼저 시작한다
-  // 승인된 방문자는 데모를 자동으로 보지 않는다. bootstrap 이 늦어 데모가 먼저 돌았다면 visitorIntro 가 그 자동 데모만 멈춘다
   const first = loadBootstrap();
   // 이전 실행의 정리 확인을 기다리는 방문자가 페이지를 다시 열었으면 같은 방식으로 잠깐씩 다시 본다
   void first.then(() => { if (!S.run && recheckable() && !accessTimer) accessTimer = setTimeout(() => refreshAccess(true), ACCESS_RECHECK_MS) as unknown as number; });
-  void Promise.race([first, new Promise(r => setTimeout(r, 1500))]).then(() => {
-    if (!S.run && S.mode === 'demo' && !link.present && !visitor()) startRun(true);
-  });
 }
 
-const CloudbiteCore = { normalizeBootstrap, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, DEMO_EXPERTS };
+const CloudbiteCore = { normalizeBootstrap, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, artifactContent, domainLabel, DEMO_EXPERTS };
 const hook = (globalThis as { __cloudbiteTestHook?: (core: typeof CloudbiteCore) => void }).__cloudbiteTestHook;
 if (typeof hook === 'function') hook(CloudbiteCore);
 if (typeof document !== 'undefined') {
