@@ -22,7 +22,7 @@ export const CB_ACCESS_MAX_RETAINED = 500;
 export const CB_ACCESS_RATE = 120;             // new requests per hashed source per hour (a venue shares one NAT address)
 export const CB_ACCESS_RATE_WINDOW = 3600_000;
 export const CB_ACCESS_LIST_MAX = 100;
-export const CB_ACCESS_MAX_PROJECTS = 1;
+export const CB_ACCESS_MAX_PROJECTS = 10;
 /** A grant whose project failed with zero completed experts gets its slot back at most this many times (paid-run bound). */
 export const CB_ACCESS_MAX_FAILED_REFUNDS = 3;
 
@@ -35,11 +35,28 @@ interface AccessRecord {
   status: 'pending' | 'approved' | 'denied' | 'revoked';
   createdAt: number; expiresAt: number; decidedAt?: number;
   credHash: string;
-  projectRequestId?: string;   // scoped requestId this grant's one project is bound to (set atomically on first reserve)
-  holds: number;               // creates in flight for that requestId
-  confirmed?: boolean;         // a project was created (or may exist): the binding is permanent unless refunded
+  projects?: Binding[];        // this grant's non-refunded project slots, at most CB_ACCESS_MAX_PROJECTS
   refunds?: number;            // failed-run refunds used (absent on records written before refunds existed = 0)
   refunded?: string[];         // scoped requestIds already refunded: never bound again
+  // Single-project records written before the multi-project quota (read through bindings(); dropped on the next write).
+  projectRequestId?: string; holds?: number; confirmed?: boolean;
+}
+/** One project slot: a scoped requestId, bound atomically on its first reserve. */
+interface Binding {
+  id: string;
+  holds: number;               // creates in flight for this requestId
+  confirmed?: boolean;         // a project was created (or may exist): the slot is permanent unless refunded
+}
+
+/** The record's slots; a legacy single binding (with its holds and confirmation) reads as a one-entry list. */
+function bindings(r: AccessRecord): Binding[] {
+  if (r.projects) return r.projects;
+  return r.projectRequestId ? [{ id: r.projectRequestId, holds: r.holds ?? 0, ...(r.confirmed ? { confirmed: true } : {}) }] : [];
+}
+/** Store slots in the current shape (lazy migration: legacy fields go; refunds/refunded tombstones stay). */
+function setBindings(r: AccessRecord, list: Binding[]) {
+  r.projects = list;
+  delete r.projectRequestId; delete r.holds; delete r.confirmed;
 }
 
 export type AccessAction = 'approve' | 'deny' | 'revoke';
@@ -60,7 +77,7 @@ export class CloudbiteAccess extends DurableObject<Env> {
   private view(r: AccessRecord, now: number): CloudbiteAccessRequest {
     return {
       id: r.id, name: r.name, purpose: r.purpose, status: this.status(r, now), createdAt: r.createdAt, expiresAt: r.expiresAt,
-      maxExperts: CB_MAX_EXPERTS, maxProjects: CB_ACCESS_MAX_PROJECTS, usedProjects: r.projectRequestId ? 1 : 0,
+      maxExperts: CB_MAX_EXPERTS, maxProjects: CB_ACCESS_MAX_PROJECTS, usedProjects: Math.min(CB_ACCESS_MAX_PROJECTS, bindings(r).length),
     };
   }
   private session(r: AccessRecord | null, now: number): CloudbiteAccessSession {
@@ -120,7 +137,7 @@ export class CloudbiteAccess extends DurableObject<Env> {
       if (await this.ctx.storage.get(`cred:${newCredHash}`)) return fail(409, 'credential collision; retry');
       const bytes = crypto.getRandomValues(new Uint8Array(16));
       const id = 'cba_' + [...bytes].map((x) => x.toString(16).padStart(2, '0')).join('');
-      const r: AccessRecord = { id, name, purpose, status: 'pending', createdAt: now, expiresAt: now + CB_ACCESS_PENDING_TTL, credHash: newCredHash, holds: 0 };
+      const r: AccessRecord = { id, name, purpose, status: 'pending', createdAt: now, expiresAt: now + CB_ACCESS_PENDING_TTL, credHash: newCredHash, projects: [] };
       times.push(now);
       await this.ctx.storage.put({ [`req:${id}`]: r, [`cred:${newCredHash}`]: id, [rateKey]: times });
       return { session: this.session(r, now), reused: false };
@@ -174,8 +191,9 @@ export class CloudbiteAccess extends DurableObject<Env> {
   }
 
   /**
-   * Atomically bind this grant's single project to scopedRequestId (or accept a retry of the same one).
-   * fresh=true means this call created the binding. Each successful reserve must be followed by confirm or release.
+   * Atomically bind one of this grant's project slots to scopedRequestId, or accept a retry of an id it already holds
+   * (a retry never takes another slot, even at full quota). fresh=true means this call created the slot. Each
+   * successful reserve must be followed by confirm or release of the same id.
    */
   reserve(credHash: string | null, scopedRequestId: string, experts: number): Promise<{ id: string; fresh: boolean } | Fail> {
     return this.serial(async () => {
@@ -183,57 +201,69 @@ export class CloudbiteAccess extends DurableObject<Env> {
       if (!r || this.status(r, this.clock()) !== 'approved') return fail(401, 'approved access required');
       if (!HEX64.test(scopedRequestId)) return fail(400, 'invalid project request');
       if (!Number.isInteger(experts) || experts < 1 || experts > CB_MAX_EXPERTS) return fail(403, `this access allows at most ${CB_MAX_EXPERTS} experts`);
-      if (r.projectRequestId && r.projectRequestId !== scopedRequestId) return fail(409, 'this access has already been used for a project');
       if (r.refunded?.includes(scopedRequestId)) return fail(409, 'that run already failed; start a new run');
-      const fresh = !r.projectRequestId;
-      r.projectRequestId = scopedRequestId;
-      r.holds = (r.holds ?? 0) + 1;
+      const list = bindings(r);
+      const b = list.find((x) => x.id === scopedRequestId);
+      if (!b && list.length >= CB_ACCESS_MAX_PROJECTS) return fail(409, `this access has already been used for ${CB_ACCESS_MAX_PROJECTS} projects`);
+      setBindings(r, b ? list.map((x) => (x === b ? { ...x, holds: x.holds + 1 } : x)) : [...list, { id: scopedRequestId, holds: 1 }]);
       await this.ctx.storage.put(`req:${r.id}`, r);
-      return { id: r.id, fresh };
+      return { id: r.id, fresh: !b };
     });
   }
 
-  /** Approved, unexpired, a confirmed binding with no create in flight: the only state a refund may start from. */
-  private refundBinding(r: AccessRecord | null, now: number): r is AccessRecord {
-    return !!r && this.status(r, now) === 'approved' && !!r.projectRequestId && r.confirmed === true && !(r.holds ?? 0);
+  /** Slots a refund may start from: approved, unexpired grant; confirmed slots with no create in flight. */
+  private refundable(r: AccessRecord | null, now: number): Binding[] {
+    if (!r || this.status(r, now) !== 'approved') return [];
+    return bindings(r).filter((b) => b.confirmed === true && !b.holds);
   }
 
   /**
-   * Failed-run refund, step 1 (read-only). The scoped requestId this grant's project is bound to, for the Worker to
-   * ask that project (by the server-stored id, never a browser one) whether it failed and was cleaned up.
+   * Failed-run refund, step 1 (read-only). The scoped requestIds of this grant's settled slots (at most
+   * CB_ACCESS_MAX_PROJECTS), for the Worker to ask each project (by the server-stored id, never a browser one) whether
+   * it failed and was cleaned up. left = failed-run refunds this grant may still use.
    */
-  refundCandidate(credHash: string | null): Promise<{ session: CloudbiteAccessSession; scoped: string | null; capped: boolean }> {
+  refundCandidate(credHash: string | null): Promise<{ session: CloudbiteAccessSession; scoped: string[]; left: number }> {
     return this.serial(async () => {
       const r = await this.byCred(credHash), now = this.clock();
-      const ok = this.refundBinding(r, now);
-      return { session: this.session(r, now), scoped: ok ? r.projectRequestId! : null, capped: ok && (r.refunds ?? 0) >= CB_ACCESS_MAX_FAILED_REFUNDS };
+      const scoped = this.refundable(r, now).map((b) => b.id);
+      return { session: this.session(r, now), scoped, left: Math.max(0, CB_ACCESS_MAX_FAILED_REFUNDS - (r?.refunds ?? 0)) };
     });
   }
 
   /**
-   * Failed-run refund, step 2. The Worker has just seen the project report 'refundable' for scoped. Compare-and-clear:
-   * only if the grant is still bound to exactly that id, confirmed, nothing in flight and under the cap. That id is
-   * remembered so it can never be bound (or refunded) again. A stale or concurrent call is a no-op.
+   * Failed-run refund, step 2. The Worker has just seen each of these projects report 'refundable'. Compare-and-clear
+   * per id, in order, while refunds remain: only a slot this grant still holds for exactly that id, confirmed and with
+   * nothing in flight. Each refunded id is remembered so it can never be bound (or refunded) again; other slots are
+   * untouched. A stale, foreign or concurrent id is a no-op.
    */
-  refund(credHash: string | null, scoped: string): Promise<CloudbiteAccessSession> {
+  refund(credHash: string | null, scoped: string[]): Promise<CloudbiteAccessSession> {
     return this.serial(async () => {
       const r = await this.byCred(credHash), now = this.clock();
-      if (this.refundBinding(r, now) && r.projectRequestId === scoped && (r.refunds ?? 0) < CB_ACCESS_MAX_FAILED_REFUNDS) {
-        r.refunds = (r.refunds ?? 0) + 1;
-        r.refunded = [...(r.refunded ?? []), scoped];
-        r.projectRequestId = undefined; r.confirmed = false; r.holds = 0;
-        await this.ctx.storage.put(`req:${r.id}`, r);
+      if (r && Array.isArray(scoped)) {
+        const ok = new Set(this.refundable(r, now).map((b) => b.id));
+        const done: string[] = [];
+        for (const id of scoped.slice(0, CB_ACCESS_MAX_PROJECTS)) {
+          if ((r.refunds ?? 0) + done.length >= CB_ACCESS_MAX_FAILED_REFUNDS) break;
+          if (typeof id === 'string' && ok.delete(id)) done.push(id);
+        }
+        if (done.length) {
+          r.refunds = (r.refunds ?? 0) + done.length;
+          r.refunded = [...(r.refunded ?? []), ...done];
+          setBindings(r, bindings(r).filter((b) => !done.includes(b.id)));
+          await this.ctx.storage.put(`req:${r.id}`, r);
+        }
       }
       return this.session(r, now);
     });
   }
 
-  /** The project now exists (or may): keep the binding for this grant (only a failed-run refund clears it). */
+  /** The project now exists (or may): keep that slot for this grant (only a failed-run refund clears it). */
   confirm(id: string, scopedRequestId: string): Promise<{ ok: true }> {
     return this.serial(async () => {
       const r = CB_ACCESS_ID.test(id) ? await this.ctx.storage.get<AccessRecord>(`req:${id}`) : undefined;
-      if (r && r.projectRequestId === scopedRequestId) {
-        r.confirmed = true; r.holds = Math.max(0, (r.holds ?? 0) - 1);
+      const list = r ? bindings(r) : [];
+      if (r && list.some((b) => b.id === scopedRequestId)) {
+        setBindings(r, list.map((b) => (b.id === scopedRequestId ? { id: b.id, holds: Math.max(0, b.holds - 1), confirmed: true } : b)));
         await this.ctx.storage.put(`req:${r.id}`, r);
       }
       return { ok: true as const };
@@ -241,15 +271,19 @@ export class CloudbiteAccess extends DurableObject<Env> {
   }
 
   /**
-   * Creation definitely did not happen for this attempt. The binding is cleared only when no other attempt for the
-   * same requestId is in flight and none ever succeeded — never someone else's slot, never a confirmed one.
+   * Creation definitely did not happen for this attempt. That slot is freed only when no other attempt for the same
+   * requestId is in flight and none ever succeeded — never another id's slot, never a confirmed one.
    */
   release(id: string, scopedRequestId: string): Promise<{ ok: true }> {
     return this.serial(async () => {
       const r = CB_ACCESS_ID.test(id) ? await this.ctx.storage.get<AccessRecord>(`req:${id}`) : undefined;
-      if (r && r.projectRequestId === scopedRequestId) {
-        r.holds = Math.max(0, (r.holds ?? 0) - 1);
-        if (!r.holds && !r.confirmed) r.projectRequestId = undefined;
+      const list = r ? bindings(r) : [];
+      if (r && list.some((b) => b.id === scopedRequestId)) {
+        setBindings(r, list.flatMap((b) => {
+          if (b.id !== scopedRequestId) return [b];
+          const holds = Math.max(0, b.holds - 1);
+          return !holds && !b.confirmed ? [] : [{ ...b, holds }];
+        }));
         await this.ctx.storage.put(`req:${r.id}`, r);
       }
       return { ok: true as const };

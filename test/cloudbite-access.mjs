@@ -83,6 +83,9 @@ const brief = (over = {}) => ({ title: 'Visitor run', objective: 'Should we laun
 const create = (w, b, headers) => call(w, 'POST', '/api/cloudbite/projects', { body: b, headers: { ...ORIGIN, ...headers } });
 const read = (w, pid, token) => call(w, 'GET', `/api/cloudbite/projects/${pid}`, { headers: { authorization: `Bearer ${token}` } });
 const records = (w) => [...w.access.getByName('hacksprint-2026-10-18').storage.m];
+const status = (w, cookie, q = '') => call(w, 'GET', '/api/cloudbite/access/status' + q, { headers: { cookie } });
+const rec = (w, id) => w.access.getByName('hacksprint-2026-10-18').storage.m.get(`req:${id}`);
+const inboxOf = (w) => w.access.getByName('hacksprint-2026-10-18');
 const noCredentialIn = (r, cookie) => {
   const cred = credOf(cookie);
   for (const s of [cred, sha(cred), OPERATOR, sha(OPERATOR), 'DT-SECRET', 'NOSANA-SECRET']) assert.ok(!r.text.includes(s), 'response leaks a credential');
@@ -109,7 +112,7 @@ await check('submit: exact Origin, JSON, 8 KiB, plain-text bounds; fresh __Host-
   const q = r.j.request;
   assert.deepEqual(Object.keys(q).sort(), ['createdAt', 'expiresAt', 'id', 'maxExperts', 'maxProjects', 'name', 'purpose', 'status', 'usedProjects']);
   assert.equal(q.name, 'Ada <b>', 'stored as trimmed plain text'); assert.equal(q.status, 'pending');
-  assert.equal(q.expiresAt - q.createdAt, 30 * MIN); assert.equal(q.maxExperts, 5); assert.equal(q.maxProjects, 1); assert.equal(q.usedProjects, 0);
+  assert.equal(q.expiresAt - q.createdAt, 30 * MIN); assert.equal(q.maxExperts, 5); assert.equal(q.maxProjects, 10); assert.equal(q.usedProjects, 0);
   noCredentialIn(r, jar(r.cookie));
   const stored = JSON.stringify(records(w));
   assert.ok(!stored.includes(credOf(jar(r.cookie))), 'plaintext credential is not stored');
@@ -163,7 +166,7 @@ await check('owner only: list and decisions need the operator or a State admin s
   assert.equal((await records(w)).filter(([k]) => k.startsWith('req:'))[0][1].status, 'pending', 'nothing changed');
 });
 
-await check('pending blocks creation; approval lets the cookie create exactly one project, with zero provider calls', async () => {
+await check('pending blocks creation; approval lets the cookie create at most ten projects, with zero provider calls', async () => {
   const w = world();
   const v = await visitor(w);
   const before = fetches;
@@ -185,9 +188,19 @@ await check('pending blocks creation; approval lets the cookie create exactly on
   const retry = await create(w, b, { cookie: v.cookie });
   assert.equal(retry.status, 201); assert.equal(retry.j.project.id, c.j.project.id, 'same-id retry returns the same project');
   assert.notEqual(retry.j.accessToken, c.j.accessToken);
-  assert.equal((await create(w, brief(), { cookie: v.cookie })).status, 409, 'second project refused');
+  const one = await call(w, 'GET', '/api/cloudbite/access/status', { headers: { cookie: v.cookie } });
+  assert.equal(one.j.request.usedProjects, 1, 'a retry takes no second slot'); assert.equal(one.j.canCreate, true);
+  for (let i = 2; i <= 10; i++) {
+    const n = await create(w, brief(), { cookie: v.cookie });
+    assert.equal(n.status, 201, `project ${i}`);
+    assert.equal((await call(w, 'GET', '/api/cloudbite/access/status', { headers: { cookie: v.cookie } })).j.request.usedProjects, i);
+  }
+  const eleventh = await create(w, brief(), { cookie: v.cookie });
+  assert.equal(eleventh.status, 409, 'eleventh project refused'); assert.match(eleventh.j.error, /10 projects/);
   const st = await call(w, 'GET', '/api/cloudbite/access/status', { headers: { cookie: v.cookie } });
-  assert.equal(st.j.request.usedProjects, 1); assert.equal(st.j.canCreate, false);
+  assert.equal(st.j.request.usedProjects, 10); assert.equal(st.j.canCreate, false); assert.equal('recovery' in st.j, false);
+  assert.equal((await create(w, b, { cookie: v.cookie })).status, 201, 'a retry of a held id still works at full quota');
+  assert.equal(w.projects.objects.size, 10);
   assert.equal((await read(w, c.j.project.id, c.j.accessToken)).status, 200);
   assert.equal(w.stateCalls.length, 0, 'visitor path never asks State');
   assert.equal(fetches, before, 'demo creation calls no provider');
@@ -253,21 +266,33 @@ await check('tenant isolation: same raw brief and requestId → different projec
   assert.equal(o2.j.project.id, o.j.project.id); assert.equal(o2.j.project.brief.requestId, owned.requestId);
 });
 
-await check('atomic quota: concurrent creates cannot use one grant twice; a refused attempt frees only its own slot', async () => {
+await check('atomic quota: eleven concurrent creates yield ten projects; same-id retries take one slot; a refused attempt frees only its own slot', async () => {
   const w = world();
   const v = await visitor(w); await act(w, v.id, 'approve');
-  const rs = await Promise.all([create(w, brief(), { cookie: v.cookie }), create(w, brief(), { cookie: v.cookie }), create(w, brief(), { cookie: v.cookie })]);
-  assert.deepEqual(rs.map((r) => r.status).sort(), [201, 409, 409]);
-  assert.equal(w.projects.objects.size, 1, 'one project object');
-  // Same race directly on the DO, lockstep (storage yields on every call): exactly one binding wins.
+  const bs = Array.from({ length: 11 }, () => brief());
+  const rs = await Promise.all(bs.map((x) => create(w, x, { cookie: v.cookie })));
+  assert.deepEqual(rs.map((r) => r.status).sort(), [...Array(10).fill(201), 409]);
+  assert.equal(w.projects.objects.size, 10, 'ten project objects');
+  assert.equal(rec(w, v.id).projects.length, 10); assert.ok(rec(w, v.id).projects.every((b) => b.confirmed && b.holds === 0));
+  // Retries of held ids at full quota, concurrently with a new id: the retries succeed and add no usage, the new id is refused.
+  const held = bs.filter((_, i) => rs[i].status === 201).slice(0, 3);
+  const rr = await Promise.all([...held.map((x) => create(w, x, { cookie: v.cookie })), create(w, brief(), { cookie: v.cookie })]);
+  assert.deepEqual(rr.map((r) => r.status), [201, 201, 201, 409]);
+  assert.deepEqual(rr.slice(0, 3).map((r) => r.j.project.id), held.map((x) => rs[bs.indexOf(x)].j.project.id));
+  assert.equal((await status(w, v.cookie)).j.request.usedProjects, 10); assert.equal(w.projects.objects.size, 10);
+  // Same race directly on the DO, lockstep (storage yields on every call): exactly ten slots are bound.
   const z = await visitor(w); await act(w, z.id, 'approve');
   const inbox = w.access.getByName('hacksprint-2026-10-18');
-  const raced = await Promise.all([1, 2, 3].map((i) => inbox.reserve(sha(credOf(z.cookie)), sha('race' + i), 2)));
-  assert.equal(raced.filter((r) => !r.error).length, 1, 'one reservation per grant');
+  const raced = await Promise.all(Array.from({ length: 13 }, (_, i) => inbox.reserve(sha(credOf(z.cookie)), sha('race' + i), 2)));
+  assert.equal(raced.filter((r) => !r.error).length, 10, 'ten reservations per grant');
+  assert.ok(raced.filter((r) => r.error).every((r) => r.status === 409));
+  assert.equal((await inbox.reserve(sha(credOf(z.cookie)), sha('race0'), 2)).fresh, false, 'retry at full quota is not fresh');
+  assert.equal(rec(w, z.id).projects.find((b) => b.id === sha('race0')).holds, 2);
   const u = await visitor(w); await act(w, u.id, 'approve');
   const b = brief();
   const same = await Promise.all([create(w, b, { cookie: u.cookie }), create(w, b, { cookie: u.cookie })]);
   assert.deepEqual(same.map((r) => r.status), [201, 201]); assert.equal(same[0].j.project.id, same[1].j.project.id);
+  assert.equal((await status(w, u.cookie)).j.request.usedProjects, 1, 'concurrent same-id creates use one slot');
   // Live slot refused (registry full) → nothing created → the reservation is released for a different requestId.
   const x = await visitor(w); await act(w, x.id, 'approve');
   const reg = w.projects.getByName('registry');
@@ -275,9 +300,10 @@ await check('atomic quota: concurrent creates cannot use one grant twice; a refu
   const live = await create(w, brief({ mode: 'live' }), { cookie: x.cookie });
   assert.equal(live.status, 429, live.text);
   assert.equal((await call(w, 'GET', '/api/cloudbite/access/status', { headers: { cookie: x.cookie } })).j.request.usedProjects, 0);
+  assert.equal(rec(w, x.id).projects.length, 0, 'the refused slot is gone, not merely unheld');
   const demo = await create(w, brief(), { cookie: x.cookie });
   assert.equal(demo.status, 201);
-  assert.equal((await create(w, brief(), { cookie: x.cookie })).status, 409);
+  assert.equal((await call(w, 'GET', '/api/cloudbite/access/status', { headers: { cookie: x.cookie } })).j.request.usedProjects, 1);
   // Live config missing is refused before any reservation.
   const y = await visitor(w); await act(w, y.id, 'approve');
   w.env.CLOUDBITE_NOSANA_API_KEY = '';
@@ -344,9 +370,6 @@ function shape(w, pid, { status = 'failed', completed = 0, phase = 'final', clea
     if (cleanup !== 'none') st.set(`cleanup:${r}:label:L${i}`, { run: r, label: `L${i}`, tries: 0, nextAt: 0, done: cleanup === 'done', stuck: cleanup === 'stuck' });
   });
 }
-const status = (w, cookie, q = '') => call(w, 'GET', '/api/cloudbite/access/status' + q, { headers: { cookie } });
-const rec = (w, id) => w.access.getByName('hacksprint-2026-10-18').storage.m.get(`req:${id}`);
-const inboxOf = (w) => w.access.getByName('hacksprint-2026-10-18');
 async function approvedWithProject(w, b = brief()) {
   const v = await visitor(w); await act(w, v.id, 'approve');
   const c = await create(w, b, { cookie: v.cookie });
@@ -354,10 +377,22 @@ async function approvedWithProject(w, b = brief()) {
   return { ...v, pid: c.j.project.id, token: c.j.accessToken, brief: b };
 }
 
+/** Create demo projects for this grant until all ten slots are used; returns their project ids. */
+async function fill(w, v) {
+  const out = [];
+  while ((await status(w, v.cookie)).j.request.usedProjects < 10) {
+    const c = await create(w, brief(), { cookie: v.cookie });
+    assert.equal(c.status, 201, c.text); out.push(c.j.project.id);
+  }
+  return out;
+}
+const slots = (w, id) => rec(w, id).projects.map((b) => b.id);
+
 await check('failed run with zero completed experts and confirmed cleanup returns the slot; evidence and token stay; same run cannot rebind', async () => {
   const w = world();
   const v = await approvedWithProject(w);
-  assert.equal((await status(w, v.cookie)).j.canCreate, false, 'running: no refund');
+  const run = await status(w, v.cookie);
+  assert.equal(run.j.request.usedProjects, 1, 'running: no refund'); assert.equal(run.j.canCreate, true, 'nine slots remain');
   shape(w, v.pid);
   const before = fetches;
   const st = await status(w, v.cookie);
@@ -371,29 +406,34 @@ await check('failed run with zero completed experts and confirmed cleanup return
   assert.equal(rec(w, v.id).refunds, 1, 'repeated refresh refunds once');
   const again = await create(w, v.brief, { cookie: v.cookie });
   assert.equal(again.status, 409, 'the refunded run is never bound again'); assert.match(again.j.error, /already failed/);
-  assert.equal((await status(w, v.cookie)).j.canCreate, true, 'refused retry keeps the slot free');
+  assert.equal((await status(w, v.cookie)).j.request.usedProjects, 0, 'refused retry takes no slot');
   const next = await create(w, brief(), { cookie: v.cookie });
   assert.equal(next.status, 201); assert.notEqual(next.j.project.id, v.pid);
+  await fill(w, v);
   assert.equal((await status(w, v.cookie)).j.canCreate, false);
-  assert.equal((await create(w, brief(), { cookie: v.cookie })).status, 409, 'still one project at a time');
+  assert.equal((await create(w, brief(), { cookie: v.cookie })).status, 409, 'still at most ten slots');
 });
 
-await check('no refund for running, completed, partial, cancelled, stuck cleanup or a missing project; settling cleanup reports pending', async () => {
+await check('no refund for running, completed, partial, cancelled, stuck cleanup or a missing project; settling cleanup reports pending only when full', async () => {
   const w = world();
   for (const [over, why] of [[{ status: 'running', phase: 'running', cleanup: 'none' }, 'running'], [{ status: 'completed', completed: 2 }, 'completed'],
     [{ status: 'partial', completed: 1 }, 'partial'], [{ status: 'cancelled' }, 'cancelled'], [{ cleanup: 'stuck' }, 'stuck cleanup']]) {
     const v = await approvedWithProject(w);
     shape(w, v.pid, over);
     const st = await status(w, v.cookie);
-    assert.equal(st.j.canCreate, false, why); assert.equal(st.j.request.usedProjects, 1, why); assert.equal('recovery' in st.j, false, why);
-    assert.equal((await create(w, brief(), { cookie: v.cookie })).status, 409, why);
+    assert.equal(st.j.canCreate, true, why); assert.equal(st.j.request.usedProjects, 1, why); assert.equal('recovery' in st.j, false, why);
+    assert.equal(rec(w, v.id).refunds, undefined, why);
   }
   const gone = await approvedWithProject(w);
   w.projects.getByName(gone.pid).storage.m.clear();
-  assert.equal((await status(w, gone.cookie)).j.canCreate, false, 'missing project');
-  // Live project: failed, but cleanup, the live slot or an expert is not settled yet → pending; once confirmed → refunded.
+  assert.equal((await status(w, gone.cookie)).j.request.usedProjects, 1, 'missing project');
+  // Live project: failed, but cleanup, the live slot or an expert is not settled yet → pending (hinted only while no
+  // slot is free); once confirmed → refunded.
   const live = await approvedWithProject(w, brief({ mode: 'live' }));
   shape(w, live.pid, { cleanup: 'pending' });
+  const p0 = await status(w, live.cookie);
+  assert.equal(p0.j.canCreate, true); assert.equal('recovery' in p0.j, false, 'free slots remain: no blocked hint');
+  await fill(w, live);
   const p1 = await status(w, live.cookie);
   assert.equal(p1.j.canCreate, false); assert.equal(p1.j.recovery, 'pending');
   shape(w, live.pid, { released: false });
@@ -401,20 +441,32 @@ await check('no refund for running, completed, partial, cancelled, stuck cleanup
   shape(w, live.pid, { phase: 'collecting' });
   assert.equal((await status(w, live.cookie)).j.recovery, 'pending', 'an expert not final yet');
   shape(w, live.pid);
-  assert.equal((await status(w, live.cookie)).j.canCreate, true);
+  const done = await status(w, live.cookie);
+  assert.equal(done.j.canCreate, true); assert.equal(done.j.request.usedProjects, 9); assert.equal('recovery' in done.j, false);
 });
 
 await check('fail closed: project check failure, unconfirmed or in-flight create, revoked or expired grant keep the slot used', async () => {
   const w = world();
   const v = await approvedWithProject(w);
+  const others = await fill(w, v);
   shape(w, v.pid);
   const real = w.env.CLOUDBITE;
   w.env.CLOUDBITE = { getByName: (n) => n === v.pid ? { refundState: async () => { throw new Error('rpc down'); } } : real.getByName(n) };
   const down = await status(w, v.cookie);
   assert.equal(down.j.canCreate, false); assert.equal(down.j.recovery, 'unavailable');
   assert.equal((await create(w, brief(), { cookie: v.cookie })).status, 409, 'create path fails closed too');
+  // One project's check failing does not hold back another slot's refund, and the hint goes once a slot is free.
+  shape(w, others[3]);
+  const mixed = await status(w, v.cookie);
+  assert.equal(mixed.j.canCreate, true); assert.equal(mixed.j.request.usedProjects, 9); assert.equal('recovery' in mixed.j, false);
+  assert.deepEqual(rec(w, v.id).refunded, [rec(w, v.id).refunded[0]]); assert.ok(slots(w, v.id).length === 9);
+  assert.equal((await create(w, brief(), { cookie: v.cookie })).status, 201, 'the returned slot is usable while the other check is down');
   w.env.CLOUDBITE = real;
-  assert.equal((await status(w, v.cookie)).j.canCreate, true, 'recovers once the check works');
+  assert.equal((await status(w, v.cookie)).j.request.usedProjects, 9, 'recovers once the check works');
+  assert.equal(rec(w, v.id).refunds, 2);
+  w.env.CLOUDBITE = undefined;
+  assert.equal((await status(w, v.cookie)).j.request.usedProjects, 9, 'no project binding: nothing refunded');
+  w.env.CLOUDBITE = real;
   // A create whose outcome was never confirmed (reserve without confirm/release, e.g. it threw) never refunds.
   const u = await visitor(w); await act(w, u.id, 'approve');
   const b = brief(); const scoped = sha(`cloudbite-visitor-v1|${u.id}|${b.requestId}`);
@@ -422,53 +474,68 @@ await check('fail closed: project check failure, unconfirmed or in-flight create
   assert.equal((await create(w, b, { cookie: u.cookie })).status, 201);
   const pid = [...w.projects.objects.keys()].find((k) => w.projects.getByName(k).storage.m.get('project')?.brief.requestId === scoped);
   shape(w, pid);
-  assert.equal(rec(w, u.id).holds, 1);
-  assert.equal((await status(w, u.cookie)).j.canCreate, false, 'a create still in flight (or lost) blocks the refund');
+  assert.equal(rec(w, u.id).projects[0].holds, 1);
+  assert.equal((await status(w, u.cookie)).j.request.usedProjects, 1, 'a create still in flight (or lost) blocks the refund');
   assert.equal(rec(w, u.id).refunds, undefined);
   // Revoked and expired grants never get a refund.
   const r = await approvedWithProject(w); shape(w, r.pid); await act(w, r.id, 'revoke');
   assert.equal((await status(w, r.cookie)).j.canCreate, false); assert.equal(rec(w, r.id).refunds, undefined);
   const e = await approvedWithProject(w); shape(w, e.pid); w.now += HOUR;
   assert.equal((await status(w, e.cookie)).j.canCreate, false); assert.equal(rec(w, e.id).refunds, undefined);
+  assert.equal((await inboxOf(w).refund(sha(credOf(e.cookie)), slots(w, e.id))).canCreate, false);
+  assert.equal(rec(w, e.id).refunds, undefined, 'a direct refund after expiry is a no-op');
 });
 
 await check('tenant isolation: the check uses the server-stored binding; other visitors and browser-supplied ids change nothing', async () => {
   const w = world();
   const a = await approvedWithProject(w), b = await approvedWithProject(w);
   shape(w, a.pid);
-  assert.equal((await status(w, b.cookie, `?project=${a.pid}&requestId=${a.brief.requestId}`)).j.canCreate, false, 'B is not refunded by A');
+  assert.equal((await status(w, b.cookie, `?project=${a.pid}&requestId=${a.brief.requestId}`)).j.request.usedProjects, 1, 'B is not refunded by A');
   assert.equal(rec(w, a.id).refunds, undefined, 'A is not touched by B');
   assert.equal(rec(w, b.id).refunds, undefined);
-  assert.equal((await status(w, a.cookie)).j.canCreate, true);
-  // A refund call with someone else's scoped id is a no-op.
+  assert.equal((await status(w, a.cookie)).j.request.usedProjects, 0);
+  // A refund call with someone else's scoped id is a no-op, and so is a release or confirm aimed at another grant.
   shape(w, b.pid);
-  await inboxOf(w).refund(sha(credOf(a.cookie)), rec(w, b.id).projectRequestId);
-  assert.equal(rec(w, b.id).refunds, undefined); assert.equal(rec(w, a.id).refunds, 1);
+  const bs = slots(w, b.id);
+  await inboxOf(w).refund(sha(credOf(a.cookie)), bs);
+  assert.equal(rec(w, b.id).refunds, undefined); assert.equal(rec(w, a.id).refunds, 1); assert.deepEqual(slots(w, b.id), bs);
+  await inboxOf(w).release(a.id, bs[0]); await inboxOf(w).confirm(a.id, bs[0]);
+  assert.deepEqual(slots(w, b.id), bs); assert.deepEqual(rec(w, a.id).projects, []);
+  await inboxOf(w).refund(sha(credOf(b.cookie)), ['not-a-slot', 42, bs[0], bs[0]]);
+  assert.equal(rec(w, b.id).refunds, 1, 'junk and duplicate ids refund once');
 });
 
-await check('concurrency: parallel refreshes and creates refund once and bind one new project; a stale refund is a no-op', async () => {
+await check('concurrency: parallel refreshes and creates refund once and bind new projects; a stale refund is a no-op', async () => {
   const w = world();
   const v = await approvedWithProject(w);
   shape(w, v.pid);
   const rs = await Promise.all([status(w, v.cookie), create(w, brief(), { cookie: v.cookie }), status(w, v.cookie), create(w, brief(), { cookie: v.cookie }),
     call(w, 'GET', '/api/cloudbite/bootstrap', { headers: { cookie: v.cookie } })]);
-  assert.deepEqual([rs[1].status, rs[3].status].sort(), [201, 409]);
+  assert.deepEqual([rs[1].status, rs[3].status], [201, 201]);
   assert.equal(rec(w, v.id).refunds, 1, 'refunded exactly once');
-  const bound = rec(w, v.id).projectRequestId;
-  assert.ok(bound && bound !== rec(w, v.id).refunded[0]);
-  // Stale step 2 for the old run after a new binding exists: nothing changes.
-  await inboxOf(w).refund(sha(credOf(v.cookie)), rec(w, v.id).refunded[0]);
-  assert.equal(rec(w, v.id).projectRequestId, bound); assert.equal(rec(w, v.id).refunds, 1);
+  const bound = slots(w, v.id);
+  assert.equal(bound.length, 2); assert.ok(!bound.includes(rec(w, v.id).refunded[0]));
+  // Stale step 2 for the old run after new bindings exist: nothing changes.
+  await inboxOf(w).refund(sha(credOf(v.cookie)), [rec(w, v.id).refunded[0]]);
+  assert.deepEqual(slots(w, v.id), bound); assert.equal(rec(w, v.id).refunds, 1);
   // Lockstep on the DO: step 1 sees the failed binding, a retry of the same run reserves first, step 2 must not clear it.
   const x = await approvedWithProject(w); shape(w, x.pid);
-  const cred = sha(credOf(x.cookie)), xs = rec(w, x.id).projectRequestId;
-  assert.equal((await inboxOf(w).refundCandidate(cred)).scoped, xs);
+  const cred = sha(credOf(x.cookie)), xs = slots(w, x.id)[0];
+  assert.deepEqual((await inboxOf(w).refundCandidate(cred)).scoped, [xs]);
   assert.ok(!(await inboxOf(w).reserve(cred, xs, 2)).error, 'retry of the same run holds the binding');
-  await inboxOf(w).refund(cred, xs);
-  assert.equal(rec(w, x.id).projectRequestId, xs, 'held binding is not refunded'); assert.equal(rec(w, x.id).refunds, undefined);
+  await inboxOf(w).refund(cred, [xs]);
+  assert.deepEqual(slots(w, x.id), [xs], 'held binding is not refunded'); assert.equal(rec(w, x.id).refunds, undefined);
+  // Full quota, two failed runs: concurrent creates each settle first, so both refunds land and two of three new ids bind.
+  const f = await approvedWithProject(w);
+  const fp = await fill(w, f);
+  shape(w, f.pid); shape(w, fp[4]);
+  const cr = await Promise.all([status(w, f.cookie), create(w, brief(), { cookie: f.cookie }), create(w, brief(), { cookie: f.cookie }), create(w, brief(), { cookie: f.cookie })]);
+  assert.deepEqual(cr.slice(1).map((r) => r.status).sort(), [201, 201, 409]);
+  assert.equal(rec(w, f.id).refunds, 2); assert.equal(slots(w, f.id).length, 10);
+  assert.ok(rec(w, f.id).refunded.every((id) => !slots(w, f.id).includes(id)));
 });
 
-await check('refund cap: at most 3 failed-run refunds per grant, then recovery=limit; records written before refunds existed recover', async () => {
+await check('refund cap: at most 3 failed-run refunds per grant, then recovery=limit once full; records written before refunds existed recover', async () => {
   const w = world();
   const v = await approvedWithProject(w);
   const r0 = rec(w, v.id); delete r0.refunds; delete r0.refunded; // pre-deployment record shape
@@ -476,16 +543,112 @@ await check('refund cap: at most 3 failed-run refunds per grant, then recovery=l
   let pid = v.pid;
   for (let i = 1; i <= 3; i++) {
     shape(w, pid);
-    assert.equal((await status(w, v.cookie)).j.canCreate, true, `refund ${i}`);
+    assert.equal((await status(w, v.cookie)).j.request.usedProjects, 0, `refund ${i}`);
     assert.equal(rec(w, v.id).refunds, i);
     const c = await create(w, brief(), { cookie: v.cookie }); assert.equal(c.status, 201); pid = c.j.project.id;
   }
   shape(w, pid);
+  const free = await status(w, v.cookie);
+  assert.equal(free.j.request.usedProjects, 1, 'cap used: the fourth failed run keeps its slot'); assert.equal('recovery' in free.j, false);
+  await fill(w, v);
   const st = await status(w, v.cookie);
-  assert.equal(st.j.canCreate, false); assert.equal(st.j.recovery, 'limit'); assert.equal(st.j.request.usedProjects, 1);
+  assert.equal(st.j.canCreate, false); assert.equal(st.j.recovery, 'limit'); assert.equal(st.j.request.usedProjects, 10);
   assert.equal((await create(w, brief(), { cookie: v.cookie })).status, 409);
   assert.equal(rec(w, v.id).refunds, 3); assert.equal(rec(w, v.id).refunded.length, 3);
-  assert.equal(w.projects.objects.size, 4, 'four projects in total for one grant, never more');
+  assert.equal(w.projects.objects.size, 13, 'ten slots plus three refunded runs per grant, never more');
+  // Several refundable runs in one settle are cut at the cap, in order, without dropping the others.
+  const m = await approvedWithProject(w);
+  const mp = await fill(w, m);
+  for (const p of [m.pid, ...mp.slice(0, 4)]) shape(w, p);
+  const ms = await status(w, m.cookie);
+  assert.equal(ms.j.request.usedProjects, 7); assert.equal(ms.j.canCreate, true); assert.equal(rec(w, m.id).refunds, 3);
+  assert.equal(slots(w, m.id).length, 7);
+});
+
+await check('legacy single-project records: usage, holds, confirmation, refunds and tombstones carry over to ten slots', async () => {
+  const w = world();
+  const legacy = (r, fields) => {
+    delete r.projects;
+    Object.assign(r, fields);
+    w.access.getByName('hacksprint-2026-10-18').storage.m.set(`req:${r.id}`, r);
+  };
+  // Used one project (confirmed) before the quota changed.
+  const a = await approvedWithProject(w);
+  const as = slots(w, a.id)[0];
+  legacy(rec(w, a.id), { projectRequestId: as, holds: 0, confirmed: true });
+  const st = await status(w, a.cookie);
+  assert.equal(st.j.request.maxProjects, 10); assert.equal(st.j.request.usedProjects, 1); assert.equal(st.j.canCreate, true);
+  const listed = (await call(w, 'GET', '/api/cloudbite/access/requests', { headers: owner() })).j.requests.find((q) => q.id === a.id);
+  assert.equal(listed.usedProjects, 1); assert.equal(listed.maxProjects, 10);
+  assert.equal(rec(w, a.id).projectRequestId, as, 'reads do not rewrite the record');
+  const retry = await create(w, a.brief, { cookie: a.cookie });
+  assert.equal(retry.status, 201); assert.equal(retry.j.project.id, a.pid, 'the legacy binding is the same slot');
+  const after = rec(w, a.id);
+  assert.deepEqual(after.projects, [{ id: as, holds: 0, confirmed: true }]);
+  assert.equal('projectRequestId' in after || 'holds' in after || 'confirmed' in after, false, 'migrated on write');
+  assert.equal((await create(w, brief(), { cookie: a.cookie })).status, 201);
+  assert.equal((await status(w, a.cookie)).j.request.usedProjects, 2);
+  // A legacy create still in flight: its confirm and release act on that slot only.
+  const b = await visitor(w); await act(w, b.id, 'approve');
+  const bs = sha('legacy-inflight');
+  legacy(rec(w, b.id), { projectRequestId: bs, holds: 2 });
+  assert.equal((await status(w, b.cookie)).j.request.usedProjects, 1);
+  await inboxOf(w).release(b.id, bs);
+  assert.deepEqual(rec(w, b.id).projects, [{ id: bs, holds: 1 }], 'another attempt is still in flight');
+  await inboxOf(w).release(b.id, bs);
+  assert.deepEqual(rec(w, b.id).projects, [], 'last unconfirmed attempt released → slot free');
+  const c = await visitor(w); await act(w, c.id, 'approve');
+  legacy(rec(w, c.id), { projectRequestId: bs, holds: 1 });
+  await inboxOf(w).confirm(c.id, bs);
+  assert.deepEqual(rec(w, c.id).projects, [{ id: bs, holds: 0, confirmed: true }]);
+  // Legacy reserve of a new id keeps the old slot.
+  const d = await visitor(w); await act(w, d.id, 'approve');
+  legacy(rec(w, d.id), { projectRequestId: bs, holds: 0, confirmed: true });
+  assert.equal((await inboxOf(w).reserve(sha(credOf(d.cookie)), sha('d2'), 1)).fresh, true);
+  assert.deepEqual(slots(w, d.id), [bs, sha('d2')]);
+  // Legacy refunded record (binding cleared, tombstones kept) and a legacy failed binding that is refunded now.
+  const e = await approvedWithProject(w);
+  const es = slots(w, e.id)[0];
+  legacy(rec(w, e.id), { projectRequestId: es, holds: 0, confirmed: true, refunds: 2, refunded: [sha('old1'), sha('old2')] });
+  shape(w, e.pid);
+  const es1 = await status(w, e.cookie);
+  assert.equal(es1.j.request.usedProjects, 0); assert.equal(rec(w, e.id).refunds, 3);
+  assert.deepEqual(rec(w, e.id).refunded, [sha('old1'), sha('old2'), es]);
+  assert.equal((await create(w, e.brief, { cookie: e.cookie })).status, 409, 'tombstone kept: the refunded run never rebinds');
+  assert.equal((await inboxOf(w).reserve(sha(credOf(e.cookie)), sha('old1'), 1)).status, 409, 'legacy tombstone still refuses');
+  const g = await approvedWithProject(w);
+  legacy(rec(w, g.id), { projectRequestId: undefined, holds: 0, confirmed: false, refunds: 1, refunded: [slots(w, g.id)[0]] });
+  delete rec(w, g.id).projectRequestId;
+  const gs = await status(w, g.cookie);
+  assert.equal(gs.j.request.usedProjects, 0); assert.equal(gs.j.canCreate, true);
+  assert.equal((await create(w, g.brief, { cookie: g.cookie })).status, 409);
+  // Legacy record that expired or was revoked stays dead.
+  const h = await approvedWithProject(w);
+  legacy(rec(w, h.id), { projectRequestId: slots(w, h.id)[0], holds: 0, confirmed: true });
+  await act(w, h.id, 'revoke');
+  assert.equal((await create(w, brief(), { cookie: h.cookie })).status, 401);
+  assert.equal((await status(w, h.cookie)).j.canCreate, false);
+  assert.ok(!JSON.stringify(records(w)).includes(credOf(a.cookie)), 'no plaintext credential stored');
+});
+
+await check('per-slot confirm/release interleavings: each acts only on its own id', async () => {
+  const w = world();
+  const v = await visitor(w); await act(w, v.id, 'approve');
+  const cred = sha(credOf(v.cookie)), box = inboxOf(w);
+  const [A, B, C] = ['A', 'B', 'C'].map((x) => sha('slot' + x));
+  await Promise.all([box.reserve(cred, A, 1), box.reserve(cred, B, 1), box.reserve(cred, A, 1), box.reserve(cred, C, 1)]);
+  const hold = () => Object.fromEntries(rec(w, v.id).projects.map((b) => [b.id, [b.holds, !!b.confirmed]]));
+  assert.deepEqual(hold(), { [A]: [2, false], [B]: [1, false], [C]: [1, false] });
+  await Promise.all([box.release(v.id, A), box.confirm(v.id, B), box.release(v.id, C)]);
+  assert.deepEqual(hold(), { [A]: [1, false], [B]: [0, true] });
+  await Promise.all([box.release(v.id, B), box.confirm(v.id, A), box.confirm(v.id, sha('never'))]);
+  assert.deepEqual(hold(), { [A]: [0, true], [B]: [0, true] }, 'release never frees a confirmed slot; unknown ids are ignored');
+  await box.release(v.id, A);
+  assert.deepEqual(hold(), { [A]: [0, true], [B]: [0, true] });
+  assert.equal((await status(w, v.cookie)).j.request.usedProjects, 2);
+  // Release of a slot freed concurrently with a reserve of the same id: the reserve wins its own slot back.
+  await Promise.all([box.release(v.id, C), box.reserve(cred, C, 1)]);
+  assert.equal(rec(w, v.id).projects.find((b) => b.id === C)?.holds, 1);
 });
 
 rmSync(tmp, { recursive: true, force: true });
