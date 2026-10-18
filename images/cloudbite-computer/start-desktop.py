@@ -113,6 +113,7 @@ def start_bus(env):
     if os.stat(folder).st_uid != os.getuid() or os.path.islink(folder):
         fail("computer_dbus_dir_untrusted")
     os.chmod(folder, 0o700)
+    env["XDG_RUNTIME_DIR"] = folder
     if not bus_alive(path):
         if os.path.exists(path):
             os.remove(path)
@@ -129,14 +130,27 @@ def start_bus(env):
 
 def start_keyring(env):
     """Unlock (creating on first use) the login keyring; best effort, reported honestly."""
-    try:
-        subprocess.run(["gnome-keyring-daemon", "--unlock", "--components=secrets"], input=b"",
-                       env=env, capture_output=True, timeout=15)
-        out = subprocess.run(["gnome-keyring-daemon", "--start", "--components=secrets"],
-                             env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
-    except (OSError, subprocess.SubprocessError):
-        return "unavailable"
-    return "started" if out.returncode == 0 else "unavailable"
+    env.pop("GNOME_KEYRING_CONTROL", None)
+    for args in (["--unlock", "--components=secrets"], ["--start", "--components=secrets"]):
+        try:
+            # Daemon children can keep captured pipes open after their parent exited.
+            # No exported variable is needed: the applications all use this same bus.
+            subprocess.run(["gnome-keyring-daemon"] + args, input=b"", env=env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    # Starting the daemon alone does not create a default collection. Chromium otherwise
+    # blocks on a new-keyring password dialog before even issuing a localhost callback.
+    for _ in range(4):
+        try:
+            ready = subprocess.run(["/usr/bin/python3", "/opt/cloudbite/computer/lib/keyring-default.py"],
+                                   env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
+            if (last_json(ready.stdout) or {}).get("ok"):
+                return "started"
+        except (OSError, subprocess.SubprocessError):
+            pass
+        time.sleep(0.25)
+    return "unavailable"
 
 
 def fix_size(python, env):
