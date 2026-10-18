@@ -310,7 +310,10 @@ def check_citations(opinion, report=''):
         if any(i not in retrieved_sources for i in citations): return 'STA evidence cites a source not retrieved; search it or remove the unsupported citation'
         return None
     texts = [opinion['summary']] + [x for k in OPINION_KEYS[3:] for x in opinion[k]] + [report if isinstance(report, str) else '']
-    cited = [i for t in texts for i in re.findall(r'\[source:([^\]\s]{0,80})\]', t)]
+    # every closed [source:...] token counts, whitespace and over-long ids included, so none slips past the audit
+    cited = [i for t in texts for i in re.findall(r'\[source:([^\]]*)\]', t)]
+    if any(not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', i) for i in cited):
+        return 'a citation is not a valid source ID; cite exactly as [source:ID] with a retrieved ID (letters, digits, _ or -, at most 80)'
     if any(i not in retrieved_sources for i in cited):
         return 'a cited source was not retrieved for this role (unknown or not searched); search it or remove the unsupported [source:ID]'
     return None

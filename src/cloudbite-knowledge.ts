@@ -10,6 +10,10 @@ export const PEER_REVIEW_STATEMENT = 'No peer result verification occurred.';
 /** Phase-one review roles. They see no peer outputs in this phase; cross-review is a separate, future pipeline. */
 export const REVIEW_ROLE_IDS: ReadonlySet<string> = new Set(['cb-evidence-auditor', 'cb-quantitative-reviewer', 'cb-assumption-auditor', 'cb-adversarial-reviewer', 'cb-synthesis-editor']);
 const SOURCE_ID = /^[a-zA-Z0-9_-]{1,80}$/;
+/** Role deliverables: a stricter subset of the runtime's collectable extras (cloudbite-validate extraArtifactPath). */
+const ARTIFACT_PATH = /^out\/[a-z0-9][a-z0-9-]{0,47}\.(md|json|csv)$/;
+const RESERVED_ARTIFACTS: ReadonlySet<string> = new Set(['out/result.json', 'out/report.md', 'out/manifest.json', 'out/knowledge.json']);
+const MAX_ARTIFACTS = 4;
 
 type Card = PhaseOneKnowledgePack['cards'][number];
 type Source = PhaseOneKnowledgePack['sources'][number];
@@ -96,6 +100,16 @@ export function checkKnowledgePack(pack: PhaseOneKnowledgePack): void {
     }
     if (s.checkStatus !== 'retrieved' && s.checkStatus !== 'unverified') fail('invalid source checkStatus');
   }
+  if (!Array.isArray(pack.artifacts) || pack.artifacts.length < 1 || pack.artifacts.length > MAX_ARTIFACTS) fail('artifact count out of bounds');
+  const artifactPaths = new Set<string>();
+  for (const a of pack.artifacts) {
+    if (!a || typeof a.path !== 'string' || !ARTIFACT_PATH.test(a.path)) fail('artifact path must be flat out/<name>.<md|json|csv>');
+    if (RESERVED_ARTIFACTS.has(a.path)) fail('artifact path is reserved by the runtime: ' + a.path);
+    if (artifactPaths.has(a.path)) fail('duplicate artifact path ' + a.path);
+    artifactPaths.add(a.path);
+    if (typeof a.label !== 'string' || !a.label.trim() || a.label.length > 80) fail('artifact label out of bounds: ' + a.path);
+    if (typeof a.guidance !== 'string' || a.guidance.trim().length < 20 || a.guidance.length > 600) fail('artifact guidance out of bounds: ' + a.path);
+  }
   const cardIds = new Set<string>();
   for (const c of pack.cards) {
     if (cardIds.has(c.id)) fail('duplicate card id ' + c.id);
@@ -105,15 +119,16 @@ export function checkKnowledgePack(pack: PhaseOneKnowledgePack): void {
   }
 }
 
-const memo = new Map<string, { cards: string; sources: string; cardsSha256: string; sourcesSha256: string; packSha256: string }>();
-/** Canonical serialized files and their hashes; computed once per pack. */
+// Keyed by the pack object, never by expertId: another object with the same id is validated and hashed on its own.
+const memo = new WeakMap<PhaseOneKnowledgePack, { cards: string; sources: string; cardsSha256: string; sourcesSha256: string; packSha256: string }>();
+/** Canonical serialized files and their hashes; computed once per pack object. */
 export function knowledgeDigest(pack: PhaseOneKnowledgePack) {
-  let d = memo.get(pack.expertId);
+  let d = memo.get(pack);
   if (!d) {
     checkKnowledgePack(pack);
     const cards = JSON.stringify(pack.cards), sources = JSON.stringify(pack.sources);
     d = { cards, sources, cardsSha256: sha256Hex(cards), sourcesSha256: sha256Hex(sources), packSha256: sha256Hex(JSON.stringify(pack)) };
-    memo.set(pack.expertId, d);
+    memo.set(pack, d);
   }
   return d;
 }

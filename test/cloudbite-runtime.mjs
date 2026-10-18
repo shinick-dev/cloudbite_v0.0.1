@@ -20,6 +20,7 @@ const PERSONAS = `
 export { CLOUDBITE_BRIEF_LIMITS, CLOUDBITE_OPINION_LIMITS, validateExpertOpinion } from './src/cloudbite-personas.ts';
 export const CLOUDBITE_EXPERTS = ['market','risk','ops','legal','finance','ux'].map((id) => ({ id, name: 'Expert ' + id, domain: id, summary: 's', prompt: 'p', tools: ['python'], outputs: ['report'], source: { repository: 'fixture', path: id, revision: 'r', license: 'MIT', basis: 'metadata-derived' } }));
 export const findExpert = (id) => CLOUDBITE_EXPERTS.find((e) => e.id === id);
+export const phaseOnePack = () => undefined;
 export function buildExpertWorkspace(expert, brief) {
   if (globalThis.__badWorkspace) return [{ path: '../escape.md', content: 'x' }];
   return [
@@ -37,7 +38,7 @@ const stubs = (fixture) => ({ name: 'stubs', setup(b) {
     b.onLoad({ filter: /^personas$/, namespace: 'stub' }, () => ({ contents: PERSONAS, loader: 'js', resolveDir: process.cwd() }));
   }
 } });
-const entry = `export { default, CloudbiteProject } from './src/index.ts'; export * from './src/cloudbite-config.ts'; export * from './src/cloudbite-validate.ts'; export { CB_RUNNER_PY } from './src/cloudbite-runner.ts'; export { CLOUDBITE_OPINION_LIMITS, CLOUDBITE_BRIEF_LIMITS } from './src/cloudbite-personas.ts';`;
+const entry = `export { default, CloudbiteProject } from './src/index.ts'; export * from './src/cloudbite-config.ts'; export * from './src/cloudbite-validate.ts'; export { CB_RUNNER_PY } from './src/cloudbite-runner.ts'; export { CLOUDBITE_OPINION_LIMITS, CLOUDBITE_BRIEF_LIMITS, phaseOnePack } from './src/cloudbite-personas.ts';`;
 const tmp = mkdtempSync(join(tmpdir(), 'cloudbite-runtime-'));
 async function load(fixture) {
   const bundle = await build({ stdin: { contents: entry, resolveDir: process.cwd(), loader: 'ts' }, bundle: true, write: false, format: 'esm', platform: 'node', plugins: [stubs(fixture)], loader: { '.ps1': 'text' } });
@@ -828,7 +829,8 @@ await check('phase-one knowledge: role-bound packs, unknown citation and missing
   const w = freshWorld({ M: REAL, model: (req, turn) => {
     const id = req.messages[1].content.match(/^Expert id: `([a-z0-9-]+)`/m)[1];
     const known = JSON.parse(req.messages[1].content.match(/"sources":(\[.*?\])\}\s*$/m)[1])[0].id;
-    if (turn === 0) return JSON.stringify({ action: 'knowledge', query: 'evidence pricing' });
+    // follow-up search uses a term of THIS role's own last card, so a second retrieval is guaranteed per role
+    if (turn === 0) return JSON.stringify({ action: 'knowledge', query: REAL.phaseOnePack(id).cards.at(-1).match[0] });
     const reviewer = id === 'cb-evidence-auditor';
     const cite = turn === 1 ? 'made-up-source' : known;
     const report = reviewer && turn < 3 ? '# Review\nI verified the pricing analyst result.' : '# Review\nNo peer result verification occurred. Only the brief was reviewed.';
@@ -871,7 +873,7 @@ await check('phase-one knowledge: role-bound packs, unknown citation and missing
     const def = boot.j.experts.find((e) => e.id === role.id);
     assert.equal(role.revision, def.source.revision); assert.match(role.revision, /^[0-9a-f]{40}$/);
     assert.equal(role.promptHash, createHash('sha256').update(def.prompt).digest('hex'));
-    assert.match(def.prompt, /Knowledge pack \S+ \(\d+ cards, \d+ source records; cards sha256 [0-9a-f]{64}\)/);
+    assert.match(def.prompt, /Knowledge pack \S+ \(\d+ cards, \d+ source records; pack sha256 [0-9a-f]{64}; cards sha256 [0-9a-f]{64}\)/);
   }
 });
 

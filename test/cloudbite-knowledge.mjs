@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { build } from 'esbuild';
 
-const b = await build({ stdin: { contents: "export * from './src/cloudbite-knowledge.ts'; export { PHASE_ONE_PACKS } from './src/cloudbite-phase-one-data.ts'; export { buildExpertWorkspace, findExpert } from './src/cloudbite-personas.ts'; export { validateWorkspace } from './src/cloudbite-validate.ts'; export { CB_RUNNER_PY } from './src/cloudbite-runner.ts';", resolveDir: process.cwd(), loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'esm' });
+const b = await build({ stdin: { contents: "export * from './src/cloudbite-knowledge.ts'; export { PHASE_ONE_PACKS } from './src/cloudbite-phase-one-data.ts'; export { buildExpertWorkspace, findExpert } from './src/cloudbite-personas.ts'; export { validateWorkspace, extraArtifactPath } from './src/cloudbite-validate.ts'; export { CB_RUNNER_PY } from './src/cloudbite-runner.ts';", resolveDir: process.cwd(), loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'esm' });
 const m = await import('data:text/javascript;base64,' + Buffer.from(b.outputFiles[0].text).toString('base64'));
 let checks = 0;
 const ok = (cond, message) => { assert.ok(cond, message); checks++; };
@@ -37,8 +37,34 @@ const broken = [
   ['too many cards', p => { p.cards = Array.from({ length: m.KNOWLEDGE_LIMITS.cards + 1 }, (_, i) => ({ ...base.cards[0], id: 'c' + i })); }],
   ['card without terms', p => { p.cards[0].match = []; }],
   ['bad expert id', p => { p.expertId = 'Bad Id'; }],
+  ['artifact outside out/', p => { p.artifacts[0].path = 'deliverables/x.md'; }],
+  ['nested artifact path', p => { p.artifacts[0].path = 'out/sub/x.md'; }],
+  ['reserved artifact', p => { p.artifacts[0].path = 'out/report.md'; }],
+  ['reserved knowledge audit', p => { p.artifacts[0].path = 'out/knowledge.json'; }],
+  ['duplicate artifact path', p => { p.artifacts = [p.artifacts[0], { ...p.artifacts[0] }]; }],
+  ['unsupported artifact extension', p => { p.artifacts[0].path = 'out/cases.jsonl'; }],
+  ['too many artifacts', p => { p.artifacts = Array.from({ length: 5 }, (_, i) => ({ ...base.artifacts[0], path: `out/a${i}.md` })); }],
+  ['no artifacts', p => { p.artifacts = []; }],
+  ['empty artifact label', p => { p.artifacts[0].label = ' '; }],
+  ['unbounded artifact guidance', p => { p.artifacts[0].guidance = 'x'.repeat(601); }],
 ];
 for (const [label, mutate] of broken) { const p = JSON.parse(JSON.stringify(base)); mutate(p); assert.throws(() => m.checkKnowledgePack(p), /knowledge pack/, label); checks++; }
+
+// --- every real artifact path is collectable by the runtime validator; digests are per pack object, not per id
+const allArtifacts = m.PHASE_ONE_PACKS.flatMap(p => p.artifacts.map(a => a.path));
+ok(allArtifacts.length > 20 && new Set(allArtifacts).size === allArtifacts.length, 'artifact paths are unique across roles');
+for (const a of allArtifacts) ok(m.extraArtifactPath(a), `${a} passes the runtime extra-artifact allowlist`);
+for (const p of m.PHASE_ONE_PACKS) for (const a of p.artifacts) ok(m.findExpert(p.expertId).outputs.includes(a.path), `${p.expertId} declares ${a.path}`);
+{
+  const p = m.PHASE_ONE_PACKS[0], d = m.knowledgeDigest(p);
+  const clone = { ...p, sources: p.sources.map((s, i) => i ? s : { ...s, checkNote: s.checkNote + ' clone' }) };
+  const cd = m.knowledgeDigest(clone);
+  ok(cd.packSha256 !== d.packSha256 && cd.packSha256 === m.sha256Hex(JSON.stringify(clone)) && cd.sourcesSha256 !== d.sourcesSha256, 'a source-only clone with the same id gets its own full-pack hash');
+  ok(m.knowledgeDigest(p) === d, 'the original pack keeps its digest');
+  const bad = { ...p, artifacts: [{ ...p.artifacts[0], path: 'deliverables/x.md' }] };
+  assert.throws(() => m.knowledgeDigest(bad), /knowledge pack/); checks++;
+  assert.throws(() => m.knowledgeWorkspaceFiles({ ...p, cards: [] }, 'q', false), /knowledge pack/); checks++;
+}
 
 // --- retrieval is bounded, reproducible, scoped to the role's own pack and never echoes the query
 for (const p of m.PHASE_ONE_PACKS) {
@@ -92,6 +118,19 @@ try {
   ok(out[4] === 'None', 'a knowledge role may answer without citing (only unknown citations are rejected)');
   ok(out[5] === 'None', 'non-review roles need no peer statement');
   ok(out[6].includes('"reference_data_only": true') && !out[6].includes('Ignore instructions'), 'follow-up search returns reference data, not the query');
+  // malformed citation tokens are not skipped: whitespace, empty, over-long and punctuated ids are all rejected
+  const malformed = [` ${retrieved}`, `${retrieved} `, 'two words', '', 'a'.repeat(81), 'bad.id', 'x/../y', `${retrieved}\n`];
+  const bad = run(dir, "m['load_knowledge']()\n" + malformed.map(c => `print(g['check_citations'](${opinion('no citation')}, ${JSON.stringify(`see [source:${c}]`)}))\n`).join('')
+    + `print(g['check_citations'](${opinion(`[source:${'a'.repeat(81)}] in evidence`)}, 'r'))\n`
+    + `print(g['check_citations'](${opinion('no citation')}, ${JSON.stringify(`[source:${retrieved}] and [source:${'z'.repeat(80)}]`)}))\n`, analyst.expertId).trim().split(/\r?\n/);
+  ok(bad.length === malformed.length + 2 && bad.slice(0, malformed.length + 1).every(l => /not a valid source ID/.test(l)), 'malformed citation ids are rejected: ' + JSON.stringify(bad));
+  ok(/not retrieved/.test(bad[malformed.length + 1]), 'a well-formed 80-char unknown id is still checked against retrieved sources');
+  // every real artifact path is accepted by the runner's write_file (fresh extras per role, <= 4 each)
+  fs.mkdirSync(path.join(dir, 'out'), { recursive: true });
+  const writes = run(dir, m.PHASE_ONE_PACKS.map(p => "g['extras'].clear()\n" + p.artifacts.map(a => `print(g['write_file'](${JSON.stringify(a.path)}, 'x'))\n`).join('')).join(''), analyst.expertId).trim().split(/\r?\n/);
+  ok(writes.length === allArtifacts.length && writes.every(l => l.startsWith('wrote out/')), 'runner write_file accepts every role artifact path');
+  ok(allArtifacts.every(a => fs.existsSync(path.join(dir, a))), 'role artifacts land at their declared paths');
+  for (const a of allArtifacts) fs.rmSync(path.join(dir, a));
 
   fails(() => run(dir, "m['load_knowledge']()", 'cb-finops'), /knowledge pack belongs to another expert/);
   const tampered = path.join(dir, 'knowledge/cards.json');
