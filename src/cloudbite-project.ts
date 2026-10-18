@@ -28,7 +28,7 @@ import {
 import { artifactPath, extraArtifactPath, isInvalid, PROJECT_ID, validateBrief, validateResult, validateWorkspace } from './cloudbite-validate';
 import { CbDaytonaError, CB_LABEL_CLAIM, CB_LABEL_PROJECT, CB_LABEL_RUN, cbCreateSandbox, cbDeleteSandbox, cbDownload, cbExec, cbFindByLabels, cbGetSandbox, cbStartRunner, cbUpload, type CbSandbox } from './cloudbite-daytona';
 import { chatMessages, nosanaChat } from './cloudbite-inference';
-import { CB_RUNNER_PY, runnerCapability } from './cloudbite-runner';
+import { CB_RUNNER_PY, RUNNER_DIAGNOSTIC_MAX, runnerCapability, runnerFailureMessage } from './cloudbite-runner';
 import { historyIndex, historyRow } from './cloudbite-history';
 import { HISTORY_TTL, HISTORY_ISSUES, type HistoryIdentity, type HistoryFeedback, type HistoryDetail } from './cloudbite-history-contract';
 import { RoutingSession } from './cloudbite-routing';
@@ -571,8 +571,10 @@ export class CloudbiteProject extends DurableObject<Env> {
         const r = await cbExec(c, sb(), `cat ${CB_WORKDIR}/out/done 2>/dev/null || true`, 10);
         const done = String(r.result ?? '').trim();
         if (done !== 'ok' && done !== 'error') { await release((x) => { x.int.nextAt = this.clock() + CB_POLL; }); return; }
+        // Bounded, optional and untrusted: only an exact allowlisted diagnostic changes the message (old runners have none).
+        const diagnostic = done === 'error' ? await cbDownload(c, sb(), `${CB_WORKDIR}/out/diagnostic.json`, RUNNER_DIAGNOSTIC_MAX).catch(() => null) : null;
         await release((x) => {
-          if (done === 'error') this.finish(x, 'failed', 'runner finished without a valid final opinion');
+          if (done === 'error') this.finish(x, 'failed', runnerFailureMessage(diagnostic));
           else { x.int.phase = 'collecting'; x.int.nextAt = this.clock(); }
         });
         return;

@@ -7,6 +7,46 @@ import { CLOUDBITE_OPINION_LIMITS as OPINION } from './cloudbite-personas';
 import { KNOWLEDGE_LIMITS, KNOWLEDGE_SCHEMA, PEER_REVIEW_STATEMENT } from './cloudbite-knowledge';
 
 export const CB_RUNNER_ROUNDS = 6;
+// After a final rejected on the last turn: at most this many final-only repair replies, still inside maxCalls.
+export const CB_RUNNER_REPAIRS = 2;
+
+// out/diagnostic.json says why a run ended with out/done = error, as allowlisted codes only (never model or provider text).
+// The sandbox is untrusted (model-written Python could forge the file), so the server accepts only the exact shape and
+// renders its own fixed wording; anything else, including old runners without the file, keeps the generic message.
+export const RUNNER_DIAGNOSTIC_SCHEMA = 'cloudbite-runner-diagnostic/v1';
+export const RUNNER_DIAGNOSTIC_MAX = 512;
+const RUNNER_FAILURE = 'runner finished without a valid final opinion';
+const DIAGNOSTIC_CODES: Record<string, string> = {
+  reply_format: 'reply was not a complete JSON action (format)',
+  final_format: 'final did not match the result format (format)',
+  final_citation: 'final cited a source not retrieved for this role (citation)',
+  final_peer_review: 'final lacked the required no-peer-verification statement (peer review)',
+  final_turn_tool: 'a tool was requested when the final was required (turns)',
+  budget: 'runner inference budget or deadline exhausted (budget)',
+  inference: 'model inference failed (inference)',
+  crash: 'runner stopped unexpectedly',
+};
+const DIAGNOSTIC_HTTP: Record<number, string> = {
+  401: 'capability rejected or expired', 410: 'run ended', 429: 'rate or budget limit', 502: 'provider error', 503: 'not configured', 504: 'provider timeout',
+};
+
+/** The expert failure message for a runner that wrote out/done = error; diagnostic is out/diagnostic.json, or null. */
+export function runnerFailureMessage(diagnostic: string | null): string {
+  if (diagnostic === null || diagnostic.length > RUNNER_DIAGNOSTIC_MAX) return RUNNER_FAILURE;
+  let d: unknown;
+  try { d = JSON.parse(diagnostic); } catch { return RUNNER_FAILURE; }
+  if (typeof d !== 'object' || d === null || Array.isArray(d)) return RUNNER_FAILURE;
+  const o = d as Record<string, unknown>;
+  const int = (v: unknown, max: number): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= max;
+  if (Object.keys(o).sort().join(',') !== 'calls,code,http,repairs,schema,turn' || o.schema !== RUNNER_DIAGNOSTIC_SCHEMA) return RUNNER_FAILURE;
+  if (typeof o.code !== 'string' || !Object.hasOwn(DIAGNOSTIC_CODES, o.code)) return RUNNER_FAILURE;
+  if (!int(o.turn, CB_RUNNER_ROUNDS) || !int(o.repairs, CB_RUNNER_REPAIRS) || !int(o.calls, CB_INFERENCE_MAX_CALLS)) return RUNNER_FAILURE;
+  if (o.http !== 0 && !(o.code === 'inference' && typeof o.http === 'number' && Object.hasOwn(DIAGNOSTIC_HTTP, o.http))) return RUNNER_FAILURE;
+  const http = o.http ? ` (${DIAGNOSTIC_HTTP[o.http as number]}, HTTP ${o.http})` : '';
+  const where = o.turn ? ` at turn ${o.turn}` : '';
+  const repairs = o.repairs ? ` after ${o.repairs} final repair attempt${o.repairs === 1 ? '' : 's'}` : '';
+  return `${RUNNER_FAILURE}: ${DIAGNOSTIC_CODES[o.code]}${http}${where}${repairs}; ${o.calls} model calls`;
+}
 
 export interface RunnerCapability {
   gateway: string; project: string; run: string; expertId: string; token: string; expiresAt: number;
@@ -26,7 +66,7 @@ OUT = os.path.join(ROOT, 'out')
 WORK = os.path.join(ROOT, 'work')
 CAP_FILE = os.path.join(ROOT, '.cloudbite', 'capability.json')
 EXTRA = re.compile(r'^out/[a-z0-9][a-z0-9_-]{0,47}(\.[a-z0-9_-]{1,16})?\.(md|txt|json|csv)$')
-RESERVED = {'out/result.json', 'out/report.md', 'out/manifest.json', 'out/done', 'out/knowledge.json'}
+RESERVED = {'out/result.json', 'out/report.md', 'out/manifest.json', 'out/done', 'out/knowledge.json', 'out/diagnostic.json'}
 DIRECTIONS = ('support', 'conditional', 'concern', 'abstain')
 # out/result.json is a flat ExpertOpinion (the workspace's RESULT.schema.json); limits come from the persona contract.
 OPINION_KEYS = ('direction', 'confidence', 'summary', 'evidence', 'assumptions', 'nextActions')
@@ -46,9 +86,15 @@ PEER_STATEMENT = '${PEER_REVIEW_STATEMENT}'
 BUDGET_RULES = ('Each reply is limited to about ${CB_INFERENCE_MAX_TOKENS} tokens; a longer reply is cut off and rejected as invalid JSON.\n'
                 'Keep every reply one compact JSON object under 2500 characters. In final keep the report under 100 words,\n'
                 'the summary under 300 characters, and each list to 1-3 short items under 120 characters.')
+REPAIRS = ${CB_RUNNER_REPAIRS}
+DIAGNOSTIC_SCHEMA = '${RUNNER_DIAGNOSTIC_SCHEMA}'
 FINAL_TURN = ('This is the last turn. Reply with only the compact final JSON object now: no python, no write, no text\n'
               'outside the JSON. Exact keys: action, opinion (direction, confidence, summary, evidence, assumptions,\n'
               'nextActions) and report. Choose direction and confidence from your own evidence; no default score is provided.')
+REPAIR_TURN = ('Final rejected: %s.\nFinal repair %d of %d: tools are no longer available and nothing else will run. Reply with only the\n'
+               'corrected compact final JSON object (action, opinion, report). Fix only what was rejected. Do not invent\n'
+               'evidence, results or sources; if a claim or citation is not supported by work already done or a source\n'
+               'already retrieved, drop it and state the gap. Choose direction and confidence from your own evidence.')
 # An honest, explicit User-Agent: Cloudflare refuses urllib's default one (403, error 1010) before the Worker runs.
 USER_AGENT = 'Cloudbite-Runner/0.0.1'
 # Inference failures are reported by local category only: never the upstream body, model output or credentials.
@@ -61,6 +107,8 @@ INFERENCE_HTTP = {
 
 cap = None
 calls = 0
+# The newest failure for out/diagnostic.json, as allowlisted values: code, turn, repairs used, HTTP status (inference only).
+failure = {'code': 'final_turn_tool', 'turn': 0, 'repairs': 0, 'http': 0}
 extras = []
 knowledge = None
 knowledge_trace = []
@@ -112,6 +160,17 @@ def inference_failure(e):
     if isinstance(e, RuntimeError):
         return 'local inference budget exhausted'
     return 'unexpected runner error (%s)' % type(e).__name__
+
+
+def note_failure(code, turn, http=0):
+    failure.update(code=code, turn=turn, http=http)
+
+
+def note_inference_failure(e, turn):
+    if isinstance(e, urllib.error.HTTPError):
+        note_failure('inference', turn, e.code if isinstance(e.code, int) and e.code in INFERENCE_HTTP else 0)
+    else:
+        note_failure('budget' if isinstance(e, RuntimeError) else 'inference', turn)
 
 
 def first_json(text):
@@ -171,6 +230,19 @@ def check_opinion(o):
         if not isinstance(v, list) or not 1 <= len(v) <= LIST_MAX or not all(isinstance(x, str) and x.strip() and len(x) <= ITEM_MAX for x in v):
             return '%s must be a list of 1-%d non-empty strings of at most %d characters' % (k, LIST_MAX, ITEM_MAX)
     return None
+
+
+def final_problem(act):
+    """(code, problem) for a final action the runner must reject, or (None, None). The opinion is never modified."""
+    report = act.get('report')
+    problem = check_opinion(act.get('opinion'))
+    if problem: return 'final_format', problem
+    problem = check_citations(act['opinion'], report)
+    if problem: return 'final_citation', problem
+    if not isinstance(report, str) or not report.strip(): return 'final_format', 'report must be non-empty markdown'
+    problem = check_peer_statement(report)
+    if problem: return 'final_peer_review', problem
+    return None, None
 
 
 def flat_opinion(o):
@@ -368,6 +440,9 @@ def finish(status, opinion=None, report='', error=''):
     else:
         with open(os.path.join(OUT, 'error.txt'), 'w', encoding='utf-8') as f:
             f.write(error[:2000])
+        with open(os.path.join(OUT, 'diagnostic.json'), 'w', encoding='utf-8') as f:
+            json.dump({'schema': DIAGNOSTIC_SCHEMA, 'code': failure['code'], 'turn': failure['turn'],
+                       'repairs': failure['repairs'], 'http': failure['http'], 'calls': calls}, f)
     with open(os.path.join(OUT, 'manifest.json'), 'w', encoding='utf-8') as f:
         json.dump({'files': (['out/knowledge.json'] if knowledge is not None and status == 'ok' else []) + extras}, f)
     with open(os.path.join(OUT, 'done'), 'w') as f:
@@ -400,6 +475,7 @@ def main():
             reply = infer(messages)
         except Exception as e:
             reason = 'turn %d: inference failed: %s' % (step, inference_failure(e))
+            note_inference_failure(e, step)
             activity('error', reason)
             finish('error', error=reason)
             return 1
@@ -407,11 +483,13 @@ def main():
         act = first_json(reply)
         problem = action_problem(act)
         if problem:
+            note_failure('reply_format', step)
             activity('error', 'turn %d: reply was not a valid action: %s (%d chars)' % (step, problem, len(reply)))
             messages.append({'role': 'user', 'content': 'Invalid reply: ' + retry_hint(problem)})
             continue
         kind = act['action']
         if step == rounds and kind != 'final':
+            note_failure('final_turn_tool', step)
             activity('error', 'turn %d: %s action not run on the last turn; final was required' % (step, kind))
             break
         if kind == 'python':
@@ -427,20 +505,61 @@ def main():
             activity('artifact', 'turn %d: %s' % (step, result))
             messages.append({'role': 'user', 'content': result})
         else:
-            problem = check_opinion(act.get('opinion'))
-            report = act.get('report')
-            if not problem: problem = check_citations(act['opinion'], report)
-            if not problem and (not isinstance(report, str) or not report.strip()):
-                problem = 'report must be non-empty markdown'
-            if not problem: problem = check_peer_statement(report)
+            code, problem = final_problem(act)
             if problem:
+                note_failure(code, step)
                 activity('error', 'turn %d: final rejected: %s' % (step, problem))
+                if step == rounds:
+                    return repair(messages, rounds, problem)
                 messages.append({'role': 'user', 'content': 'Final rejected: ' + retry_hint(problem)})
                 continue
             activity('thought', 'turn %d: final opinion %s (self-assessed confidence %s)' % (step, act['opinion']['direction'], act['opinion']['confidence']))
-            finish('ok', act['opinion'], report)
+            finish('ok', act['opinion'], act['report'])
             return 0
     finish('error', error='no valid final opinion within %d turns' % rounds)
+    return 1
+
+
+def repair(messages, rounds, problem):
+    """A final was rejected on the last turn: up to REPAIRS final-only replies inside the existing call budget.
+    Only a final is ever accepted here, the runner never edits the opinion, and an inference failure stays explicit."""
+    for attempt in range(1, REPAIRS + 1):
+        if calls >= cap['maxCalls'] or time.time() * 1000 > cap['expiresAt']:
+            break
+        failure['repairs'] = attempt
+        messages.append({'role': 'user', 'content': REPAIR_TURN % (problem, attempt, REPAIRS)})
+        try:
+            reply = infer(messages)
+        except Exception as e:
+            reason = 'final repair %d: inference failed: %s' % (attempt, inference_failure(e))
+            note_inference_failure(e, rounds)
+            activity('error', reason)
+            finish('error', error=reason)
+            return 1
+        messages.append({'role': 'assistant', 'content': reply[:8000]})
+        act = first_json(reply)
+        problem = action_problem(act)
+        if problem:
+            note_failure('reply_format', rounds)
+            activity('error', 'final repair %d: reply was not a valid action: %s (%d chars)' % (attempt, problem, len(reply)))
+            problem = 'reply was not a valid final action: ' + problem
+            continue
+        if act['action'] != 'final':
+            note_failure('final_turn_tool', rounds)
+            problem = '%s action not run; only the final is accepted' % act['action']
+            activity('error', 'final repair %d: %s' % (attempt, problem))
+            continue
+        code, problem = final_problem(act)
+        if problem:
+            note_failure(code, rounds)
+            activity('error', 'final repair %d: final rejected: %s' % (attempt, problem))
+            continue
+        activity('thought', 'final repair %d: final opinion %s (self-assessed confidence %s)' % (attempt, act['opinion']['direction'], act['opinion']['confidence']))
+        finish('ok', act['opinion'], act['report'])
+        return 0
+    used = failure['repairs']
+    finish('error', error='no valid final opinion within %d turns and %d final repair attempt%s; last problem: %s' % (
+        rounds, used, '' if used == 1 else 's', failure['code']))
     return 1
 
 
@@ -449,6 +568,7 @@ if __name__ == '__main__':
         sys.exit(main())
     except Exception as e:
         try:
+            failure.update(code='crash', http=0)
             finish('error', error='runner crashed: %s' % type(e).__name__)
         except Exception:
             pass
