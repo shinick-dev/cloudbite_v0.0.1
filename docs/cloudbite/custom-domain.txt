@@ -11,6 +11,13 @@ remain unchanged. No gw-shinick, k.shinick.dev, lab.shinick.dev or account-wide 
 subdomain changes. Only Cloudbite and its registration assets/APIs are exposed on the new host.
 The original workers.dev application and all its existing links remain available.
 
+Zone routing prerequisite: the existing *.shinick.dev/* -> gw-shinick route takes priority
+over Custom Domains. A narrower cloudbite.shinick.dev/* -> Workers disabled (no script)
+exception lets this hostname reach its cloudbite-v001 Custom Domain. Keep that exact
+exception in the shinick.dev zone Workers Routes; do not remove or edit the wildcard.
+Wrangler manages this app's Custom Domain; the no-script exception is managed in the
+Cloudflare zone dashboard, like the existing console.shinick.dev/* exception.
+
 Security keys keep RP ID cloudbite-v001.ai-gongbu.workers.dev. The original RP serves
 /.well-known/webauthn with the exact two permitted origins. Related Origin Requests let
 compatible browsers use the existing key at the custom origin; no credential is copied or
@@ -33,3 +40,14 @@ Checks: npm run check; cloudbite-owner (software-key signed alias assertions, or
 approval/create/logout, old-session preservation, invalid origins/RPs, replay, registration,
 public RP document and legacy-path isolation); cloudbite-access; cloudbite-access-ui;
 wrangler deploy --dry-run. Hardware key use requires the owner's physical interaction.
+
+Production verification (2026-10-18 21:44 KST): runtime commit 4e36b9b, Worker version
+c694a807-9179-4f83-9f4e-fced66302e8c. Aside confirmed the new hostname renders in Korean.
+Home, owner inbox, request, QR, console JS, registration and WebAuthn JS returned 200;
+the original application remained 200 and /admin on the alias remained 404. The original
+RP's well-known document and the alias's owner options preserve the original RP. A
+mismatched HTTP Origin returned 403. A production QA visitor requested access, received
+an approved usable session under the existing auto-approval policy (left ON), then had
+that QA grant revoked. No provider jobs ran. Signed software-key tests: 16 checks;
+access service: 21 checks; access UI: 20 checks; build/typecheck passed. A physical-key
+ceremony at the new hostname has not been performed by the coordinator.
