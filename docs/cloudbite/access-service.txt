@@ -15,6 +15,7 @@ Routes (all on the Cloudbite Worker ORIGIN)
                                                    this browser already holds a pending/approved unexpired request.
                                                    Response: CloudbiteAccessSession.
   GET  /api/cloudbite/access/status                the cookie's CloudbiteAccessSession, or {request:null,canCreate:false}.
+                                                   Runs the failed-run refund check first (below).
   GET  /api/cloudbite/access/requests              owner only (x-admin-token). {requests: [...]} newest first, max 100.
   POST /api/cloudbite/access/requests/<id>/approve owner only, exact Origin, JSON body exactly {}.
   POST /api/cloudbite/access/requests/<id>/deny    "
@@ -46,7 +47,7 @@ Lifecycle (server clock)
   maxExperts 5, maxProjects 1, usedProjects 0/1.
 
 Storage: one CloudbiteAccess DO, getByName('hacksprint-2026-10-18'), SQLite-backed class (migration v2), KV API.
-  req:<id>       record (public fields, credHash, projectRequestId, holds, confirmed)
+  req:<id>       record (public fields, credHash, projectRequestId, holds, confirmed, refunds, refunded)
   cred:<sha256>  -> id
   rate:<sha256>  creation times within the last hour for a hashed source
   Every method runs in one in-object serial queue and does storage I/O only; related keys are written in one put().
@@ -69,11 +70,43 @@ Quota and tenant isolation (POST /api/cloudbite/projects with a visitor cookie)
      only if no other attempt for the same id is in flight and none succeeded. Success or 409 (project exists) ->
      confirm(): binding is permanent. A thrown/indeterminate create keeps the binding (conservative: the visitor
      may retry the same requestId but can never start a second project).
-  Revoked or expired grants cannot create or retry. Project cbt_ tokens already issued keep the existing 24 h
+  Revoked or expired grants cannot create or retry.
+
+Failed-run refund (one project at a time, but a definitively failed run gives the slot back)
+  Runs on GET /api/cloudbite/access/status, GET /api/cloudbite/bootstrap (with a cookie) and before every visitor
+  reserve. No new endpoint, no browser-supplied id: the Worker
+    1. asks CloudbiteAccess.refundCandidate(credHash) (read-only): the stored scoped requestId, only when the grant
+       is approved, unexpired, its binding confirmed and holds == 0 (nothing in flight, no unconfirmed create);
+    2. asks CloudbiteProject.refundState(scoped) on getByName(cbProjectId(scoped)) — an internal read-only DO method
+       (never routed from HTTP) that re-checks project.brief.requestId == scoped and answers
+         refundable  status failed (zero completed experts), every expert final, every cleanup entry done and none
+                     stuck, live slot released (live mode)
+         cleanup     failed with zero completed, cleanup/slot not confirmed yet
+         none        missing/purged, running, completed, partial, cancelled, stuck cleanup, other requestId;
+    3. refundable and under the cap -> CloudbiteAccess.refund(credHash, scoped): compare-and-clear in the serial
+       queue (still bound to exactly scoped, confirmed, holds 0, refunds < cap). It clears the binding, refunds += 1
+       and remembers scoped in refunded[]; reserve() refuses a refunded scoped id (409), so the failed run is never
+       rebound — the visitor starts a new run with a new requestId. A stale/concurrent refund is a no-op; concurrent
+       refreshes refund once; a reserve that lands between steps 1 and 3 (holds > 0 or a new binding) wins.
+  Fail closed: an exception from the project check, a missing CLOUDBITE binding or any other state keeps the slot.
+  Cap: CB_ACCESS_MAX_FAILED_REFUNDS = 3 per grant, so one grant creates at most 1 + 3 projects in total, and all but
+  the last of those definitively failed with zero completed experts.
+  Session field recovery (only when the bound project failed with zero completed and the slot was NOT returned):
+    pending      cleanup not confirmed yet (the console re-reads bootstrap every 5 s, 24 times, plus "Check again")
+    unavailable  the project check failed (fail closed; same re-read)
+    limit        the cap is used up (final; ask the host for a new session)
+  Records written before refunds existed have no refunds/refunded fields and read as 0/[]: an already-failed grant
+  recovers on its next status/bootstrap after deployment. Refunds never touch the failed project: its cbt_ token,
+  activity and artifacts stay readable under the 24 h project policy.
+  Console: after a visitor's live run reaches a terminal status it re-reads bootstrap and enables Run again only when
+  the server reports canCreate. Nothing starts automatically and the failed run stays on screen until the visitor
+  selects Run again (a new requestId). Owner/operator runs are unchanged.
+ Project cbt_ tokens already issued keep the existing 24 h
   project policy (CB_RETENTION); revocation does not reach into an already-created project.
 
 Deploy notes (root): wrangler.cloudbite.jsonc adds binding CLOUDBITE_ACCESS (top level and env.dev) and migration
   tag v2 new_sqlite_classes ["CloudbiteAccess"]; v1 is untouched. migrations are top-level and apply to env.dev too.
   Without the binding the Worker behaves as before (access status null, submit 503, owner list 503).
 
-Checks: node test/cloudbite-access.mjs (real router + real DOs, memory storage, no network).
+Checks: node test/cloudbite-access.mjs (real router + real DOs, memory storage, no network);
+        node test/cloudbite-console.mjs (failed visitor run -> re-read -> explicit Run again).

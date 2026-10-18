@@ -589,11 +589,11 @@ const pick = (env, id) => { const x = env.fk(`x:${id}`); x.checked = true; x.dis
 const cards = (env) => env.all().filter(n => n.className.startsWith('cb-card ')).length;
 
 await test('승인된 방문자: 실제 실행·설정이 열리고 자동 데모·자동 실행 없이 직접 고른 역할로 쿠키만으로 만든다', async () => {
-  const env = visitorEnv(accessOf(), (url, init) => {
+  const env = visitorEnv(null, (url, init) => {
     if (url === '/api/cloudbite/projects' && init.method === 'POST') return json(201, { project: liveProject('running', 'running'), accessToken: 'proj-scope-tok' });
     if (url === '/api/cloudbite/projects/proj-1') return json(200, liveProject('completed', 'completed', { updatedAt: 5 }));
     return json(404, {});
-  });
+  }, { bootstrap: (n) => json(200, { ...CATALOGUE, access: n === 1 ? accessOf() : accessOf({ usedProjects: 1 }, false) }) });
   await env.flush(); await env.advance(30000);
   assert.deepEqual(env.requests.map(r => r.url), ['/api/cloudbite/bootstrap'], 'no automatic demo or paid run');
   assert.equal(cards(env), 0);
@@ -619,6 +619,7 @@ await test('승인된 방문자: 실제 실행·설정이 열리고 자동 데�
   const get = env.requests.find(r => r.url === '/api/cloudbite/projects/proj-1');
   assert.equal(get.init.headers.authorization, 'Bearer proj-scope-tok');
   assert.match(env.root.textContent, /1 \/ 1 valid opinions/);
+  assert.equal(env.boots(), 2, 'finished visitor run re-reads the server access state');
   assert.match(env.root.textContent, /0 of 1 project left/);
   assert.equal(startBtnOf(env).disabled, true, 'quota used: no second run');
 });
@@ -700,6 +701,102 @@ await test('관리자 토큰이 있으면 방문자 쿠키보다 우선해 헤�
   await pub.flush(); await pub.advance(30000);
   assert.match(pub.root.textContent, /4 \/ 4 valid opinions/, 'public browser demo still auto-starts');
   assert.ok(!/Request visitor access.*has expired|no projects left/.test(pub.root.textContent));
+});
+
+// ───────── 실패한 방문자 실행 뒤 다시 실행 (서버가 canCreate 를 돌려줄 때만, 자동 실행 없음)
+const failedProject = (updatedAt = 5) => ({ ...liveProject('failed', 'failed', { updatedAt }), experts: [{ ...liveProject('failed', 'failed').experts[0], error: 'runner finished without a valid final opinion' }] });
+function failedVisitorEnv(accessAfter) {
+  return visitorEnv(null, (url, init) => {
+    if (url === '/api/cloudbite/projects' && init.method === 'POST') return json(201, { project: liveProject('running', 'running'), accessToken: 'proj-scope-tok' });
+    if (url === '/api/cloudbite/projects/proj-1') return json(200, failedProject());
+    return json(404, {});
+  }, { bootstrap: (n) => json(200, { ...CATALOGUE, access: n === 1 ? accessOf() : accessAfter(n) }) });
+}
+async function runOnce(env) {
+  await env.flush();
+  pick(env, 'strategy');
+  startBtnOf(env).click(); await env.flush();
+  await env.advance(1500);
+}
+const posts = (env) => env.requests.filter(r => r.url === '/api/cloudbite/projects' && r.init.method === 'POST').length;
+
+await test('방문자 실행이 실패하면 서버 상태를 다시 읽고, canCreate 일 때만 Run again 을 연다 — 실패 기록은 남고 자동 실행은 없다', async () => {
+  const env = failedVisitorEnv(() => accessOf({ usedProjects: 0 }, true));
+  await runOnce(env);
+  assert.equal(env.boots(), 2, 'bootstrap re-read after the terminal failure');
+  assert.match(env.root.textContent, /0 \/ 1 valid opinions/, 'failure evidence stays on screen');
+  assert.match(env.root.textContent, /Failed: 0 valid opinions, 1 failed/);
+  assert.match(env.root.textContent, /Your visitor session can run again\. Nothing starts until you select Run again\./);
+  const again = env.byText('BUTTON', 'Run again');
+  assert.equal(again.disabled, false);
+  assert.equal(cards(env), 1, 'no demo substituted');
+  await env.advance(120000);
+  assert.equal(posts(env), 1, 'no automatic paid run');
+  assert.equal(env.boots(), 2, 'no further re-reads once the slot is back');
+  again.click(); await env.flush();
+  assert.equal(posts(env), 2, 'explicit Run again creates a new project');
+  const [first, second] = env.requests.filter(r => r.init.method === 'POST').map(r => JSON.parse(r.init.body));
+  assert.notEqual(first.requestId, second.requestId, 'a new run, not a retry of the failed one');
+  assert.equal(env.requests.filter(r => r.init.method === 'POST')[1].init.headers['x-admin-token'], undefined);
+});
+
+await test('정리 확인 대기 중이면 이유를 보이고 잠깐씩 다시 읽어 확인되면 연다, 한도 소진·확인 불가도 설명한다', async () => {
+  const env = failedVisitorEnv((n) => n < 4 ? { ...accessOf({ usedProjects: 1 }, false), recovery: 'pending' } : accessOf({ usedProjects: 0 }, true));
+  await runOnce(env);
+  assert.match(env.root.textContent, /Your last run failed\. Run again unlocks once the server confirms its sandboxes were cleaned up/);
+  assert.equal(startBtnOf(env).disabled, true, 'not before the server says canCreate');
+  assert.ok(env.byText('BUTTON', 'Check again'), 'explicit re-check offered');
+  await env.advance(5000);
+  assert.equal(env.boots(), 3); assert.equal(startBtnOf(env).disabled, true);
+  await env.advance(5000);
+  assert.equal(env.boots(), 4);
+  assert.equal(startBtnOf(env).disabled, false, 'opens once cleanup is confirmed');
+  await env.advance(60000);
+  assert.equal(env.boots(), 4, 'stops re-reading'); assert.equal(posts(env), 1, 'no automatic paid run');
+
+  const limit = failedVisitorEnv(() => ({ ...accessOf({ usedProjects: 1 }, false), recovery: 'limit' }));
+  await runOnce(limit);
+  assert.match(limit.root.textContent, /used all its retries after failed runs/);
+  assert.equal(startBtnOf(limit).disabled, true);
+  await limit.advance(60000);
+  assert.equal(limit.boots(), 2, 'limit is final: no polling');
+
+  const down = failedVisitorEnv(() => ({ ...accessOf({ usedProjects: 1 }, false), recovery: 'unavailable' }));
+  await runOnce(down);
+  assert.match(down.root.textContent, /could not confirm its cleanup yet/);
+  await down.advance(10 * 60_000);
+  assert.equal(down.boots(), 1 + 24, 'automatic re-reads after the run are bounded (24)');
+  down.byText('BUTTON', 'Check again').click(); await down.flush();
+  assert.equal(down.boots(), 26, 'Check again re-reads on demand');
+  assert.equal(posts(down), 1);
+  assert.equal(cards(down), 1, 'never falls back to the demo');
+});
+
+await test('정리 대기 중에 페이지를 다시 열어도 데모 없이 이유를 보이고 다시 읽어 확인되면 연다', async () => {
+  const env = visitorEnv(null, () => json(404, {}), { bootstrap: (n) => json(200, { ...CATALOGUE, access: n < 3 ? { ...accessOf({ usedProjects: 1 }, false), recovery: 'pending' } : accessOf() }) });
+  await env.flush(); await env.advance(2000);
+  assert.equal(cards(env), 0, 'approved visitor: no automatic demo');
+  assert.match(env.root.textContent, /Your last run failed/);
+  assert.equal(startBtnOf(env).disabled, true);
+  await env.advance(10000);
+  assert.equal(env.boots(), 3);
+  pick(env, 'strategy');
+  assert.equal(startBtnOf(env).disabled, false);
+  await env.advance(60000);
+  assert.equal(env.boots(), 3); assert.equal(posts(env), 0, 'nothing started automatically');
+});
+
+await test('관리자 실행이 실패해도 Run again 은 그대로 열리고 방문자 상태를 다시 읽지 않는다', async () => {
+  const env = liveEnv((url, init) => {
+    if (url === '/api/cloudbite/projects' && init.method === 'POST') return json(201, { project: liveProject('running', 'running'), accessToken: 'tok' });
+    if (url === '/api/cloudbite/projects/proj-1') return json(200, failedProject());
+    return json(404, {});
+  });
+  await goLive(env);
+  startBtnOf(env).click(); await env.flush(); await env.advance(1500);
+  assert.match(env.root.textContent, /0 \/ 1 valid opinions/);
+  assert.equal(env.requests.filter(r => r.url === '/api/cloudbite/bootstrap').length, 1);
+  assert.equal(env.byText('BUTTON', 'Run again').disabled, false, 'owner run-again stays possible');
 });
 
 console.log(`cloudbite-console: ${pass} passed`);

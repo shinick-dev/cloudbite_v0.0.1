@@ -332,5 +332,161 @@ await check('without the CLOUDBITE_ACCESS binding: public demo, bootstrap, opera
   assert.equal((await call(x, 'GET', '/', {})).status, 200, 'public console page');
 });
 
+// ── failed-run refund (docs/cloudbite/access-service.txt) ──
+/** Test-only: put a project into a given final shape directly in its storage (alarms never run in this file). */
+function shape(w, pid, { status = 'failed', completed = 0, phase = 'final', cleanup = 'done', released = true } = {}) {
+  const st = w.projects.getByName(pid).storage.m;
+  const p = st.get('project');
+  p.status = status; p.released = released;
+  p.runs.forEach((r, i) => {
+    const e = st.get(`expert:${r}`);
+    e.int.phase = phase; e.run.status = i < completed ? 'completed' : status === 'cancelled' ? 'cancelled' : 'failed';
+    if (cleanup !== 'none') st.set(`cleanup:${r}:label:L${i}`, { run: r, label: `L${i}`, tries: 0, nextAt: 0, done: cleanup === 'done', stuck: cleanup === 'stuck' });
+  });
+}
+const status = (w, cookie, q = '') => call(w, 'GET', '/api/cloudbite/access/status' + q, { headers: { cookie } });
+const rec = (w, id) => w.access.getByName('hacksprint-2026-10-18').storage.m.get(`req:${id}`);
+const inboxOf = (w) => w.access.getByName('hacksprint-2026-10-18');
+async function approvedWithProject(w, b = brief()) {
+  const v = await visitor(w); await act(w, v.id, 'approve');
+  const c = await create(w, b, { cookie: v.cookie });
+  assert.equal(c.status, 201, c.text);
+  return { ...v, pid: c.j.project.id, token: c.j.accessToken, brief: b };
+}
+
+await check('failed run with zero completed experts and confirmed cleanup returns the slot; evidence and token stay; same run cannot rebind', async () => {
+  const w = world();
+  const v = await approvedWithProject(w);
+  assert.equal((await status(w, v.cookie)).j.canCreate, false, 'running: no refund');
+  shape(w, v.pid);
+  const before = fetches;
+  const st = await status(w, v.cookie);
+  assert.equal(st.j.canCreate, true); assert.equal(st.j.request.usedProjects, 0); assert.equal('recovery' in st.j, false);
+  noCredentialIn(st, v.cookie);
+  assert.equal(fetches, before, 'the refund check calls no provider');
+  assert.equal((await read(w, v.pid, v.token)).j.status, 'failed', 'failure evidence is untouched');
+  for (let i = 0; i < 3; i++) assert.equal((await status(w, v.cookie)).j.canCreate, true);
+  const boot = await call(w, 'GET', '/api/cloudbite/bootstrap', { headers: { cookie: v.cookie } });
+  assert.equal(boot.j.access.canCreate, true);
+  assert.equal(rec(w, v.id).refunds, 1, 'repeated refresh refunds once');
+  const again = await create(w, v.brief, { cookie: v.cookie });
+  assert.equal(again.status, 409, 'the refunded run is never bound again'); assert.match(again.j.error, /already failed/);
+  assert.equal((await status(w, v.cookie)).j.canCreate, true, 'refused retry keeps the slot free');
+  const next = await create(w, brief(), { cookie: v.cookie });
+  assert.equal(next.status, 201); assert.notEqual(next.j.project.id, v.pid);
+  assert.equal((await status(w, v.cookie)).j.canCreate, false);
+  assert.equal((await create(w, brief(), { cookie: v.cookie })).status, 409, 'still one project at a time');
+});
+
+await check('no refund for running, completed, partial, cancelled, stuck cleanup or a missing project; settling cleanup reports pending', async () => {
+  const w = world();
+  for (const [over, why] of [[{ status: 'running', phase: 'running', cleanup: 'none' }, 'running'], [{ status: 'completed', completed: 2 }, 'completed'],
+    [{ status: 'partial', completed: 1 }, 'partial'], [{ status: 'cancelled' }, 'cancelled'], [{ cleanup: 'stuck' }, 'stuck cleanup']]) {
+    const v = await approvedWithProject(w);
+    shape(w, v.pid, over);
+    const st = await status(w, v.cookie);
+    assert.equal(st.j.canCreate, false, why); assert.equal(st.j.request.usedProjects, 1, why); assert.equal('recovery' in st.j, false, why);
+    assert.equal((await create(w, brief(), { cookie: v.cookie })).status, 409, why);
+  }
+  const gone = await approvedWithProject(w);
+  w.projects.getByName(gone.pid).storage.m.clear();
+  assert.equal((await status(w, gone.cookie)).j.canCreate, false, 'missing project');
+  // Live project: failed, but cleanup, the live slot or an expert is not settled yet → pending; once confirmed → refunded.
+  const live = await approvedWithProject(w, brief({ mode: 'live' }));
+  shape(w, live.pid, { cleanup: 'pending' });
+  const p1 = await status(w, live.cookie);
+  assert.equal(p1.j.canCreate, false); assert.equal(p1.j.recovery, 'pending');
+  shape(w, live.pid, { released: false });
+  assert.equal((await status(w, live.cookie)).j.recovery, 'pending', 'live slot not released yet');
+  shape(w, live.pid, { phase: 'collecting' });
+  assert.equal((await status(w, live.cookie)).j.recovery, 'pending', 'an expert not final yet');
+  shape(w, live.pid);
+  assert.equal((await status(w, live.cookie)).j.canCreate, true);
+});
+
+await check('fail closed: project check failure, unconfirmed or in-flight create, revoked or expired grant keep the slot used', async () => {
+  const w = world();
+  const v = await approvedWithProject(w);
+  shape(w, v.pid);
+  const real = w.env.CLOUDBITE;
+  w.env.CLOUDBITE = { getByName: (n) => n === v.pid ? { refundState: async () => { throw new Error('rpc down'); } } : real.getByName(n) };
+  const down = await status(w, v.cookie);
+  assert.equal(down.j.canCreate, false); assert.equal(down.j.recovery, 'unavailable');
+  assert.equal((await create(w, brief(), { cookie: v.cookie })).status, 409, 'create path fails closed too');
+  w.env.CLOUDBITE = real;
+  assert.equal((await status(w, v.cookie)).j.canCreate, true, 'recovers once the check works');
+  // A create whose outcome was never confirmed (reserve without confirm/release, e.g. it threw) never refunds.
+  const u = await visitor(w); await act(w, u.id, 'approve');
+  const b = brief(); const scoped = sha(`cloudbite-visitor-v1|${u.id}|${b.requestId}`);
+  assert.ok(!(await inboxOf(w).reserve(sha(credOf(u.cookie)), scoped, 2)).error);
+  assert.equal((await create(w, b, { cookie: u.cookie })).status, 201);
+  const pid = [...w.projects.objects.keys()].find((k) => w.projects.getByName(k).storage.m.get('project')?.brief.requestId === scoped);
+  shape(w, pid);
+  assert.equal(rec(w, u.id).holds, 1);
+  assert.equal((await status(w, u.cookie)).j.canCreate, false, 'a create still in flight (or lost) blocks the refund');
+  assert.equal(rec(w, u.id).refunds, undefined);
+  // Revoked and expired grants never get a refund.
+  const r = await approvedWithProject(w); shape(w, r.pid); await act(w, r.id, 'revoke');
+  assert.equal((await status(w, r.cookie)).j.canCreate, false); assert.equal(rec(w, r.id).refunds, undefined);
+  const e = await approvedWithProject(w); shape(w, e.pid); w.now += HOUR;
+  assert.equal((await status(w, e.cookie)).j.canCreate, false); assert.equal(rec(w, e.id).refunds, undefined);
+});
+
+await check('tenant isolation: the check uses the server-stored binding; other visitors and browser-supplied ids change nothing', async () => {
+  const w = world();
+  const a = await approvedWithProject(w), b = await approvedWithProject(w);
+  shape(w, a.pid);
+  assert.equal((await status(w, b.cookie, `?project=${a.pid}&requestId=${a.brief.requestId}`)).j.canCreate, false, 'B is not refunded by A');
+  assert.equal(rec(w, a.id).refunds, undefined, 'A is not touched by B');
+  assert.equal(rec(w, b.id).refunds, undefined);
+  assert.equal((await status(w, a.cookie)).j.canCreate, true);
+  // A refund call with someone else's scoped id is a no-op.
+  shape(w, b.pid);
+  await inboxOf(w).refund(sha(credOf(a.cookie)), rec(w, b.id).projectRequestId);
+  assert.equal(rec(w, b.id).refunds, undefined); assert.equal(rec(w, a.id).refunds, 1);
+});
+
+await check('concurrency: parallel refreshes and creates refund once and bind one new project; a stale refund is a no-op', async () => {
+  const w = world();
+  const v = await approvedWithProject(w);
+  shape(w, v.pid);
+  const rs = await Promise.all([status(w, v.cookie), create(w, brief(), { cookie: v.cookie }), status(w, v.cookie), create(w, brief(), { cookie: v.cookie }),
+    call(w, 'GET', '/api/cloudbite/bootstrap', { headers: { cookie: v.cookie } })]);
+  assert.deepEqual([rs[1].status, rs[3].status].sort(), [201, 409]);
+  assert.equal(rec(w, v.id).refunds, 1, 'refunded exactly once');
+  const bound = rec(w, v.id).projectRequestId;
+  assert.ok(bound && bound !== rec(w, v.id).refunded[0]);
+  // Stale step 2 for the old run after a new binding exists: nothing changes.
+  await inboxOf(w).refund(sha(credOf(v.cookie)), rec(w, v.id).refunded[0]);
+  assert.equal(rec(w, v.id).projectRequestId, bound); assert.equal(rec(w, v.id).refunds, 1);
+  // Lockstep on the DO: step 1 sees the failed binding, a retry of the same run reserves first, step 2 must not clear it.
+  const x = await approvedWithProject(w); shape(w, x.pid);
+  const cred = sha(credOf(x.cookie)), xs = rec(w, x.id).projectRequestId;
+  assert.equal((await inboxOf(w).refundCandidate(cred)).scoped, xs);
+  assert.ok(!(await inboxOf(w).reserve(cred, xs, 2)).error, 'retry of the same run holds the binding');
+  await inboxOf(w).refund(cred, xs);
+  assert.equal(rec(w, x.id).projectRequestId, xs, 'held binding is not refunded'); assert.equal(rec(w, x.id).refunds, undefined);
+});
+
+await check('refund cap: at most 3 failed-run refunds per grant, then recovery=limit; records written before refunds existed recover', async () => {
+  const w = world();
+  const v = await approvedWithProject(w);
+  const r0 = rec(w, v.id); delete r0.refunds; delete r0.refunded; // pre-deployment record shape
+  assert.equal('refunds' in r0 || 'refunded' in r0, false);
+  let pid = v.pid;
+  for (let i = 1; i <= 3; i++) {
+    shape(w, pid);
+    assert.equal((await status(w, v.cookie)).j.canCreate, true, `refund ${i}`);
+    assert.equal(rec(w, v.id).refunds, i);
+    const c = await create(w, brief(), { cookie: v.cookie }); assert.equal(c.status, 201); pid = c.j.project.id;
+  }
+  shape(w, pid);
+  const st = await status(w, v.cookie);
+  assert.equal(st.j.canCreate, false); assert.equal(st.j.recovery, 'limit'); assert.equal(st.j.request.usedProjects, 1);
+  assert.equal((await create(w, brief(), { cookie: v.cookie })).status, 409);
+  assert.equal(rec(w, v.id).refunds, 3); assert.equal(rec(w, v.id).refunded.length, 3);
+  assert.equal(w.projects.objects.size, 4, 'four projects in total for one grant, never more');
+});
+
 rmSync(tmp, { recursive: true, force: true });
 console.log(`cloudbite-access: ${count} checks passed`);

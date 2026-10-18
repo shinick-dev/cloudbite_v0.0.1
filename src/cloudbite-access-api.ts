@@ -4,7 +4,7 @@
 import type { CloudbiteAccessSession } from './cloudbite-access-contract';
 import { CB_ACCESS_ID, CB_ACCESS_INBOX, CB_ACCESS_GRANT_TTL, CB_ACCESS_PENDING_TTL, type AccessAction } from './cloudbite-access-service';
 import { boundedText } from './cloudbite-inference';
-import { cbHash, isCbFail } from './cloudbite-project';
+import { cbHash, cbProjectId, isCbFail } from './cloudbite-project';
 import type { Env } from './state';
 
 type Json = (data: unknown, status?: number) => Response;
@@ -40,11 +40,32 @@ export async function accessCredentialHash(req: Request, env: Env): Promise<stri
 
 const inbox = (env: Env) => env.CLOUDBITE_ACCESS!.getByName(CB_ACCESS_INBOX);
 
+/**
+ * This credential's session, after returning the grant's project slot if (and only if) its bound project definitively
+ * failed with zero completed experts and its cleanup is confirmed (docs/cloudbite/access-service.txt, Failed-run refund).
+ * The project is found from the scoped requestId the access DO stored — never from anything the browser sent. Any
+ * failure to ask the project keeps the slot used (fail closed). Idempotent: repeated calls refund at most once per run.
+ */
+export async function settledSession(env: Env, cred: string | null): Promise<CloudbiteAccessSession> {
+  const box = inbox(env);
+  const c = await box.refundCandidate(cred);
+  if (!c.scoped) return c.session;
+  let state: 'refundable' | 'cleanup' | 'none';
+  try {
+    if (!env.CLOUDBITE) throw new Error('no project binding');
+    state = await env.CLOUDBITE.getByName(await cbProjectId(c.scoped)).refundState(c.scoped);
+  } catch { return { ...c.session, recovery: 'unavailable' }; }
+  if (state === 'none') return c.session;
+  if (state === 'cleanup') return { ...c.session, recovery: 'pending' };
+  if (c.capped) return { ...c.session, recovery: 'limit' };
+  return box.refund(cred, c.scoped);
+}
+
 /** bootstrap.access: only when the binding exists and the browser presents a credential. */
 export async function accessSession(req: Request, env: Env): Promise<CloudbiteAccessSession | null> {
   if (!env.CLOUDBITE_ACCESS) return null;
   const cred = await accessCredentialHash(req, env);
-  return cred ? inbox(env).current(cred) : null;
+  return cred ? settledSession(env, cred) : null;
 }
 
 /** Visitor brief.requestId namespace: two visitors (or a visitor and the owner) never share a project id. */
@@ -61,7 +82,11 @@ export const visitorGrant = {
     const g = await inbox(env).grant(cred);
     return isCbFail(g) ? null : { cred, id: g.id };
   },
-  reserve: (env: Env, cred: string, scoped: string, experts: number) => inbox(env).reserve(cred, scoped, experts),
+  /** Return a failed project's slot first (same rules as bootstrap), then bind atomically. */
+  async reserve(env: Env, cred: string, scoped: string, experts: number) {
+    await settledSession(env, cred);
+    return inbox(env).reserve(cred, scoped, experts);
+  },
   confirm: (env: Env, id: string, scoped: string) => inbox(env).confirm(id, scoped),
   release: (env: Env, id: string, scoped: string) => inbox(env).release(id, scoped),
 };
@@ -94,7 +119,7 @@ export async function accessRoute(req: Request, env: Env, path: string, isOwner:
   if (path === '/api/cloudbite/access/status') {
     if (req.method !== 'GET') return json({ error: 'method not allowed' }, 405);
     if (!env.CLOUDBITE_ACCESS) return json({ request: null, canCreate: false } satisfies CloudbiteAccessSession);
-    return json(await inbox(env).current(await accessCredentialHash(req, env)));
+    return json(await settledSession(env, await accessCredentialHash(req, env)));
   }
 
   if (path === '/api/cloudbite/access/requests') {

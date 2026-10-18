@@ -225,6 +225,23 @@ export class CloudbiteProject extends DurableObject<Env> {
     return { ...meta, content };
   }
 
+  /**
+   * Internal, read-only (CloudbiteAccess quota refund; never routed from HTTP). requestId is the server-stored scoped
+   * requestId the caller derived this object's id from. 'refundable' = this project definitively failed with zero
+   * completed experts, every expert is final, every cleanup entry is done (none stuck) and a live slot was released.
+   * 'cleanup' = failed with zero completed but cleanup is not confirmed yet. 'none' = anything else (missing, other
+   * requestId, running, completed, partial, cancelled, stuck cleanup).
+   */
+  async refundState(requestId: string): Promise<'refundable' | 'cleanup' | 'none'> {
+    const s = await this.load();
+    if (!s || s.p.brief.requestId !== requestId || s.p.id !== await cbProjectId(requestId)) return 'none';
+    if (s.p.status !== 'failed' || s.experts.length !== s.p.runs.length || s.experts.some((e) => e.run.status === 'completed')) return 'none';
+    const cleanup = [...(await this.ctx.storage.list<CleanupEntry>({ prefix: 'cleanup:' })).values()];
+    if (cleanup.some((x) => x.stuck && !x.done)) return 'none';
+    const settled = s.experts.every((e) => e.int.phase === 'final') && cleanup.every((x) => x.done) && (s.p.brief.mode === 'demo' || s.p.released === true);
+    return settled ? 'refundable' : 'cleanup';
+  }
+
   // ── /p/_cloudbite/worker/<project>/<run>/<action> (sandbox runner, per-expert capability) ──
   async worker(run: string, token: unknown, action: string, body: unknown): Promise<unknown | CbFail> {
     if (typeof token !== 'string' || !/^cbw_[A-Za-z0-9_-]{43}$/.test(token)) return fail(401, 'worker capability required');

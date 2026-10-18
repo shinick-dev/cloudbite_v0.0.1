@@ -104,6 +104,10 @@ function normalizeExpertDef(raw: unknown): ExpertDefinition | null {
 }
 
 const ACCESS_STATUSES: CloudbiteAccessRequest['status'][] = ['pending', 'approved', 'denied', 'revoked', 'expired'];
+const ACCESS_RECOVERY: NonNullable<CloudbiteAccessSession['recovery']>[] = ['pending', 'unavailable', 'limit'];
+/** 실패한 방문자 실행의 정리 확인을 기다리며 bootstrap 을 다시 읽는 횟수·간격 (그 뒤에는 Check again 으로만) */
+const ACCESS_RECHECKS = 24;
+const ACCESS_RECHECK_MS = 5000;
 /** 방문자 접근 상태 (bootstrap.access). 자격 증명은 HttpOnly 쿠키에만 있고 여기에는 상태만 온다. 깨졌으면 없는 것으로 본다 */
 function normalizeAccess(raw: unknown): CloudbiteAccessSession | undefined {
   if (!isObj(raw)) return undefined;
@@ -117,7 +121,8 @@ function normalizeAccess(raw: unknown): CloudbiteAccessSession | undefined {
     id, status, name: str(r.name, 80), purpose: str(r.purpose, 1000), createdAt: n(r.createdAt, Number.MAX_SAFE_INTEGER), expiresAt: n(r.expiresAt, Number.MAX_SAFE_INTEGER),
     maxExperts: n(r.maxExperts, 100), maxProjects: n(r.maxProjects, 100), usedProjects: n(r.usedProjects, 100),
   };
-  return { request, canCreate: raw.canCreate === true && status === 'approved' };
+  const recovery = ACCESS_RECOVERY.find(x => x === raw.recovery);
+  return { request, canCreate: raw.canCreate === true && status === 'approved', ...(recovery ? { recovery } : {}) };
 }
 
 /** 승인되고 만료 전인 방문자 요청만 돌려준다. URL 이 아니라 서버 bootstrap 이 알려 준 상태만 본다 */
@@ -608,6 +613,8 @@ function boot(): void {
     run: null as null | {
       mode: Mode; phase: 'starting' | 'running' | 'cancelling' | 'done' | 'error'; project: ConsoleProject | null;
       accessToken: string; error: string; startedAt: number; pollErrors: number;
+      /** 승인된 방문자 쿠키로 만든 실제 실행: 끝나면 서버 접근 상태를 다시 읽는다 */
+      viaVisitor: boolean;
     },
     view: 'home' as View,
     setupOpen: link.present,
@@ -628,6 +635,7 @@ function boot(): void {
   };
   let timers: number[] = [];
   let pollTimer = 0;
+  let accessTimer = 0, accessTries = 0;
   let lastAnnounce = '';
 
   const catalogue = (): ExpertDefinition[] => S.mode === 'live' ? S.boot.data?.experts ?? [] : (S.boot.data?.experts.length ? S.boot.data.experts : DEMO_EXPERTS);
@@ -644,7 +652,14 @@ function boot(): void {
   const accessProblem = (): string => {
     const r = S.boot.data?.access?.request;
     if (!r) return '';
-    if (visitor()) return visitorCanRun() ? '' : 'Your visitor session has no projects left. Ask the host for a new session.';
+    if (visitor()) {
+      if (visitorCanRun()) return '';
+      const rec = S.boot.data?.access?.recovery;
+      return rec === 'pending' ? 'Your last run failed. Run again unlocks once the server confirms its sandboxes were cleaned up — checking automatically.'
+        : rec === 'unavailable' ? 'Your last run failed, but the server could not confirm its cleanup yet. Select Check again in a moment.'
+          : rec === 'limit' ? 'Your runs failed and this visitor session has used all its retries after failed runs. Ask the host for a new session.'
+            : 'Your visitor session has no projects left. Ask the host for a new session.';
+    }
     return r.status === 'pending' ? 'Your access request is still waiting for the host.'
       : r.status === 'denied' ? 'The host declined your access request.'
         : r.status === 'revoked' ? 'The host ended your visitor session.'
@@ -657,6 +672,9 @@ function boot(): void {
   };
   const active = () => !!S.run && (S.run.phase === 'starting' || S.run.phase === 'running' || S.run.phase === 'cancelling'
     || (S.run.phase === 'error' && !!S.run.project && !TERMINAL_PROJECT.includes(S.run.project.status)));
+  /** 실패한 실행의 정리를 아직 확인하지 못한 방문자: Check again 으로 서버 상태를 다시 읽을 수 있다 */
+  const recheckable = () => { const r = S.boot.data?.access?.recovery; return !!visitor() && !visitorCanRun() && (r === 'pending' || r === 'unavailable'); };
+  const checkAgain = () => h('button', { type: 'button', class: 'cb-ghost', onclick: () => refreshAccess(true) }, 'Check again');
   const findDef = (id: string) => catalogue().find(e => e.id === id) ?? DEMO_EXPERTS.find(e => e.id === id);
 
   // ── 고정 뼈대 (입력란은 한 번만 만들어 포커스·입력 중 글자를 잃지 않는다)
@@ -873,6 +891,7 @@ function boot(): void {
     if (v) liveKids.push(h('p', { class: 'cb-help' }, `Visitor session for ${v.name || 'you'} · ends at ${hhmm(v.expiresAt)} · ${visitorLeft()} of ${plural(v.maxProjects, 'project')} left · up to ${plural(v.maxExperts, 'expert')} per project${S.adminToken.trim() ? ' · the admin token is used instead while entered' : ''}`));
     const problem = accessProblem();
     if (problem) liveKids.push(h('p', { class: 'cb-warn' }, problem, ' ', h('a', { href: REQUEST_PATH }, 'Request visitor access')));
+    if (recheckable()) liveKids.push(checkAgain());
     liveStatus.replaceChildren(...liveKids.filter((k): k is Node => !!k));
     clearTokenBtn.hidden = !S.adminToken;
     const busy = active();
@@ -1105,6 +1124,10 @@ function boot(): void {
       tips.push(h('p', null, a.valid ? 'Results are in. Read the synthesis below, check any dissent, then export a report.'
         : 'No valid opinions to synthesise. Check the errors in the execution stream and run again.'));
       if (a.failed || a.invalid) tips.push(h('p', null, `${plural(a.failed + a.invalid, 'expert')} did not produce a valid opinion and ${a.failed + a.invalid === 1 ? 'is' : 'are'} excluded.`));
+      if (run.viaVisitor && !S.adminToken.trim() && S.boot.status === 'ready') {
+        tips.push(h('p', null, visitorCanRun() ? 'Your visitor session can run again. Nothing starts until you select Run again.' : accessProblem() || 'Your visitor session cannot start another run.'));
+        if (recheckable()) tips.push(checkAgain());
+      }
     }
     fill(tipBody, ...tips);
   }
@@ -1188,7 +1211,20 @@ function boot(): void {
     for (const e of list) { if (S.selected.size >= 4) break; S.selected.add(e.id); }
   }
 
-  function clearTimers(): void { for (const t of timers) clearTimeout(t); timers = []; clearTimeout(pollTimer); pollTimer = 0; }
+  function clearTimers(): void { for (const t of timers) clearTimeout(t); timers = []; clearTimeout(pollTimer); pollTimer = 0; clearTimeout(accessTimer); accessTimer = 0; }
+
+  /** 방문자 실행이 끝나면 서버가 아는 접근 상태(canCreate)를 다시 읽는다. 실패한 실행의 정리 확인을 기다리는 동안만
+   *  잠깐씩 다시 본다. 버튼만 다시 열 뿐 실행·데모는 자동으로 시작하지 않고, 실패 기록은 사용자가 다시 시작할 때까지 둔다 */
+  function refreshAccess(fresh: boolean): void {
+    clearTimeout(accessTimer); accessTimer = 0;
+    if (fresh) accessTries = 0;
+    void loadBootstrap().then(() => {
+      if (active()) return;
+      const r = S.boot.data?.access?.recovery;
+      if ((r === 'pending' || r === 'unavailable' || S.boot.status === 'error') && ++accessTries < ACCESS_RECHECKS)
+        accessTimer = setTimeout(() => refreshAccess(false), ACCESS_RECHECK_MS) as unknown as number;
+    });
+  }
 
   /** auto = 첫 화면이 스스로 시작한 데모 (visitorIntro 가 이것만 멈출 수 있다) */
   function startRun(auto = false): void {
@@ -1206,7 +1242,7 @@ function boot(): void {
     const gen = ++S.gen;
     const brief: ProjectBrief = { ...f, mode: S.mode, requestId: crypto.randomUUID() };
     S.artifactCache.clear(); S.hiddenRows.clear(); S.focusExpert = ''; S.artifactPath = ''; S.artifactPicked = false; lastAnnounce = '';
-    S.run = { mode: S.mode, phase: 'starting', project: null, accessToken: '', error: '', startedAt: Date.now(), pollErrors: 0 };
+    S.run = { mode: S.mode, phase: 'starting', project: null, accessToken: '', error: '', startedAt: Date.now(), pollErrors: 0, viaVisitor: viaVisitor() };
     S.autoDemoGen = auto && S.mode === 'demo' ? gen : 0;
     if (S.mode === 'demo') startDemo(gen, brief); else void startLive(gen, brief);
     renderAll();
@@ -1275,6 +1311,7 @@ function boot(): void {
     S.run!.phase = TERMINAL_PROJECT.includes(project.status) ? 'done' : 'running';
     if (S.run!.phase === 'running') schedulePoll(gen, 1200);
     renderAll();
+    if (S.run!.phase === 'done' && v) refreshAccess(true);
   }
 
   function schedulePoll(gen: number, ms: number): void {
@@ -1308,6 +1345,7 @@ function boot(): void {
     if (p.updatedAt >= run.project.updatedAt) run.project = p; // 늦게 도착한 옛 상태는 버린다
     if (TERMINAL_PROJECT.includes(run.project.status)) run.phase = 'done'; else schedulePoll(gen, 2000);
     renderAll();
+    if (run.phase === 'done' && run.viaVisitor) refreshAccess(true);
   }
 
   function pollFailed(gen: number, msg: string): void {
@@ -1425,7 +1463,10 @@ function boot(): void {
   renderAll();
   // 카탈로그를 잠깐(최대 1.5초) 기다렸다가 시작한다. 늦으면 내장 데모 역할로 먼저 시작한다
   // 승인된 방문자는 데모를 자동으로 보지 않는다. bootstrap 이 늦어 데모가 먼저 돌았다면 visitorIntro 가 그 자동 데모만 멈춘다
-  void Promise.race([loadBootstrap(), new Promise(r => setTimeout(r, 1500))]).then(() => {
+  const first = loadBootstrap();
+  // 이전 실행의 정리 확인을 기다리는 방문자가 페이지를 다시 열었으면 같은 방식으로 잠깐씩 다시 본다
+  void first.then(() => { if (!S.run && recheckable() && !accessTimer) accessTimer = setTimeout(() => refreshAccess(true), ACCESS_RECHECK_MS) as unknown as number; });
+  void Promise.race([first, new Promise(r => setTimeout(r, 1500))]).then(() => {
     if (!S.run && S.mode === 'demo' && !link.present && !visitor()) startRun(true);
   });
 }

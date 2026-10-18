@@ -23,6 +23,8 @@ export const CB_ACCESS_RATE = 120;             // new requests per hashed source
 export const CB_ACCESS_RATE_WINDOW = 3600_000;
 export const CB_ACCESS_LIST_MAX = 100;
 export const CB_ACCESS_MAX_PROJECTS = 1;
+/** A grant whose project failed with zero completed experts gets its slot back at most this many times (paid-run bound). */
+export const CB_ACCESS_MAX_FAILED_REFUNDS = 3;
 
 type Fail = { error: string; status: number };
 const fail = (status: number, error: string): Fail => ({ error, status });
@@ -35,7 +37,9 @@ interface AccessRecord {
   credHash: string;
   projectRequestId?: string;   // scoped requestId this grant's one project is bound to (set atomically on first reserve)
   holds: number;               // creates in flight for that requestId
-  confirmed?: boolean;         // a project was created (or may exist): the binding is permanent
+  confirmed?: boolean;         // a project was created (or may exist): the binding is permanent unless refunded
+  refunds?: number;            // failed-run refunds used (absent on records written before refunds existed = 0)
+  refunded?: string[];         // scoped requestIds already refunded: never bound again
 }
 
 export type AccessAction = 'approve' | 'deny' | 'revoke';
@@ -180,6 +184,7 @@ export class CloudbiteAccess extends DurableObject<Env> {
       if (!HEX64.test(scopedRequestId)) return fail(400, 'invalid project request');
       if (!Number.isInteger(experts) || experts < 1 || experts > CB_MAX_EXPERTS) return fail(403, `this access allows at most ${CB_MAX_EXPERTS} experts`);
       if (r.projectRequestId && r.projectRequestId !== scopedRequestId) return fail(409, 'this access has already been used for a project');
+      if (r.refunded?.includes(scopedRequestId)) return fail(409, 'that run already failed; start a new run');
       const fresh = !r.projectRequestId;
       r.projectRequestId = scopedRequestId;
       r.holds = (r.holds ?? 0) + 1;
@@ -188,7 +193,42 @@ export class CloudbiteAccess extends DurableObject<Env> {
     });
   }
 
-  /** The project now exists (or may): keep the binding forever for this grant. */
+  /** Approved, unexpired, a confirmed binding with no create in flight: the only state a refund may start from. */
+  private refundBinding(r: AccessRecord | null, now: number): r is AccessRecord {
+    return !!r && this.status(r, now) === 'approved' && !!r.projectRequestId && r.confirmed === true && !(r.holds ?? 0);
+  }
+
+  /**
+   * Failed-run refund, step 1 (read-only). The scoped requestId this grant's project is bound to, for the Worker to
+   * ask that project (by the server-stored id, never a browser one) whether it failed and was cleaned up.
+   */
+  refundCandidate(credHash: string | null): Promise<{ session: CloudbiteAccessSession; scoped: string | null; capped: boolean }> {
+    return this.serial(async () => {
+      const r = await this.byCred(credHash), now = this.clock();
+      const ok = this.refundBinding(r, now);
+      return { session: this.session(r, now), scoped: ok ? r.projectRequestId! : null, capped: ok && (r.refunds ?? 0) >= CB_ACCESS_MAX_FAILED_REFUNDS };
+    });
+  }
+
+  /**
+   * Failed-run refund, step 2. The Worker has just seen the project report 'refundable' for scoped. Compare-and-clear:
+   * only if the grant is still bound to exactly that id, confirmed, nothing in flight and under the cap. That id is
+   * remembered so it can never be bound (or refunded) again. A stale or concurrent call is a no-op.
+   */
+  refund(credHash: string | null, scoped: string): Promise<CloudbiteAccessSession> {
+    return this.serial(async () => {
+      const r = await this.byCred(credHash), now = this.clock();
+      if (this.refundBinding(r, now) && r.projectRequestId === scoped && (r.refunds ?? 0) < CB_ACCESS_MAX_FAILED_REFUNDS) {
+        r.refunds = (r.refunds ?? 0) + 1;
+        r.refunded = [...(r.refunded ?? []), scoped];
+        r.projectRequestId = undefined; r.confirmed = false; r.holds = 0;
+        await this.ctx.storage.put(`req:${r.id}`, r);
+      }
+      return this.session(r, now);
+    });
+  }
+
+  /** The project now exists (or may): keep the binding for this grant (only a failed-run refund clears it). */
   confirm(id: string, scopedRequestId: string): Promise<{ ok: true }> {
     return this.serial(async () => {
       const r = CB_ACCESS_ID.test(id) ? await this.ctx.storage.get<AccessRecord>(`req:${id}`) : undefined;
