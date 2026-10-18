@@ -11,6 +11,7 @@ import { boundedText } from './cloudbite-inference';
 import { isInvalid, PROJECT_ID, RUN_ID, validateBrief } from './cloudbite-validate';
 import { accessRoute, accessSession, visitorGrant, visitorRequestId } from './cloudbite-access-api';
 import { ownerCookieValid, ownerRoute, type OwnerState } from './cloudbite-owner';
+import { historyRoute, prepareHistory } from './cloudbite-history-api';
 import type { Env, State } from './state';
 
 type Json = (data: unknown, status?: number) => Response;
@@ -26,7 +27,7 @@ export function cloudbitePage(path: string, sec: Record<string, string>): Respon
   if (path === '/cloudbite/access' || path === '/cloudbite/access/') return page(CLOUDBITE_ACCESS_HTML, 'text/html; charset=utf-8', true);
   if (path === '/cloudbite/access.css') return page(CLOUDBITE_ACCESS_CSS, 'text/css; charset=utf-8');
   if (path === '/cloudbite/access-qr.svg') return page(CLOUDBITE_ACCESS_QR, 'image/svg+xml; charset=utf-8');
-  if (path === '/' || path === '/cloudbite' || path === '/cloudbite/') return page(CLOUDBITE_HTML, 'text/html; charset=utf-8', true);
+  if (path === '/' || path === '/cloudbite' || path === '/cloudbite/' || path === '/cloudbite/history' || path === '/cloudbite/history/') return page(CLOUDBITE_HTML, 'text/html; charset=utf-8', true);
   // Asset paths are the ones the page itself references (exported next to the page by the UI build).
   if (path === CLOUDBITE_JS_PATH) return page(CLOUDBITE_JS, 'text/javascript; charset=utf-8');
   if (path === CLOUDBITE_CSS_PATH) return page(CLOUDBITE_CSS, 'text/css; charset=utf-8');
@@ -35,7 +36,7 @@ export function cloudbitePage(path: string, sec: Record<string, string>): Respon
 
 export function cloudbiteBootstrap(env: Env): CloudbiteBootstrap {
   const missing = cloudbiteMissing(env, CLOUDBITE_EXPERTS.length);
-  return { experts: [...CLOUDBITE_EXPERTS], configuration: { liveReady: missing.length === 0, missing, maxExperts: CB_MAX_EXPERTS } };
+  return { experts: [...CLOUDBITE_EXPERTS], configuration: { liveReady: missing.length === 0, missing, maxExperts: CB_MAX_EXPERTS, ...(env.CLOUDBITE_HISTORY ? { historyRetentionDays: 30 } : {}) } };
 }
 
 function bearer(req: Request) {
@@ -91,6 +92,8 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
   const hasAdmin = req.headers.has('x-admin-token');
   const admin = req.headers.get('x-admin-token') ?? '';
   const ownerAuth = () => (hasAdmin ? isOwner(admin) : ownerCookieValid(req, env, state));
+  const historyResponse = await historyRoute(req, env, url, ownerAuth, json);
+  if (historyResponse) return historyResponse;
   const access = await accessRoute(req, env, path, ownerAuth, json);
   if (access) return access;
 
@@ -133,7 +136,8 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
       const slot = await ns.getByName('registry').registryAcquire(id);
       if (isCbFail(slot)) return refused(slot.status, slot.error);
     }
-    const created = await ns.getByName(id).create(id, brief);
+    const history = await prepareHistory(req, env, visitor?.cred ?? null);
+    const created = await ns.getByName(id).create(id, brief, history?.actor);
     // A failed first create must not hold a live slot. (Idempotent retries of an existing project return success.)
     if (isCbFail(created) && brief.mode === 'live' && created.status !== 409) await ns.getByName('registry').registryRelease(id);
     if (isCbFail(created)) {
@@ -143,7 +147,9 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
       return json({ error: created.error }, created.status);
     }
     if (hold) await visitorGrant.confirm(env, hold.id, hold.scoped);
-    return json(created, 201);
+    const response = json(created, 201);
+    if (history?.cookie) response.headers.append('set-cookie', history.cookie);
+    return response;
   }
 
   const m = path.match(/^\/api\/cloudbite\/projects\/([^/]+)(\/cancel|\/artifact)?$/);

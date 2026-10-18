@@ -59,7 +59,7 @@ const PLAIN_KEYS = ['max_tokens', 'messages', 'model', 'stream', 'temperature'];
 
 // ── world: storage per DO name, clock, fake providers ──
 function memStorage(w) {
-  const m = new Map(); let alarm = null;
+  const m = new Map(); let alarm = null, transactions = Promise.resolve();
   const clone = (v) => (v === undefined ? undefined : structuredClone(v));
   return {
     m,
@@ -69,6 +69,7 @@ function memStorage(w) {
     async list({ prefix = '' } = {}) { return new Map([...m].filter(([k]) => k.startsWith(prefix)).sort().map(([k, v]) => [k, clone(v)])); },
     async getAlarm() { return alarm; }, async setAlarm(t) { alarm = t; }, async deleteAlarm() { alarm = null; },
     async deleteAll() { m.clear(); },
+    transaction(fn) { const result = transactions.then(() => fn(this)); transactions = result.catch(() => {}); return result; },
     get alarm() { return alarm; },
   };
 }
@@ -818,6 +819,24 @@ await check('curated STA: full persona, question-specific references, follow-up 
   assert.equal(audit.commercialStaExecuted, false); assert.ok(audit.retrievals.length >= 2);
   assert.ok(audit.sources.some(s => s.id === 'education-005' || s.aliases.includes('education-005')));
   assert.ok(w.nosana.every(r => !JSON.stringify(r).includes('DAYTONA-SECRET-VALUE')));
+});
+
+await check('live history: real runner results publish without browser polling, keep model/persona identity and cleanup unchanged', async () => {
+  const w = freshWorld(), rows = [];
+  w.env.CLOUDBITE_HISTORY = { getByName: () => ({ upsert: async row => { rows.push(structuredClone(row)); } }) };
+  const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['market'] }), headers: admin });
+  assert.equal(created.status, 201, created.text);
+  const obj = await project(w, created);
+  await drive(w, obj, p => p.status !== 'running', 2000); await Promise.all(w.procs);
+  const p = await obj.storage.get('project');
+  assert.equal(p.status, 'completed'); assert.equal(p.purgeAt - p.createdAt, 30 * 86400_000);
+  assert.ok(rows.some(r => r.status === 'completed' && r.mode === 'live'));
+  const final = rows.findLast(r => r.status === 'completed');
+  assert.equal(final.model, 'fake-model'); assert.equal(final.roles[0].promptHash.length, 64);
+  const detail = await call(w, 'GET', '/api/cloudbite/history/' + p.id, { headers: admin });
+  assert.equal(detail.status, 200, detail.text); assert.ok(detail.j.project.experts[0].opinion);
+  assert.ok(!SECRETS.some(s => JSON.stringify(rows).includes(s) || detail.text.includes(s)));
+  assert.equal(w.deletes.length, 1);
 });
 
 server.close();

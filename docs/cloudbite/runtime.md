@@ -46,7 +46,7 @@ readiness: while `CLOUDBITE_EXPERTS` is empty, live (and demo) creation is refus
   `CLOUDBITE_BRIEF_LIMITS`: title ≤ 120, objective ≤ 2000, context ≤ 8000, `requestId` 8–64 of `[A-Za-z0-9_-]` — the same
   constants `buildExpertWorkspace` enforces, so an accepted brief always yields a workspace. `requestId` maps
   deterministically to the project id; a retry returns the same project with a fresh access token (≤ 4), a different brief → 409.
-- **Project access token** `cbt_…` (hash stored): read, cancel (strict Origin), artifact. 24 h retention, then purge.
+- **Project access token** `cbt_…` (hash stored): read, cancel (strict Origin), artifact. New history-enabled projects retain data for 30 days; legacy projects retain the original 24 h period. Reads enforce the deadline independently of alarm delivery. See `history.txt` for history-only cookies and permissions.
 - **Worker capability** `cbw_…`: one per expert, hash stored, 13 min expiry, revoked on completion/failure/cancel/timeout.
   Works only for `/p/_cloudbite/worker/<project>/<run>/{inference,activity,complete}`; requests with an `Origin` are refused.
   Inference: ≤ 48 KiB body, ≤ 32 messages, ≤ 8 calls per expert (reserved before the upstream call), one in flight,
@@ -110,6 +110,6 @@ and no `sandboxId` is set. The public demo remains the browser-local UI simulati
 - Sandbox outputs (activity text, artifacts, opinion strings) are model-controlled data; the UI must render them as text.
 - A step stuck longer than 3 minutes is taken over; its late effects are discarded by the claim check, but a stale upload can
   overwrite the capability file with a revoked one (the expert then fails honestly).
-- Records are purged 24 h after creation (48 h if cleanup is still pending); stuck cleanup then relies on Daytona auto-delete.
+- Legacy records are purged 24 h after creation (48 h if cleanup is still pending). New history-enabled project records are retained for 30 days, with the same additional 24 h cleanup grace; expired history and project tokens cannot read them. Stuck cleanup then relies on Daytona auto-delete.
 - Local dev: `npm run dev` (port 8808) with `ORIGIN` `http://localhost:8808` in `wrangler.cloudbite.jsonc` `env.dev`.
 - No live Daytona/Nosana call was made during implementation; request shapes follow `src/lab.ts` and the OpenAI chat API.

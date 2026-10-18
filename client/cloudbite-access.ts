@@ -185,6 +185,7 @@ const EN = {
     : s === 404 ? 'That request no longer exists.' : s === 409 ? 'That request has already changed state.' : '',
   visitorForm: 'Visitor request form',
   consoleLink: 'Cloudbite console',
+  historyLink: 'Usage history and improvement report',
 };
 type Dict = typeof EN;
 type Via = 'key' | 'operator' | 'admin';
@@ -338,6 +339,7 @@ const KO: Dict = {
     : s === 404 ? '그 요청은 더 이상 없습니다.' : s === 409 ? '그 요청의 상태가 이미 바뀌었습니다.' : '',
   visitorForm: '방문자 요청 양식',
   consoleLink: 'Cloudbite 콘솔',
+  historyLink: '사용 기록과 개선 리포트',
 };
 const DICT: Record<Lang, Dict> = { en: EN, ko: KO };
 const T = (): Dict => DICT[lang];
@@ -846,7 +848,8 @@ function ownerPage(root: HTMLElement): void {
       advanced,
       h('p', { class: 'ax-note' },
         ta(tx(h('a'), () => T().visitorForm), 'href', () => withLang(REQUEST_PATH)), ' · ',
-        ta(tx(h('a'), () => T().consoleLink), 'href', () => withLang(CONSOLE_PATH)))));
+        ta(tx(h('a'), () => T().consoleLink), 'href', () => withLang(CONSOLE_PATH)), ' · ',
+        ta(tx(h('a'), () => T().historyLink), 'href', () => withLang('/cloudbite/history')))));
   document.addEventListener('visibilitychange', () => { if (visible() && creds() && O.phase === 'ready' && !timer && !loading) void load(); });
 
   /** 명시한 토큰이 있으면 그것만 쓴다 (거부돼도 쿠키로 몰래 넘어가지 않는다). 없으면 로그인된 쿠키 */

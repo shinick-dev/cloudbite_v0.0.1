@@ -200,7 +200,7 @@ function fakeEnv({ fetchImpl, owner = OWNER_OUT, globals = {} }) {
   const root = new Node_(doc, 'div'); root.id = 'cloudbite'; doc.body = new Node_(doc, 'body'); doc.body.append(root);
   const requests = [], ownerCalls = [];
   const ctx = vm.createContext({
-    document: doc, crypto: globalThis.crypto, CSS: { escape: (s) => s }, URL, Blob,
+    document: doc, crypto: globalThis.crypto, CSS: { escape: (s) => s }, URL, URLSearchParams, Blob,
     setTimeout: (fn, ms) => { const id = ++seq; timers.set(id, { at: now + (ms || 0), fn }); return id; },
     clearTimeout: (id) => { timers.delete(id); }, setInterval: () => 0,
     fetch: (url, init = {}) => {
@@ -1209,6 +1209,57 @@ await test('지식 기반 STA: 페르소나 끝을 보존하고 예제 선택은
   assert.ok(selected.length > 0 && selected.every(id => id.includes('probably-primetime-sta')));
   assert.equal(env.requests.filter(r => r.init.method === 'POST').length, 0);
   assert.equal(cards(env), 0, 'example selection does not start a demo');
+});
+
+await test('사용 기록: 서버 원문은 텍스트로, 평가 초안·포커스는 KO/EN 전환 후 유지, 명시 저장만 POST', async () => {
+  const id = 'cb' + 'a'.repeat(32), now = Date.now();
+  const p = project([run(1, 'completed', { ...opinion('conditional', 55), summary: EVIL })], { id, status: 'completed', createdAt: now, brief: brief({ mode: 'live' }) });
+  const row = { id, title: EVIL, mode: 'live', status: 'completed', createdAt: now, updatedAt: now, expiresAt: now + 86400_000, expertCount: 1, feedbackCount: 0, model: 'test' };
+  const env = fakeEnv({ globals: { location: { pathname: '/cloudbite/history', search: '?lang=en', hash: '' } }, fetchImpl: (url, init) => {
+    if (url === '/api/cloudbite/bootstrap') return json(200, CATALOGUE);
+    if (url.startsWith('/api/cloudbite/history?')) return json(200, { rows: [row], next: null, owner: false, retentionDays: 30 });
+    if (url.endsWith('/feedback')) return json(200, { ok: true });
+    return json(200, { project: p, model: 'test', roles: [], feedback: [], expiresAt: row.expiresAt, canFeedback: true });
+  } });
+  await env.flush(); assert.equal(view(env, 'history').hidden, false);
+  env.fk('hist-record:' + id).click(); await env.flush();
+  assert.ok(view(env, 'history').textContent.includes(EVIL)); assert.ok(!env.all().some(n => ['IMG', 'SCRIPT'].includes(n.tagName)));
+  const field = () => env.fk(id + ':x1-comment'); field().value = 'My unsent feedback'; field().dispatch('input'); field().focus();
+  langBtn(env, 'ko').click(); await env.flush();
+  assert.equal(field().value, 'My unsent feedback'); assert.equal(env.doc.activeElement.getAttribute('data-fk'), id + ':x1-comment');
+  assert.equal(env.requests.filter(r => r.init.method === 'POST').length, 0);
+  env.fk(id + ':x1-save').click(); await env.flush();
+  const posts = env.requests.filter(r => r.init.method === 'POST'); assert.equal(posts.length, 1);
+  assert.deepEqual(JSON.parse(posts[0].init.body), { expertId: 'x1', rating: 'helpful', comment: 'My unsent feedback' });
+  assert.ok(view(env, 'history').textContent.includes('피드백을 저장했습니다.'));
+});
+
+await test('사용 기록: 두 단계 삭제와 API 확인 뒤 목록 갱신, 거절된 사용자에게 운영자 리포트 없음', async () => {
+  const id = 'cb' + 'b'.repeat(32), p = project([], { id, status: 'completed', createdAt: Date.now() }); let removed = false;
+  const env = fakeEnv({ fetchImpl: (url, init) => {
+    if (url === '/api/cloudbite/bootstrap') return json(200, CATALOGUE);
+    if (url.startsWith('/api/cloudbite/history?')) return json(200, { rows: removed ? [] : [{ id, title: 'Delete QA', mode: 'live', status: 'completed', createdAt: p.createdAt, expertCount: 0 }], owner: false, next: null });
+    if (init.method === 'DELETE') { removed = true; return json(200, { ok: true }); }
+    return json(200, { project: p, roles: [], feedback: [], model: 'm', expiresAt: Date.now() + 1000, canFeedback: true });
+  } });
+  env.fk('nav:history').click(); await env.flush(); env.fk('hist-record:' + id).click(); await env.flush();
+  env.byText('BUTTON', 'Delete record').click(); await env.flush(); assert.equal(removed, false);
+  env.byText('BUTTON', 'Delete permanently').click(); await env.flush(); assert.equal(removed, true);
+  assert.ok(!env.fk('hist-record:' + id)); assert.ok(!env.byText('BUTTON', 'Improvement report'));
+});
+
+await test('개선 리포트: 운영자만 탭 표시, 실측 집계와 데모 제외·확신도 한계를 KO/EN으로 표시', async () => {
+  const report = { analyzed: 3, live: 2, demoExcluded: 1, pending: 1, experts: 3, completed: 3, failed: 0, referenced: 1, confidenceBins: [0,0,3,0,0],
+    feedback: { helpful: 0, unhelpful: 1, issues: { 'too-generic': 1 } }, errors: {}, roles: [], models: [], insights: [{ kind: 'confidence', count: 1, total: 1 }] };
+  const env = fakeEnv({ owner: () => json(200, { authenticated: true, hasCredentials: true }), fetchImpl: url => {
+    if (url === '/api/cloudbite/bootstrap') return json(200, CATALOGUE);
+    return url.endsWith('/report') ? json(200, report) : json(200, { rows: [], next: null, owner: true });
+  } });
+  env.fk('nav:history').click(); await env.flush(); env.byText('BUTTON', 'Improvement report').click(); await env.flush();
+  assert.ok(view(env, 'history').textContent.includes('1 server demos excluded'));
+  assert.ok(view(env, 'history').textContent.includes('this alone does not prove a defect'));
+  langBtn(env, 'ko').click(); await env.flush(); assert.ok(view(env, 'history').textContent.includes('자체 평가이며 정확도가 아닙니다'));
+  assert.ok(env.requests.every(r => r.init.method !== 'POST'));
 });
 
 console.log(`cloudbite-console: ${pass} passed`);

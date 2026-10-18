@@ -350,6 +350,52 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 
 /* guide / help / settings views */
 .cb-page { max-width: 1000px; display: flex; flex-direction: column; gap: 16px; }
+.cb-history { width: 100%; max-width: 1280px; }
+.cb-history .cb-page-head { margin-bottom: 20px; max-width: 75ch; }
+.cb-history .cb-page-head h2 { font-size: 22px; }
+.cb-history-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.cb-history-toolbar button:last-child { margin-left: auto; }
+.cb-history-grid { display: grid; grid-template-columns: minmax(240px, 30%) minmax(0, 1fr); gap: 16px; align-items: start; }
+.cb-history-list { padding: 8px; max-height: 75vh; overflow: auto; scrollbar-color: var(--line-strong) var(--sunk); }
+.cb-history-record { display: flex; flex-direction: column; gap: 5px; padding: 16px 14px; width: 100%; text-align: left; color: var(--ink); background: var(--surface); border: 0; border-radius: var(--radius-sm); cursor: pointer; overflow-wrap: anywhere; }
+.cb-history-record + .cb-history-record { margin-top: 4px; }
+.cb-history-record:hover { background: var(--sunk); }
+.cb-history-record[aria-pressed=true] { color: var(--blue-hover); background: var(--blue-soft); }
+.cb-history-record span, .cb-history-record small { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.cb-history-detail h3 { font-size: 19px; margin-bottom: 8px; }
+.cb-history-detail h4 { font-size: 15px; margin: 20px 0 8px; }
+.cb-history-copy { max-width: 75ch; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
+.cb-history-copy li { margin-bottom: 8px; }
+.cb-history-answer { padding: 4px 0 20px; border-bottom: 1px solid var(--line); }
+.cb-history-answer:last-of-type { margin-bottom: 20px; }
+.cb-history-feedback { display: grid; gap: 8px; margin-top: 20px; max-width: 65ch; }
+.cb-history-feedback label { color: var(--muted); font-size: 13px; margin-top: 6px; }
+.cb-history-feedback select, .cb-history-feedback textarea { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); padding: 9px 10px; width: 100%; max-width: 100%; caret-color: var(--blue); }
+.cb-history-feedback textarea { resize: vertical; }
+.cb-history-feedback button { justify-self: start; }
+.cb-history-feedback select:disabled { color: var(--muted); background: var(--sunk); }
+.cb-history-delete { padding-top: 12px; }
+.cb-history-delete button { margin: 0 8px 8px 0; }
+.cb-history-report { display: flex; flex-direction: column; gap: 12px; }
+.cb-history-report h3 { font-size: 17px; margin-top: 16px; }
+.cb-history-report h3:first-child { margin-top: 0; }
+.cb-history-report p { max-width: 75ch; margin: 0; line-height: 1.65; }
+.cb-history-insights { max-width: 85ch; padding-left: 20px; margin: 8px 0; }
+.cb-history-insights li { padding: 6px 0; line-height: 1.65; }
+.cb-history-table { max-width: 100%; overflow: auto; scrollbar-color: var(--line-strong) var(--sunk); }
+.cb-history-table table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.cb-history-table th, .cb-history-table td { padding: 11px 12px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
+.cb-history-table th { color: var(--muted); background: var(--sunk); font-size: 12px; font-weight: 650; white-space: nowrap; }
+.cb-history-table td { font-size: 13px; overflow-wrap: anywhere; }
+.cb-history-notice { max-width: 75ch; line-height: 1.6; }
+@media (max-width: 1024px) { .cb-history-grid { grid-template-columns: minmax(200px, 35%) minmax(0, 1fr); } }
+@media (max-width: 680px) {
+  .cb-history-grid { grid-template-columns: 1fr; }
+  .cb-history-list { max-height: 260px; }
+  .cb-history-table table { min-width: 480px; }
+  .cb-history-toolbar { gap: 6px; }
+  .cb-nav-list { flex-wrap: wrap; }
+}
 .cb-page-head h2 { font-size: 20px; }
 .cb-page-head p { margin: 4px 0 0; color: var(--muted); }
 .cb-guide-steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }

@@ -10,9 +10,10 @@ import type {
   OpinionDirection, ProjectBrief, ProjectRun, ProjectStatus,
 } from '../src/cloudbite-contract';
 import type { CloudbiteAccessRequest, CloudbiteAccessSession } from '../src/cloudbite-access-contract';
+import type { HistoryList, HistoryDetail, HistoryReport, HistoryIssue, HistoryFeedback } from '../src/cloudbite-history-contract';
 
 type Mode = 'demo' | 'live';
-type View = 'home' | 'guide' | 'help' | 'settings';
+type View = 'home' | 'guide' | 'help' | 'settings' | 'history';
 type ConsoleExpert = ExpertRun & { invalidOpinion?: boolean };
 type ConsoleProject = Omit<ProjectRun, 'experts'> & { experts: ConsoleExpert[] };
 interface Limits { min: number; max: number }
@@ -110,7 +111,7 @@ const EN = {
   brandSub: 'Expert sandboxes for one shared project',
   sessionAria: 'Session',
   navAria: 'Primary', navLabel: 'Workspace',
-  nav: { home: 'Home', guide: 'Guide', help: 'Help', settings: 'Settings' } as Record<'home' | 'guide' | 'help' | 'settings', string>,
+  nav: { home: 'Home', guide: 'Guide', help: 'Help', settings: 'Settings', history: 'History' } as Record<View, string>,
   navFoot: 'Up to 5 experts per project · 3 run at once',
   requestAccess: 'Request visitor access',
   accessQr: 'Access QR',
@@ -373,7 +374,7 @@ const KO: Messages = {
   brandSub: '하나의 공동 프로젝트를 위한 전문가 샌드박스',
   sessionAria: '세션',
   navAria: '주 메뉴', navLabel: '작업공간',
-  nav: { home: '홈', guide: '안내', help: '도움말', settings: '설정' },
+  nav: { home: '홈', guide: '안내', help: '도움말', settings: '설정', history: '사용 기록' },
   navFoot: '프로젝트당 전문가 최대 5명 · 동시에 3명 실행',
   requestAccess: '방문자 접근 요청',
   accessQr: '접근 QR',
@@ -748,6 +749,7 @@ function normalizeBootstrap(raw: unknown): CloudbiteBootstrap {
     configuration: {
       liveReady: c.liveReady === true, missing: strList(c.missing, 80, 20),
       maxExperts: max !== null && max >= 1 ? Math.min(Math.floor(max), 100) : 5,
+      ...(c.historyRetentionDays === 30 ? { historyRetentionDays: 30 } : {}),
     },
     ...(access ? { access } : {}),
   };
@@ -1213,6 +1215,69 @@ const OWNER_REFRESH_MS = 30_000;
 const OWNER_INBOX_PATH = '/cloudbite/requests';
 const REQUEST_PATH = '/cloudbite/request';
 
+const HISTORY_TEXT = {
+  en: {
+    title: 'Usage history', mine: 'My records', all: 'All users', report: 'Improvement report', refresh: 'Refresh', more: 'Load more',
+    notice: 'Live-run questions and answers are stored for 30 days and can be reviewed by the owner to improve quality. You can delete finished records in History. Browser demos stay in this tab.',
+    intro: 'Reopen questions, expert answers and feedback. Records stay available in this browser for 30 days; clearing browser cookies removes your access.',
+    empty: 'No saved runs yet. Start a live run, then refresh here after a few seconds. Browser demos are not stored.',
+    select: 'Choose a record to read the question and answers.', loading: 'Loading records…', auth: 'Run a project with approved visitor access, or sign in as the owner to see saved records.',
+    error: (s: number) => s === 409 ? 'Stop the running project before deleting its record.' : `Could not load or update history (${s || 'network error'}). Try again.`,
+    detail: 'Question and answers', model: 'Model', objective: 'Question', context: 'Context', sources: 'Evidence and sources', assumptions: 'Assumptions', actions: 'Next actions',
+    expires: 'Available until', feedback: 'Was this expert answer useful?', helpful: 'Helpful', unhelpful: 'Not helpful', issue: 'What needs improvement?',
+    noIssue: 'Choose a reason (optional)', comment: 'Comment (optional, up to 1,000 characters)', save: 'Save feedback', saved: 'Feedback saved.',
+    remove: 'Delete record', confirm: 'Delete this question, answers, feedback and stored output files?', deleteYes: 'Delete permanently', cancel: 'Keep record',
+    ownerNote: 'All-user records and the improvement report require the owner session. Sign in through Owner inbox.',
+    reportIntro: 'Automatic signals from up to the latest 1,000 saved projects in 30 days. Only finished live runs contribute to quality metrics. No extra model calls or automatic prompt edits.',
+    qualityNote: 'Source presence only checks reference formatting. It does not verify truth. Confidence is self-assessed, not accuracy.',
+    sample: (n: number, live: number, demos: number, pending: number) => `${n} projects sampled · ${live} live · ${demos} server demos excluded · ${pending} live runs still in progress`,
+    noSignals: 'No improvement signals in this sample yet. Collect real runs and user feedback before drawing conclusions.',
+    small: 'Small sample: treat these as investigation leads, not a quality score or a ranking of expert ability.',
+    counts: 'Execution and feedback', completed: 'Completed answers', failed: 'Failed experts', referenced: 'Answers with references', feedbackHelpful: 'Helpful reviews', feedbackUnhelpful: 'Unhelpful reviews',
+    role: 'Expert', basis: 'Knowledge basis', revision: 'Prompt versions', knowledge: 'Curated knowledge', metadata: 'Persona metadata', unknown: 'Unknown',
+    confidence: 'Self-assessed confidence distribution', errors: 'Failure categories', feedbackIssues: 'Feedback reasons', models: 'Models', projects: 'Projects', feedbackReadonly: 'Feedback is provided by the user who ran this project.',
+    insights: {
+      execution: (n: number, total: number) => `${n} / ${total} experts failed. Review the failure categories and affected roles before changing persona prompts.`,
+      sources: (n: number, total: number) => `${n} / ${total} completed answers had no URL or source-ID reference. Review retrieval and citation instructions.`,
+      confidence: (n: number, total: number) => `${n} / ${total} finished live projects gave identical confidence across at least three answers. Inspect shared examples and scoring rubrics; this alone does not prove a defect.`,
+      feedback: (n: number, total: number) => `${n} / ${total} user reviews were unhelpful. Read the linked records and reasons before prioritizing changes.`,
+      knowledge: (n: number, total: number) => `${n} / ${total} completed answers used metadata-only personas. Add curated domain material and retrieval where feedback shows a need.`,
+    },
+    issues: { incorrect: 'Incorrect', 'missing-sources': 'Missing sources', 'too-generic': 'Too generic', 'off-topic': 'Off topic', slow: 'Too slow', other: 'Other' } as Record<HistoryIssue, string>,
+    errorKinds: { format: 'Result format', timeout: 'Timeout', 'rate-limit': 'Rate limit', budget: 'Budget / credit', sandbox: 'Sandbox', inference: 'Inference', other: 'Other' } as Record<string, string>,
+  },
+  ko: {
+    title: '사용 기록', mine: '내 기록', all: '전체 사용자', report: '개선 리포트', refresh: '새로 고침', more: '더 보기',
+    notice: '실제 실행의 질문·답변은 30일간 보관하며 운영자가 품질 개선을 위해 열람할 수 있습니다. 완료된 기록은 사용 기록에서 삭제할 수 있습니다. 브라우저 데모는 이 탭에만 남습니다.',
+    intro: '질문·전문가 답변·피드백을 다시 살펴봅니다. 같은 브라우저에서 30일간 볼 수 있으며, 쿠키를 지우면 내 기록에 접근할 수 없습니다.',
+    empty: '저장된 실행이 없습니다. 실제 실행을 시작한 뒤 몇 초 후 새로 고침하세요. 브라우저 데모는 저장하지 않습니다.',
+    select: '기록을 선택하면 질문과 답변을 볼 수 있습니다.', loading: '기록을 불러오는 중…', auth: '승인된 방문자로 프로젝트를 실행하거나, 운영자 로그인 후 저장된 기록을 볼 수 있습니다.',
+    error: (s: number) => s === 409 ? '실행 중인 프로젝트를 먼저 중지한 뒤 기록을 삭제하세요.' : `기록을 불러오거나 변경하지 못했습니다 (${s || '네트워크 오류'}). 다시 시도하세요.`,
+    detail: '질문과 답변', model: '모델', objective: '질문', context: '맥락', sources: '근거와 출처', assumptions: '가정', actions: '다음 행동',
+    expires: '보관 기한', feedback: '이 전문가의 답변이 도움이 됐나요?', helpful: '도움됨', unhelpful: '도움 안 됨', issue: '개선이 필요한 부분',
+    noIssue: '이유 선택 (선택 사항)', comment: '의견 (선택 사항, 최대 1,000자)', save: '피드백 저장', saved: '피드백을 저장했습니다.',
+    remove: '기록 삭제', confirm: '이 질문·답변·피드백과 저장된 결과 파일을 삭제할까요?', deleteYes: '영구 삭제', cancel: '기록 유지',
+    ownerNote: '전체 사용자 기록과 개선 리포트는 운영자 로그인이 필요합니다. 소유자 요청함에서 로그인하세요.',
+    reportIntro: '최근 30일 내 최신 프로젝트 최대 1,000개의 자동 집계입니다. 완료된 실제 실행만 품질 지표에 반영합니다. 추가 모델 호출이나 프롬프트 자동 변경은 하지 않습니다.',
+    qualityNote: '출처 표기는 참조 형식의 유무만 확인하며 사실 여부를 검증하지 않습니다. 확신도는 자체 평가이며 정확도가 아닙니다.',
+    sample: (n: number, live: number, demos: number, pending: number) => `분석 표본 ${n}개 · 실제 실행 ${live}개 · 서버 데모 ${demos}개 제외 · 실제 실행 진행 중 ${pending}개`,
+    noSignals: '아직 이 표본에서 개선 신호가 발견되지 않았습니다. 실제 실행과 사용자 피드백을 더 모아 판단하세요.',
+    small: '표본이 작습니다. 전문가의 능력 순위나 품질 점수가 아니라 우선 조사할 단서로 보세요.',
+    counts: '실행과 피드백', completed: '완료 답변', failed: '실패 전문가', referenced: '출처 표기 답변', feedbackHelpful: '도움됨 평가', feedbackUnhelpful: '도움 안 됨 평가',
+    role: '전문가', basis: '지식 기반', revision: '프롬프트 버전 수', knowledge: '문서 기반 지식', metadata: '페르소나 메타데이터', unknown: '알 수 없음',
+    confidence: '자체 평가 확신도 분포', errors: '실패 유형', feedbackIssues: '개선 요청 이유', models: '모델', projects: '프로젝트', feedbackReadonly: '이 프로젝트를 실행한 사용자가 남기는 피드백입니다.',
+    insights: {
+      execution: (n: number, total: number) => `전문가 ${total}명 중 ${n}명이 실패했습니다. 페르소나를 바꾸기 전에 실패 유형과 해당 역할을 확인하세요.`,
+      sources: (n: number, total: number) => `완료 답변 ${total}개 중 ${n}개에 URL·출처 ID 표기가 없습니다. 문서 검색과 근거 인용 지시를 점검하세요.`,
+      confidence: (n: number, total: number) => `완료된 실제 실행 ${total}개 중 ${n}개에서 답변 3개 이상이 같은 확신도를 보고했습니다. 공통 예시와 평가 기준을 확인하세요. 이것만으로 결함이 입증되지는 않습니다.`,
+      feedback: (n: number, total: number) => `사용자 평가 ${total}개 중 ${n}개가 도움 안 됨입니다. 해당 기록과 이유를 읽고 개선 우선순위를 정하세요.`,
+      knowledge: (n: number, total: number) => `완료 답변 ${total}개 중 ${n}개가 메타데이터 중심 페르소나를 사용했습니다. 피드백에서 필요가 확인되는 분야부터 문서·검색을 보강하세요.`,
+    },
+    issues: { incorrect: '내용이 틀림', 'missing-sources': '출처 부족', 'too-generic': '너무 일반적임', 'off-topic': '질문과 무관함', slow: '너무 느림', other: '기타' } as Record<HistoryIssue, string>,
+    errorKinds: { format: '결과 형식', timeout: '시간 초과', 'rate-limit': '호출 제한', budget: '예산·크레딧', sandbox: '샌드박스', inference: '추론', other: '기타' } as Record<string, string>,
+  },
+};
+
 function boot(): void {
   // 운영자 링크는 화면·요청보다 먼저 지운다. 링크가 있으면 실제 실행 모드로 열고 자동 데모·자동 실행은 하지 않는다
   const link = takeOperatorLink();
@@ -1240,7 +1305,7 @@ function boot(): void {
       /** 소유자 로그인 쿠키로 만든 실제 실행 */
       viaOwner: boolean;
     },
-    view: 'home' as View,
+    view: (g.location?.pathname?.replace(/\/$/, '') === '/cloudbite/history' ? 'history' : 'home') as View,
     /** 프로젝트 브리프 편집 영역. 실행 전에는 늘 열려 있고, 실행이 실제로 시작되면 접힌다 (오류가 나면 다시 열린다) */
     setupOpen: true,
     /** 사용자가 Settings 에서 실행 방식을 직접 골랐다 — 방문자·소유자 소개가 그 선택을 바꾸지 않는다 */
@@ -1264,6 +1329,17 @@ function boot(): void {
   let pollTimer = 0;
   let accessTimer = 0, accessTries = 0;
   let lastAnnounce = '';
+  const H = {
+    tab: (new URLSearchParams(g.location?.search ?? '').get('tab') === 'report' ? 'report' : 'mine') as 'mine' | 'all' | 'report',
+    owner: false, busy: false, detailBusy: false, mutation: false, error: 0, unauthorized: false, message: '',
+    list: null as HistoryList | null, detail: null as HistoryDetail | null, report: null as HistoryReport | null,
+    deleteId: '', gen: 0, detailGen: 0, dirty: true, renderedLang: '',
+    drafts: new Map<string, Omit<HistoryFeedback, 'at'>>(), opened: new Set<string>(),
+  };
+  const HT = () => HISTORY_TEXT[lang];
+  function clearHistoryAuthority(): void {
+    H.gen++; H.detailGen++; H.list = null; H.detail = null; H.report = null; H.drafts.clear(); H.opened.clear(); H.owner = false; H.busy = false; H.detailBusy = false; H.dirty = true; H.tab = 'mine';
+  }
 
   const catalogue = (): ExpertDefinition[] => S.mode === 'live' ? S.boot.data?.experts ?? [] : (S.boot.data?.experts.length ? S.boot.data.experts : DEMO_EXPERTS);
   const catalogueIsBuiltin = () => S.mode === 'demo' && !S.boot.data?.experts.length;
@@ -1336,7 +1412,7 @@ function boot(): void {
   for (const inp of [titleIn, objectiveIn]) inp.addEventListener('input', () => { if (!active()) renderControls(); });
   const tokenIn = attr(h('input', { id: 'cb-token', type: 'password', autocomplete: 'off', spellcheck: 'false' }), 'placeholder', m => m.tokenPlaceholder);
   tokenIn.value = S.adminToken;
-  tokenIn.addEventListener('input', () => { S.adminToken = tokenIn.value; renderControls(); renderProgress(); });
+  tokenIn.addEventListener('input', () => { S.adminToken = tokenIn.value; clearHistoryAuthority(); renderControls(); renderProgress(); });
   const failIn = h('input', { id: 'cb-fail', type: 'checkbox' });
   failIn.addEventListener('change', () => { S.failSim = failIn.checked; });
   const filterIn = attr(attr(h('input', { id: 'cb-filter', type: 'search', autocomplete: 'off' }), 'placeholder', m => m.searchPlaceholder), 'aria-label', m => m.searchAria);
@@ -1361,7 +1437,7 @@ function boot(): void {
   const catalogueNote = h('p', { class: 'cb-help' });
   const selCount = h('span', { class: 'cb-selcount' });
   const liveStatus = h('div', { class: 'cb-live-status' });
-  const clearTokenBtn = tx('button', { type: 'button', class: 'cb-ghost', onclick: () => { S.adminToken = ''; tokenIn.value = ''; renderControls(); tokenIn.focus(); } }, m => m.clearToken);
+  const clearTokenBtn = tx('button', { type: 'button', class: 'cb-ghost', onclick: () => { S.adminToken = ''; tokenIn.value = ''; clearHistoryAuthority(); renderControls(); tokenIn.focus(); } }, m => m.clearToken);
   const tokenLabel = h('label', { for: 'cb-token', class: 'cb-label' });
   const liveBox = h('div', { class: 'cb-live' }, liveStatus,
     tokenLabel, tokenIn, tx('p', { class: 'cb-help' }, m => m.tokenHelp), clearTokenBtn);
@@ -1376,6 +1452,7 @@ function boot(): void {
       h('div', { class: 'cb-field' }, tx('label', { for: 'cb-context', class: 'cb-label' }, m => m.contextLabel), contextIn, counter(contextIn, LIMIT.context))));
   const modeLine = h('span');
   const startNote = h('div', { class: 'cb-startnote' });
+  const historyNotice = tx('p', { class: 'cb-help cb-history-notice' }, () => HT().notice);
   const form = attr(h('form', { class: 'cb-form', novalidate: true },
     h('div', { class: 'cb-field cb-objective' }, tx('label', { for: 'cb-objective', class: 'cb-label' }, m => m.objectiveLabel), objectiveIn, counter(objectiveIn, LIMIT.objective)),
     staExampleBtn, projDetails,
@@ -1383,6 +1460,7 @@ function boot(): void {
       h('div', { class: 'cb-label-row' }, tx('span', { id: 'cb-cat-label', class: 'cb-label' }, m => m.chooseExperts), selCount),
       coreBox, alsoSel, moreDetails, catalogueNote),
     h('div', { class: 'cb-form-foot' }, formMsg, startNote,
+      historyNotice,
       h('div', { class: 'cb-start-row' }, startBtn,
         h('p', { class: 'cb-mode-line' }, modeLine, ' ', tx('button', { type: 'button', class: 'cb-link', onclick: () => setView('settings') }, m => m.changeInSettings))))), 'aria-label', m => m.briefAria);
   form.addEventListener('submit', ev => { ev.preventDefault(); startRun(); });
@@ -1479,9 +1557,12 @@ function boot(): void {
         tx('a', { href: '/lab' }, m => m.legacyLink))));
 
   const homeView = h('div', { class: 'cb-view cb-home', id: 'cb-view-home' }, h('div', { class: 'cb-center' }, projectCard, wsPanel), aside);
-  const views: Record<View, HTMLElement> = { home: homeView, guide: guideView, help: helpView, settings: settingsView };
-  const NAV: View[] = ['home', 'guide', 'help', 'settings'];
-  const navBtns = NAV.map(v => h('button', { type: 'button', class: 'cb-nav-btn', 'data-fk': `nav:${v}`, onclick: () => setView(v) }, icon(v), tx('span', null, m => m.nav[v])));
+  const historyBody = h('div', { class: 'cb-history-body' });
+  const historyView = h('section', { class: 'cb-view cb-history', id: 'cb-view-history', 'aria-labelledby': 'cb-history-h' },
+    h('div', { class: 'cb-page-head' }, tx('h2', { id: 'cb-history-h' }, () => HT().title), tx('p', null, () => HT().intro)), historyBody);
+  const views: Record<View, HTMLElement> = { home: homeView, guide: guideView, help: helpView, settings: settingsView, history: historyView };
+  const NAV: View[] = ['home', 'guide', 'help', 'settings', 'history'];
+  const navBtns = NAV.map(v => h('button', { type: 'button', class: 'cb-nav-btn', 'data-fk': `nav:${v}`, onclick: () => setView(v) }, icon(v === 'history' ? 'chart' : v), tx('span', null, m => m.nav[v])));
 
   root.replaceChildren(
     h('header', { class: 'cb-top' },
@@ -1497,7 +1578,7 @@ function boot(): void {
         h('ul', { class: 'cb-nav-list' }, ...navBtns.map(b => h('li', null, b))),
         h('div', { class: 'cb-nav-foot' }, tx('span', null, m => m.navFoot), pageLink(REQUEST_PATH, m => m.requestAccess),
           pageLink('/cloudbite/access', m => m.accessQr, { target: '_blank', rel: 'noopener noreferrer' }), pageLink(OWNER_INBOX_PATH, m => m.ownerInbox))), 'aria-label', m => m.navAria),
-      h('main', { class: 'cb-main' }, banner, homeView, guideView, helpView, settingsView)));
+      h('main', { class: 'cb-main' }, banner, homeView, guideView, helpView, settingsView, historyView)));
 
   document.addEventListener('keydown', ev => { if ((ev as KeyboardEvent).key === 'Escape' && S.full) { ev.preventDefault(); setFull(false); } });
 
@@ -1513,12 +1594,13 @@ function boot(): void {
     keepFocus(() => {
       // 오른쪽 패널은 프로젝트가 생긴 뒤에만: 그 전에는 편집 영역 한 열
       homeView.className = `cb-view cb-home${S.run?.project ? ' has-rail' : ''}`;
-      renderNav(); renderControls(); renderCatalogue(); renderWork(); renderProgress(); renderSynth();
+      renderNav(); renderControls(); renderCatalogue(); renderWork(); renderProgress(); renderSynth(); renderHistory();
     });
   }
 
   function renderNav(): void {
     NAV.forEach((v, i) => { navBtns[i].setAttribute('aria-current', v === S.view ? 'page' : 'false'); views[v].hidden = v !== S.view; });
+    banner.hidden = modeBadge.hidden = S.view === 'history';
     LANG_ORDER.forEach((l, i) => langBtns[i].setAttribute('aria-pressed', String(l === lang)));
   }
 
@@ -1559,6 +1641,7 @@ function boot(): void {
     modeLine.textContent = demo ? m.nextDemo : viaOwner() ? m.nextLiveOwner : viaVisitor() ? m.nextLiveVisitor : m.nextLive;
     demoBox.hidden = !demo; liveBox.hidden = demo;
     const cfg = S.boot.data?.configuration;
+    historyNotice.hidden = demo || cfg?.historyRetentionDays !== 30;
     const liveKids: Kid[] = [];
     if (S.boot.status === 'loading') liveKids.push(h('p', { class: 'cb-help' }, m.checkingServer));
     else if (S.boot.status === 'error') liveKids.push(h('p', { class: 'cb-warn' }, m.catalogueFailed(S.boot.error ? S.boot.error(m) : '')),
@@ -1893,6 +1976,163 @@ function boot(): void {
     if (terminal && phrase !== lastAnnounce) { lastAnnounce = phrase; live.textContent = phrase; }
   }
 
+  // ── 서버 사용 기록: 기존 콘솔 안의 추가 화면. 원문은 텍스트 노드로만 그린다.
+  function paintHistory(): void { H.dirty = true; keepFocus(renderHistory); }
+  const historyDate = (at: number) => new Intl.DateTimeFormat(lang === 'ko' ? 'ko-KR' : 'en-GB', { dateStyle: 'medium', timeStyle: 'short' }).format(at);
+  async function historyRequest(path: string, method = 'GET', body?: unknown): Promise<{ status: number; data: unknown }> {
+    const headers: Record<string, string> = {};
+    if (S.adminToken.trim()) headers['x-admin-token'] = S.adminToken.trim();
+    if (body !== undefined) headers['content-type'] = 'application/json';
+    try {
+      const r = await fetch('/api/cloudbite/history' + path, { method, headers, credentials: 'same-origin', cache: 'no-store', ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+      return { status: r.status, data: await r.json() };
+    } catch { return { status: 0, data: null }; }
+  }
+  function historyDenied(status: number): void {
+    H.error = status; H.unauthorized = status === 401 || status === 403;
+    if (H.unauthorized) { H.list = null; H.detail = null; H.report = null; H.owner = false; H.drafts.clear(); }
+  }
+  async function loadHistory(more = false): Promise<void> {
+    if (H.busy) return;
+    const gen = ++H.gen, tab = H.tab;
+    H.busy = true; H.error = 0; H.unauthorized = false; paintHistory();
+    const q = '?scope=' + (tab === 'all' ? 'all' : 'mine') + (more && H.list?.next ? '&before=' + encodeURIComponent(H.list.next) : '');
+    const result = await historyRequest(q);
+    if (gen !== H.gen) return;
+    const list = result.data as HistoryList | null;
+    if (result.status !== 200 || !list || !Array.isArray(list.rows) || !list.rows.every(x => /^cb[0-9a-f]{32}$/.test(x.id))) {
+      historyDenied(result.status); H.busy = false; paintHistory(); return;
+    }
+    H.owner = list.owner === true;
+    H.list = more && H.list ? { ...list, rows: [...H.list.rows, ...list.rows] } : list;
+    if (tab === 'report') {
+      const r = await historyRequest('/report');
+      if (gen !== H.gen) return;
+      const report = r.data as HistoryReport | null;
+      if (r.status === 200 && report && Array.isArray(report.insights) && Array.isArray(report.roles)) H.report = report;
+      else historyDenied(r.status);
+    }
+    H.busy = false; paintHistory();
+  }
+  async function openHistory(id: string): Promise<void> {
+    const gen = ++H.detailGen;
+    H.detailBusy = true; H.detail = null; H.error = 0; H.message = ''; H.deleteId = ''; paintHistory();
+    const r = await historyRequest('/' + encodeURIComponent(id));
+    if (gen !== H.detailGen) return;
+    const detail = r.data as HistoryDetail | null;
+    if (r.status === 200 && detail && normalizeProject(detail.project) && Array.isArray(detail.feedback)) H.detail = detail;
+    else historyDenied(r.status);
+    H.detailBusy = false; paintHistory();
+  }
+  async function saveHistoryFeedback(id: string, draft: Omit<HistoryFeedback, 'at'>): Promise<void> {
+    if (H.mutation) return;
+    H.mutation = true; H.error = 0; paintHistory();
+    const r = await historyRequest('/' + encodeURIComponent(id) + '/feedback', 'POST', draft);
+    H.mutation = false;
+    if (r.status === 200) { if (H.detail?.project.id === id) { H.detail.feedback = [...H.detail.feedback.filter(f => f.expertId !== draft.expertId), { ...draft, at: Date.now() }]; H.message = 'saved'; } }
+    else historyDenied(r.status);
+    paintHistory();
+  }
+  async function deleteHistory(id: string): Promise<void> {
+    if (H.mutation) return;
+    H.mutation = true; H.error = 0; paintHistory();
+    const r = await historyRequest('/' + encodeURIComponent(id), 'DELETE');
+    H.mutation = false;
+    if (r.status === 200) {
+      H.detailGen++; H.detail = null; H.deleteId = ''; H.message = '';
+      for (const key of H.drafts.keys()) if (key.startsWith(id + ':')) H.drafts.delete(key);
+      await loadHistory();
+    } else { historyDenied(r.status); paintHistory(); }
+  }
+  function historyTable(heads: string[], rows: string[][]): HTMLElement {
+    return h('div', { class: 'cb-history-table' }, h('table', null,
+      h('thead', null, h('tr', null, ...heads.map(x => h('th', { scope: 'col' }, x)))),
+      h('tbody', null, ...rows.map(row => h('tr', null, ...row.map(x => h('td', null, x)))))));
+  }
+  function historyDisclosure(key: string, title: string, ...content: Kid[]): HTMLDetailsElement {
+    const box = h('details', { class: 'cb-disclosure cb-history-disclosure', open: H.opened.has(key) }, h('summary', null, icon('chevron'), title), ...content);
+    box.addEventListener('toggle', () => { if (box.open) H.opened.add(key); else H.opened.delete(key); });
+    return box;
+  }
+  function renderHistory(): void {
+    if (S.view !== 'history' || (!H.dirty && H.renderedLang === lang)) return;
+    H.dirty = false; H.renderedLang = lang;
+    const t = HT();
+    if (H.list && !H.owner && !S.adminToken.trim() && !ownerAuthed()) { profileName.textContent = M.profileVisitor; profileState.textContent = lang === 'ko' ? '이 브라우저의 사용 기록' : 'History for this browser'; }
+    const tabs = h('div', { class: 'cb-history-toolbar', role: 'group', 'aria-label': t.title });
+    for (const tab of (H.owner ? ['mine', 'all', 'report'] : ['mine']) as Array<typeof H.tab>) {
+      tabs.append(h('button', { type: 'button', class: 'cb-seg', 'aria-pressed': String(H.tab === tab), 'data-fk': 'hist-tab:' + tab, onclick: () => {
+        H.gen++; H.detailGen++; H.busy = false; H.detailBusy = false; H.tab = tab; H.list = null; H.detail = null; H.error = 0; H.message = ''; void loadHistory();
+      } }, t[tab]));
+    }
+    tabs.append(h('button', { type: 'button', class: 'cb-secondary', disabled: H.busy, 'data-fk': 'hist-refresh', onclick: () => { void loadHistory(); } }, t.refresh));
+    const notices: Kid[] = [tabs];
+    if (H.error || H.unauthorized) notices.push(h('p', { class: 'cb-warn', role: 'alert' }, H.unauthorized ? t.auth : t.error(H.error), ' ', pageLink(OWNER_INBOX_PATH, m => m.ownerInbox)));
+    if (H.busy) notices.push(h('p', { role: 'status', class: 'cb-help' }, t.loading));
+    if (H.tab === 'report' && H.report && H.owner) {
+      const r = H.report;
+      fill(historyBody, ...notices, h('section', { class: 'cb-panel cb-history-report' }, h('h3', null, t.report), h('p', null, t.reportIntro),
+        h('p', { class: 'cb-help' }, t.sample(r.analyzed, r.live, r.demoExcluded, r.pending)), h('p', { class: 'cb-help' }, t.qualityNote),
+        r.experts > 0 && r.experts < 20 ? h('p', { class: 'cb-help' }, t.small) : null,
+        r.insights.length ? h('ul', { class: 'cb-history-insights' }, ...r.insights.map(x => h('li', null, t.insights[x.kind](x.count, x.total)))) : h('p', null, t.noSignals),
+        r.experts ? h('h3', null, t.counts) : null, r.experts ? historyTable([t.completed, t.failed, t.referenced, t.feedbackHelpful, t.feedbackUnhelpful], [[r.completed, r.failed, r.referenced, r.feedback.helpful, r.feedback.unhelpful].map(String)]) : null,
+        r.experts ? historyTable([t.role, t.basis, t.completed, t.failed, t.referenced, t.feedbackUnhelpful, t.revision], r.roles.map(x => [findDef(x.id)?.name ?? x.id, x.basis === 'curated-knowledge' ? t.knowledge : x.basis === 'metadata-derived' ? t.metadata : t.unknown, ...[x.completed, x.failed, x.referenced, x.unhelpful, x.revisions.length].map(String)])) : null,
+        r.experts ? historyDisclosure('diagnostics', lang === 'ko' ? '진단 세부 정보' : 'Diagnostic details',
+        h('h3', null, t.confidence), historyTable(['0–19', '20–39', '40–59', '60–79', '80–100'], [r.confidenceBins.map(String)]),
+        h('h3', null, t.errors), historyTable([t.errors, t.failed], Object.entries(r.errors).map(([k, n]) => [t.errorKinds[k] ?? k, String(n)])),
+        h('h3', null, t.feedbackIssues), historyTable([t.issue, t.feedbackUnhelpful], Object.entries(r.feedback.issues).map(([k, n]) => [t.issues[k as HistoryIssue] ?? k, String(n)])),
+        h('h3', null, t.models), historyTable([t.model, t.projects, t.failed], r.models.map(x => [x.model, String(x.projects), String(x.failed)]))) : null));
+      return;
+    }
+    const list = h('section', { class: 'cb-panel cb-history-list', 'aria-label': t.title });
+    if (!H.list?.rows.length && !H.busy && !H.unauthorized) list.append(h('p', null, t.empty));
+    for (const p of H.list?.rows ?? []) list.append(h('button', { type: 'button', class: 'cb-history-record', 'aria-pressed': String(H.detail?.project.id === p.id), 'data-fk': 'hist-record:' + p.id, onclick: () => { void openHistory(p.id); } },
+      h('strong', null, p.title), h('span', null, `${M.projectStatus[p.status]} · ${p.mode === 'live' ? M.modeLive : M.modeDemo}`), h('small', null, `${historyDate(p.createdAt)} · ${M.experts(p.expertCount)}${p.browser ? ' · ' + p.browser : ''}`)));
+    if (H.list?.next) list.append(h('button', { type: 'button', class: 'cb-secondary', disabled: H.busy, onclick: () => { void loadHistory(true); } }, t.more));
+    const detail = h('section', { class: 'cb-panel cb-history-detail', 'aria-label': t.detail });
+    if (H.detailBusy) detail.append(h('p', { role: 'status' }, t.loading));
+    else if (!H.detail) detail.append(h('p', { class: 'cb-help' }, t.select));
+    else {
+      const d = H.detail, p = d.project;
+      detail.append(h('h3', null, p.brief.title), h('p', { class: 'cb-help' }, `${M.projectStatus[p.status]} · ${t.model}: ${d.model} · ${t.expires}: ${historyDate(d.expiresAt)}`),
+        h('h4', null, t.objective), h('p', { class: 'cb-history-copy' }, p.brief.objective));
+      if (p.brief.context) detail.append(historyDisclosure(p.id + ':context', t.context, h('p', { class: 'cb-history-copy' }, p.brief.context)));
+      if (H.message === 'saved') detail.append(h('p', { role: 'status', class: 'cb-ok' }, t.saved));
+      for (const e of p.experts) {
+        const article = h('article', { class: 'cb-history-answer' }, h('h4', null, e.name), h('p', { class: 'cb-help' }, M.status[e.status]));
+        if (e.opinion) {
+          article.append(h('p', { class: 'cb-help' }, M.mdOpinion(M.direction[e.opinion.direction], e.opinion.confidence)), h('p', { class: 'cb-history-copy' }, e.opinion.summary));
+          if (d.reports?.[e.expertId]) article.append(historyDisclosure(p.id + ':' + e.id + ':report', lang === 'ko' ? '전체 보고서' : 'Full report', h('pre', { class: 'cb-history-copy' }, d.reports[e.expertId])));
+          for (const [part, heading, content] of [['evidence', t.sources, e.opinion.evidence], ['assumptions', t.assumptions, e.opinion.assumptions], ['actions', t.actions, e.opinion.nextActions]] as const)
+            article.append(historyDisclosure(p.id + ':' + e.id + ':' + part, heading, h('ul', { class: 'cb-history-copy' }, ...content.map(x => h('li', null, x)))));
+          const prior = d.feedback.find(f => f.expertId === e.expertId);
+          if (d.canFeedback) {
+            const key = p.id + ':' + e.expertId;
+            if (!H.drafts.has(key)) H.drafts.set(key, prior ? { expertId: prior.expertId, rating: prior.rating, issue: prior.issue, comment: prior.comment } : { expertId: e.expertId, rating: 'helpful', comment: '' });
+            const draft = H.drafts.get(key)!, base = 'hist-' + e.id;
+            const rating = h('select', { id: base + '-rating', 'data-fk': key + '-rating' }, h('option', { value: 'helpful', selected: draft.rating === 'helpful' }, t.helpful), h('option', { value: 'unhelpful', selected: draft.rating === 'unhelpful' }, t.unhelpful));
+            rating.addEventListener('change', () => { draft.rating = rating.value === 'unhelpful' ? 'unhelpful' : 'helpful'; if (draft.rating === 'helpful') delete draft.issue; paintHistory(); });
+            const reason = h('select', { id: base + '-issue', disabled: draft.rating === 'helpful', 'data-fk': key + '-issue' }, h('option', { value: '', selected: !draft.issue }, t.noIssue), ...Object.entries(t.issues).map(([k, text]) => h('option', { value: k, selected: draft.issue === k }, text)));
+            reason.addEventListener('change', () => { if (reason.value in t.issues) draft.issue = reason.value as HistoryIssue; else delete draft.issue; });
+            const comment = h('textarea', { id: base + '-comment', maxlength: 1000, rows: 2, value: draft.comment, 'data-fk': key + '-comment' });
+            comment.addEventListener('input', () => { draft.comment = comment.value; });
+            const form = h('form', { class: 'cb-history-feedback' }, h('label', { for: base + '-rating' }, t.feedback), rating,
+              h('label', { for: base + '-issue' }, t.issue), reason, h('label', { for: base + '-comment' }, t.comment), comment,
+              h('button', { type: 'submit', class: 'cb-secondary', disabled: H.mutation, 'data-fk': key + '-save' }, t.save));
+            form.addEventListener('submit', ev => { ev.preventDefault(); void saveHistoryFeedback(p.id, { ...draft }); }); article.append(historyDisclosure(key + ':feedback', t.feedback, form));
+          } else if (prior) article.append(h('p', { class: 'cb-help' }, `${prior.rating === 'helpful' ? t.helpful : t.unhelpful}${prior.issue ? ' · ' + t.issues[prior.issue] : ''}`, prior.comment ? '\n' + prior.comment : ''));
+        } else if (e.error) article.append(h('p', { class: 'cb-warn' }, e.error));
+        detail.append(article);
+      }
+      detail.append(h('p', { class: 'cb-help' }, t.qualityNote));
+      if (H.deleteId === p.id) detail.append(h('div', { class: 'cb-history-delete', role: 'group', 'aria-label': t.confirm }, h('p', null, t.confirm),
+        h('button', { type: 'button', class: 'cb-secondary', disabled: H.mutation, onclick: () => { void deleteHistory(p.id); } }, t.deleteYes),
+        h('button', { type: 'button', class: 'cb-ghost', disabled: H.mutation, onclick: () => { H.deleteId = ''; paintHistory(); } }, t.cancel)));
+      else detail.append(h('button', { type: 'button', class: 'cb-ghost', onclick: () => { H.deleteId = p.id; paintHistory(); } }, t.remove));
+    }
+    fill(historyBody, ...notices, h('div', { class: 'cb-history-grid' }, list, detail), h('p', { class: 'cb-help' }, t.ownerNote));
+  }
+
   // ── 동작
   /** 언어를 그 자리에서 바꾼다: 다시 실행·새로 고침 없이 글자만 다시 그리고, 입력·선택·실행·타이머·탭·접기 상태는 그대로 둔다 */
   function setLang(l: Lang): void {
@@ -1922,8 +2162,13 @@ function boot(): void {
 
   function setView(v: View): void {
     if (S.full && v !== 'home') setFull(false);
+    const wasHistory = S.view === 'history';
     S.view = v; renderNav();
     navBtns[NAV.indexOf(v)].focus();
+    if ((v === 'history' || wasHistory) && g.history && typeof g.history.replaceState === 'function') {
+      try { g.history.replaceState(g.history.state, '', (v === 'history' ? '/cloudbite/history' : '/cloudbite') + withLang('', lang)); } catch { /* navigation still works in place */ }
+    }
+    if (v === 'history') { void loadHistory(); }
     if (v === 'settings') refreshOwner(false);
   }
 
@@ -2271,6 +2516,9 @@ function boot(): void {
     }
     if (seq !== ownerSeq) return;
     ownerPending = false;
+    if (H.owner && next.status === 'ready' && !next.authenticated && !S.adminToken.trim()) {
+      H.gen++; H.detailGen++; H.list = null; H.detail = null; H.report = null; H.drafts.clear(); H.owner = false; H.busy = false; H.detailBusy = false; H.dirty = true;
+    }
     Object.assign(S.owner, next);
     ownerIntro();
     renderAll();
@@ -2299,6 +2547,7 @@ function boot(): void {
   applyLang();
   defaultSelection();
   renderAll();
+  if (S.view === 'history') void loadHistory();
   const first = loadBootstrap();
   void loadOwner();
   // 탭으로 돌아오면 소유자 세션을 다시 읽는다 (간격 제한)

@@ -15,6 +15,8 @@ Give one common project to several expert personas, let them work inside separat
 Reuse gw-shinick, reference pro-bably's expert catalogue, use Daytona for isolated execution and Nosana for inference. The implementation supports up to five experts selected from twelve general roles and one curated PrimeTime STA expert. The STA pilot includes authored knowledge cards and source-linked retrieval; the general roles remain metadata-derived. A hundred experts is the longer-term concept, not a verified runtime capacity.
 
 ## Capabilities and Constraints
+New server runs have 30-day browser-scoped history with real questions, expert answers, feedback and deletion. The owner can review all records and see deterministic improvement signals, separated from browser/server simulations. The report counts failure categories, reference formatting, confidence patterns and feedback; it does not prove answer accuracy, run extra model evaluations, train models or automatically change prompts. Visitors retain read-only history access after their execution grant expires; cookie removal loses access. See docs/cloudbite/history.txt.
+
 The user requests an HTML preview of the finished pitch experience while implementation continues. The preview must be explicitly simulated and separate from the real console. Its data does not prove provider performance, customer demand, accuracy, or business outcomes. Confidence means a model's self-assessment, not measured accuracy or independent expert agreement.
 
 ## Brand Commitments

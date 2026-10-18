@@ -26,6 +26,8 @@ import { artifactPath, extraArtifactPath, isInvalid, PROJECT_ID, validateBrief, 
 import { CbDaytonaError, CB_LABEL_CLAIM, CB_LABEL_PROJECT, CB_LABEL_RUN, cbCreateSandbox, cbDeleteSandbox, cbDownload, cbExec, cbFindByLabels, cbGetSandbox, cbStartRunner, cbUpload, type CbSandbox } from './cloudbite-daytona';
 import { chatMessages, nosanaChat } from './cloudbite-inference';
 import { CB_RUNNER_PY, runnerCapability } from './cloudbite-runner';
+import { historyIndex, historyRow } from './cloudbite-history';
+import { HISTORY_TTL, HISTORY_ISSUES, type HistoryIdentity, type HistoryFeedback, type HistoryDetail } from './cloudbite-history-contract';
 
 export type CbFail = { error: string; status: number };
 const fail = (status: number, error: string): CbFail => ({ error, status });
@@ -49,6 +51,7 @@ interface ProjectRecord {
   id: string; brief: ProjectBrief; briefHash: string; status: ProjectStatus;
   createdAt: number; updatedAt: number; finishedAt?: number; purgeAt: number;
   tokens: string[]; runs: string[]; released?: boolean;
+  history?: HistoryIdentity; feedback?: HistoryFeedback[];
 }
 interface CleanupEntry { run: string; sandboxId?: string; label?: string; tries: number; nextAt: number; done?: boolean; stuck?: boolean }
 
@@ -140,7 +143,7 @@ export class CloudbiteProject extends DurableObject<Env> {
   }
 
   // ── create / read / cancel / artifact (Worker has already checked admin, Origin and body size) ──
-  async create(projectId: string, rawBrief: unknown): Promise<{ project: ProjectRun; accessToken: string } | CbFail> {
+  async create(projectId: string, rawBrief: unknown, historyActor?: string): Promise<{ project: ProjectRun; accessToken: string } | CbFail> {
     if (!PROJECT_ID.test(projectId)) return fail(400, 'invalid project id');
     const catalogue = this.catalogue();
     if (!catalogue.length) return fail(503, 'expert catalogue is not integrated yet');
@@ -157,6 +160,14 @@ export class CloudbiteProject extends DurableObject<Env> {
     const token = `cbt_${rand(32)}`;
     const [tokenHash, briefHash] = await Promise.all([cbHash(token), cbHash(JSON.stringify(brief))]);
     const now = this.clock();
+    if (historyActor && historyActor !== 'owner' && !/^v_[a-f0-9]{64}$/.test(historyActor)) return fail(400, 'invalid history identity');
+    const history: HistoryIdentity | undefined = historyActor && this.env.CLOUDBITE_HISTORY ? {
+      actor: historyActor, model: brief.mode === 'live' ? this.config()!.nosana.model : 'server-demo', revision: 1, published: 0, nextAt: 0,
+      roles: await Promise.all(brief.expertIds.map(async id => {
+        const def = catalogue.find(x => x.id === id)!;
+        return { id, basis: def.source.basis, revision: def.source.revision, promptHash: await cbHash(def.prompt) };
+      })),
+    } : undefined;
     // From here: storage only, no other awaits — concurrent duplicate creates serialize on the input gate.
     const existing = await this.ctx.storage.get<ProjectRecord>('project');
     if (existing) {
@@ -177,7 +188,7 @@ export class CloudbiteProject extends DurableObject<Env> {
       this.log(rec, 'status', brief.mode === 'demo' ? '[demo] queued — simulated run, no sandbox or model is contacted' : 'queued for an independent Daytona sandbox');
       return rec;
     });
-    const p: ProjectRecord = { id: projectId, brief, briefHash, status: 'running', createdAt: now, updatedAt: now, purgeAt: now + CB_RETENTION, tokens: [tokenHash], runs };
+    const p: ProjectRecord = { id: projectId, brief, briefHash, status: 'running', createdAt: now, updatedAt: now, purgeAt: now + (history ? HISTORY_TTL : CB_RETENTION), tokens: [tokenHash], runs, ...(history ? { history } : {}) };
     await this.ctx.storage.put({ project: p, ...Object.fromEntries(experts.map((e) => [`expert:${e.run.id}`, e])) });
     await this.ctx.storage.setAlarm(now);
     return { project: this.view(p, experts), accessToken: token };
@@ -187,7 +198,7 @@ export class CloudbiteProject extends DurableObject<Env> {
     if (typeof token !== 'string' || !/^cbt_[A-Za-z0-9_-]{43}$/.test(token)) return fail(401, 'project access token required');
     const h = await cbHash(token);
     const s = await this.load();
-    if (!s || !s.p.tokens.includes(h)) return fail(401, 'project access token is not valid');
+    if (!s || s.p.purgeAt <= this.clock() || !s.p.tokens.includes(h)) return fail(401, 'project access token is not valid');
     return s;
   }
 
@@ -196,12 +207,89 @@ export class CloudbiteProject extends DurableObject<Env> {
     return isCbFail(s) ? s : this.view(s.p, s.experts);
   }
 
+  /** Internal history reads: the HTTP adapter derives actor from an HttpOnly cookie, never a query parameter. */
+  async historyRead(actor: string, owner: boolean): Promise<HistoryDetail | CbFail> {
+    const s = await this.load();
+    if (!s?.p.history || s.p.history.deleted || s.p.purgeAt <= this.clock() || (!owner && s.p.history.actor !== actor)) return fail(404, 'history record not found');
+    const reports = await this.ctx.storage.get<string>(s.experts.map(e => `artifact:${e.run.id}:out/report.md`));
+    return { project: this.view(s.p, s.experts), model: s.p.history.model, roles: s.p.history.roles,
+      reports: Object.fromEntries(s.experts.flatMap(e => { const content = reports.get(`artifact:${e.run.id}:out/report.md`); return content === undefined ? [] : [[e.run.expertId, content]]; })),
+      feedback: s.p.feedback ?? [], expiresAt: s.p.purgeAt, canFeedback: s.p.history.actor === actor && TERMINAL_PROJECT.has(s.p.status) };
+  }
+
+  async historyFeedback(actor: string, feedback: Omit<HistoryFeedback, 'at'>): Promise<{ ok: true } | CbFail> {
+    const s = await this.load();
+    if (!s?.p.history || s.p.history.deleted || s.p.history.actor !== actor || s.p.purgeAt <= this.clock()) return fail(404, 'history record not found');
+    if (!TERMINAL_PROJECT.has(s.p.status)) return fail(409, 'wait for the project to finish before reviewing its answers');
+    const e = s.experts.find(x => x.run.expertId === feedback.expertId);
+    if (!e || e.run.status !== 'completed' || !e.run.opinion) return fail(409, 'only a completed opinion can be reviewed');
+    if (!['helpful', 'unhelpful'].includes(feedback.rating) || typeof feedback.comment !== 'string' || feedback.comment.length > 1000 ||
+      (feedback.issue !== undefined && !HISTORY_ISSUES.includes(feedback.issue)) || (feedback.rating === 'helpful' && feedback.issue)) return fail(400, 'invalid feedback');
+    const updated = await this.ctx.storage.transaction(async tx => {
+      const p = await tx.get<ProjectRecord>('project');
+      if (!p?.history || p.history.deleted || p.history.actor !== actor) return false;
+      p.feedback = [...(p.feedback ?? []).filter(x => x.expertId !== feedback.expertId), { ...feedback, at: this.clock() }];
+      p.history.revision++; p.history.nextAt = 0;
+      await tx.put('project', p);
+      return true;
+    });
+    if (!updated) return fail(404, 'history record not found');
+    await this.publishHistory();
+    await this.wake(this.clock() + 1000);
+    return { ok: true };
+  }
+
+  async historyDelete(actor: string, owner: boolean): Promise<{ ok: true } | CbFail> {
+    const bad = await this.ctx.storage.transaction(async tx => {
+      const p = await tx.get<ProjectRecord>('project');
+      if (!p?.history || (!owner && p.history.actor !== actor) || p.purgeAt <= this.clock()) return fail(404, 'history record not found');
+      if (!TERMINAL_PROJECT.has(p.status)) return fail(409, 'stop the running project before deleting its history');
+      if (!p.history.deleted) {
+        p.history.deleted = true; p.history.revision++; p.history.nextAt = 0;
+        p.brief.title = '[deleted]'; p.brief.objective = '[deleted]'; p.brief.context = ''; p.feedback = [];
+        const records = await tx.get<ExpertRecord>(p.runs.map(run => 'expert:' + run));
+        const experts = [...records.values()];
+        for (const e of experts) { delete e.run.opinion; if (e.run.error) e.run.error = '[deleted]'; e.run.activity = []; e.run.artifacts = []; }
+        await tx.put({ project: p, ...Object.fromEntries(experts.map(e => [`expert:${e.run.id}`, e])) });
+      }
+      return null;
+    });
+    if (bad) return bad;
+    // Delete the source artifact copies too; cleanup claims/owned sandbox IDs stay until provider cleanup settles.
+    const keys = [...(await this.ctx.storage.list({ prefix: 'artifact:' })).keys()];
+    for (let i = 0; i < keys.length; i += 128) await this.ctx.storage.delete(keys.slice(i, i + 128));
+    await this.publishHistory();
+    await this.wake(this.clock() + 1000);
+    const p = await this.ctx.storage.get<ProjectRecord>('project');
+    if (p?.history && p.history.published < p.history.revision) return fail(503, 'content deleted; history index removal is pending and will retry');
+    return { ok: true };
+  }
+
+  /** Durable outbox: acknowledgement follows the day-index write, and retries survive alarm/DO restarts. */
+  private async publishHistory() {
+    if (!this.env.CLOUDBITE_HISTORY) return;
+    const s = await this.load(), now = this.clock();
+    const h = s?.p.history;
+    if (!s || !h || !this.env.CLOUDBITE_HISTORY || h.published >= h.revision || h.nextAt > now) return;
+    let ok = false;
+    try { await historyIndex(this.env, s.p.createdAt).upsert(historyRow(this.view(s.p, s.experts), h, s.p.feedback ?? [])); ok = true; }
+    catch { /* content remains durable in this project; retry metadata without interrupting cleanup/execution */ }
+    await this.ctx.storage.transaction(async tx => {
+      const p = await tx.get<ProjectRecord>('project');
+      if (!p?.history) return;
+      if (ok) p.history.published = Math.max(p.history.published, h.revision);
+      p.history.nextAt = now + (ok ? 1000 : 60_000);
+      await tx.put('project', p);
+    });
+  }
+
   async cancel(token: unknown): Promise<ProjectRun | CbFail> {
     const s = await this.authorize(token);
     if (isCbFail(s)) return s;
     if (TERMINAL_PROJECT.has(s.p.status)) return this.view(s.p, s.experts);
     const now = this.clock();
     s.p.status = 'cancelled'; s.p.finishedAt = now; s.p.updatedAt = now;
+    if (s.p.history) { s.p.history.revision++; s.p.history.nextAt = 0; }
     const writes: Record<string, unknown> = { project: s.p };
     for (const e of s.experts) {
       if (e.int.phase !== 'final') this.finish(e, 'cancelled', 'cancelled — worker capability revoked, sandbox scheduled for deletion');
@@ -542,6 +630,7 @@ export class CloudbiteProject extends DurableObject<Env> {
       const done = experts.filter((e) => e.run.status === 'completed').length;
       p.status = done === experts.length ? 'completed' : done > 0 ? 'partial' : 'failed';
       p.finishedAt = now; p.updatedAt = now;
+      if (p.history) { p.history.revision++; p.history.nextAt = 0; }
       await this.ctx.storage.put('project', p);
     }
     const cleanup = [...(await this.ctx.storage.list<CleanupEntry>({ prefix: 'cleanup:' })).values()];
@@ -549,14 +638,20 @@ export class CloudbiteProject extends DurableObject<Env> {
     if (TERMINAL_PROJECT.has(p.status) && !pending.length && !p.released && p.brief.mode === 'live') {
       await this.env.CLOUDBITE?.getByName(REGISTRY).registryRelease(p.id).catch(() => {});
       p.released = true;
-      await this.ctx.storage.put('project', p);
+      await this.ctx.storage.transaction(async tx => {
+        const fresh = await tx.get<ProjectRecord>('project');
+        if (fresh) { fresh.released = true; await tx.put('project', fresh); }
+      });
     }
+    await this.publishHistory();
+    p.history = (await this.ctx.storage.get<ProjectRecord>('project'))?.history;
     if (now >= p.purgeAt && (!pending.length || now >= p.purgeAt + CB_RETENTION)) {
       await this.ctx.storage.deleteAlarm();
       await this.ctx.storage.deleteAll();
       return;
     }
     const times = [p.purgeAt];
+    if (p.history && p.history.published < p.history.revision) times.push(p.history.nextAt || now + 1000);
     if (p.status === 'running') {
       for (const e of experts) if (e.int.phase !== 'final') times.push(e.int.phase === 'queued' ? now + 2000 : Math.max(e.int.nextAt, (e.int.claimAt ?? 0) + CB_CLAIM_STALE * (e.int.claim ? 1 : 0)));
       if (p.brief.mode === 'demo') times.push(now + 1500);

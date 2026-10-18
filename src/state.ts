@@ -118,6 +118,7 @@ export interface Env {
   TEACHER_PUSH_VAPID_JWK?: string; // 강사 손 알림 VAPID 개인키 JWK (Worker secret). 없거나 틀리면 알림 꺼짐 — DO 밖으로 안 나간다 (공개키만 config 로)
   // Cloudbite (wrangler.cloudbite.jsonc 전용). 원래 gw-shinick 공급자 키를 쓰지 않는 독립 설정 — src/cloudbite-config.ts
   CLOUDBITE?: DurableObjectNamespace<import('./cloudbite-project').CloudbiteProject>;
+  CLOUDBITE_HISTORY?: DurableObjectNamespace<import('./cloudbite-history').CloudbiteHistory>;
   CLOUDBITE_ACCESS?: DurableObjectNamespace<import('./cloudbite-access-service').CloudbiteAccess>; // 없으면 청응 접근 요청을 막는다 — src/cloudbite-access-service.ts
   CLOUDBITE_DAYTONA_API_URL?: string;
   CLOUDBITE_DAYTONA_API_KEY?: string;   // Worker secret

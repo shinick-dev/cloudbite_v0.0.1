@@ -1,0 +1,79 @@
+Cloudbite usage history and improvement signals — 2026-10-18
+
+URL: https://cloudbite.shinick.dev/cloudbite/history
+Owner report: same page, Improvement report / 개선 리포트 tab; or ?tab=report.
+
+New authenticated server runs keep the question, context, expert answers, evidence,
+artifacts and feedback for 30 days in the existing per-project SQLite-backed DO.
+Sandbox teardown, execution budgets, one-hour visitor grants and ten-project quotas
+are unchanged. Browser-only demos never send questions or answers to this service.
+Server demos remain labeled and are excluded from quality aggregates. Existing runs
+created before this feature are not backfilled or assigned to guessed users.
+
+Identity and permissions
+- Owner cookie or existing valid explicit operator/admin token: own owner records,
+  all-user records and report. An invalid explicit header never falls back to cookies.
+- Approved visitors receive a separate __Host-cb-history HttpOnly / Secure / SameSite
+  Strict cookie, renewed for 30 days when they create a project. It is derived from
+  the existing secret grant on first use, so a lost-create retry gets the same identity.
+  Later grants preserve the existing history cookie. It grants history access only,
+  never new runs, additional quota or access to other browsers' records.
+- User identity means this browser, not a verified account or named person. Clearing
+  cookies loses access; different browsers have independent history. Owner views use
+  pseudonymous browser labels; access-request names/IP addresses are not copied here.
+- Visitors may read/delete their own records and review their own finished answers.
+  Owners may inspect/delete all records, but cannot impersonate a visitor's review.
+- No raw credential, provider key or access token is placed in history JSON/index rows.
+
+Storage and consistency
+- CLOUDBITE_HISTORY binds CloudbiteHistory; migration v3 adds its SQLite namespace.
+  Indexes are sharded by UTC creation day. They contain bounded metadata, not full
+  questions, answers or feedback comments. The source remains the project DO.
+- Project alarms publish initial/final states without needing an open browser.
+  Monotonic revisions + a durable acknowledgement/retry field form an outbox. Index
+  outages do not interrupt sandbox cleanup or lose answers; metadata retries in 60s.
+- Feedback replaces a user's prior review of the same expert, not an extra vote per
+  click. Revision changes, erasure and acknowledgements use storage transactions.
+- Deletion is allowed after completion/cancellation. It erases question/context,
+  answers, feedback, activity and stored output files from active project storage.
+  A metadata tombstone prevents delayed updates from recreating the index entry.
+  Owned sandbox IDs/cleanup claims stay until cleanup settles. A pending index removal
+  is reported as 503 and retried; it is never acknowledged as fully removed early.
+- Reads enforce the 30-day deadline independently of alarm delivery. Retention alarms
+  purge source storage; day indexes purge after their full day is outside the window.
+  Existing cleanup grace may retain a failed-cleanup object's storage up to another
+  24 hours; expired history is inaccessible. Provider logs/backups are outside this UI.
+
+HTTP (same-origin; JSON errors; no-store)
+GET    /api/cloudbite/history?scope=mine|all&before=<opaque cursor>
+       50 rows per page; global scope is owner-only. Includes next cursor and owner flag.
+GET    /api/cloudbite/history/report                 owner-only; newest 1000 / 30 days
+GET    /api/cloudbite/history/<project>              source answers, model, role versions
+POST   /api/cloudbite/history/<project>/feedback     expertId, rating, optional issue, comment
+DELETE /api/cloudbite/history/<project>              own record, or owner; terminal only
+Feedback: helpful | unhelpful; issues: incorrect, missing-sources, too-generic,
+off-topic, slow, other. Comment <=1000 characters, JSON body <=8 KiB. Changes require
+an exact Origin and appropriate cookie/token authority. Unknown fields are rejected.
+
+Automatic analysis is deterministic, with no additional LLM calls or training:
+- completed / failed / cancelled expert counts and failure categories;
+- formatted URL or [source:ID] presence, not truth/URL-content validation;
+- actual self-reported confidence bins; identical-confidence project signals;
+- helpful/unhelpful reviews and reported reasons;
+- breakdowns by expert, persona basis/prompt hash and inference model.
+Only terminal live projects enter quality denominators. Pending runs and demo counts
+are shown separately. Small samples are labeled; counts are investigation leads, not
+calibrated accuracy or independent-expert rankings. Suggestions never modify prompts
+or redeploy code automatically; claim-level evaluation still requires a labeled set.
+
+UI: existing console History navigation and owner inbox link. KO/EN, loading/error/
+empty states, paginated list, real detail reads, explicit feedback saves, two-step
+deletion and owner report. Input drafts and expanded feedback survive language changes.
+
+Verification: cloudbite-history.mjs uses real SQLite for day indexes, real Worker and
+project/access DO code, simulated server runs and no provider network. Covers lifecycle,
+reconstruction, >24h reads, expiry/purge, permissions, lost-create retries, concurrent
+reviews/deletion, stale revisions, outbox recovery and cursor ties. Console UI tests
+cover safe text, drafts/focus across languages, saves, deletion and report semantics.
+Aside verified actual local reads/feedback writes. Aside lacks viewport resizing;
+isolated Edge captures cover 1536x1024 and 390x844, without page errors or overflow.
