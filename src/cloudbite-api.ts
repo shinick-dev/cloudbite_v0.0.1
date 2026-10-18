@@ -6,6 +6,7 @@ import { CLOUDBITE_CSS, CLOUDBITE_CSS_PATH, CLOUDBITE_HTML, CLOUDBITE_JS, CLOUDB
 import { CLOUDBITE_ACCESS_HTML, CLOUDBITE_ACCESS_CSS, CLOUDBITE_ACCESS_QR } from './cloudbite-access-page';
 import { CB_ACTIVITY_BODY_MAX, CB_COMPLETE_BODY_MAX, CB_CREATE_BODY_MAX, CB_INFERENCE_BODY_MAX, CB_MAX_EXPERTS, cloudbiteMissing } from './cloudbite-config';
 import { cbProjectId, isCbFail } from './cloudbite-project';
+import { CB_OPERATOR_PREFIX, verifyCloudbiteOperator } from './cloudbite-operator';
 import { boundedText } from './cloudbite-inference';
 import { isInvalid, PROJECT_ID, RUN_ID, validateBrief } from './cloudbite-validate';
 import type { Env, State } from './state';
@@ -47,7 +48,8 @@ const result = (json: Json, r: unknown) => (isCbFail(r) ? json({ error: r.error 
 
 /**
  * Cloudbite API and worker callbacks. null = not a Cloudbite path (legacy routing continues).
- * Live/demo creation reuses the existing State admin session (x-admin-token, State.adminList: storage reads only).
+ * Live/demo creation reuses the existing State admin session (x-admin-token, State.adminList: storage reads only),
+ * or a temporary Cloudbite operator token in the same header (src/cloudbite-operator.ts; this route only).
  */
 export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pick<DurableObjectStub<State>, 'adminList'>, json: Json): Promise<Response | null> {
   const path = url.pathname;
@@ -81,7 +83,10 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     const b = await readJson(req, CB_CREATE_BODY_MAX);
     if ('error' in b) return json({ error: b.error }, b.status);
     const admin = req.headers.get('x-admin-token') ?? '';
-    if (!admin || isCbFail(await state.adminList(admin))) return json({ error: 'admin session required' }, 401);
+    // cbo_ = temporary Cloudbite operator: checked against its own secrets only, never sent to State.
+    const allowed = admin.startsWith(CB_OPERATOR_PREFIX) ? await verifyCloudbiteOperator(env, admin)
+      : !!admin && !isCbFail(await state.adminList(admin));
+    if (!allowed) return json({ error: 'admin session required' }, 401);
     const brief = validateBrief(b.ok);
     if (isInvalid(brief)) return json({ error: brief.invalid }, 400);
     if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);

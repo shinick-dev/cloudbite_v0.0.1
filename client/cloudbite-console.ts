@@ -61,6 +61,31 @@ function hash(s: string): number {
 }
 function plural(n: number, one: string, many = `${one}s`): string { return `${n} ${n === 1 ? one : many}`; }
 
+// 임시 Cloudbite 운영자 토큰 (docs/cloudbite/temporary-operator.txt): 서버(src/cloudbite-operator.ts)와 같은 모양만 받는다
+const OPERATOR_TOKEN = /^cbo_[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/;
+const isOperatorToken = (t: string) => t.trim().startsWith('cbo_');
+/** `#operator=<token>` 조각을 읽는다. present = 운영자 자격처럼 보이는 조각이 있다 (형식이 틀려도 지워야 한다) */
+function operatorFragment(hash: string): { present: boolean; token: string } {
+  const raw = hash.startsWith('#') ? hash.slice(1) : hash;
+  const parts = raw.split('&');
+  const hit = parts.find(p => p === 'operator' || p.startsWith('operator='));
+  const value = hit === undefined ? null : hit.slice('operator='.length);
+  return { present: hit !== undefined || raw.includes('cbo_'), token: value !== null && OPERATOR_TOKEN.test(value) ? value : '' };
+}
+/** 운영자 조각을 메모리로 옮기고, 어떤 요청보다 먼저 주소창·현재 기록 항목에서 지운다. location·history 가 없으면 조용히 넘어간다 */
+function takeOperatorLink(): { present: boolean; token: string } {
+  const g = globalThis as { location?: Location; history?: History };
+  const loc = g.location;
+  const found = operatorFragment(loc && typeof loc.hash === 'string' ? loc.hash : '');
+  if (!found.present || !loc) return found;
+  const clean = `${loc.pathname ?? ''}${loc.search ?? ''}`;
+  try {
+    if (g.history && typeof g.history.replaceState === 'function') { g.history.replaceState(g.history.state, '', clean); return found; }
+  } catch { /* 아래 대안으로 */ }
+  try { if (typeof loc.replace === 'function') loc.replace(`${clean}#`); } catch { /* 지울 방법이 없다 */ }
+  return found;
+}
+
 function normalizeExpertDef(raw: unknown): ExpertDefinition | null {
   if (!isObj(raw)) return null;
   const id = str(raw.id, 80), name = str(raw.name, 80);
@@ -541,14 +566,16 @@ function clock(at: number): string {
 }
 
 function boot(): void {
+  // 운영자 링크는 화면·요청보다 먼저 지운다. 링크가 있으면 실제 실행 모드로 열고 자동 데모·자동 실행은 하지 않는다
+  const link = takeOperatorLink();
   const root = document.getElementById('cloudbite');
   if (!root) return;
 
   const S = {
     gen: 0,
     boot: { status: 'loading' as 'loading' | 'ready' | 'error', data: null as CloudbiteBootstrap | null, error: '' },
-    mode: 'demo' as Mode,
-    adminToken: '',
+    mode: (link.present ? 'live' : 'demo') as Mode,
+    adminToken: link.token,
     selected: new Set<string>(),
     failSim: false,
     run: null as null | {
@@ -556,7 +583,7 @@ function boot(): void {
       accessToken: string; error: string; startedAt: number; pollErrors: number;
     },
     view: 'home' as View,
-    setupOpen: false,
+    setupOpen: link.present,
     full: false,
     /** "Clear view" 때 화면에서만 숨긴 실행 기록 줄. 프로젝트 기록·파일은 그대로 둔다 */
     hiddenRows: new Set<string>(),
@@ -566,7 +593,7 @@ function boot(): void {
     /** 사용자가 파일을 직접 고르기 전에는 새 파일이 생기면 가장 쓸모 있는 파일(out/report.md 우선)로 따라간다 */
     artifactPicked: false,
     artifactCache: new Map<string, { state: 'loading' | 'ok' | 'error'; text: string }>(),
-    formErrors: [] as string[],
+    formErrors: (link.present && !link.token ? ['The temporary Cloudbite operator link is malformed. It was removed from the address bar; ask the owner for a new link.'] : []) as string[],
   };
   let timers: number[] = [];
   let pollTimer = 0;
@@ -593,6 +620,7 @@ function boot(): void {
   };
   for (const inp of [titleIn, objectiveIn]) inp.addEventListener('input', () => { if (!S.run) renderControls(); });
   const tokenIn = h('input', { id: 'cb-token', type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: 'Existing admin session token' });
+  tokenIn.value = S.adminToken;
   tokenIn.addEventListener('input', () => { S.adminToken = tokenIn.value; renderControls(); renderProgress(); });
   const failIn = h('input', { id: 'cb-fail', type: 'checkbox' });
   failIn.addEventListener('change', () => { S.failSim = failIn.checked; });
@@ -613,8 +641,9 @@ function boot(): void {
   const selCount = h('span', { class: 'cb-selcount' });
   const liveStatus = h('div', { class: 'cb-live-status' });
   const clearTokenBtn = h('button', { type: 'button', class: 'cb-ghost', onclick: () => { S.adminToken = ''; tokenIn.value = ''; renderControls(); tokenIn.focus(); } }, 'Clear token');
+  const tokenLabel = h('label', { for: 'cb-token', class: 'cb-label' });
   const liveBox = h('div', { class: 'cb-live' }, liveStatus,
-    h('label', { for: 'cb-token', class: 'cb-label' }, 'Admin token'), tokenIn,
+    tokenLabel, tokenIn,
     h('p', { class: 'cb-help' }, 'The token stays in this tab\'s memory only and is never stored. Daytona and Nosana API keys are configured on the server, never entered here.'), clearTokenBtn);
   const demoBox = h('div', { class: 'cb-demoopts' },
     h('label', { class: 'cb-check' }, failIn, ' Simulate one expert failing'));
@@ -764,7 +793,9 @@ function boot(): void {
     const runMode = S.run?.mode ?? S.mode;
     modeBadge.textContent = runMode === 'demo' ? 'Browser demo' : 'Live run';
     modeBadge.className = `cb-badge ${runMode === 'demo' ? 'is-demo' : 'is-live'}`;
-    profileState.textContent = S.adminToken.trim() ? 'Admin token held in memory' : 'No admin token';
+    const operator = isOperatorToken(S.adminToken);
+    profileState.textContent = operator ? 'Temporary Cloudbite operator token in memory' : S.adminToken.trim() ? 'Admin token held in memory' : 'No admin token';
+    tokenLabel.textContent = operator ? 'Temporary Cloudbite operator token (Cloudbite runs only)' : 'Admin token';
     banner.textContent = runMode === 'demo'
       ? 'Browser demo — simulated activity and files; no Daytona or Nosana calls.'
       : 'Live run — server-reported activity. Confidence is self-assessed.';
@@ -1102,6 +1133,7 @@ function boot(): void {
     if (S.mode === 'live') {
       if (!S.boot.data?.configuration.liveReady) S.formErrors.push('The server is not ready for live runs.');
       if (!S.adminToken.trim()) S.formErrors.push('Enter the admin token in Settings.');
+      else if (isOperatorToken(S.adminToken) && !OPERATOR_TOKEN.test(S.adminToken.trim())) S.formErrors.push('The temporary Cloudbite operator token is malformed. Clear it and use a new link.');
     }
     if (S.formErrors.length) { renderControls(); return; }
     clearTimers();
@@ -1142,6 +1174,7 @@ function boot(): void {
   }
 
   async function startLive(gen: number, brief: ProjectBrief): Promise<void> {
+    const operator = isOperatorToken(S.adminToken);
     let res: Response;
     try {
       res = await fetch('/api/cloudbite/projects', { method: 'POST', credentials: 'same-origin', cache: 'no-store',
@@ -1151,7 +1184,11 @@ function boot(): void {
       S.run!.phase = 'error'; S.run!.error = 'Could not reach the server. Check the network and run again. (Not switched to demo.)'; renderAll(); return;
     }
     if (gen !== S.gen) return;
-    if (!res.ok) { const msg = await errorText(res); if (gen !== S.gen) return; S.run!.phase = 'error'; S.run!.error = msg; renderAll(); return; }
+    if (!res.ok) {
+      const msg = operator && res.status === 401 ? 'The temporary Cloudbite operator token was rejected or has expired. Ask the owner for a new link.' : await errorText(res);
+      if (gen !== S.gen) return;
+      S.run!.phase = 'error'; S.run!.error = msg; renderAll(); return;
+    }
     let body: unknown = null;
     try { body = await res.json(); } catch { /* 아래에서 형식 오류 */ }
     if (gen !== S.gen) return;
@@ -1287,7 +1324,7 @@ function boot(): void {
     if (!S.run) S.selected.clear();
     const ids = new Set(catalogue().map(e => e.id));
     for (const id of [...S.selected]) if (!ids.has(id)) S.selected.delete(id);
-    if (!S.selected.size && S.mode === 'demo') defaultSelection();
+    if (!S.selected.size && (S.mode === 'demo' || link.present)) defaultSelection();
     renderAll();
   }
 
@@ -1296,10 +1333,10 @@ function boot(): void {
   defaultSelection();
   renderAll();
   // 카탈로그를 잠깐(최대 1.5초) 기다렸다가 시작한다. 늦으면 내장 데모 역할로 먼저 시작한다
-  void Promise.race([loadBootstrap(), new Promise(r => setTimeout(r, 1500))]).then(() => { if (!S.run && S.mode === 'demo') startRun(); });
+  void Promise.race([loadBootstrap(), new Promise(r => setTimeout(r, 1500))]).then(() => { if (!S.run && S.mode === 'demo' && !link.present) startRun(); });
 }
 
-const CloudbiteCore = { normalizeBootstrap, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, DEMO_EXPERTS };
+const CloudbiteCore = { normalizeBootstrap, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, DEMO_EXPERTS };
 const hook = (globalThis as { __cloudbiteTestHook?: (core: typeof CloudbiteCore) => void }).__cloudbiteTestHook;
 if (typeof hook === 'function') hook(CloudbiteCore);
 if (typeof document !== 'undefined') {

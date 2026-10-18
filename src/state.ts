@@ -122,6 +122,8 @@ export interface Env {
   CLOUDBITE_NOSANA_MODEL?: string;
   CLOUDBITE_GATEWAY_URL?: string;       // 샌드박스가 /p/_cloudbite/worker/ 로 부르는 이 Worker 의 workers.dev 주소
   CLOUDBITE_ALLOW_HTTP?: string;        // dev 전용: http://localhost 주소 허용
+  CLOUDBITE_OPERATOR_TOKEN_HASH?: string; // Worker secret: 임시 Cloudbite 운영자 토큰의 SHA-256 (소문자 hex) — src/cloudbite-operator.ts
+  CLOUDBITE_OPERATOR_EXPIRES_AT?: string; // 그 토큰의 만료 (epoch ms). 둘 중 하나라도 없거나 틀리면 운영자 토큰은 거부된다
 }
 
 export interface ClientMeta { ip: string; country: string; city: string; ua: string }

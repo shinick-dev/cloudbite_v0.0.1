@@ -1,0 +1,54 @@
+Cloudbite temporary operator token
+==================================
+
+Purpose
+  When the owner cannot touch the physical security key, the owner may issue a short-lived bearer that lets the
+  independently deployed Cloudbite start projects. It is a Cloudbite-only credential. It is NOT an admin session, NOT a
+  WebAuthn / security-key / biometric proof, and the console never labels it as "admin-key verified".
+
+Scope (enforced in src/cloudbite-api.ts + src/cloudbite-operator.ts)
+  Accepted ONLY as the x-admin-token header of POST /api/cloudbite/projects. A header value starting with "cbo_" is checked
+  against the operator secrets only and is never sent to the legacy State object. Any other value still goes through the
+  existing State admin session check (State.adminList), unchanged.
+  Every other create guard is unchanged: exact Origin, application/json, 16 KiB body limit, catalogue-only experts,
+  at most 5 experts, 3 concurrent experts per project, 2 active live projects, per-project access tokens, runner callbacks.
+  It does NOT open /api/admin, the vault, QR approvals, legacy gw-shinick services, participant workspaces, project reads
+  or cancel (those need the per-project cbt_ token returned by create). Wrong, missing, malformed or expired -> 401.
+  The public participant QR remains k.shinick.dev/lab/request.
+
+Format and secrets
+  Token  : "cbo_" + unpadded base64url of exactly 32 random bytes (47 characters; the 43rd character is canonical).
+  Secret : CLOUDBITE_OPERATOR_TOKEN_HASH = lowercase hex SHA-256 of the full token text including "cbo_" (64 hex chars).
+  Secret : CLOUDBITE_OPERATOR_EXPIRES_AT = expiry as epoch milliseconds (decimal digits only).
+  Missing or malformed hash or expiry, a malformed token, or now >= expiry: rejected (fail closed). Comparison is
+  SHA-256 (WebCrypto) + node:crypto timingSafeEqual (nodejs_compat). Errors never contain token or hash values.
+  /api/cloudbite/bootstrap does not reveal whether an operator token is configured.
+
+Issuance (owner, 8 hours)
+  1. Generate locally, never in chat or logs, e.g.
+       node -e "const c=require('node:crypto');const t='cbo_'+c.randomBytes(32).toString('base64url');console.error(c.createHash('sha256').update(t).digest('hex'));console.error(String(Date.now()+8*3600e3));process.stdout.write(t)"
+     (prints hash and expiry to stderr, the token to stdout; keep the token out of shell history and files).
+  2. Set both values as Worker secrets of the Cloudbite worker only (wrangler.cloudbite.jsonc), never in gw-shinick:
+       wrangler secret put CLOUDBITE_OPERATOR_TOKEN_HASH --config wrangler.cloudbite.jsonc
+       wrangler secret put CLOUDBITE_OPERATOR_EXPIRES_AT --config wrangler.cloudbite.jsonc
+  3. Hand over the link  https://<cloudbite host>/cloudbite#operator=<token>  over a private channel.
+
+Browser handoff (client/cloudbite-console.ts)
+  On load, before any request, the console reads #operator=, keeps the token only in memory and in the password input,
+  and erases the fragment with history.replaceState (fallback: location.replace to the same URL with an empty fragment).
+  It never writes it to cookies, localStorage, sessionStorage, the URL query or logs. A malformed fragment is erased too
+  and is not loaded. With an operator fragment the console opens in Live run, does not auto-start the browser demo and
+  does not start a paid run: the operator must press Run experts. "Clear token" clears memory and the input. Without a
+  fragment the public browser demo behaves exactly as before; a manually pasted admin session token still works.
+
+Expiry, rotation, revocation
+  Expiry  : automatic at CLOUDBITE_OPERATOR_EXPIRES_AT.
+  Rotate  : issue a new token and overwrite both secrets; the old token stops working at once.
+  Revoke  : wrangler secret delete CLOUDBITE_OPERATOR_TOKEN_HASH --config wrangler.cloudbite.jsonc (removing the hash
+            alone fails closed). Revoking the operator does NOT invalidate per-project cbt_ access tokens already issued
+            (valid up to 24h); cancel those projects with their own token if needed.
+
+Limitations
+  A legacy admin session token that happened to start with "cbo_" would be routed to the operator check and rejected
+  for Cloudbite create only (legacy tokens are 32 characters, so it can never pass as an operator token).
+  The expiry is not capped by the server; the owner sets 8 hours at issuance.

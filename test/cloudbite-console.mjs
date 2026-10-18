@@ -188,7 +188,7 @@ class Node_ {
     return null;
   }
 }
-function fakeEnv({ fetchImpl }) {
+function fakeEnv({ fetchImpl, globals = {} }) {
   const timers = new Map(); let seq = 0, now = 0;
   const doc = { readyState: 'complete', activeElement: null, createElement: (t) => new Node_(doc, t), getElementById: (id) => id === 'cloudbite' ? root : null,
     listeners: {}, addEventListener(t, f) { (this.listeners[t] ||= []).push(f); },
@@ -200,6 +200,7 @@ function fakeEnv({ fetchImpl }) {
     setTimeout: (fn, ms) => { const id = ++seq; timers.set(id, { at: now + (ms || 0), fn }); return id; },
     clearTimeout: (id) => { timers.delete(id); }, setInterval: () => 0,
     fetch: (url, init = {}) => { requests.push({ url, init }); return fetchImpl(url, init, requests.length); },
+    ...globals,
   });
   vm.runInContext(CLOUDBITE_JS, ctx);
   const flush = async () => { for (let i = 0; i < 20; i++) await new Promise(r => setImmediate(r)); };
@@ -474,6 +475,100 @@ await test('실행 기록은 읽기 전용 표시다: 입력란·명령 프롬�
   assert.ok(![...stream.walk()].some(n => ['INPUT', 'TEXTAREA', 'SELECT'].includes(n.tagName)));
   assert.ok(!/\w+@\w+[:$]|\$ $/m.test(stream.textContent));
   assert.match(stream.textContent, /simulated · running · \d+ active · \d+ events?/);
+});
+
+// ───────── 임시 Cloudbite 운영자 링크 (#operator=<token>)
+const OP_TOKEN = 'cbo_' + Buffer.from(Array.from({ length: 32 }, (_, i) => (i * 37 + 11) & 0xff)).toString('base64url');
+/** location·history 가짜. log 에 replaceState·fetch 순서를 남기고, 주소는 replaceState 로만 바뀐다 */
+function addressBar(hash, { history = true } = {}) {
+  const log = [];
+  const location = { pathname: '/cloudbite', search: '?x=1', hash, replace(u) { log.push(['replace', u]); location.hash = ''; } };
+  const g = { location };
+  if (history) g.history = { state: null, replaceState(s, t, u) { log.push(['replaceState', u]); location.hash = ''; } };
+  return { g, log, location };
+}
+function operatorEnv(hash, handlers = () => json(404, {}), opts) {
+  const bar = addressBar(hash, opts);
+  const env = fakeEnv({ globals: bar.g, fetchImpl: (url, init, n) => {
+    bar.log.push(['fetch', url]);
+    if (url === '/api/cloudbite/bootstrap') return json(200, CATALOGUE);
+    return handlers(url, init, n);
+  } });
+  return { env, bar };
+}
+
+await test('운영자 조각 읽기: 정확한 형식만 토큰, 틀린 형식도 present 로 지운다', () => {
+  assert.deepEqual(core.operatorFragment(`#operator=${OP_TOKEN}`), { present: true, token: OP_TOKEN });
+  assert.deepEqual(core.operatorFragment(`#x=1&operator=${OP_TOKEN}`), { present: true, token: OP_TOKEN });
+  for (const h of ['#operator=', '#operator', '#operator=cbo_short', `#operator=${OP_TOKEN}A`, `#operator=${OP_TOKEN.slice(0, -1)}B`, `#${OP_TOKEN}`, `#operator=${encodeURIComponent(OP_TOKEN + '+')}`])
+    assert.deepEqual(core.operatorFragment(h), { present: true, token: '' }, h.slice(0, 20));
+  assert.deepEqual(core.operatorFragment(''), { present: false, token: '' });
+  assert.deepEqual(core.operatorFragment('#home'), { present: false, token: '' });
+});
+
+await test('운영자 링크: 요청 전에 조각을 지우고, 실제 실행 모드·메모리·입력란에만 두며, 자동 데모·자동 실행이 없다', async () => {
+  const { env, bar } = operatorEnv(`#operator=${OP_TOKEN}`, (url, init) => {
+    if (url === '/api/cloudbite/projects' && init.method === 'POST') return json(201, { project: liveProject('running', 'running'), accessToken: 'proj-scope-tok' });
+    if (url === '/api/cloudbite/projects/proj-1') return json(200, liveProject('completed', 'completed', { updatedAt: 5 }));
+    return json(404, {});
+  });
+  assert.deepEqual(bar.log[0], ['replaceState', '/cloudbite?x=1'], 'fragment erased first, query kept');
+  assert.equal(bar.log[1][0], 'fetch');
+  assert.equal(bar.location.hash, '');
+  await env.flush(); await env.advance(30000);
+  assert.deepEqual(env.requests.map(r => r.url), ['/api/cloudbite/bootstrap'], 'no automatic demo or paid run');
+  assert.ok(!env.all().some(n => n.className.startsWith('cb-card ')), 'no demo cards');
+  assert.match(env.root.textContent, /Live run — server-reported activity/);
+  assert.equal(env.byText('BUTTON', 'Live run').getAttribute('aria-pressed'), 'true');
+  const tok = env.all().find(n => n.id === 'cb-token');
+  assert.equal(tok.value, OP_TOKEN); assert.equal(tok.getAttribute('type'), 'password');
+  assert.match(env.root.textContent, /Temporary Cloudbite operator token in memory/);
+  assert.match(env.root.textContent, /Temporary Cloudbite operator token \(Cloudbite runs only\)/);
+  assert.ok(!/verified|security key/i.test(env.all().find(n => n.className === 'cb-profile-state').textContent));
+  assert.ok(!env.root.textContent.includes(OP_TOKEN), 'token never rendered as text');
+  for (const k of ['localStorage', 'sessionStorage', 'indexedDB']) assert.equal(env.ctx[k], undefined);
+  assert.equal(env.doc.cookie, undefined);
+  // 사용자가 직접 Run experts 를 눌러야 시작한다
+  const start = env.byText('BUTTON', 'Run experts');
+  assert.equal(start.disabled, false);
+  start.click(); await env.flush();
+  const post = env.requests.find(r => r.init.method === 'POST');
+  assert.equal(post.init.headers['x-admin-token'], OP_TOKEN);
+  assert.ok(!post.url.includes(OP_TOKEN) && !post.init.body.includes(OP_TOKEN), 'only in the header');
+  await env.advance(1500);
+  const get = env.requests.find(r => r.url === '/api/cloudbite/projects/proj-1');
+  assert.equal(get.init.headers.authorization, 'Bearer proj-scope-tok'); assert.equal(get.init.headers['x-admin-token'], undefined);
+  assert.ok(!bar.log.some(([k, u]) => k !== 'fetch' && String(u).includes('cbo_')));
+});
+
+await test('운영자 링크: 형식이 틀려도 지우고 토큰을 받지 않으며, 거부·만료는 값 없이 알리고, Clear token 은 메모리·입력란을 비운다', async () => {
+  const bad = operatorEnv('#operator=cbo_not-a-real-token', undefined, { history: false });
+  assert.deepEqual(bad.bar.log[0], ['replace', '/cloudbite?x=1#'], 'falls back to location.replace without history');
+  await bad.env.flush(); await bad.env.advance(30000);
+  assert.equal(bad.env.all().find(n => n.id === 'cb-token').value, '');
+  assert.match(bad.env.root.textContent, /temporary Cloudbite operator link is malformed/);
+  assert.ok(!bad.env.root.textContent.includes('cbo_not-a-real-token'));
+  assert.deepEqual(bad.env.requests.map(r => r.url), ['/api/cloudbite/bootstrap'], 'no automatic demo after a malformed link');
+
+  const { env } = operatorEnv(`#operator=${OP_TOKEN}`, () => json(401, { error: 'admin session required' }));
+  await env.flush();
+  env.byText('BUTTON', 'Run experts').click(); await env.flush();
+  assert.match(env.root.textContent, /temporary Cloudbite operator token was rejected or has expired/);
+  assert.ok(!env.root.textContent.includes(OP_TOKEN));
+  env.byText('BUTTON', 'Clear token').click(); await env.flush();
+  assert.equal(env.all().find(n => n.id === 'cb-token').value, '');
+  assert.match(env.root.textContent, /No admin token/);
+  assert.equal((env.byText('BUTTON', 'Run again') || env.byText('BUTTON', 'Run experts')).disabled, true, 'live blocked without a token');
+});
+
+await test('location·history 가 없는 환경과 조각 없는 공개 데모는 그대로 동작한다', async () => {
+  const { env, bar } = operatorEnv('');
+  await env.flush(); await env.advance(30000);
+  assert.ok(!bar.log.some(([k]) => k !== 'fetch'), 'nothing to erase');
+  assert.match(env.root.textContent, /4 \/ 4 valid opinions/, 'public browser demo still auto-starts');
+  const env2 = fakeEnv({ globals: { location: { hash: `#operator=${OP_TOKEN}` } }, fetchImpl: () => json(200, CATALOGUE) });
+  await env2.flush();
+  assert.equal(env2.all().find(n => n.id === 'cb-token').value, OP_TOKEN, 'no history/replace: still consumed, nothing thrown');
 });
 
 console.log(`cloudbite-console: ${pass} passed`);
