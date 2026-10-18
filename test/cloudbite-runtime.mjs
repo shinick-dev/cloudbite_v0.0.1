@@ -53,6 +53,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const gate = () => { let resolve; const p = new Promise((r) => (resolve = r)); return { p, resolve }; };
 const jr = (v, status = 200) => new Response(JSON.stringify(v), { status, headers: { 'content-type': 'application/json' } });
 const SECRETS = ['DAYTONA-SECRET-VALUE', 'NOSANA-SECRET-VALUE', 'ADMIN-TOKEN-VALUE'];
+const QWEN = 'qwen/qwen3.8-27b';
+const HIDDEN = 'HIDDEN-REASONING-TRACE';
+const PLAIN_KEYS = ['max_tokens', 'messages', 'model', 'stream', 'temperature'];
 
 // ── world: storage per DO name, clock, fake providers ──
 function memStorage(w) {
@@ -114,6 +117,9 @@ globalThis.fetch = async (u, init = {}) => {
     w.nosana.push(req);
     if (w.nosanaHold) await w.nosanaHold.p;
     if (w.nosanaFail) return new Response('upstream says ' + SECRETS[1] + ' internal trace', { status: 500 });
+    if (w.nosanaEmpty) return jr({ choices: [{ message: { content: w.nosanaEmpty.content, reasoning_content: HIDDEN + ' ' + SECRETS[1] }, finish_reason: w.nosanaEmpty.finish }] });
+    // Like qwen/qwen3.8-27b on a realistic prompt: with thinking on, reasoning eats max_tokens and content stays null.
+    if (req.model === QWEN && req.chat_template_kwargs?.enable_thinking !== false) return jr({ choices: [{ message: { content: null, reasoning_content: HIDDEN }, finish_reason: 'length' }] });
     return jr({ choices: [{ message: { content: script(req) } }] });
   }
   assert.equal(url.host, 'dt.fake', 'unknown network forbidden: ' + url.host);
@@ -303,7 +309,7 @@ await check('live run: distinct sandbox per expert, persona placement, real pyth
   assert.deepEqual([...new Set(w.uas)], [RUNNER_UA]);
   // secrets never reached sandbox files, the model input or the public project
   for (const [, text] of allText(w)) for (const s of SECRETS) assert.ok(!text.includes(s));
-  for (const req of w.nosana) { assert.equal(req.model, 'fake-model'); assert.ok(req.max_tokens <= 1200); for (const s of SECRETS) assert.ok(!JSON.stringify(req).includes(s)); }
+  for (const req of w.nosana) { assert.equal(req.model, 'fake-model'); assert.ok(req.max_tokens <= 1200); assert.deepEqual(Object.keys(req).sort(), PLAIN_KEYS, 'generic model keeps the plain request shape'); for (const s of SECRETS) assert.ok(!JSON.stringify(req).includes(s)); }
   const read = await call(w, 'GET', `/api/cloudbite/projects/${created.j.project.id}`, { headers: { authorization: 'Bearer ' + created.j.accessToken } });
   assert.equal(read.status, 200); assert.equal(read.j.status, 'completed');
   for (const s of SECRETS) assert.ok(!read.text.includes(s));
@@ -610,6 +616,67 @@ await check('real python runner: upstream inference failure is visible as a boun
     for (const s of SECRETS) assert.ok(!text.includes(s));
   }
   assert.deepEqual([...new Set(w.uas)], [RUNNER_UA]);
+});
+
+await check('real python runner: qwen/qwen3.8-27b is sent enable_thinking=false and completes; the fake answers only then', async () => {
+  const w = freshWorld({ env: { CLOUDBITE_NOSANA_MODEL: QWEN } });
+  const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['market'] }), headers: admin });
+  const obj = await project(w, created);
+  const p = await drive(w, obj, (p) => p.status !== 'running', 2000);
+  await Promise.all(w.procs);
+  const [e] = await experts(obj);
+  assert.equal(p.status, 'completed', JSON.stringify(e.run.activity.map((a) => a.message)));
+  assert.equal(e.run.status, 'completed'); assert.equal(e.run.opinion.direction, 'support');
+  assert.ok(w.nosana.length >= 3);
+  for (const req of w.nosana) {
+    assert.deepEqual(Object.keys(req).sort(), [...PLAIN_KEYS, 'chat_template_kwargs'].sort());
+    assert.deepEqual(req.chat_template_kwargs, { enable_thinking: false });
+    assert.equal(req.model, QWEN); assert.equal(req.max_tokens, 1200); assert.equal(req.temperature, 0.3); assert.equal(req.stream, false);
+  }
+});
+
+await check('empty model answers (null / length / whitespace) fail by bounded category; reasoning and body never surface', async () => {
+  const w = freshWorld({ runner: 'none' });
+  const { created, obj, caps: [a] } = await manualRun(w);
+  const cases = [
+    [{ content: null, finish: 'length' }, 'inference upstream used its output budget before any content (finish_reason=length)'],
+    [{ content: null, finish: 'stop' }, 'inference upstream returned no content'],
+    [{ content: ' \n\t ', finish: 'stop' }, 'inference upstream returned no content'],
+    [{ content: '', finish: 'length' }, 'inference upstream used its output budget before any content (finish_reason=length)'],
+  ];
+  for (const [empty, error] of cases) {
+    w.nosanaEmpty = empty;
+    const r = await wcall(w, a, 'inference', msgs);
+    assert.equal(r.status, 502); assert.deepEqual(Object.keys(r.j), ['error']); assert.equal(r.j.error, error);
+  }
+  w.nosanaEmpty = null;
+  const [e] = await experts(obj);
+  const errs = e.run.activity.filter((x) => x.kind === 'error').map((x) => x.message);
+  assert.deepEqual(errs, cases.map(([, error], i) => `model call ${i + 1} failed: ${error}`));
+  const read = await call(w, 'GET', `/api/cloudbite/projects/${created.j.project.id}`, { headers: { authorization: 'Bearer ' + created.j.accessToken } });
+  for (const text of [read.text, JSON.stringify(e)]) {
+    assert.ok(!text.includes(HIDDEN), 'hidden reasoning never reflected');
+    for (const s of SECRETS) assert.ok(!text.includes(s));
+  }
+});
+
+await check('real python runner: a length-exhausted empty answer fails the expert once, with no fabricated opinion or retry', async () => {
+  const w = freshWorld({ nosanaEmpty: { content: null, finish: 'length' } });
+  const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['market'] }), headers: admin });
+  const obj = await project(w, created);
+  const p = await drive(w, obj, (p) => p.status !== 'running', 2000);
+  await Promise.all(w.procs);
+  const [e] = await experts(obj);
+  assert.equal(p.status, 'failed'); assert.equal(e.run.status, 'failed'); assert.equal(e.run.opinion, undefined);
+  assert.equal(w.nosana.length, 1, 'no retries, larger budget or fallback model');
+  assert.ok(e.run.activity.some((x) => x.message === 'model call 1 failed: inference upstream used its output budget before any content (finish_reason=length)'));
+  assert.equal(readFileSync(join(sbDir(w, e.run.sandboxId), 'out', 'error.txt'), 'utf8'), 'turn 1: inference failed: model provider returned an error (HTTP 502)');
+  assert.ok(!existsSync(join(sbDir(w, e.run.sandboxId), 'out', 'result.json')), 'no fabricated opinion');
+  const read = await call(w, 'GET', `/api/cloudbite/projects/${created.j.project.id}`, { headers: { authorization: 'Bearer ' + created.j.accessToken } });
+  for (const text of [read.text, JSON.stringify(e), ...allText(w).map(([, t]) => t)]) {
+    assert.ok(!text.includes(HIDDEN), 'hidden reasoning never reflected');
+    for (const s of SECRETS) assert.ok(!text.includes(s));
+  }
 });
 
 server.close();

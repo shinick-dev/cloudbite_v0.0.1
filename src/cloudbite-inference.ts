@@ -39,20 +39,38 @@ export async function boundedText(r: Request | Response, max: number): Promise<s
 
 export type InferenceResult = { content: string } | { error: string; status: number };
 
+// Qwen3-family chat templates think by default; on a realistic persona+workspace prompt the hidden reasoning used the
+// whole max_tokens budget and left content null. The model card documents chat_template_kwargs.enable_thinking=false
+// to turn it off. Only these exact model ids get the flag; every other OpenAI-compatible model keeps the plain shape.
+const THINKING_OFF_MODELS = new Set(['qwen/qwen3.8-27b']);
+
+/** The upstream request body: same budgets for every model, plus the thinking switch for the models above. */
+export function chatRequestBody(model: string, messages: ChatMessage[]): Record<string, unknown> {
+  const body: Record<string, unknown> = { model, messages, max_tokens: CB_INFERENCE_MAX_TOKENS, temperature: 0.3, stream: false };
+  if (THINKING_OFF_MODELS.has(model)) body.chat_template_kwargs = { enable_thinking: false };
+  return body;
+}
+
 export async function nosanaChat(cfg: CloudbiteConfig['nosana'], messages: ChatMessage[]): Promise<InferenceResult> {
   let r: Response;
   try {
     r = await fetch(`${cfg.base}/chat/completions`, {
       method: 'POST',
       headers: { authorization: `Bearer ${cfg.key}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ model: cfg.model, messages, max_tokens: CB_INFERENCE_MAX_TOKENS, temperature: 0.3, stream: false }),
+      body: JSON.stringify(chatRequestBody(cfg.model, messages)),
       signal: AbortSignal.timeout(CB_INFERENCE_TIMEOUT),
     });
   } catch { return { error: 'inference upstream unavailable', status: 504 }; }
   if (!r.ok) { await r.body?.cancel(); return { error: `inference upstream failed (${r.status})`, status: 502 }; }
   let j: unknown;
   try { j = JSON.parse(await boundedText(r, 512 * 1024)); } catch { return { error: 'inference upstream returned invalid JSON', status: 502 }; }
-  const content = (j as { choices?: Array<{ message?: { content?: unknown } }> })?.choices?.[0]?.message?.content;
-  if (typeof content !== 'string') return { error: 'inference upstream returned no content', status: 502 };
+  const choice = (j as { choices?: Array<{ message?: { content?: unknown }; finish_reason?: unknown }> })?.choices?.[0];
+  const content = choice?.message?.content;
+  // Empty answers fail by category only: any reasoning text or other body fields are never read back or substituted.
+  if (typeof content !== 'string' || !content.trim()) {
+    return choice?.finish_reason === 'length'
+      ? { error: 'inference upstream used its output budget before any content (finish_reason=length)', status: 502 }
+      : { error: 'inference upstream returned no content', status: 502 };
+  }
   return { content: content.slice(0, CB_INFERENCE_REPLY_MAX) };
 }

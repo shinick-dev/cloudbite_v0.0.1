@@ -51,6 +51,11 @@ readiness: while `CLOUDBITE_EXPERTS` is empty, live (and demo) creation is refus
   Works only for `/p/_cloudbite/worker/<project>/<run>/{inference,activity,complete}`; requests with an `Origin` are refused.
   Inference: ≤ 48 KiB body, ≤ 32 messages, ≤ 8 calls per expert (reserved before the upstream call), one in flight,
   60 s timeout, `max_tokens` 1200, reply reduced to `{content}` ≤ 16 KiB. Upstream errors become a fixed message.
+  For the exact model `qwen/qwen3.8-27b` the request adds `chat_template_kwargs: {enable_thinking: false}` (documented
+  on the Qwen model card): with thinking on, a realistic persona+workspace prompt spent all 1200 tokens on hidden
+  reasoning and returned `content: null`. Other models keep the plain request shape. An empty/whitespace/null answer
+  fails as `inference upstream returned no content`, or `… used its output budget before any content
+  (finish_reason=length)`; reasoning fields are never read, returned or substituted.
 - **Global bound**: the `registry` instance allows 2 live projects at once; per project 3 experts provisioned/running at once.
 
 ## Execution
