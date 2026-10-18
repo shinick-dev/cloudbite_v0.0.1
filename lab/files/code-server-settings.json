@@ -1,0 +1,20 @@
+{
+  "workbench.startupEditor": "readme",
+  "workbench.colorTheme": "Default Dark Modern",
+  "workbench.secondarySideBar.defaultVisibility": "hidden",
+  "chat.disableAIFeatures": true,
+  "security.workspace.trust.enabled": false,
+  "telemetry.telemetryLevel": "off",
+  "terminal.integrated.defaultProfile.linux": "bash",
+  "terminal.integrated.profiles.linux": {
+    "bash": { "path": "bash", "icon": "terminal-bash" },
+    "공유 터미널 (모임지기와 같이 보기)": { "path": "tmux", "args": ["-u", "new-session", "-A", "-s", "share"], "icon": "live-share" },
+    "수업 따라보기 (모임지기와 함께 보기)": { "path": "tmux", "args": ["-u", "attach", "-r", "-t", "gw-lesson"], "icon": "live-share" }
+  },
+  "terminal.integrated.copyOnSelection": true,
+  "terminal.integrated.rightClickBehavior": "copyPaste",
+  "terminal.integrated.enableMultiLinePasteWarning": "never",
+  "terminal.integrated.fontSize": 14,
+  "editor.fontSize": 14,
+  "files.autoSave": "afterDelay"
+}

@@ -1,0 +1,146 @@
+{
+  "date": "2026-10-16",
+  "status": "research; not implemented",
+  "effortLegend": {
+    "S": "기존 기능의 작은 UI/상태 확장",
+    "M": "프런트·권한·저장 또는 서비스 연결 포함",
+    "L": "별도 운영 구성·실시간 협업 등 큰 통합; 상대적 추정이며 견적 아님"
+  },
+  "features": [
+    {
+      "id": "F01",
+      "priority": "P0",
+      "feature": "모임지기 전용 시연실과 세 모드",
+      "effort": "M",
+      "implementation": "기존 생성·시험실·SFU 확장",
+      "inspiration": "BigBlueButton 발표 배치 / Canvas 참여자 관점",
+      "acceptance": "시연은 모임지기 환경에서 실행, 참여자 명령은 명시적으로 분리"
+    },
+    {
+      "id": "F02",
+      "priority": "P0",
+      "feature": "한 창에서 시연·자료·실습 보기",
+      "effort": "M",
+      "implementation": "기존 영상·실습실 막대; Driver.js 선택",
+      "inspiration": "BigBlueButton 배치 / Moodle 목차",
+      "acceptance": "시각 정보는 한 창, 작성 중 파일·입력 초점 유지"
+    },
+    {
+      "id": "F03",
+      "priority": "P0",
+      "feature": "현재 단계와 자기 진행 상태",
+      "effort": "S",
+      "implementation": "기존 State·자리 권한 독립 확장",
+      "inspiration": "Moodle 완료 / Canvas 모듈",
+      "acceptance": "자기 확인·제출·검토를 구분, 조회·화면 연결을 이해도로 오인하지 않음"
+    },
+    {
+      "id": "F04",
+      "priority": "P0",
+      "feature": "단계가 연결된 도움 대기열",
+      "effort": "S",
+      "implementation": "기존 손들기·조교 API",
+      "inspiration": "BigBlueButton 손들기",
+      "acceptance": "모임·자리·단계·담당 유지; 동의 전 제어 없음"
+    },
+    {
+      "id": "F05",
+      "priority": "P1",
+      "feature": "입장 전 준비 확인",
+      "effort": "S",
+      "implementation": "기존 preparation·readiness 확장",
+      "inspiration": "현재 실습실 기반",
+      "acceptance": "실습실·파일·도구 준비를 확인하되 학습 완료로 표시하지 않음"
+    },
+    {
+      "id": "F06",
+      "priority": "P1",
+      "feature": "파일 업로드 발견성과 실패 복구",
+      "effort": "S/M",
+      "implementation": "code-server 안내부터; 필요 시 Uppy",
+      "inspiration": "Moodle 과제 / Uppy",
+      "acceptance": "실제 파일 존재·경로·크기·중복 처리 확인; tus는 별도 서버 필요"
+    },
+    {
+      "id": "F07",
+      "priority": "P1",
+      "feature": "결과물 제출과 피드백",
+      "effort": "M",
+      "implementation": "기존 ZIP·체크포인트·파일 메타데이터",
+      "inspiration": "Canvas SpeedGrader",
+      "acceptance": "제출 버전·피드백·PC 보관 확인을 분리"
+    },
+    {
+      "id": "F08",
+      "priority": "P1",
+      "feature": "단계·자료·녹화가 연결된 복습",
+      "effort": "S/M",
+      "implementation": "명시적 메타데이터; 기존 녹화 사용",
+      "inspiration": "Open edX 북마크·이어하기",
+      "acceptance": "만료된 실습실과 저장된 자료·영상 링크를 구분"
+    },
+    {
+      "id": "F09",
+      "priority": "P1",
+      "feature": "참여자 관점 미리 보기",
+      "effort": "S/M",
+      "implementation": "분리된 테스트 자리·최소 권한",
+      "inspiration": "Canvas StudentView / Open edX masquerade",
+      "acceptance": "실제 참여자 가장·관리 토큰 공유 없음"
+    },
+    {
+      "id": "F10",
+      "priority": "P1",
+      "feature": "수업 템플릿 복제",
+      "effort": "S",
+      "implementation": "단계·자료·안내 데이터 저장",
+      "inspiration": "Moodle / Canvas 수업 구조",
+      "acceptance": "비밀값·과거 참여자·이전 요청 ID 복사 없음"
+    },
+    {
+      "id": "F11",
+      "priority": "P1/P2",
+      "feature": "짧은 상태 투표와 문제",
+      "effort": "S 또는 M/L",
+      "implementation": "짧은 투표 독립 구현; H5P는 별도 검토",
+      "inspiration": "BigBlueButton 투표 / H5P",
+      "acceptance": "무응답·완료·정답 구분, 풍부한 콘텐츠는 추가 서버·라이선스 검토"
+    },
+    {
+      "id": "F12",
+      "priority": "P2",
+      "feature": "설명용 판서",
+      "effort": "M",
+      "implementation": "Excalidraw MIT",
+      "inspiration": "BigBlueButton 판서·발표",
+      "acceptance": "React·자산·저장 필요; 다자 협업은 추가 구성"
+    },
+    {
+      "id": "F13",
+      "priority": "P2",
+      "feature": "공동 메모·코드 편집",
+      "effort": "M/L",
+      "implementation": "Yjs MIT; 메모부터 실험",
+      "inspiration": "Yjs editor providers",
+      "acceptance": "방별 권한·영속 저장·code-server 연결 검토"
+    },
+    {
+      "id": "F14",
+      "priority": "P2",
+      "feature": "앱 안의 음성 수업",
+      "effort": "L",
+      "implementation": "현재 CF SFU 확장안과 LiveKit 비교",
+      "inspiration": "BigBlueButton / LiveKit",
+      "acceptance": "마이크 권한·장치·에코·재연결·운영량 확인"
+    },
+    {
+      "id": "F15",
+      "priority": "P1/P2",
+      "feature": "사용성 관찰과 수업 후 개선",
+      "effort": "S/M",
+      "implementation": "최소 이벤트·기존 피드백 루프; rrweb 선택",
+      "inspiration": "현재 피드백 루프 / rrweb",
+      "acceptance": "자발적 시험 관찰, 민감 입력 제외; DOM 재현과 강의 녹화 구분"
+    }
+  ]
+}

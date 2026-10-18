@@ -1,0 +1,45 @@
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+const bundle=await build({entryPoints:['src/lab-live-service.ts'],bundle:true,write:false,format:'esm',platform:'node',logLevel:'silent'});
+const {LabLiveService}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+let t=1800000000000;const oldNow=Date.now;Date.now=()=>t;
+const data=new Map(),work=[],copy=x=>x===undefined?x:structuredClone(x);
+const storage={async get(k){return copy(data.get(k))},async put(k,v){data.set(k,copy(v))},async delete(k){return data.delete(k)},async list({prefix}){return new Map([...data].filter(([k])=>k.startsWith(prefix)).map(([k,v])=>[k,copy(v)]))}};
+const lab={id:'room',name:'quality',expiresAt:t+3600000,seats:[{n:1,code:'one',sandboxId:'sb1'},{n:2,code:'two',sandboxId:'sb2'}]};
+data.set('lab:room',lab);for(const owner of ['a','b'])data.set('live-auth:'+owner,{expiresAt:t+3600000});
+let serial=0;globalThis.fetch=async(url,opt)=>{const body=JSON.parse(opt.body||'null');return Response.json(url.endsWith('/sessions/new')?{sessionId:'session-'+(++serial)}:url.endsWith('/tracks/new')?{sessionDescription:{type:body.sessionDescription?'answer':'offer',sdp:'v=0\r\n'},tracks:[{mid:'0'}]}:{})};
+const service=new LabLiveService({storage,env:{REALTIME_APP_ID:'app',REALTIME_APP_TOKEN:'not-a-real-secret'},authorize:async token=>data.has('live-auth:'+token)?{owner:token,expiresAt:data.get('live-auth:'+token).expiresAt}:null,seatOf:async code=>{const seat=lab.seats.find(s=>s.code===code);return seat?{lab,seat}:{status:404,error:'missing'}},schedule:async()=>{},waitUntil:p=>work.push(p),audit:async()=>{}});
+const publisher='publisher-tab-123456',viewer='viewer-tab-12345678',viewer2='viewer-second-123456';
+const ok=r=>assert.ok(!r.error,JSON.stringify(r));
+const mode=async code=>(await service.seatState(code,publisher)).quality;
+const focus=(n,v)=>({id:'room',n,v});
+const set=(owner,tab,revision,target,at=t)=>service.quality(owner,tab,revision,at,target);
+try{
+ const first=await service.start('one',publisher,'v=0\r\n',[{mid:'0',trackName:'screen'}]);ok(first);
+ const second=await service.start('two',publisher,'v=0\r\n',[{mid:'0',trackName:'screen'}]);ok(second);
+ assert.equal(await mode('one'),'preview');
+ assert.equal((await set('invalid',viewer,1,focus(1,first.v))).status,401);
+ for(const [rev,at,target] of [[0,t,null],[1,t-30001,null],[1,t+30001,null],[1,t,{id:'room',n:1,v:0}],[1,t,{id:'room',n:1,v:first.v,extra:true}]])assert.ok((await set('a',viewer,rev,target,at)).error);
+ ok(await set('a',viewer,1,focus(1,first.v)));assert.equal(await mode('one'),'detail');assert.equal(await mode('two'),'preview');
+ assert.equal((await service.seatState('one',publisher)).control,null,'detail never grants input');
+ ok(await set('a',viewer,2,focus(2,second.v)));assert.equal(await mode('one'),'preview');assert.equal(await mode('two'),'detail');
+ assert.equal((await set('a',viewer,1,focus(1,first.v))).stale,true);assert.equal(await mode('one'),'preview');
+ ok(await set('a',viewer,3,null));ok(await set('a',viewer,2,focus(2,second.v)));assert.equal(await mode('two'),'preview','late responses cannot resurrect cleared detail');
+ ok(await set('a',viewer2,1,focus(1,first.v)));ok(await set('b',viewer,1,focus(1,first.v)));
+ ok(await set('a',viewer2,2,null));assert.equal(await mode('one'),'detail','another viewer keeps its requested detail');
+ t+=10000;ok(await set('b',viewer,2,focus(1,first.v)));t+=10000;assert.equal(await mode('one'),'detail','renewal extends only its short lease');
+ t+=5001;assert.equal(await mode('one'),'preview','lease expiry downgrades even while source and login remain alive');
+ ok(await set('a',viewer,4,focus(1,first.v)));data.delete('live-auth:a');assert.equal(await mode('one'),'preview','revoked login cannot retain detail');data.set('live-auth:a',{expiresAt:t+3600000});
+ const fresh=await service.start('one',publisher,'v=0\r\n',[{mid:'0',trackName:'screen'}]);ok(fresh);
+ assert.equal(await mode('one'),'preview','focus does not follow a replacement publication');
+ assert.equal((await set('a',viewer,5,focus(1,first.v))).status,409);
+ ok(await set('a',viewer,5,focus(1,fresh.v)));assert.equal(await mode('one'),'detail');
+ await service.dropOwners(['a']);assert.equal(await mode('one'),'preview');
+ // Eight active/revision-holding tabs per owner, then bounded refusal.
+ for(let i=0;i<8;i++)ok(await set('a','bounded-viewer-tab-'+i,1,null));
+ assert.equal((await set('a','bounded-viewer-tab-9',1,null)).status,429);
+ t+=60001;await service.alarm(t);assert.equal([...data.keys()].some(k=>k.startsWith('live-quality:')),false);
+ assert.equal((await set('a',viewer,1,focus(1,fresh.v),t-60001)).status,409,'expired timestamp cannot replay after revision cleanup');
+ ok(await set('b',viewer,3,focus(1,fresh.v)));await service.clear('room');assert.equal([...data.keys()].some(k=>k.startsWith('live-quality:')),false);
+ console.log('PASS quality leases: authority, bounds, selected seat, monotonic revisions, multiple viewers, expiry, logout, source generation and cleanup');
+}finally{await Promise.allSettled(work);Date.now=oldNow}

@@ -1,0 +1,2 @@
+# 줄 끝(LF/CRLF)·BOM 을 파일 그대로 저장한다 — lab/files 의 셸 스크립트가 CRLF 로 바뀌면 샌드박스에서 안 돈다
+* -text

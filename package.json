@@ -1,0 +1,51 @@
+{
+  "name": "gw-shinick",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#lab-demo-workspace": "./src/lab-demo-workspace.ts",
+    "#lab-demo-broadcast": "./src/lab-demo-broadcast.generated.ts",
+    "#lab-broadcast-preview": "./src/lab-broadcast-preview.ts",
+    "#lab-resources": "./src/lab-resources.ts",
+    "#lab-request-previews": "./src/lab-request-previews.ts",
+    "#lab-seat-add-ui": "./src/lab-seat-add-ui.ts",
+    "#lab-command-center": "./src/lab-command-center.ts",
+    "#lab-renderer": "./src/lab-renderer.generated.ts",
+    "#lab-terminal": "./src/labterminal.ts",
+    "#lab-control": "./src/labcontrol.ts",
+    "#lab-trial": "./src/labtrial.ts",
+    "#lab-interrupt": "./src/labinterrupt.ts",
+    "#lab-files": "./src/labfiles.ts",
+    "#lab-checkpoints": "./src/labcheckpoints.ts",
+    "#lab-recovery": "./src/labrecovery.ts",
+    "#lab-assistants": "./src/labassistants.ts",
+    "#lab-live": "./src/lablive.ts",
+    "#lab-media-meter": "./src/lab-media-meter.ts",
+    "#lab-classroom-teacher": "./src/lab-classroom-teacher.ts",
+    "#lab-demo-editor": "./src/lab-demo-editor.ts"
+  },
+  "scripts": {
+    "dev": "wrangler dev --env dev",
+    "deploy": "wrangler deploy",
+    "check": "node tools/build-lab-renderer.mjs --check && node tools/build-lab-dom-capture.mjs --check && node tools/build-lab-demo-broadcast.mjs --check && tsc --noEmit && tsc -p tsconfig.client.json",
+    "build:lab-renderer": "node tools/build-lab-renderer.mjs",
+    "build:lab-dom-capture": "node tools/build-lab-dom-capture.mjs",
+    "build:lab-demo-broadcast": "node tools/build-lab-demo-broadcast.mjs",
+    "test:e2e": "node test/e2e.mjs",
+    "test:security": "node tools/test-security.mjs",
+    "test:security-runner": "node test/security-runner.mjs"
+  },
+  "dependencies": {
+    "@simplewebauthn/server": "^14.0.3",
+    "jose": "^6.2.12",
+    "uqr": "^0.1.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260929.1",
+    "esbuild": "0.28.1",
+    "html-to-image": "1.11.13",
+    "playwright-core": "^1.63.0",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.143.0"
+  }
+}

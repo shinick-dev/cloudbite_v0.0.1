@@ -1,0 +1,61 @@
+{
+  // k.shinick.dev — 자격증명 브로커.
+  // RP_ID 를 등록 도메인(shinick.dev)으로 둬서, 호스트 이름을 바꿔도 등록한 보안 키가 그대로 동작한다.
+  // 진짜 키는 DO 에 MASTER_KEY 로 암호화돼 있고, 밖으로는 kvt_ 가짜 토큰만 나간다.
+  // secrets: MASTER_KEY, SETUP_TOKEN(등록할 때만)
+  "name": "gw-shinick",
+  "main": "src/index.ts",
+  // 강사 /lab 목록 렌더러(src/lab-renderer.generated.ts)가 client/lab-renderer.ts 와 맞는지 dev·deploy 전에 확인만 한다 (다시 만들기: npm run build:lab-renderer)
+  "build": { "command": "node tools/build-lab-renderer.mjs --check && node tools/build-lab-dom-capture.mjs --check && node tools/build-lab-demo-broadcast.mjs --check" },
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // src/go.ps1 (빌린 PC 자동 로그인 스크립트) 를 문자열로 번들
+  "rules": [{ "type": "Text", "globs": ["**/*.ps1"], "fallthrough": true }],
+  "vars": {
+    "RP_ID": "shinick.dev",
+    "ORIGIN": "https://k.shinick.dev",
+    // 요청함 전용 Access 앱. 이메일 로그인으로 조회하고, 개설 승인은 별도 WebAuthn.
+    "LAB_OPEN_ACCESS_TEAM": "https://long-hill-8768.cloudflareaccess.com",
+    "LAB_OPEN_AUDIENCE": "b088c75e588022c8d9ebf37980c998c474b0e8396d128ba47e509ba2b0e1db04",
+    "LAB_OPEN_OWNER_EMAIL": "jcpukpyi@gmail.com",
+    // 공부방 참가자 호스트 — code-server 를 게이트웨이가 대신 열어 준다 (src/labhost.ts). 금고와 출처를 나누려고 따로 둔다
+    "LAB_ORIGIN": "https://lab.shinick.dev",
+    // 자리 호스트 s-<label>.<LAB_SEAT_DOMAIN> (src/labhost.ts) — 자리마다 출처를 나눈다. 비우면 입장·수업 만들기 503(닫힌 채로 실패).
+    // 운영 준비 (운영자가 대시보드에서 확인함):
+    //   1) DNS: *.shinick.dev 와일드카드 레코드(프록시) — 이미 있는 k·lab·console 등 명시 레코드가 우선한다
+    //   2) route: 아래 "*.shinick.dev/*" 가 이 Worker 로 — 와일드카드 route 는 console.shinick.dev(Cloudflare Access 뒤)와 다른 기존 호스트까지 덮는다.
+    //      console.shinick.dev/* 는 Worker 없음 route 로 빼 두었다. 게이트웨이가 아닌 호스트를 새로 만들면 반드시 같은 Worker 없음 route 를 먼저 추가할 것.
+    //      route 우선순위는 로컬에서 증명할 수 없다 — route 를 바꾸면 대시보드에서 console 이 그대로 Access 로 가는지 다시 확인
+    //   3) 인증서: 한 단계 와일드카드(*.shinick.dev)는 Universal SSL 에 들어 있다 (s-<label> 은 한 단계라 두 단계 인증서가 필요 없다)
+    "LAB_SEAT_DOMAIN": "shinick.dev",
+    // 샌드박스가 부르는 게이트웨이 = 이 Worker 의 workers.dev 주소 (<이름>.<계정 하위 도메인>.workers.dev).
+    // 계정 하위 도메인을 바꾸면(대시보드 Workers & Pages → 하위 도메인) 여기도 바꾸고 배포. 진행 중인 수업의 샌드박스는 예전 주소를 쓰므로 수업 사이에
+    "LAB_GW": "https://gw-shinick.ai-gongbu.workers.dev",
+    // 강사 화면 공유 — Cloudflare Realtime SFU 앱 id (비밀 아님). 앱 비밀은 secret REALTIME_APP_TOKEN
+    "REALTIME_APP_ID": "c29dbceb14ae7159c05ee756c190ddc2"
+  },
+  "routes": [
+    { "pattern": "k.shinick.dev", "custom_domain": true },
+    { "pattern": "lab.shinick.dev", "custom_domain": true },
+    // 자리 호스트 s-<label>.shinick.dev — console 등 다른 호스트는 대시보드의 Worker 없음 route 로 빠진다 (위 LAB_SEAT_DOMAIN 참고)
+    { "pattern": "*.shinick.dev/*", "zone_name": "shinick.dev" }
+  ],
+  // 공부방 Daytona 샌드박스(Tier 1·2)는 허용 목록 밖 도메인에 못 나간다 — *.workers.dev 는 허용이라 프록시(/p/)만 여기로 연다
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [{ "name": "STATE", "class_name": "State" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["State"] }],
+  "observability": { "enabled": true },
+  // 로컬 검증용: wrangler dev --env dev (배포하지 않는다)
+  "env": {
+    "dev": {
+      // 입장 호스트와 자리 호스트가 같은 사이트여야 한다(입장 POST 의 Sec-Fetch-Site: same-site) — lab.localhost·s-x.localhost 는 서로 다른 사이트라 gw.localhost 아래에 둔다
+      "vars": { "RP_ID": "localhost", "ORIGIN": "http://localhost:8797", "ALLOW_SHORT_TTL": "1", "LAB_DAYTONA_API": "http://localhost:8799", "LAB_ORIGIN": "http://lab.gw.localhost:8797", "LAB_SEAT_DOMAIN": "gw.localhost:8797", "LAB_GW": "",
+        // SFU 는 테스트 쪽 :8799/rtc 로 (lab-e2e 는 가짜 SFU, 브라우저 점검은 거기서 진짜 SFU 로 그대로 넘긴다). 비밀은 잠금 실행기가 프로세스 env 로
+        "REALTIME_APP_ID": "c29dbceb14ae7159c05ee756c190ddc2", "REALTIME_API": "http://localhost:8799/rtc" },
+      "routes": [],
+      "durable_objects": { "bindings": [{ "name": "STATE", "class_name": "State" }] }
+    }
+  }
+}

@@ -1,0 +1,42 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import vm from 'node:vm';
+import {transform} from 'esbuild';
+
+const built=await transform(await readFile('src/lab-demo-embed-bridge.ts','utf8'),{loader:'ts',format:'esm'});
+const {labDemoEmbedBridgeJS}=await import('data:text/javascript;base64,'+Buffer.from(built.code).toString('base64'));
+const origin='https://console.example.test',nonce='a'.repeat(32);
+function fixture({pending=false}={}){
+ const listeners=new Map(),timeouts=new Map(),intervals=new Map(),sent=[];
+ let id=0,time=1000,opened=0,stopped=0,frames=1,closed=0,resolveOpen;
+ const session={stats:()=>({frames}),isCurrent:()=>true,snapshot:()=>({}),stop:()=>stopped++};
+ const parent={postMessage:(value,target,transfer)=>sent.push({value,target,transfer})};
+ const window={parent,__labDomCapture:{open:()=>{opened++;return pending?new Promise(r=>resolveOpen=r):Promise.resolve(session)}}};
+ const context={window,Date:{now:()=>time},addEventListener:(name,fn)=>listeners.set(name,fn),clearTimeout:k=>timeouts.delete(k),clearInterval:k=>intervals.delete(k),setTimeout:(fn)=>{timeouts.set(++id,fn);return id},setInterval:(fn)=>{intervals.set(++id,fn);return id},createImageBitmap:async()=>({width:1920,height:1080,close:()=>closed++})};
+ vm.runInNewContext(labDemoEmbedBridgeJS(origin),context);
+ return {sent,parent,session,timeouts,intervals,get opened(){return opened},get stopped(){return stopped},get closed(){return closed},nextFrame:()=>frames++,advance:n=>time+=n,resolve:()=>resolveOpen(session),hide:()=>listeners.get('pagehide')(),message:(value,source=parent,from=origin)=>listeners.get('message')({data:value,source,origin:from})};
+}
+const flush=async()=>{for(let i=0;i<8;i++)await Promise.resolve()};
+const f=fixture();
+assert.equal(f.sent[0].value.type,'gw-demo-ready');
+assert.equal(f.sent[0].target,origin);
+for(const [source,from] of [[{},origin],[f.parent,'https://stranger.test']])f.message({type:'gw-demo-start',nonce},source,from);
+f.message({type:'gw-demo-start',nonce:'short'});
+assert.equal(f.opened,0,'foreign or malformed requests cannot open capture');
+f.message({type:'gw-demo-start',nonce});await flush();
+assert.equal(f.opened,1);
+const first=f.sent.find(s=>s.value.type==='gw-demo-frame');
+assert.ok(first);assert.equal(first.value.nonce,nonce);assert.equal(first.value.width,1920);
+assert.equal(first.target,origin);assert.equal(first.transfer[0],first.value.bitmap);
+f.nextFrame();const pump=[...f.timeouts.values()][0];await pump();
+assert.equal(f.sent.filter(s=>s.value.type==='gw-demo-frame').length,1,'one outstanding frame bounds transfer pressure');
+f.message({type:'gw-demo-ack',nonce,seq:first.value.seq});
+await [...f.timeouts.values()].at(-1)();
+assert.equal(f.sent.filter(s=>s.value.type==='gw-demo-frame').length,2);
+f.message({type:'gw-demo-start',nonce});await flush();assert.equal(f.opened,1,'heartbeat reuses existing capture');
+f.advance(6000);for(const fn of [...f.intervals.values()])fn();
+assert.equal(f.stopped,1);assert.equal(f.intervals.size,0);assert.equal(f.timeouts.size,0);
+const late=fixture({pending:true});late.message({type:'gw-demo-start',nonce});late.hide();late.resolve();await flush();
+assert.equal(late.stopped,1,'late capture creation is disposed after page exit');
+assert.equal(late.sent.filter(s=>s.value.type==='gw-demo-frame').length,0);
+console.log('PASS demo child bridge: origin/source, transfer bounds, acknowledgment, heartbeat, late cleanup');

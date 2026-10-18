@@ -1,0 +1,84 @@
+#!/usr/bin/env node
+// Bounded, read-only local diagnosis. No network, host capacity fallback or sampling.
+const fs = require('node:fs');
+const path = require('node:path').posix;
+function collect(io = fs) {
+  const out = { cgroup: 'unknown', cpuQuotaState: 'unknown', cpuQuotaCores: null, cpuSetCores: null, cpuEffectiveCores: null,
+    cpuThrottledUsecTotal: null, memoryLimitBytes: null, memoryLimitState: 'unknown',
+    memoryCurrentBytes: null, memoryHeadroomBytes: null, memoryOomTotal: null, memoryOomKillTotal: null,
+    rootAvailableBytes: null, workAvailableBytes: null, memoryPressure: null };
+  const read = p => { try { const f = io.openSync(p, 'r'); try { const b = Buffer.alloc(16385); const n = io.readSync(f, b, 0, b.length, 0); return n <= 16384 ? b.toString('utf8', 0, n).trim() : null; } finally { io.closeSync(f); } } catch { return null; } };
+  const num = s => typeof s === 'string' && /^\d+$/.test(s) && Number.isSafeInteger(Number(s)) ? Number(s) : null;
+  const disk = p => { try { const s = io.statfsSync(p); const n = s.bavail * s.bsize; return Number.isSafeInteger(n) && n >= 0 ? n : null; } catch { return null; } };
+  out.rootAvailableBytes = disk('/'); out.workAvailableBytes = disk('/home/daytona/work');
+  const cg = read('/proc/self/cgroup'), mounts = read('/proc/self/mountinfo');
+  if (!cg || !mounts) return out;
+  const row = cg.split('\n').find(s => s.startsWith('0::'));
+  if (!row) { out.cgroup = 'v1-unsupported'; return out; }
+  const safe = p => /^\/[A-Za-z0-9_./:-]*$/.test(p) && !p.split('/').some(s => s === '.' || s === '..') && p.length < 4096;
+  const current = row.slice(3);
+  if (!safe(current)) return out;
+  const mount = mounts.split('\n').map(s => s.split(' ')).find(a => {
+    const i = a.indexOf('-'); return a[i + 1] === 'cgroup2' && safe(a[3]) && safe(a[4]) &&
+      (a[4] === '/sys/fs/cgroup' || a[4].startsWith('/sys/fs/cgroup/')) &&
+      (current === a[3] || a[3] === '/' || current.startsWith(a[3] + '/'));
+  });
+  if (!mount) return out;
+  try { if (io.realpathSync(mount[4]) !== mount[4]) return out; } catch { return out; }
+  const root = mount[4], leaf = path.join(root, current.slice(mount[3] === '/' ? 1 : mount[3].length));
+  const dirs = []; let d = leaf;
+  while (dirs.length < 64) { dirs.push(d); if (d === root) break; d = path.dirname(d); }
+  if (dirs.at(-1) !== root) return out;
+  const local = (dir, name) => { const p = path.join(dir, name); try {
+    const real = io.realpathSync(p); if (!(real.startsWith(root + '/') && !real.split('/').includes('..'))) return null;
+    return read(p);
+  } catch { return null; } };
+  out.cgroup = 'v2';
+  let quotaUnknown = false, setUnknown = false, memoryUnknown = false, headroomUnknown = false;
+  const quotas = [], sets = [], limits = [], headrooms = [];
+  function cpus(s) {
+    if (!s || !/^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$/.test(s)) return null;
+    let total = 0, last = -1;
+    for (const r of s.split(',')) { const [a, b = a] = r.split('-').map(Number); if (!Number.isSafeInteger(b) || a <= last || b < a || b > 1048576) return null; total += b - a + 1; last = b; }
+    return total;
+  }
+  for (const dir of dirs) {
+    const q = local(dir, 'cpu.max');
+    const match = typeof q === 'string' ? q.match(/^(max|\d+) (\d+)$/) : null;
+    if (!match || !num(match[2]) || (match[1] !== 'max' && !num(match[1]))) quotaUnknown = true;
+    else if (match[1] !== 'max') quotas.push(Number(match[1]) / Number(match[2]));
+    const set = cpus(local(dir, 'cpuset.cpus.effective')); if (set === null) setUnknown = true; else sets.push(set);
+    const lim = local(dir, 'memory.max'), use = num(local(dir, 'memory.current'));
+    if (lim !== 'max') { const n = num(lim); if (n === null) memoryUnknown = true;
+      else { limits.push(n); if (use === null) headroomUnknown = true; else headrooms.push(Math.max(0, n - use)); } }
+    if (dir === leaf) out.memoryCurrentBytes = use;
+  }
+  out.cpuQuotaState = quotaUnknown ? 'unknown' : quotas.length ? 'limited' : 'unlimited';
+  out.cpuQuotaCores = !quotaUnknown && quotas.length ? Math.min(...quotas) : null;
+  out.cpuSetCores = !setUnknown && sets.length ? Math.min(...sets) : null;
+  // Unknown constraints prevent claiming an effective allowance.
+  if (!quotaUnknown && !setUnknown && sets.length) out.cpuEffectiveCores = Math.min(out.cpuQuotaCores ?? Infinity, out.cpuSetCores);
+  if (!memoryUnknown) { out.memoryLimitState = limits.length ? 'limited' : 'unlimited'; out.memoryLimitBytes = limits.length ? Math.min(...limits) : null;
+    if (limits.length && !headroomUnknown) out.memoryHeadroomBytes = Math.min(...headrooms); }
+  const stat = local(leaf, 'cpu.stat'); const events = local(leaf, 'memory.events');
+  out.cpuThrottledUsecTotal = num(stat?.match(/^throttled_usec (\d+)$/m)?.[1]);
+  out.memoryOomTotal = num(events?.match(/^oom (\d+)$/m)?.[1]);
+  out.memoryOomKillTotal = num(events?.match(/^oom_kill (\d+)$/m)?.[1]);
+  if (out.memoryHeadroomBytes !== null && out.memoryLimitBytes !== null) out.memoryPressure = out.memoryHeadroomBytes < Math.max(200 * 1048576, out.memoryLimitBytes * 0.1);
+  return out;
+}
+function format(r) {
+  const value = n => n === null ? 'unknown' : String(n);
+  const mib = n => n === null ? 'unknown' : `${Math.floor(n / 1048576)} MiB`;
+  return [`자원 (${r.cgroup}; 읽기 전용)`, `CPU quota ${r.cpuQuotaState === 'unlimited' ? 'unlimited' : value(r.cpuQuotaCores) + ' cores'} · cpuset ${value(r.cpuSetCores)} · effective ${value(r.cpuEffectiveCores)} cores`,
+    `CPU throttled ${value(r.cpuThrottledUsecTotal)} usec (누적; 현재 부하 아님)`,
+    `메모리 limit ${r.memoryLimitState === 'unlimited' ? 'unlimited' : mib(r.memoryLimitBytes)} · current ${mib(r.memoryCurrentBytes)} · headroom ${mib(r.memoryHeadroomBytes)} · OOM events ${value(r.memoryOomTotal)} · kills ${value(r.memoryOomKillTotal)} (누적)`,
+    `디스크 usable / ${mib(r.rootAvailableBytes)} · /home/daytona/work ${mib(r.workAvailableBytes)}`,
+    ...([r.rootAvailableBytes, r.workAvailableBytes].some(n => n !== null && n < 300 * 1048576) ? ['⚠ 디스크 여유가 300 MiB 미만입니다. 큰 파일·불필요한 node_modules를 정리하세요.'] : []),
+    ...(r.memoryPressure ? ['⚠ 메모리 여유가 적습니다. 동시 작업·에이전트를 줄이세요.'] : [])].join('\n');
+}
+module.exports = { collect, format };
+if (require.main === module) {
+  if (process.argv.length > 3 || (process.argv[2] && process.argv[2] !== '--json')) { console.error('usage: lab-resources [--json]'); process.exitCode = 2; }
+  else { const r = collect(); console.log(process.argv[2] === '--json' ? JSON.stringify(r) : format(r)); }
+}

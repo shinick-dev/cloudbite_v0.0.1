@@ -1,0 +1,68 @@
+{
+  "platformCount": 4,
+  "repositories": [
+    {
+      "name": "moodle",
+      "fork": "https://github.com/shinick-studyroom/moodle",
+      "isFork": true,
+      "upstream": "moodle/moodle",
+      "branch": "main",
+      "commit": "b7260e59a83124d6311c0217df3ba27ef6b9a7b0",
+      "license": "GPL-3.0",
+      "private": false,
+      "local": "../research/teaching-platforms/moodle",
+      "codegraphIndexed": false
+    },
+    {
+      "name": "canvas-lms",
+      "fork": "https://github.com/shinick-studyroom/canvas-lms",
+      "isFork": true,
+      "upstream": "instructure/canvas-lms",
+      "branch": "master",
+      "commit": "1c9f0bb8013ed69c4f2efe11fd483025469b7e6c",
+      "license": "AGPL-3.0",
+      "private": false,
+      "local": "../research/teaching-platforms/canvas-lms",
+      "codegraphIndexed": false
+    },
+    {
+      "name": "openedx-platform",
+      "fork": "https://github.com/shinick-studyroom/openedx-platform",
+      "isFork": true,
+      "upstream": "openedx/openedx-platform",
+      "branch": "master",
+      "commit": "4915ebb1b4db4641075a465ea61b182daa2b9544",
+      "license": "AGPL-3.0",
+      "private": false,
+      "local": "../research/teaching-platforms/openedx-platform",
+      "codegraphIndexed": false
+    },
+    {
+      "name": "frontend-app-learning",
+      "fork": "https://github.com/shinick-studyroom/frontend-app-learning",
+      "isFork": true,
+      "upstream": "openedx/frontend-app-learning",
+      "branch": "master",
+      "commit": "732a040fd025eed9b2ddf53081483bdf5d559c43",
+      "license": "AGPL-3.0",
+      "private": false,
+      "local": "../research/teaching-platforms/frontend-app-learning",
+      "codegraphIndexed": false
+    },
+    {
+      "name": "bigbluebutton",
+      "fork": "https://github.com/shinick-studyroom/bigbluebutton",
+      "isFork": true,
+      "upstream": "bigbluebutton/bigbluebutton",
+      "branch": "v4.0.x-develop",
+      "commit": "0631f20e45d4ee4e1fbf0e90d78cf73c73ecf331",
+      "license": "LGPL-3.0",
+      "private": false,
+      "local": "../research/teaching-platforms/bigbluebutton",
+      "codegraphIndexed": false
+    }
+  ],
+  "purpose": "read-only source research, not deployed",
+  "repositoryCount": 5,
+  "checkedAt": "2026-10-16T04:55:24.1498767Z"
+}

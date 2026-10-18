@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "openrouter/{env:LAB_MODEL}",
+  "autoupdate": false,
+  "share": "disabled",
+  "provider": {
+    "openrouter": {
+      "options": {
+        "baseURL": "{env:OPENROUTER_BASE_URL}",
+        "apiKey": "{env:OPENROUTER_API_KEY}"
+      }
+    }
+  }
+}

@@ -1,0 +1,43 @@
+// Opt-in real WSL tmux check, isolated socket/HOME, no participant/provider access.
+import {build} from 'esbuild';
+import {spawnSync} from 'node:child_process';
+import assert from 'node:assert/strict';
+const b=await build({entryPoints:['src/lab-interrupt.ts'],bundle:true,write:false,platform:'node',format:'esm',logLevel:'silent'});
+const url='data:text/javascript;base64,'+Buffer.from(b.outputFiles[0].text).toString('base64');
+const script=String.raw`import assert from 'node:assert/strict';
+import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import{execSync,execFileSync as exec}from'node:child_process';
+const mod=await import(URL_REPLACE),root=fs.mkdtempSync(path.join(os.tmpdir(),'gw-interrupt-real-')),socket=path.join(root,'tmux.sock'),home=path.join(root,'home');
+fs.mkdirSync(home);const env={...process.env,HOME:home,PATH:path.dirname(process.execPath)+':/usr/bin:/bin',TMUX:''};
+const tmux=(...a)=>exec('/usr/bin/tmux',['-S',socket,...a],{env,encoding:'utf8',timeout:5000}).trim();
+const run=c=>execSync(c,{env,encoding:'utf8',timeout:15000});
+const wait=()=>new Promise(r=>setTimeout(r,250));
+const sid='30000000-0000-4000-8000-000000000001',rid=n=>'30000000-0000-4000-8000-'+String(n).padStart(12,'0');
+try{
+ tmux('-f','/dev/null','new-session','-d','-s','gw-lesson','/bin/bash --noprofile --norc');
+ tmux('new-session','-d','-s','personal','/bin/bash --noprofile --norc');
+ const server=tmux('display-message','-p','-t','=gw-lesson:0.0','#{pid}');env.TMUX=socket+','+server+',0';
+ await wait();tmux('send-keys','-t','=gw-lesson:0.0','sleep 120','Enter');tmux('send-keys','-t','=personal:0.0','sleep 120','Enter');await wait();
+ const proof=mod.parseTeachingPane(run(mod.teachingPaneProbeCommand()));assert.ok(proof);assert.equal(proof.program,'sleep');
+ assert.equal(run(mod.teachingPaneInterruptCommand(sid,rid(2),proof)),'SENT');await wait();
+ assert.equal(tmux('display-message','-p','-t','=gw-lesson:0.0','#{pane_current_command}'),'bash');
+ assert.equal(tmux('display-message','-p','-t','=personal:0.0','#{pane_current_command}'),'sleep');
+ assert.equal(run(mod.teachingPaneInterruptCommand(sid,rid(2),proof)),'DUPLICATE');
+ tmux('send-keys','-t','=gw-lesson:0.0','sleep 120','Enter');await wait();
+ assert.equal(run(mod.teachingPaneInterruptCommand(sid,rid(3),proof)),'CHANGED','same name new process must not match old proof');
+ assert.equal(tmux('display-message','-p','-t','=gw-lesson:0.0','#{pane_current_command}'),'sleep');
+ const second=mod.parseTeachingPane(run(mod.teachingPaneProbeCommand()));assert.notEqual(proof.fingerprint,second.fingerprint);
+ tmux('kill-session','-t','=gw-lesson');tmux('new-session','-d','-s','gw-lesson','/bin/bash --noprofile --norc');await wait();
+ assert.equal(run(mod.teachingPaneInterruptCommand(sid,rid(4),second)),'CHANGED');
+ assert.equal(tmux('display-message','-p','-t','=personal:0.0','#{pane_current_command}'),'sleep');
+ assert.equal(mod.parseTeachingPane('not json'),null);assert.throws(()=>mod.teachingPaneInterruptCommand('bad',rid(6),proof));
+ const beforeRestart=mod.parseTeachingPane(run(mod.teachingPaneProbeCommand()));
+ tmux('kill-server');tmux('-f','/dev/null','new-session','-d','-s','gw-lesson','/bin/bash --noprofile --norc');
+ env.TMUX=socket+','+tmux('display-message','-p','-t','=gw-lesson:0.0','#{pid}')+',0';await wait();
+ assert.equal(run(mod.teachingPaneInterruptCommand(sid,rid(7),beforeRestart)),'CHANGED');
+ console.log('PASS real isolated tmux: exact teaching pane only; duplicate suppressed; same-name new process, recreated pane and restarted server rejected; personal terminal untouched');
+}finally{try{tmux('kill-server')}catch{}assert.ok(root.startsWith(path.join(os.tmpdir(),'gw-interrupt-real-')));fs.rmSync(root,{recursive:true,force:true})}
+`;
+const binary=process.env.LAB_TEST_LINUX_NODE;
+assert.ok(binary,'Set LAB_TEST_LINUX_NODE to your WSL Ubuntu Node executable');
+const r=spawnSync('wsl.exe',['-d','Ubuntu','--exec',binary,'--input-type=module','-'],{input:script.replace('URL_REPLACE',JSON.stringify(url)),encoding:'utf8',timeout:30000});
+process.stdout.write(r.stdout??'');process.stderr.write(r.stderr??'');if(r.error)throw r.error;assert.equal(r.status,0);

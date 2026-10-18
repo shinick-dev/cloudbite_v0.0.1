@@ -1,0 +1,128 @@
+// Integrated operator tasks in a local synthetic scene. Aside is used for visual review;
+// this isolated Edge run supplies fake RTC/credentials without touching user sessions.
+import assert from 'node:assert/strict';
+import {mkdir,writeFile} from 'node:fs/promises';
+import path from 'node:path';
+import {chromium} from 'playwright-core';
+import {operatorFixture} from './fixtures/lab-operator-ui.mjs';
+
+const fixture=await operatorFixture(),browser=await chromium.launch({channel:'msedge',headless:true});
+const artifact=path.resolve('../.artifacts/operator-ux-audit-20261016/integration');await mkdir(artifact,{recursive:true});
+const results=[];const check=(name,cond)=>{assert.ok(cond,name);results.push(name);console.log('ok '+name)};
+const page=await browser.newPage({viewport:{width:1366,height:768}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+const nav=name=>{const target=page.getByRole('button',{name,exact:true}).or(page.getByRole('tab',{name,exact:true})).or(page.getByRole('link',{name,exact:true})).first();return{isVisible:()=>target.isVisible(),click:async()=>{for(const [dialog,close] of [['prepDialog','prepClose'],['settingsDialog','settingsClose']])if(await page.locator('#'+dialog).isVisible())await page.locator('#'+close).click();if(name==='모임 진행')return;if(name==='새 모임'&&!await target.isVisible())await page.locator('#navSet').click();await target.click()}}};
+try {
+ await page.goto(fixture.origin+'/lab');await page.evaluate(()=>window.__uxReady);
+ await page.locator('[data-live-seat="1"]').first().waitFor();
+ for(const name of ['설정'])check('navigation '+name,await nav(name).isVisible());
+ check('active meeting starts with creation and device settings hidden',!(await page.locator('#newLab').isVisible())&&!(await page.locator('#pushCard').isVisible()));
+ check('one screen sharing entry for selected room',await page.getByRole('button',{name:/화면 공유 시작|내 화면 공유/}).count()===1);
+ check('no horizontal overflow on laptop',await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+ const waiting=page.locator('[data-live-seat="4"]');
+ check('waiting seat has no large empty video',!(await waiting.locator('video').isVisible()));
+ check('remote input hidden before consent',!(await page.locator('[data-live-seat="1"]').first().locator('textarea').isVisible()));
+ check('only selected room management is rendered',await page.locator('#labs > [data-lab]').count()===1);
+ check('routine tools use closed disclosures',await page.locator('#labs details[data-lab-section]:not([open])').count()>=6);
+ check('command pause precedes participant gallery',(await page.locator('#deliveryDock').boundingBox()).y<(await page.locator('#liveTools').boundingBox()).y);
+ await page.locator('#runMaterials').click();
+ const code=page.locator('[data-snip="ux-a"] textarea');await code.fill('메모를 사실과 제안으로 구분하세요.');await code.focus();
+ await page.evaluate(()=>load(true));await page.waitForTimeout(80);
+ check('poll retains open tool, code draft and focus',await code.isVisible()&&await code.inputValue()==='메모를 사실과 제안으로 구분하세요.'&&await code.evaluate(e=>e===document.activeElement));
+
+ await page.locator('#opsClose').click();
+ await nav('새 모임').click();
+ if(!(await page.locator('#l_name').isVisible()))await page.locator('#newLab > summary').click();
+ await page.locator('#l_name').fill('다음 모임 초안');
+ check('preset hides custom resource fields',!(await page.locator('#l_custom').isVisible()));
+ await page.locator('#l_spec').selectOption('custom');check('custom resources available on request',await page.locator('#l_custom').isVisible());
+ await page.locator('#l_cpu').fill('3');
+ await nav('설정').click();check('settings has notification setup',await page.locator('#pushCard').isVisible());
+ await nav('모임 진행').click();await nav('새 모임').click();
+ check('navigation retains creation draft',await page.locator('#l_name').inputValue()==='다음 모임 초안'&&await page.locator('#l_cpu').inputValue()==='3');
+ await nav('모임 진행').click();
+
+ const share=page.getByRole('button',{name:/화면 공유 시작|내 화면 공유/});await share.click();
+ await page.waitForFunction(()=>Object.values(SH).some(x=>x.startedAt));
+ await nav('설정').click();await nav('새 모임').click();await nav('모임 진행').click();
+ check('local navigation retains active screen stream',await page.evaluate(()=>Object.values(SH).some(x=>x.s.getVideoTracks()[0].readyState==='live')));
+
+ const help=page.locator('#handList').getByRole('button',{name:/도와|지원/}).first();await help.click();
+ const one=page.locator('[data-live-seat="1"]').first();
+ await one.getByRole('button',{name:'제어 요청',exact:true}).waitFor({state:'visible'});
+ check('opening help sends no consent request',fixture.state.calls.filter(x=>x.path==='/api/lab/live/request').length===0);
+ check('no remote inputs before explicit consent',fixture.state.calls.filter(x=>x.path==='/api/lab/live/input').length===0);
+ await one.getByRole('button',{name:'제어 요청',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('[data-live-seat="1"]')?.dataset.control==='requested');
+ const request=fixture.state.calls.findLast(x=>x.path==='/api/lab/live/request').body;
+ await fetch(fixture.origin+'/fixture/consent',{method:'POST',body:JSON.stringify(request)});
+ await one.locator('textarea').waitFor({state:'visible'});await one.locator('textarea').fill('한 사람에게만 입력');
+ await one.getByRole('button',{name:'입력 보내기',exact:true}).click();
+ await page.waitForTimeout(150);
+ const sent=fixture.state.calls.filter(x=>x.path==='/api/lab/live/input');
+ check('consented input identifies exact room seat request',sent.length===1&&sent[0].body.id===request.id&&sent[0].body.n===request.n&&sent[0].body.requestId===request.requestId);
+ await one.getByRole('button',{name:'제어 끝내기',exact:true}).click();
+ await page.waitForTimeout(150);check('explicit control end hides input',!(await one.locator('textarea').isVisible()));
+ await page.locator('#runTools').click();
+ await page.locator('#labs summary').filter({hasText:/^마무리$/}).click();
+ let finishWarning='';page.once('dialog',async d=>{finishWarning=d.message();await d.dismiss()});
+ await page.getByRole('button',{name:'지금 끝내기',exact:true}).click();
+ check('finish warns about unverified ZIP and cancellation preserves room',finishWarning.includes('ZIP')&&fixture.state.calls.every(x=>x.path!=='/api/lab/end'));
+
+ await page.locator('#opsClose').click();
+ // Keep an active, independently authorized live support session across monitor loss.
+ await one.getByRole('button',{name:'제어 요청',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('[data-live-seat="1"]')?.dataset.control==='requested');
+ const request2=fixture.state.calls.findLast(x=>x.path==='/api/lab/live/request').body;
+ await fetch(fixture.origin+'/fixture/consent',{method:'POST',body:JSON.stringify(request2)});
+ await one.locator('textarea').waitFor({state:'visible'});
+ // An auth transition must keep observation but remove management authority.
+ await page.evaluate(()=>{TE=Date.now()-1;admExpired()});
+ check('admin expiry discards cached management metadata',await page.evaluate(()=>LD===null));
+ check('admin expiry exposes reauthentication',await page.locator('#reauth').isVisible());
+ check('admin expiry hides create form',!(await page.locator('#newForm').isVisible()));
+ const writes=fixture.state.calls.filter(x=>/^\/api\/lab\/(create|end|clip)$/.test(x.path)).length;
+ await nav('새 모임').click();await nav('모임 진행').click();
+ check('navigation causes no management writes after expiry',fixture.state.calls.filter(x=>/^\/api\/lab\/(create|end|clip)$/.test(x.path)).length===writes);
+ check('screen share survives admin expiry with independent live session',await page.evaluate(()=>Object.values(SH).some(x=>x.s.getVideoTracks()[0].readyState==='live')));
+ const releases=fixture.state.calls.filter(x=>x.path==='/api/lab/live/release').length;
+ await page.evaluate(()=>monEnd('synthetic monitor expired'));
+ await page.waitForTimeout(150);
+ check('monitor expiry preserves selected independent live room',await one.isVisible()&&await page.evaluate(()=>RID==='ux-a'&&LLIVE.hasSession()));
+ check('monitor expiry does not release valid participant consent',await one.locator('textarea').isVisible()&&fixture.state.calls.filter(x=>x.path==='/api/lab/live/release').length===releases);
+ await page.evaluate(()=>paintRoomStat(currentLabs()));
+ check('missing monitor metadata is unknown, not an empty meeting claim',(await page.locator('#roomStat').textContent()).includes('상태 확인 필요'));
+ await page.evaluate(()=>repaintLabs());
+ check('repaint after expiry cannot resurrect management cards',await page.locator('#labs > [data-lab]').count()===0&&await page.evaluate(()=>currentLabs().length===0));
+ await page.evaluate(()=>{for(const id in SH)shEnd(id);LLIVE.end()});
+
+ await page.goto(fixture.origin+'/lab');await page.evaluate(()=>window.__uxReady);
+ await page.locator('[data-live-seat="1"]').first().waitFor();
+ await page.evaluate(()=>{MON=null;MD=null;TE=Date.now()-1;admExpired();repaintLabs()});
+ check('admin expiry without monitor cannot restore cached cards',await page.evaluate(()=>LD===null&&document.getElementById('labs').dataset.mode===''&&currentLabs().length===0)&&await page.locator('#labs > [data-lab]').count()===0);
+ await page.evaluate(()=>LLIVE.end());
+ await page.goto(fixture.origin+'/lab/requests');
+ const requestCard=page.locator('.request').filter({hasText:'복습할 참여자'});await requestCard.waitFor();
+ check('request list requires no security key',await page.evaluate(()=>window.__fixtureKeyTaps===0));
+ check('approval conditions deferred until request selected',!(await requestCard.getByRole('button',{name:'보안 키로 승인하고 열기',exact:true}).isVisible()));
+ await requestCard.locator('summary').first().click();
+ const spec=requestCard.getByRole('combobox',{name:'복습할 참여자 실습실 사양',exact:true});
+ await spec.selectOption('custom');
+ await requestCard.getByRole('spinbutton',{name:'복습할 참여자 CPU (코어)',exact:true}).fill('2');
+ await requestCard.getByRole('spinbutton',{name:'복습할 참여자 메모리 (GiB)',exact:true}).fill('4');
+ await requestCard.getByRole('spinbutton',{name:'복습할 참여자 디스크 (GiB)',exact:true}).fill('5');
+ const approve=requestCard.getByRole('button',{name:'보안 키로 승인하고 열기',exact:true});
+ check('approval touch target at least 44px',(await approve.boundingBox()).height>=44);
+ await approve.click();
+ await requestCard.getByRole('button',{name:/같은 요청으로 생성 결과 확인/}).waitFor();
+ const options=fixture.state.calls.findLast(x=>x.path==='/api/lab/open/manager/options'),approval=fixture.state.calls.findLast(x=>x.path==='/api/lab/open/manager/approve');
+ check('approval binds chosen specs to key verification',JSON.stringify(options.body.choice)===JSON.stringify(approval.body.choice)&&approval.body.choice.cpu===2&&approval.body.choice.memory===4&&approval.body.choice.disk===5&&await page.evaluate(()=>window.__fixtureKeyTaps===1));
+ await requestCard.getByRole('button',{name:/같은 요청으로 생성 결과 확인/}).click();
+ await page.waitForTimeout(100);
+ const resumed=fixture.state.calls.findLast(x=>x.path==='/api/lab/open/manager/resume');
+ check('uncertain creation checks exact same request',resumed?.body.id===approval.body.id&&fixture.state.calls.filter(x=>x.path==='/api/lab/open/manager/approve').length===1);
+ await page.setViewportSize({width:390,height:844});
+ check('mobile inbox has no horizontal overflow',await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+ check('no script exceptions',errors.length===0);
+ await writeFile(path.join(artifact,'checks.json'),JSON.stringify({checks:results,errors},null,2));
+ console.log('PASS integrated operator UX '+results.length);
+} finally {await page.evaluate(()=>{for(const id in SH)shEnd(id);LLIVE.end()}).catch(()=>{});await browser.close();fixture.server.closeAllConnections();await fixture.close()}

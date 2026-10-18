@@ -1,0 +1,12 @@
+{
+  // 브라우저 소스(client/) 전용 — Workers 타입·src 와 섞지 않는다. 검사만 하고 JS 는 tools/build-lab-renderer.mjs 가 만든다
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "types": [],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["client"]
+}

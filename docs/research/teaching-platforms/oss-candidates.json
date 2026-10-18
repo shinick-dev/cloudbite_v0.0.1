@@ -1,0 +1,125 @@
+{
+  "candidates": [
+    {
+      "repo": "nilbuild/driver.js",
+      "url": "https://github.com/nilbuild/driver.js",
+      "commit": "ca44ea064a8a57ab4acb197e57c6f514d2df4da1",
+      "reportedSpdx": "MIT",
+      "archived": false,
+      "pushedAt": "2026-10-15T13:52:54Z",
+      "checkedLicenseFile": true,
+      "note": "",
+      "licenseFileUrl": "https://github.com/nilbuild/driver.js/blob/master/license",
+      "licenseFileSha": "7ceaeef6ddb796075f089375c5953463b0e0db52"
+    },
+    {
+      "repo": "transloadit/uppy",
+      "url": "https://github.com/transloadit/uppy",
+      "commit": "a17c84d0497b8902f84226a5d3dd49431bed71f3",
+      "reportedSpdx": "MIT",
+      "archived": false,
+      "pushedAt": "2026-10-15T14:36:10Z",
+      "checkedLicenseFile": true,
+      "note": "",
+      "licenseFileUrl": "https://github.com/transloadit/uppy/blob/main/LICENSE",
+      "licenseFileSha": "6f18e1d1911c4e913e8db28b7d32e6f2762a8931"
+    },
+    {
+      "repo": "tus/tus-js-client",
+      "url": "https://github.com/tus/tus-js-client",
+      "commit": "0fee69e35750090a6f7f9ea30abf08852f0253ca",
+      "reportedSpdx": "MIT",
+      "archived": false,
+      "pushedAt": "2026-10-13T22:12:13Z",
+      "checkedLicenseFile": true,
+      "note": "",
+      "licenseFileUrl": "https://github.com/tus/tus-js-client/blob/main/LICENSE",
+      "licenseFileSha": "b98294335901b5c1c52d02d653c316393d666175"
+    },
+    {
+      "repo": "yjs/yjs",
+      "url": "https://github.com/yjs/yjs",
+      "commit": "943d6dd6dcbd0a7bcdc5ea6924cc18402fbf3005",
+      "reportedSpdx": "NOASSERTION",
+      "archived": false,
+      "pushedAt": "2026-10-15T18:30:56Z",
+      "checkedLicenseFile": true,
+      "note": "API NOASSERTION; LICENSE text checked: MIT",
+      "licenseFileUrl": "https://github.com/yjs/yjs/blob/main/LICENSE",
+      "licenseFileSha": "f55e8b4846a2796967970bc4ad02d3e6abda3bac"
+    },
+    {
+      "repo": "excalidraw/excalidraw",
+      "url": "https://github.com/excalidraw/excalidraw",
+      "commit": "4c37956ba5f04ec342a9d9d5891a38f22c5b7b4e",
+      "reportedSpdx": "MIT",
+      "archived": false,
+      "pushedAt": "2026-10-15T09:11:06Z",
+      "checkedLicenseFile": true,
+      "note": "",
+      "licenseFileUrl": "https://github.com/excalidraw/excalidraw/blob/master/LICENSE",
+      "licenseFileSha": "8a844bc750a313db95d147bea9e4c9537b2cebc0"
+    },
+    {
+      "repo": "rrweb-io/rrweb",
+      "url": "https://github.com/rrweb-io/rrweb",
+      "commit": "9b9a1ff30dd281d00317b0fbece3dbd90a9e0a80",
+      "reportedSpdx": "MIT",
+      "archived": false,
+      "pushedAt": "2026-10-15T16:27:34Z",
+      "checkedLicenseFile": true,
+      "note": "",
+      "licenseFileUrl": "https://github.com/rrweb-io/rrweb/blob/main/LICENSE",
+      "licenseFileSha": "f6bd47f33af40341ba88463487d6a24ea9ffbb9b"
+    },
+    {
+      "repo": "h5p/h5p-php-library",
+      "url": "https://github.com/h5p/h5p-php-library",
+      "commit": "cb64a1f3884408487c3178e31fc140f5d45ca165",
+      "reportedSpdx": "GPL-3.0",
+      "archived": false,
+      "pushedAt": "2026-10-08T13:39:23Z",
+      "checkedLicenseFile": true,
+      "note": "",
+      "licenseFileUrl": "https://github.com/h5p/h5p-php-library/blob/master/LICENSE.txt",
+      "licenseFileSha": "20d40b6bceca3a6c0237d7455ebf1820aeff3680"
+    },
+    {
+      "repo": "jupyterlab/jupyterlab",
+      "url": "https://github.com/jupyterlab/jupyterlab",
+      "commit": "5d3ae70270ffd602eac1be77ca24ed7a88ad518a",
+      "reportedSpdx": "BSD-3-Clause",
+      "archived": false,
+      "pushedAt": "2026-10-14T18:09:01Z",
+      "checkedLicenseFile": true,
+      "note": "",
+      "licenseFileUrl": "https://github.com/jupyterlab/jupyterlab/blob/main/LICENSE",
+      "licenseFileSha": "5df16e6eb196ff092e4c7413e9a218fe3705f25c"
+    },
+    {
+      "repo": "livekit/livekit",
+      "url": "https://github.com/livekit/livekit",
+      "commit": "3d45aa2e87a73ee0af799f744b5cca4a6e53f1f4",
+      "reportedSpdx": "Apache-2.0",
+      "archived": false,
+      "pushedAt": "2026-10-15T04:59:14Z",
+      "checkedLicenseFile": true,
+      "note": "",
+      "licenseFileUrl": "https://github.com/livekit/livekit/blob/master/LICENSE",
+      "licenseFileSha": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+    },
+    {
+      "repo": "tldraw/tldraw",
+      "url": "https://github.com/tldraw/tldraw",
+      "commit": "9bbecbe7973d0b6103adc441410662f04d2658e9",
+      "reportedSpdx": "NOASSERTION",
+      "archived": false,
+      "pushedAt": "2026-10-15T15:52:08Z",
+      "checkedLicenseFile": true,
+      "note": "SDK source available; production license key required per official docs; exclude from unrestricted OSS shortlist",
+      "licenseFileUrl": "https://github.com/tldraw/tldraw/blob/main/LICENSE.md",
+      "licenseFileSha": "346511b1cc5338abdca005a4c5cb49eec183f483"
+    }
+  ],
+  "checkedAt": "2026-10-16T04:56:02.6296499Z"
+}

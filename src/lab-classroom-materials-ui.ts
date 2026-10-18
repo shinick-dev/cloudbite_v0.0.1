@@ -1,0 +1,8 @@
+export const LAB_CLASSROOM_MATERIALS_JS = String.raw`(()=>{
+let mounted=false,stopped=false;
+function mount(){if(stopped||mounted)return;const panel=document.getElementById('lab-classroom-tab-files');if(!panel)return setTimeout(mount,300);mounted=true;
+const box=document.createElement('div'),button=document.createElement('button'),note=document.createElement('p');
+button.type='button';button.textContent='수업 자료를 내 실습실에 넣기';button.style.cssText='font:inherit;min-height:44px;width:100%;border:1px solid #c9c9c2;border-radius:12px;padding:8px;background:#fff;color:#20242c;cursor:pointer';note.style.cssText='font-size:13px;overflow-wrap:anywhere';note.setAttribute('role','status');note.textContent='저장된 수업 자료만 넣습니다. 이미 있는 파일은 유지합니다.';box.append(button,note);panel.insertBefore(box,panel.firstChild);
+button.onclick=async()=>{if(button.disabled)return;if(!confirm('저장된 수업 자료를 내 work 폴더에 넣습니다. 이미 있는 파일은 덮어쓰지 않습니다. 진행할까요?'))return;button.disabled=true;note.textContent='내 실습실에 자료를 넣고 있습니다…';const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),20000);try{const r=await fetch('/__lab/classroom/materials',{method:'POST',headers:{'content-type':'application/json'},body:'{}',signal:ctrl.signal});const data=await r.json();if(!r.ok)throw Error(data.error||'자료를 넣지 못했습니다.');if(!Array.isArray(data.files))throw Error('결과를 확인하지 못했습니다.');note.textContent='자료 '+data.files.filter(f=>f.state==='added').length+'개를 넣었습니다. 기존 파일 '+data.files.filter(f=>f.state==='exists').length+'개는 유지했습니다. 왼쪽 파일 목록에서 확인하세요.'}catch(e){note.textContent='자료 넣기를 확인하지 못했습니다. 파일 목록을 확인해 주세요. 이미 있는 파일은 덮어쓰지 않습니다. '+String(e.message||e)}finally{clearTimeout(timer);button.disabled=false}};
+}addEventListener('pagehide',()=>{stopped=true});mount();
+})();`;

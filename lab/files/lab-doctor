@@ -1,0 +1,65 @@
+#!/bin/bash
+# 공부방 실습실 자가 진단: 안 될 때 이걸 돌리고 결과를 강사에게 보여 주세요.
+# 토큰 값은 출력하지 않는다. 모델 확인은 1토큰짜리 호출이라 비용은 거의 0.
+ok=0; bad=0
+pass() { echo "  ✅ $1"; ok=$((ok+1)); }
+fail() { echo "  ❌ $1"; [ -n "$2" ] && echo "     → $2"; bad=$((bad+1)); }
+echo "실습실 자가 진단 ${LAB_NAME:+· $LAB_NAME} ${LAB_SEAT:+· ${LAB_SEAT}번 자리}"
+echo
+echo "[설정]"
+if [ -n "$OPENROUTER_API_KEY" ] && [ -n "$OPENROUTER_BASE_URL" ] && [ -n "$ANTHROPIC_BASE_URL" ]; then pass "AI 연결 설정 있음 (모델 ${LAB_MODEL:-?})"
+else fail "AI 연결 설정이 비어 있음" "새 터미널을 열어 보세요. 그래도 같으면 강사에게"; fi
+
+echo "[게이트웨이 · 한도]"
+body=$(curl -s -m 8 -w '\n%{http_code}' -H "Authorization: Bearer $OPENROUTER_API_KEY" "$OPENROUTER_BASE_URL/key")
+code=${body##*$'\n'}; json=${body%$'\n'*}
+case "$code" in
+  200)
+    usage=$(echo "$json" | jq -r '.data.usage // 0'); limit=$(echo "$json" | jq -r '.data.limit // empty')
+    if [ -n "$limit" ] && awk -v u="$usage" -v l="$limit" 'BEGIN{exit !(u >= l)}'; then fail "한도를 다 썼음 ($(printf '$%.2f' "$usage") / \$$limit)" "강사에게 한도 추가를 요청하세요"
+    else pass "게이트웨이 연결 OK · 사용 $(printf '$%.2f' "$usage")${limit:+ / \$$limit}"; fi ;;
+  401) fail "토큰이 거절됨 (401)" "수업이 끝났거나 강사가 자리를 닫았습니다" ;;
+  000) fail "게이트웨이에 연결하지 못함" "잠시 뒤 다시. 여러 명이 같으면 강사 쪽 문제입니다" ;;
+  *) fail "게이트웨이 응답 $code" "$(echo "$json" | head -c 200)" ;;
+esac
+
+echo "[모델]"
+req=$(jq -nc --arg m "$LAB_MODEL" '{model:$m,max_tokens:1,messages:[{role:"user",content:"ping"}]}')
+r=$(curl -s -m 30 -w '\n%{http_code}' -H "Authorization: Bearer $OPENROUTER_API_KEY" -H 'content-type: application/json' -d "$req" "$OPENROUTER_BASE_URL/chat/completions")
+code=${r##*$'\n'}; msg=$(echo "${r%$'\n'*}" | jq -r '.error.message // .error // empty' 2>/dev/null | head -c 200)
+case "$code" in
+  200) pass "OpenCode 경로 (OpenAI 형식) 응답 OK" ;;
+  402) fail "한도 초과 (402)" "강사에게 한도 추가를 요청하세요" ;;
+  404) fail "모델을 찾을 수 없음 (404) — $msg" "모델 이름이 바뀌었을 수 있습니다. 강사에게" ;;
+  429) fail "요청이 많아 잠시 막힘 (429)" "30초 뒤 다시" ;;
+  *) fail "모델 응답 $code ${msg:+— $msg}" "잠시 뒤 다시. 계속되면 강사에게" ;;
+esac
+req=$(jq -nc --arg m "$LAB_MODEL" '{model:$m,max_tokens:1,messages:[{role:"user",content:"ping"}]}')
+r=$(curl -s -m 30 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $ANTHROPIC_AUTH_TOKEN" -H 'anthropic-version: 2023-06-01' -H 'content-type: application/json' -d "$req" "$ANTHROPIC_BASE_URL/v1/messages")
+[ "$r" = 200 ] && pass "Claude Code 경로 (Anthropic 형식) 응답 OK" || fail "Claude Code 경로 응답 $r" "위 모델 항목도 실패면 같은 원인입니다"
+
+# 이 수업에서 나눠 준 API 키 (LAB_SHARED): 게이트웨이가 이 자리 토큰을 받아 주는지 (upstream 은 안 부르고, 호출 수에도 안 셈)
+if [ -n "$LAB_SHARED" ]; then
+  echo "[이 수업의 API 키]"
+  r=$(curl -s -m 8 -w '\n%{http_code}' -H "Authorization: Bearer $OPENROUTER_API_KEY" "${LAB_GW:-none}/p/_lab/share")
+  code=${r##*$'\n'}; json=${r%$'\n'*}
+  if [ "$code" = 200 ]; then
+    while IFS=$'\t' read -r label envKey on used cap; do
+      if [ -z "${!envKey}" ]; then fail "$label: 환경변수 $envKey 가 비어 있음" "새 터미널을 열어 보세요"
+      elif [ "$on" != true ]; then fail "$label: 강사가 잠시 껐음" "강사에게 물어보세요"
+      elif [ "$used" -ge "$cap" ]; then fail "$label: 이 자리 호출 상한을 다 씀 ($used / ${cap}회)" "강사에게 상한을 늘려 달라고 하세요"
+      else pass "$label ($envKey) 게이트웨이 인증 OK · $used / ${cap}회"; fi
+    done < <(echo "$json" | jq -r '.providers[] | [.label, .envKey, (.on|tostring), (.used|tostring), (.cap|tostring)] | @tsv')
+  elif [ "$code" = 401 ]; then fail "API 키 토큰이 거절됨 (401)" "수업이 끝났습니다"
+  else fail "API 키 확인 응답 $code" "잠시 뒤 다시. 계속되면 강사에게"; fi
+fi
+
+echo "[실습실]"
+h=$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)
+[ "$h" = 200 ] && pass "VS Code(code-server) 켜짐" || fail "VS Code 응답 $h" "브라우저를 새로고침하세요"
+# Local read-only cgroup/filesystem diagnosis; unknown is never host capacity.
+lab-resources
+if [ -n "$LAB_ENDS" ]; then m=$(( (LAB_ENDS - $(date +%s)) / 60 )); [ $m -gt 0 ] && pass "수업 남은 시간 ${m}분" || fail "수업 시간이 끝났음"; fi
+
+echo
+[ $bad -eq 0 ] && echo "모두 정상 ($ok개). 그래도 안 되면 ✋ 손 들기를 누르세요." || echo "문제 $bad개. 이 화면을 강사에게 보여 주거나 ✋ 손 들기를 누르세요."

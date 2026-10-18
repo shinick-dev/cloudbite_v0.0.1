@@ -1,0 +1,44 @@
+#!/bin/bash
+# 공부방 실습실: 남은 AI 사용 한도와 수업 시간.
+#   lab-status          자세히
+#   lab-status --line   한 줄 (Claude Code 상태 줄, 30초 캐시)
+# 한도는 게이트웨이를 거쳐 이 자리 OpenRouter 서브키의 /key 로 묻는다 (가짜 토큰만 씀).
+cache=/tmp/lab-status.json
+if [ "$1" = "--line" ] && [ -f "$cache" ] && [ $(( $(date +%s) - $(stat -c %Y "$cache") )) -lt 30 ]; then :; else
+  curl -s -m 5 -H "Authorization: Bearer $OPENROUTER_API_KEY" "$OPENROUTER_BASE_URL/key" -o "$cache.tmp" && mv "$cache.tmp" "$cache"
+fi
+usage=$(jq -r '.data.usage // empty' "$cache" 2>/dev/null)
+limit=$(jq -r '.data.limit // empty' "$cache" 2>/dev/null)
+now=$(date +%s)
+left=""
+if [ -n "$LAB_ENDS" ]; then
+  mins=$(( (LAB_ENDS - now) / 60 )); [ $mins -lt 0 ] && mins=0
+  if [ $mins -ge 60 ]; then left="$((mins / 60))시간 $((mins % 60))분"; else left="${mins}분"; fi
+fi
+money="?"
+[ -n "$usage" ] && money=$(printf '$%.2f' "$usage")
+[ -n "$limit" ] && money="$money / $(printf '$%g' "$limit")"
+if [ "$1" = "--line" ]; then
+  echo "AI $money · 남은 시간 ${left:-?}"
+  exit 0
+fi
+echo "실습실   ${LAB_NAME:-} ${LAB_SEAT:+· ${LAB_SEAT}번 자리}"
+echo "모델     ${LAB_MODEL:-?}"
+if [ -n "$usage" ] && [ -n "$limit" ]; then
+  pct=$(awk -v u="$usage" -v l="$limit" 'BEGIN { printf "%d", (l > 0 ? u / l * 100 : 0) }')
+  echo "AI 사용  $money ($pct%)"
+  [ "$pct" -ge 90 ] && echo "         한도가 거의 찼습니다. 넘으면 AI 호출이 거절됩니다."
+else
+  echo "AI 사용  (조회 실패 — 잠시 뒤 다시)"
+fi
+[ -n "$left" ] && echo "남은 시간 $left ($(date -d "@$LAB_ENDS" '+%H:%M') 에 끝나고 실습실이 지워집니다)"
+# 이 수업에서 나눠 준 API 키 (LAB_SHARED). 게이트웨이가 켜짐·자리당 남은 호출 수를 알려 준다 (호출 수에는 안 셈)
+if [ -n "$LAB_SHARED" ] && [ -n "$LAB_GW" ]; then
+  s=$(curl -s -m 5 -H "Authorization: Bearer $OPENROUTER_API_KEY" "$LAB_GW/p/_lab/share")
+  lines=$(echo "$s" | jq -r '.providers[] | "\(.label) (\(.envKey)) \(if .on then "\(.used) / \(.cap)회" + (if .used >= .cap then " — 다 씀" else "" end) else "꺼짐" end)"' 2>/dev/null)
+  if [ -n "$lines" ]; then echo "$lines" | sed '1s/^/API 키   /; 2,$s/^/         /'
+  else echo "API 키   (조회 실패 — 잠시 뒤 다시)"; fi
+fi
+
+# --line exits above: no resource reads on the 30-second status-line path.
+lab-resources

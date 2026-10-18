@@ -1,0 +1,9 @@
+{
+  "hasCompletedOnboarding": true,
+  "numStartups": 1,
+  "autoUpdates": false,
+  "projects": {
+    "/home/daytona": { "hasTrustDialogAccepted": true, "hasCompletedProjectOnboarding": true },
+    "/home/daytona/work": { "hasTrustDialogAccepted": true, "hasCompletedProjectOnboarding": true }
+  }
+}

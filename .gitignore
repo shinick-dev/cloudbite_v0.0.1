@@ -1,0 +1,10 @@
+node_modules/
+.wrangler/
+.dev-setup-token
+.dev.vars
+.dev-master-key
+
+# 로그·임시
+dev.log
+*.log
+_trash/

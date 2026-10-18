@@ -1,0 +1,507 @@
+<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><meta name="description" content="AI 공부방의 시연·실습·도움·제출·복습을 체험하는 독립 HTML 목업"><title>공부방 · 수업 흐름 체험</title><style>:root {
+  --bg: #f7f7f5; --ink: #20242c; --blue: #315cf2; --soft: #e7edfe;
+  --editor: #18212f; --editor-text: #dbe5f2; --line: #d5d8df; --muted: #4e5662;
+  --green: #17693e; --amber: #8a5a00; --danger: #b42318; --panel: #fff; --radius: 12px;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { font-size: 15px; }
+body {
+  margin: 0; min-height: 100vh; background: var(--bg); color: var(--ink);
+  font-family: "Pretendard", "Malgun Gothic", system-ui, sans-serif;
+  line-height: 1.45; overflow-wrap: anywhere; word-break: keep-all;
+}
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+p, h1, h2, pre { margin: 0; }
+pre, .prompt-block pre, .submission-detail pre { white-space: pre-wrap; overflow: auto; }
+
+.app-header {
+  height: 64px; min-height: 64px; display: flex; align-items: center; gap: 12px;
+  padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.brand-mark {
+  width: 32px; height: 32px; flex: 0 0 auto; display: grid; place-items: center;
+  border: 1px solid var(--blue); border-radius: 8px; color: var(--blue); font-weight: 700;
+}
+.class-title { min-width: 0; font-size: 1rem; font-weight: 700; }
+.header-actions { margin-left: auto; }
+.header-actions, .head-actions, .workspace-footer, .modal-actions,
+.lesson-strip, .mode-switch, .role-switch, .quick-status, .editor-tabs {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+}
+.demo-label, .muted, .hint, .status-text, .queue-meta, .workspace-meta { color: var(--muted); }
+.demo-label { font-size: .75rem; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; }
+
+.app-shell { display: flex; align-items: stretch; min-height: calc(100vh - 64px); }
+.sidebar {
+  width: 210px; flex: 0 0 210px; display: flex; flex-direction: column;
+  background: var(--panel); border-right: 1px solid var(--line);
+}
+.main-content { flex: 1 1 auto; min-width: 0; padding: 12px 16px; }
+.sidebar nav, .step-list, .participant-list, .submission-list, .timeline, .tour-steps {
+  display: flex; flex-direction: column; gap: 4px; padding: 12px;
+}
+.sidebar-bottom { margin-top: auto; padding: 12px; border-top: 1px solid var(--line); }
+.nav-item, .step-item, .file-item, .participant-row, .queue-item, .submission-item,
+.timeline-item, .resource-row, .check-row, .tour-item, .file-tab,
+.role-switch button, .mode-switch button, .quick-status button, .lesson-action {
+  display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px 10px;
+  border: 1px solid transparent; border-radius: 10px; background: transparent;
+  color: inherit; text-align: left; text-decoration: none;
+}
+.nav-item, .step-item, .file-item, .participant-row, .queue-item,
+.submission-item, .resource-row, .check-row, .tour-item { width: 100%; }
+.nav-item.active, .step-item.active, .file-item.active, .file-tab.active,
+.mode-switch button.active, .role-switch button.active, .quick-status button.active,
+.submission-item.active, .timeline-item.active {
+  background: var(--soft); border-color: var(--blue); color: var(--blue); font-weight: 700;
+}
+.step-item.complete { border-color: var(--green); color: var(--green); }
+.step-num {
+  width: 24px; height: 24px; flex: 0 0 auto; display: grid; place-items: center;
+  border: 1px solid currentColor; border-radius: 50%; font-size: .75rem;
+}
+
+.page-head, .workspace-head, .section-head, .panel-heading, .terminal-head, .modal-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;
+}
+.page-title { font-size: 1.15rem; font-weight: 700; }
+.live-layout {
+  display: grid; grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 12px; align-items: start; min-width: 0;
+}
+.workspace-column, .side-panel, .editor-main, .submission-detail, .playback, .review-materials, .step-content { min-width: 0; }
+.side-panel, .panel, .workspace, .preview-panel, .feedback-box, .prompt-block, .modal, .empty-state, .notice, .consent-banner {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.side-panel { border-left: 1px solid var(--line); padding: 12px; }
+.panel, .preview-panel, .feedback-box, .prompt-block, .workspace, .empty-state { padding: 12px; }
+.lesson-strip, .notice, .consent-banner { padding: 8px 12px; margin-bottom: 8px; }
+.notice, .consent-banner { background: #fff6df; border-color: var(--amber); }
+.empty-state { text-align: center; color: var(--muted); }
+
+.editor-shell {
+  display: grid; grid-template-columns: 148px minmax(0, 1fr);
+  background: #18212f; color: #dbe5f2; border: 1px solid #2c3a4e; border-radius: 10px; overflow: hidden;
+}
+.file-tree { border-right: 1px solid #2c3a4e; padding: 8px; }
+.file-item, .file-tab { color: #dbe5f2; }
+.file-item.active, .file-tab.active { background: #243044; color: #fff; border-color: #315cf2; }
+.editor-tabs { padding: 6px; border-bottom: 1px solid #2c3a4e; }
+.code-wrap {
+  display: grid; grid-template-columns: auto minmax(0, 1fr);
+  height: 340px; min-height: 310px; max-height: 390px;
+}
+.line-numbers, .code-editor, .code-editor textarea, .terminal, .terminal-log, .terminal-input input {
+  font-family: ui-monospace, "D2Coding", Consolas, monospace; font-size: 13px; line-height: 1.5;
+}
+.line-numbers { padding: 10px 8px; text-align: right; color: #9aadc4; user-select: none; border-right: 1px solid #2c3a4e; }
+.code-editor { min-width: 0; }
+.terminal {
+  height: 130px; margin-top: 8px; display: flex; flex-direction: column; overflow: hidden;
+  background: #18212f; color: #dbe5f2; border: 1px solid #2c3a4e; border-radius: 10px;
+}
+.terminal-head { margin: 0; padding: 4px 10px; color: #9aadc4; border-bottom: 1px solid #2c3a4e; }
+.terminal-log { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 6px 10px; }
+.terminal-line { min-height: 1.4em; }
+.terminal-input { display: flex; border-top: 1px solid #2c3a4e; }
+.workspace-footer { margin-top: 8px; }
+
+.avatar {
+  width: 32px; height: 32px; flex: 0 0 auto; display: grid; place-items: center;
+  border: 1px solid var(--line); border-radius: 50%; background: var(--soft); color: var(--blue);
+  font-size: .8rem; font-weight: 700;
+}
+.participant-info { min-width: 0; display: flex; flex-direction: column; }
+.help { color: var(--amber); font-weight: 700; }
+.divider { height: 0; border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 44px; padding: 0 14px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); color: var(--ink); text-decoration: none;
+}
+.btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+.btn.secondary { background: var(--soft); border-color: var(--blue); color: var(--blue); }
+.btn.danger { background: #fff; border-color: var(--danger); color: var(--danger); }
+.btn.ghost { background: transparent; }
+.btn.small { padding: 0 10px; font-size: .85rem; }
+.btn:disabled, .btn[disabled] { opacity: .45; cursor: not-allowed; }
+.pill { display: inline-flex; align-items: center; min-height: 24px; padding: 0 8px; border: 1px solid var(--line); border-radius: 999px; font-size: .75rem; }
+.pill.blue { color: var(--blue); border-color: var(--blue); background: var(--soft); }
+.pill.green { color: var(--green); border-color: var(--green); background: #e5f6ec; }
+.pill.amber { color: var(--amber); border-color: var(--amber); background: #fff6df; }
+.icon, svg.icon { width: 18px; height: 18px; flex: 0 0 auto; display: inline-block; vertical-align: middle; }
+.icon svg { width: 18px; height: 18px; display: block; }
+
+.grid2, .form-grid, .submission-layout, .review-layout {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px;
+}
+.field, .form-grid label { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: .9rem; }
+input, select, textarea {
+  width: 100%; max-width: 100%; min-width: 0; min-height: 44px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 10px; background: #fff; overflow-wrap: anywhere;
+}
+textarea { min-height: 88px; resize: vertical; }
+input[type="checkbox"], input[type="radio"] { width: 18px; height: 18px; min-height: 0; padding: 0; accent-color: var(--blue); }
+.inline-note, .hint { font-size: .8rem; }
+.prompt-block pre, .submission-detail pre { background: #18212f; color: #dbe5f2; border-radius: 8px; padding: 10px; }
+.play-screen {
+  min-height: 160px; display: grid; place-items: center;
+  background: #18212f; color: #dbe5f2; border: 1px solid #2c3a4e; border-radius: 10px;
+}
+.scrubber, input[type="range"] { width: 100%; min-height: 28px; padding: 0; border: 0; background: transparent; accent-color: var(--blue); }
+.progress-track { height: 8px; border: 1px solid var(--line); border-radius: 99px; background: #fff; overflow: hidden; }
+.progress-fill { display: block; height: 100%; width: 0; background: #315cf2; }
+.timeline-item { align-items: flex-start; }
+.mobile-menu, .mobile-step { display: none; }
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 40; display: flex; align-items: center; justify-content: center;
+  padding: 16px; background: rgba(32, 36, 44, .48);
+}
+.modal { width: min(520px, 100%); max-height: min(84vh, 680px); overflow: auto; padding: 16px; }
+.modal-body { margin-bottom: 12px; }
+#toast, .toast {
+  position: fixed; left: 50%; bottom: 16px; z-index: 50; max-width: min(420px, calc(100% - 24px));
+  padding: 10px 14px; border-radius: 10px; background: #20242c; color: #fff;
+  opacity: 0; pointer-events: none; transform: translateX(-50%) translateY(8px);
+}
+#toast.show, .toast.show { opacity: 1; pointer-events: auto; transform: translateX(-50%) translateY(0); }
+.file-input {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+.code-editor textarea, .terminal-input input {
+  display: block; width: 100%; max-width: 100%; min-width: 0; margin: 0; border: 0; border-radius: 0;
+  resize: none; background: #18212f; color: #dbe5f2;
+}
+.code-editor textarea { height: 100%; min-height: 310px; max-height: 390px; padding: 10px; }
+.terminal-input input { flex: 1; min-height: 0; height: 32px; padding: 4px 10px; }
+
+[hidden] { display: none !important; }
+::selection { background: #d6e1ff; color: #15285f; }
+input, textarea { caret-color: var(--blue); }
+.header-brand { display: flex; align-items: center; gap: 16px; min-width: 0; }
+.brand { color: var(--ink); text-decoration: none; font-size: 18px; white-space: nowrap; }
+.role-switch { gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 12px; }
+.role-switch button { min-height: 36px; font-size: 13px; white-space: nowrap; }
+.sidebar-course { padding: 20px 16px 10px; }
+.sidebar-course h2 { font-size: 17px; line-height: 1.5; margin: 10px 0 6px; }
+.sidebar-course .muted { font-size: 12px; }
+.sidebar > .section-head { padding: 0 16px; font-size: 12px; }
+.sidebar-bottom { display: flex; flex-direction: column; gap: 5px; }
+.sidebar-bottom p { font-size: 11px; padding: 8px; }
+.sidebar .step-list { padding: 8px 10px; }
+.step-item { font-size: 12px; }
+.step-item.complete { border-color: transparent; }
+h2 { font-size: 16px; } h3 { font-size: 14px; margin: 14px 0 8px; }
+.page-head { margin: 2px 0 14px; align-items: flex-start; }
+.page-head p { font-size: 12px; margin-top: 4px; }
+.page-title { font-size: 22px; letter-spacing: -.02em; line-height: 1.35; }
+.head-actions { flex-shrink: 0; }
+.mode-switch { margin: 0 0 12px; gap: 4px; }
+.mode-switch button { font-size: 13px; }
+.mode-switch > .muted { margin-left: auto; font-size: 11px; max-width: 240px; }
+.lesson-strip { justify-content: space-between; background: #eef2ff; border-radius: 10px; margin-bottom: 10px; font-size: 12px; }
+.lesson-strip > div { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.lesson-strip strong { font-size: 13px; }
+.lesson-strip .muted { font-size: 11px; }
+.workspace { padding: 10px; }
+.workspace-head { font-size: 12px; }
+.workspace-head > span:first-child { display: flex; align-items: center; gap: 6px; }
+.workspace-meta, .workspace-footer { font-size: 10px; }
+.workspace-footer { justify-content: space-between; }
+.code-wrap { height: 220px; min-height: 210px; max-height: none; }
+.line-numbers { white-space: pre; }
+textarea.code-editor { height: 100%; min-height: 0; max-height: none; border: 0; border-radius: 0; background: var(--editor); color: var(--editor-text); padding: 12px 10px; resize: none; line-height: 1.7; font-size: 12px; white-space: pre; overflow: auto; tab-size: 2; }
+.editor-tabs { justify-content: space-between; }
+.editor-tabs .muted { color: #a9b7cb; font-size: 10px; }
+.file-item { padding: 7px 3px; min-height: 36px; font-size: 10px; }
+.file-tree .section-head { color: #a9b7cb; font-size: 10px; }
+.terminal-input { align-items: center; padding-left: 10px; gap: 3px; }
+.terminal-input input { height: 44px; }
+.terminal-input .btn { border-radius: 5px; min-height: 34px; margin: 4px; }
+.terminal-log { white-space: pre-wrap; font-size: 11px; }
+.action-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.action-toolbar .btn { font-size: 12px; }
+.support-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; margin-bottom: 8px; }
+.participant-list { padding: 0; }
+.participant-row { gap: 8px; padding: 10px 0; border-bottom: 1px solid #eef0f4; border-radius: 0; }
+.participant-row.active { background: var(--soft); }
+.participant-info { flex: 1; } .participant-info strong { font-size: 13px; }
+.participant-info > span { font-size: 10px; color: var(--muted); }
+.status-text { font-size: 10px; max-width: 65px; }
+.queue-item { display: block; padding: 10px 0; }
+.queue-meta { display: flex; justify-content: space-between; font-size: 11px; }
+.queue-item p { font-size: 12px; line-height: 1.65; margin: 10px 0; }
+.empty-note, .side-panel > p { font-size: 12px; padding: 8px 0; }
+.pause-line { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; padding: 10px 0; }
+.pause-line > span { display: flex; gap: 6px; align-items: center; }
+.batch-panel { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 12px; }
+.batch-targets { display: flex; gap: 12px; margin: 10px 0; }
+.batch-targets label { display: flex; align-items: center; gap: 5px; font-size: 12px; }
+.terminal-input.light { border: 1px solid var(--line); padding: 3px; border-radius: 10px; }
+.terminal-input.light input { color: var(--ink); background: white; }
+.prep-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.panel { padding: 18px; } .panel > h2 { margin-bottom: 14px; }
+.panel > p { margin: 10px 0; font-size: 13px; line-height: 1.7; }
+.field { margin: 12px 0; }
+.inline-note { padding: 10px 0; line-height: 1.6; }
+.hint { margin-top: 10px; line-height: 1.6; }
+.side-panel .panel { padding: 0; border: 0; border-radius: 0; }
+.side-panel .panel + .panel { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 14px; }
+.step-content h2 { margin: 9px 0; } .step-content p { font-size: 12px; line-height: 1.65; }
+.step-content .section-head { margin-top: 14px; font-size: 11px; font-weight: 700; }
+.prompt-block { border: 0; padding: 0; } .prompt-block pre { font-size: 12px; line-height: 1.8; }
+.side-panel .head-actions { gap: 4px; } .side-panel .btn { font-size: 11px; }
+.quick-status { gap: 4px; margin: 10px 0; }
+.preview-copy { white-space: pre-wrap; background: var(--editor); color: var(--editor-text); padding: 24px; min-height: 300px; line-height: 2; font-size: 14px; }
+.submission-layout { grid-template-columns: 235px minmax(0,1fr); }
+.submission-list { padding: 0; } .submission-item > span:nth-child(2) { flex: 1; display: flex; flex-direction: column; gap: 5px; font-size: 13px; }
+.submission-item .muted { font-size: 11px; }
+.result-preview { font-size: 14px; line-height: 2; padding: 24px !important; min-height: 240px; margin: 16px 0; }
+.review-layout { grid-template-columns: minmax(0,1fr) 290px; }
+.play-screen { min-height: 350px; padding: 28px; } .play-screen h2 { margin: 18px 0; font-size: 21px; }
+.play-screen pre { font-size: 12px; line-height: 2; margin: 24px 0; } .play-screen p { font-size: 11px; color: #a9b7cb; }
+.play-controls { display: flex; gap: 12px; align-items: center; padding: 12px 0; font-size: 11px; white-space: nowrap; }
+.play-controls .scrubber { flex: 1; }
+.timeline { padding: 0; } .timeline-item { flex-direction: column; align-items: flex-start; width: 100%; font-size: 12px; }
+.timeline-item span { color: var(--muted); font-size: 11px; }
+.modal-head { margin-bottom: 14px; } .modal-body p { font-size: 13px; line-height: 1.8; margin: 10px 0; }
+.modal-body pre { font-size: 12px; background: var(--bg); padding: 14px; border-radius: 8px; }
+.modal-actions { justify-content: flex-end; }
+.tour-steps { padding: 0 0 0 20px; list-style: decimal; } .tour-item { display: list-item; padding: 10px 0; font-size: 13px; }
+.tour-item strong, .tour-item span { display: block; } .tour-item span { color: var(--muted); margin-top: 4px; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+.btn:hover:not(:disabled), .nav-item:hover, .step-item:hover { filter: brightness(.96); }
+.code-editor::placeholder { color: #b2c0d3; }
+
+@media (max-width: 1000px) {
+  .sidebar { display: none; }
+  .sidebar-open .sidebar, .sidebar.sidebar-open { display: flex; }
+  .sidebar-open .sidebar { position: fixed; left: 0; top: 64px; bottom: 0; z-index: 20; width: 245px; overflow: auto; box-shadow: 10px 0 35px rgba(0,0,0,.13); }
+  .mobile-menu { display: inline-flex; }
+}
+@media (max-width: 760px) {
+  html { font-size: 14px; }
+  .app-header { height: auto; flex-wrap: wrap; padding: 8px 12px; }
+  .header-actions, .head-actions, .mode-switch, .role-switch { width: 100%; }
+  .header-actions { margin-left: 0; }
+  .live-layout, .editor-shell, .grid2, .form-grid, .submission-layout, .review-layout { grid-template-columns: 1fr; }
+  .side-panel { border-left-width: 0; border-top: 1px solid var(--line); }
+  .file-tree { border-right: 0; border-bottom: 1px solid #2c3a4e; }
+  .code-wrap, .code-editor textarea { height: auto; min-height: 220px; max-height: none; }
+  .terminal { height: auto; min-height: 130px; overflow: visible; }
+  .only-desktop { display: none; }
+  .mobile-menu, .mobile-step { display: inline-flex; }
+  .main-content { padding: 12px; }
+  .app-header { gap: 6px; } .header-brand { gap: 8px; }
+  .header-actions { gap: 6px; width: auto; flex: 1; justify-content: flex-end; }
+  .header-actions .role-switch { width: auto; flex-wrap: nowrap; }
+  .header-actions .role-switch button { font-size: 11px; min-height: 34px; padding: 6px; }
+  .class-title { display: none; }
+  .demo-label { display: inline-block; order: 5; width: 100%; text-align: center; font-size: 9px; border: 0; padding: 0; }
+  .brand { font-size: 16px; } .brand-mark { width: 28px; height: 28px; }
+  .page-title { font-size: 19px; } .page-head .head-actions { width: auto; }
+  .page-head { gap: 8px; } .lesson-strip { padding: 8px; }
+  .mode-switch > .muted { max-width: none; width: 100%; margin-left: 0; }
+  .mode-switch button { flex: 1; justify-content: center; }
+  .editor-shell { grid-template-columns: 1fr; } .file-tree { display: flex; flex-wrap: wrap; gap: 2px; padding: 5px; }
+  .file-tree .section-head { display: none; } .file-item { width: auto; font-size: 10px; min-height: 30px; padding: 3px; }
+  .file-item .icon { width: 12px; height: 12px; }
+  .code-wrap { height: 230px; min-height: 230px; } textarea.code-editor { min-height: 0; height: 100%; font-size: 11px; }
+  .workspace-meta { font-size: 9px; } .workspace-footer > span { max-width: 160px; }
+  .pause-line, .support-head { align-items: flex-start; flex-wrap: wrap; }
+  .prep-layout, .submission-layout, .review-layout { grid-template-columns: 1fr; }
+  .side-panel { border: 1px solid var(--line); }
+  .side-panel .head-actions { width: auto; }
+  .submission-list { flex-direction: row; overflow: auto; }
+  .submission-item { min-width: 190px; }
+  .play-screen { min-height: 290px; padding: 18px; }
+  .modal-backdrop { padding: 10px; } .modal { max-height: 90dvh; padding: 14px; }
+  .sidebar-open .sidebar { top: 60px; }
+}
+
+.terminal .btn.ghost { color: #dbe6f5; border-color: #66768e; }
+</style></head><body><div id="app"></div><div id="modal" hidden></div><div id="toast" class="toast" role="status" aria-live="polite"></div><input class="file-input" id="upload-input" type="file" accept=".txt,.md,.csv,.json,.log" aria-label="체험 공간에 텍스트 파일 열기"><script>window.renderLearner = function (S, H) {
+  const p = S.students.find(x => x.id === S.learnerId);
+  const e = H.esc;
+  if (!p) {
+    return '<section class="page-head"><h1 class="page-title">참여자를 찾지 못했습니다</h1><p class="muted">명단에서 참여자를 고른 뒤 다시 열어 주세요.</p></section>';
+  }
+
+  const mine = H.stepData(p.step) || {};
+  const teacher = H.stepData(S.step) || {};
+  const step = Math.max(0, Math.min(4, p.step | 0));
+  const tStep = Math.max(0, Math.min(4, S.step | 0));
+  const modes = {
+    watch: ['따라 보기', 'blue', '시연은 모임지기 실습실에서 실행됩니다. 내 파일은 바뀌지 않아요.'],
+    together: ['함께 하기', 'amber', '함께 실행은 고른 참여자만, 확인한 뒤에 각자 실습실에서 따로 실행합니다.'],
+    practice: ['혼자 실습', 'green', '참여자가 자기 실습실에서 따로 작업합니다.']
+  };
+  const mode = modes[S.mode] || modes.practice;
+  const sub = p.submission;
+  const btn = (action, cls, label, extra) =>
+    '<button type="button" class="btn ' + cls + '" data-action="' + action + '"' + (extra || '') + '>' + label + '</button>';
+  const idAttr = ' data-id="' + e(p.id) + '"';
+  let consent = '';
+  if (p.consent === 'requested') {
+    consent = '<div class="consent-banner notice"><p>모임지기가 내 실습실의 클릭·키보드 제어를 요청했습니다. 화면 미리보기는 이미 연결돼 있으며, 제어는 내가 허용해야 시작합니다.</p><div class="head-actions">'
+      + btn('consent-allow', 'primary small', '5분 동안 제어 허용', idAttr)
+      + btn('consent-deny', 'danger small', '거절', idAttr)
+      + '</div></div>';
+  } else if (p.consent === 'active') {
+    consent = '<div class="consent-banner notice"><p>모임지기가 내 실습실을 제어할 수 있습니다. 언제든 제어를 끝내고 직접 작업할 수 있어요.</p>'
+      + btn('consent-end', 'secondary small', H.icon('close') + ' 제어 끝내기', idAttr)
+      + '</div>';
+  }
+
+  let feedback = '';
+  if (sub && sub.feedback) {
+    feedback = '<div class="feedback-box"><p class="section-head">모임지기 의견</p><p>' + e(sub.feedback) + '</p>'
+      + (sub.version == null ? '' : '<p class="muted">제출 차례 ' + e(String(sub.version)) + '</p>')
+      + '<p class="hint">모임지기의 의견입니다. 다음 단계는 참여자가 고릅니다.</p></div>';
+  } else if (sub) {
+    feedback = '<p class="hint">제출한 내용이 있습니다. 모임지기 의견은 아직 없습니다.</p>';
+  }
+
+  const on = (value) => (p.status === value ? ' active' : '');
+  const stat = (value, label) => btn('status', 'ghost small' + on(value), label, ' data-value="' + value + '"');
+  const stage = S.showDemo ? (H.teacherPreview() || '') : (H.editor(p) || '');
+  const here = S.showDemo ? '모임지기 시연' : '내 실습실';
+  const other = S.showDemo ? '내 실습실' : '모임지기 시연';
+  const who = [S.classTitle, p.name].filter(Boolean).map(e).join(' · ');
+
+  return '<header class="page-head"><div>'
+    + '<h1 class="page-title">내 손으로 완성하는 5줄 보고서</h1>'
+    + '<p class="muted">' + who + ' · 사실(신청 10명)과 제안·미정(정원 12명 검토 중, 40분 제안, 참가비 미정)을 구분합니다.</p>'
+    + '</div><div class="head-actions">' + btn('show-materials', 'secondary', H.icon('book') + ' 자료 보기') + '</div></header>'
+    + '<div class="live-layout"><div class="workspace-column">'
+    + '<div class="lesson-strip"><span class="pill blue">모임지기 ' + (tStep + 1) + '/5</span>'
+    + '<strong>' + e(teacher.title || '') + '</strong>'
+    + '<span class="lesson-action"><span class="workspace-meta">지금 ' + here + '</span>'
+    + btn('toggle-demo', 'secondary small', H.icon(S.showDemo ? 'code' : 'screen') + ' ' + other, ' aria-pressed="' + (S.showDemo ? 'true' : 'false') + '"')
+    + '</span></div>'
+    + '<p class="inline-note"><span class="pill ' + mode[1] + '">' + mode[0] + '</span> ' + mode[2]
+    + (S.paused ? ' <span class="pill amber">잠시 멈춤</span>' : '') + '</p>'
+    + '<section class="learner-stage"><div class="workspace-head"><div class="workspace-meta">참여자 단계 '
+    + (step + 1) + '/5 · ' + e(mine.title || '') + '</div><div class="head-actions">'
+    + btn('upload', 'ghost small', H.icon('upload') + ' 올리기')
+    + btn('download', 'ghost small', H.icon('download') + ' 내려받기')
+    + btn('save', 'secondary small', H.icon('check') + ' 저장')
+    + '</div></div>' + stage + '</section></div>'
+    + '<aside class="side-panel">' + consent
+    + '<section class="panel"><div class="panel-heading">이 단계 안내</div><div class="step-content">'
+    + '<h2>' + e(mine.title || '') + '</h2>'
+    + '<p class="section-head">이번 목표</p><p>' + e(mine.goal || '') + '</p>'
+    + '<p class="section-head">예시 문장</p><div class="prompt-block"><pre>' + e(mine.prompt || '') + '</pre></div>'
+    + '<div class="head-actions">'
+    + btn('copy-prompt', 'ghost small', H.icon('copy') + ' 예시 문장 복사')
+    + btn('insert-prompt', 'secondary small', H.icon('arrow') + ' 실습실에 넣기')
+    + btn('generate', 'secondary small', H.icon('code') + ' 내 초안 만들기')
+    + btn('bookmark', 'ghost small', H.icon('book') + ' 남겨 두기', ' data-value="' + step + '"')
+    + '</div></div><div class="divider"></div><div class="head-actions">'
+    + btn('learner-step', 'secondary small', '이전 단계', ' data-value="' + (step <= 0 ? 0 : step - 1) + '"' + (step <= 0 ? ' disabled' : ''))
+    + btn('learner-step', 'secondary small', '다음 단계', ' data-value="' + (step >= 4 ? 4 : step + 1) + '"' + (step >= 4 ? ' disabled' : ''))
+    + '</div></section>'
+    + '<section class="panel"><div class="panel-heading">내 상태</div><div class="quick-status">'
+    + stat('working', '작업 중')
+    + stat('needs-time', '시간 더 필요')
+    + stat('done', '마친 것으로 표시')
+    + '</div>'
+    + btn('help', 'secondary' + on('help'), H.icon('help') + ' 도움 요청')
+    + (p.helpText ? '<p class="hint">' + e(p.helpText) + '</p>' : '')
+    + btn('submit', 'primary', H.icon('send') + ' 제출')
+    + feedback
+    + '</section></aside></div>';
+};
+</script><script>/* Original interaction prototype. All classroom operations stay in this tab. */
+(() => {
+'use strict';
+const $ = s => document.querySelector(s);
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const paths = {play:'m9 5 11 7-11 7Z',code:'m8 8-4 4 4 4m8-8 4 4-4 4m-3-12-2 16',check:'m5 12 4 4L19 6',help:'M9 9a3 3 0 0 1 6 0c0 2-3 2-3 4m0 4h.01M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z',upload:'M12 16V3m-5 5 5-5 5 5M4 15v5h16v-5',download:'M12 3v13m-5-5 5 5 5-5M4 16v5h16v-5',send:'m22 2-7 20-4-9-9-4 20-7ZM11 13 22 2',file:'M14 2H5v20h14V7Zm0 0v6h5',book:'M12 5C8 2 4 3 2 4v16c3-1 6-1 10 1 4-2 7-2 10-1V4c-2-1-6-2-10 1Zm0 0v16',arrow:'M4 12h16m-6-6 6 6-6 6',chevron:'m6 9 6 6 6-6',users:'M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2m22 0v-2a4 4 0 0 0-3-4M13 3a4 4 0 0 1 0 8M12 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z',screen:'M2 3h20v14H2ZM8 21h8m-4-4v4',copy:'M9 9h13v13H9ZM5 15H2V2h13v3',close:'m6 6 12 12M6 18 18 6',clock:'M12 7v5l3 2m7-2a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z',edit:'m16 3 5 5-12 12-6 1 1-6Zm-1 1 5 5',menu:'M3 6h18M3 12h18M3 18h18',pause:'M8 4v16M16 4v16',settings:'M4 7h16M4 17h16M8 4v6m8 4v6'};
+const icon = name => `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[name] || paths.file}"/></svg>`;
+const button = (text, action, cls='', attrs='') => `<button type="button" class="btn ${cls}" data-action="${action}" ${attrs}>${text}</button>`;
+const requestMemo = 'AI 공부방 모임 안내를 위한 보고서가 필요합니다.\n메모 두 개를 근거로 5줄로 정리해 주세요.\n확정된 사실과 아직 검토·제안 중인 내용을 구분해 주세요.';
+const progressMemo = '현재 신청자: 10명\n정원 12명: 검토 중\n진행 시간 40분: 제안\n참가비: 아직 확인하지 않음';
+const draft = 'AI 공부방 모임을 준비하고 있습니다.\n현재 신청자는 10명입니다.\n정원은 12명으로 확정됐습니다.\n모임은 40분 동안 진행합니다.\n참가비는 무료입니다.';
+const corrected = 'AI 공부방 모임을 준비하고 있습니다.\n현재 신청자는 10명입니다.\n정원 12명은 검토 중입니다.\n진행 시간 40분은 제안 단계입니다.\n참가비는 확인이 필요합니다.';
+const steps = [
+ {title:'메모 두 개 읽기',goal:'어떤 자료가 있고, 무엇이 요청됐는지 확인하세요.',prompt:'01_요청메모.txt와 02_진행메모.txt를 읽고, 요청 사항과 확인된 사실을 각각 알려 주세요. 파일은 아직 만들지 마세요.'},
+ {title:'AI에게 초안 요청',goal:'메모를 근거로 5줄짜리 결과.txt를 만들어 보세요.',prompt:'두 메모만 근거로 안내 보고서를 5줄로 써서 결과.txt에 저장해 주세요. 확정된 사실과 검토·제안 중인 내용을 구분하고, 없는 정보는 확인 필요로 적어 주세요.'},
+ {title:'사실과 제안 구분',goal:'정원·진행 시간·참가비 표현을 원문과 대조하세요.',prompt:'결과.txt를 두 메모와 대조해 주세요. 12명은 검토 중, 40분은 제안입니다. 참가비는 확인 필요로 고치고 5줄을 유지해 주세요.'},
+ {title:'결과물 제출',goal:'직접 읽고 수정한 결과.txt를 제출하세요.',prompt:'결과.txt를 직접 열어 5줄인지 확인하세요. 없는 사실이 추가되지 않았는지 본 다음 제출하세요.'},
+ {title:'내 컴퓨터에 보관',goal:'내려받은 파일을 직접 열고, 다음에 연습할 곳을 남기세요.',prompt:'결과.txt를 내려받아 내 컴퓨터에서 직접 열어 보세요. 확인한 다음 보관 확인을 표시하고 복습할 단계를 골라 주세요.'}
+];
+function makePerson(id,name,step=1,status='working') { return {id,name,step,status,files:{'01_요청메모.txt':requestMemo,'02_진행메모.txt':progressMemo,'결과.txt':id==='p3'?corrected:''},activeFile:'결과.txt',log:['OpenCode 실습 공간이 준비되었습니다.'],helpText:'',consent:'none',terminalView:'personal',submission:null,bookmarks:[],backup:false}; }
+function initial() { const people=[makePerson('p1','유진'),makePerson('p2','준호',1,'help'),makePerson('p3','서연',3,'done')];people[1].helpText='두 번째 메모를 못 찾겠어요. 어디에서 열어야 하나요?';people[2].submission={text:corrected,version:1,feedback:'',at:'오후 8:24'};return {role:'teacher',view:'live',mode:'watch',step:1,learnerId:'p1',focusId:null,showDemo:false,roomReady:true,classStarted:true,paused:false,classTitle:'메모 두 개로 5줄 보고서 만들기',students:people,teacher:{id:'teacher',name:'모임지기',files:{'01_요청메모.txt':requestMemo,'02_진행메모.txt':progressMemo,'결과.txt':draft},activeFile:'결과.txt',log:['$ opencode','메모 두 개를 읽었습니다. 초안을 함께 확인해 볼까요?']},selected:['p1','p2','p3'],templates:[],reviewAt:480,playing:false,reviewId:'p3',previewFile:null}; }
+let S=initial(), modalReturn=null, playTimer=null;
+window.mockState=S;
+const person = id => id==='teacher'?S.teacher:S.students.find(p=>p.id===id);
+const statusText = p => ({working:'진행 중','needs-time':'조금 더 필요',help:'도움 필요',done:'본인 완료 표시'}[p.status] || '확인 전');
+const modeText = () => ({watch:'시연 보기',together:'함께 실행',practice:'개별 실습'}[S.mode]);
+const stepData = i => steps[Math.max(0,Math.min(4,Number(i)))];
+function editor(actor,readOnly=false) {const file=S.focusId===actor.id&&readOnly?(S.previewFile||actor.activeFile):actor.activeFile;const text=actor.files[file]??'';const ro=readOnly?'readonly':'';const follow=actor.id!=='teacher'&&actor.terminalView==='lesson';return `<section class="workspace" aria-label="${esc(actor.name)} 작업 공간">
+ <div class="workspace-head"><span>${icon('code')} ${esc(actor.id==='teacher'?'모임지기 시연실':actor.name+'의 실습실')}</span><span class="workspace-meta">${readOnly?'보기 전용':actor.id==='teacher'?'나의 독립된 실습 환경':'개인 작업 공간'} <span class="pill green">연결됨</span></span></div>
+ <div class="editor-shell"><nav class="file-tree" aria-label="작업 파일"><div class="section-head">작업 파일</div>${Object.keys(actor.files).map(f=>`<button type="button" class="file-item ${f===file?'active':''}" data-action="file" data-id="${actor.id}" data-file="${esc(f)}" ${readOnly?'data-preview="true"':''}>${icon('file')}<span>${esc(f)}</span></button>`).join('')}</nav>
+ <div class="editor-main"><div class="editor-tabs"><span class="file-tab active">${icon('file')} ${esc(file)}</span><span class="muted">${readOnly?'읽기 전용':'텍스트 편집'}</span></div><div class="code-wrap"><div class="line-numbers" aria-hidden="true">${Array.from({length:Math.max(8,text.split('\n').length)},(_,i)=>i+1).join('\n')}</div><textarea class="code-editor" aria-label="${esc(actor.name)} ${esc(file)} 내용" data-editor="${actor.id}" data-editor-file="${esc(file)}" spellcheck="false" ${ro} placeholder="결과가 여기에 저장됩니다. 직접 입력할 수도 있어요.">${esc(text)}</textarea></div></div></div>
+ <div class="terminal"><div class="terminal-head"><span>${icon('code')} ${follow?'수업 따라보기 · 읽기 전용':'터미널 · OpenCode'}</span>${actor.id==='teacher'?'':button(follow?'개인 터미널로':'수업 따라보기','terminal-view','ghost small',`data-id="${actor.id}"`)}</div><div class="terminal-log" aria-live="polite">${actor.log.slice(-6).map(line=>`<div class="terminal-line">${esc(line)}</div>`).join('')}</div><form class="terminal-input" data-terminal="${actor.id}"><span aria-hidden="true">›</span><input name="command" aria-label="${esc(actor.name)} 터미널 입력" placeholder="pwd, ls, opencode 또는 요청문 입력" autocomplete="off" ${readOnly||follow?'disabled':''}><button class="btn small" type="submit" ${readOnly||follow?'disabled':''}>실행</button></form></div>
+ <div class="workspace-footer"><span>작업 파일은 화면을 전환해도 유지됩니다.</span>${button(icon('check')+' 저장','save','ghost small',`data-id="${actor.id}" ${readOnly?'disabled':''}`)}</div></section>`; }
+function teacherPreview() { return `<section class="preview-panel"><div class="workspace-head"><span>${icon('screen')} 모임지기 시연</span><span class="pill blue">보기 전용</span></div><div class="preview-copy">${esc(S.teacher.files[S.teacher.activeFile]||'아직 파일 내용이 없습니다.')}</div><div class="terminal-log">${S.teacher.log.slice(-3).map(l=>`<div>${esc(l)}</div>`).join('')}</div><div class="workspace-footer">시연은 모임지기 실습실에서 실행됩니다. 내 파일은 바뀌지 않습니다.</div></section>`; }
+const H={esc,icon,editor,teacherPreview,stepData};
+function header() { return `<header class="app-header"><div class="header-brand">${button(icon('menu'),'menu','ghost mobile-menu','aria-label="메뉴 열기"')}<a class="brand" href="#" data-action="home"><span class="brand-mark">${icon('book')}</span><strong>공부방</strong></a><span class="class-title">AI 야간반 · 2주차</span></div><div class="header-actions"><span class="demo-label">체험용 목업 · 실제 서버 연결 없음</span><div class="role-switch" role="group" aria-label="체험할 역할"><button class="${S.role==='teacher'?'active':''}" data-action="role" data-value="teacher">모임지기</button><button class="${S.role==='learner'?'active':''}" data-action="role" data-value="learner">참여자</button></div>${button(icon('help'),'tour','ghost','aria-label="체험 안내" title="체험 안내"')}${button('초기화','reset','ghost only-desktop')}</div></header>`; }
+function sidebar() { return `<aside class="sidebar"><div class="sidebar-course"><span class="pill blue">오늘의 모임</span><h2>${esc(S.classTitle)}</h2><p class="muted">45분 · ${S.students.length}명 참여</p></div><nav aria-label="주요 메뉴">${[['live','screen',S.role==='teacher'?'수업 진행':'내 실습실'],['prep','settings',S.role==='teacher'?'수업 준비':'입장 준비'],['submissions','file',S.role==='teacher'?'제출·피드백':'내 제출물'],['review','book','복습하기']].map(([v,i,t])=>`<button class="nav-item ${S.view===v?'active':''}" data-action="view" data-value="${v}" ${S.view===v?'aria-current="page"':''}>${icon(i)}${t}</button>`).join('')}</nav><div class="divider"></div><div class="section-head">오늘의 순서</div><div class="step-list">${steps.map((x,i)=>`<button class="step-item ${i===(S.role==='teacher'?S.step:person(S.learnerId).step)?'active':''} ${i<(S.role==='teacher'?S.step:person(S.learnerId).step)?'complete':''}" data-action="${S.role==='teacher'?'step':'learner-step'}" data-value="${i}"><span class="step-num">${i+1}</span><span>${esc(x.title)}</span></button>`).join('')}</div><div class="sidebar-bottom">${button(icon('file')+' 수업 자료','show-materials','ghost')}${button('체험 순서 보기','tour','ghost')}<p class="muted">가상 참여자·예시 결과물로<br>수업 흐름을 체험합니다.</p></div></aside>`; }
+function pageHead(title,desc,actions='') {return `<div class="page-head"><div><h1 class="page-title">${title}</h1><p class="muted">${desc}</p></div><div class="head-actions">${actions}</div></div>`;}
+function peers() {return `<div class="section-head"><h2>참여자 <span class="muted">${S.students.length}</span></h2>${button(icon('users'),'participants','ghost small','aria-label="참여자 전체 보기"')}</div><div class="participant-list">${S.students.map((p,i)=>`<button class="participant-row ${S.focusId===p.id?'active':''}" data-action="focus" data-id="${p.id}"><span class="avatar a${i}">${esc(p.name.slice(0,1))}</span><span class="participant-info"><strong>${esc(p.name)}</strong><span>${p.step+1}단계 · ${esc(stepData(p.step).title)}</span></span><span class="status-text ${p.status==='help'?'help':''}">${esc(statusText(p))}</span></button>`).join('')}</div>`;}
+function teacherLive() {const active=S.focusId&&person(S.focusId);return pageHead('함께 만드는 첫 보고서',`${S.classStarted?'모임 진행 중':'시작 전'} · 메모의 사실과 제안을 구분해 봅니다.`,`<span class="pill">${icon('clock')} 38:40</span>${button(S.paused?'전달 재개':'명령 전달 일시정지','pause',S.paused?'secondary small':'danger small','title="새 명령 전달만 막으며 실행 중인 작업은 계속됩니다."')}${button(S.classStarted?'모임 마무리':'모임 시작',S.classStarted?'finish':'start','secondary')}`)+`<div class="lesson-strip"><div><span class="pill blue">지금 ${S.step+1} / 5</span><strong>${esc(stepData(S.step).title)}</strong><span class="muted">${esc(stepData(S.step).goal)}</span></div>${button('다음 단계 안내 '+icon('arrow'),'next-step','small',S.step===4?'disabled':'')}</div>
+ <div class="mode-switch" role="group" aria-label="수업 방식">${[['watch','screen','시연 보기'],['together','code','함께 실행'],['practice','edit','개별 실습']].map(([m,i,t])=>`<button class="${S.mode===m?'active':''}" data-action="mode" data-value="${m}" aria-pressed="${S.mode===m}">${icon(i)}${t}</button>`).join('')}<span class="muted">${S.mode==='watch'?'모임지기 실습실 한 곳에서 시연합니다.':S.mode==='together'?'고른 참여자 환경에서 각각 실행합니다.':'각자 작업하고 필요할 때 도움을 요청합니다.'}</span></div>
+ <div class="live-layout"><div class="workspace-column">${active?`<div class="support-head"><span>${icon('help')} <strong>${esc(active.name)} 지원</strong> · ${active.consent==='active'?'참여자가 제어를 허용했습니다.':'자동 미리보기 · 아직 제어하지 않습니다.'}</span>${button('내 시연실로','focus-close','secondary small')}</div>`:''}
+ ${S.roomReady?(active?editor(active,active.consent!=='active'):editor(S.teacher)):`<section class="workspace empty-state"><div>${icon('screen')}<h2>모임지기 시연실을 먼저 열어보세요</h2><p>참여자 실습실과 분리된 나의 작업 공간입니다.</p>${button('시연실 열기','room-open','primary')}</div></section>`}
+ <div class="action-toolbar">${active?`${button(icon('help')+(active.consent==='active'?'제어 끝내기':active.consent==='requested'?'참여자 응답 대기':'제어 요청'),active.consent==='active'?'consent-end':'consent-request',active.consent==='active'?'danger':'primary',`data-id="${active.id}" ${active.consent==='requested'?'disabled':''}`)}${button('이 참여자 화면으로 보기','as-learner','secondary',`data-id="${active.id}"`)}${button('지원 완료 기록','resolve','ghost',`data-id="${active.id}"`)}`:`${button(icon('play')+' 예시 초안 만들기','generate','primary','data-id="teacher"')}${button(icon('file')+' 메모 대조하기','compare','secondary','data-id="teacher"')}${button(icon('screen')+' 시연실 설정','room-settings','ghost small')}`}</div>
+ ${S.mode==='together'?`<section class="batch-panel"><div class="section-head"><strong>선택한 참여자에게 같은 명령 실행</strong><span class="muted">내 시연실 입력과 별도입니다.</span></div><div class="batch-targets">${S.students.map(p=>`<label><input type="checkbox" data-target="${p.id}" ${S.selected.includes(p.id)?'checked':''}>${esc(p.name)}</label>`).join('')}</div><form data-batch><label for="batch-command" class="sr-only">함께 실행할 한 줄 명령</label><div class="terminal-input light"><input id="batch-command" name="batch" placeholder="예: pwd 또는 현재 OpenCode에 보낼 요청문" ${S.paused?'disabled':''}><button type="submit" class="btn primary" ${S.paused?'disabled':''}>대상 확인 후 보내기</button></div></form></section>`:''}
+ ${S.paused?'<p class="inline-note" role="status">새 명령 전달 일시정지 · 이미 실행 중인 작업은 계속됩니다.</p>':''}</div>
+ <aside class="side-panel">${peers()}<div class="divider"></div><div class="section-head"><h2>도움 대기 <span class="pill amber">${S.students.filter(p=>p.status==='help').length}</span></h2></div>${S.students.filter(p=>p.status==='help').map(p=>`<div class="queue-item"><div class="queue-meta"><strong>${esc(p.name)}</strong><span class="muted">${p.step+1}단계 · 2분째</span></div><p>${esc(p.helpText||'어디에서 막혔는지 함께 확인해 주세요.')}</p>${button('도와주기 '+icon('arrow'),'focus','primary small',`data-id="${p.id}"`)}</div>`).join('')||'<div class="empty-note">지금 기다리는 도움 요청이 없습니다.</div>'}<div class="divider"></div><div class="section-head"><h2>진행 속도 확인</h2></div><p class="muted">참여자에게 지금 상태를 물어보세요.</p>${button('상태 응답 받아보기','poll','secondary')}<p class="hint">연결 상태는 이해도를 뜻하지 않습니다.</p></aside></div>`; }
+function fallbackLearner() {const p=person(S.learnerId);return pageHead('내 실습실',stepData(p.step).goal)+`<div class="live-layout"><div>${editor(p)}<div class="action-toolbar">${button('예시 초안 만들기','generate','primary',`data-id="${p.id}"`)}${button('도움 요청','help','secondary')}${button('결과물 제출','submit','primary')}</div></div><aside class="side-panel"><h2>지금 할 일</h2><p>${esc(stepData(p.step).prompt)}</p>${button('모임지기 시연 보기','toggle-demo','secondary')}${S.showDemo?teacherPreview():''}</aside></div>`;}
+function prep() {return pageHead(S.role==='teacher'?'다음 수업을 여유 있게 준비하세요':'실습을 시작할 준비가 됐나요?',S.role==='teacher'?'시연실, 단계와 자료를 한곳에서 준비합니다.':'화면과 자료를 확인한 뒤 내 속도로 따라가면 됩니다.')+`<div class="prep-layout"><section class="panel"><h2>${S.role==='teacher'?'수업 기본 정보':'입장 준비 확인'}</h2>${S.role==='teacher'?`<form data-prep><label class="field">수업 이름<input name="title" value="${esc(S.classTitle)}" required></label><div class="form-grid"><label class="field">수업 시간<select name="duration"><option>45분</option><option>40분</option><option>50분</option></select></label><label class="field">시연실 사양<select name="spec"><option>2 CPU · 4 GB 메모리</option><option>1 CPU · 2 GB 메모리</option><option>4 CPU · 8 GB 메모리</option></select></label></div><p class="hint">시연실은 참여자 실습실과 별도로 자원을 사용합니다.</p><div class="action-toolbar"><button class="btn primary" type="submit">준비 내용 저장</button>${button('수업 템플릿으로 저장','template','secondary')}</div></form>`:`${['내 실습실 열기','메모 두 개 확인','소리를 들을 기기 준비'].map(t=>`<label class="check-row"><input type="checkbox" checked>${t}</label>`).join('')}<p class="hint">목업의 예시 확인 항목입니다. 실제 연결을 검사하지 않습니다.</p>${button('내 실습실로','view','primary','data-value="live"')}`}</section><section class="panel"><h2>오늘 사용할 자료</h2>${['01_요청메모.txt','02_진행메모.txt'].map(f=>`<div class="resource-row">${icon('file')}<span>${esc(f)}</span>${button('읽기','material','ghost small',`data-file="${esc(f)}"`)}</div>`).join('')}<div class="divider"></div><h3>단계별 안내</h3>${steps.map((s,i)=>`<div class="resource-row"><span class="step-num">${i+1}</span><span>${esc(s.title)}</span></div>`).join('')}</section>${S.role==='teacher'?`<section class="panel"><h2>모임지기 시연실</h2><p>참여자에게 전달하기 전에 먼저 실행하고, 같은 화면으로 설명하세요.</p><div class="inline-note">${S.roomReady?'시연실 준비됨 · 참여자 인원에서 제외':'시연실이 닫혀 있습니다.'}</div>${button(S.roomReady?'시연실로 이동':'시연실 열기',S.roomReady?'room-view':'room-open','primary')}</section><section class="panel"><h2>실습실 개설 요청 <span class="pill amber">1</span></h2><p><strong>가상 참여자 하늘</strong> · 개인 복습<br><span class="muted">메모로 보고서 만드는 과제를 다시 연습하고 싶어요.</span></p>${button('조건 확인하고 승인 체험','approve-room','secondary')}<p class="hint">실제 요청·보안 키·샌드박스와 연결되지 않습니다.</p></section>`:''}</div>`;}
+function submissions() {const list=S.role==='teacher'?S.students:[person(S.learnerId)];const selected=list.find(p=>p.id===S.reviewId)||list[0];const sub=selected.submission;return pageHead(S.role==='teacher'?'결과물을 보고 다음 안내를 남기세요':'내가 만든 결과물',S.role==='teacher'?'제출된 버전과 참여자의 자기 확인을 구분해서 봅니다.':'제출한 내용과 모임지기의 피드백이 함께 남습니다.')+`<div class="submission-layout"><div class="submission-list">${list.map(p=>`<button class="submission-item ${p.id===selected.id?'active':''}" data-action="review-person" data-id="${p.id}"><span class="avatar">${esc(p.name[0])}</span><span><strong>${esc(p.name)}</strong><span class="muted">${p.submission?'결과.txt · 버전 '+p.submission.version:'아직 제출하지 않았어요'}</span></span>${p.submission?icon('check'):icon('clock')}</button>`).join('')}</div><section class="submission-detail panel"><div class="section-head"><h2>${esc(selected.name)}의 결과.txt</h2>${sub?`<span class="pill green">제출됨 · v${sub.version}</span>`:''}</div>${sub?`<p class="muted">${esc(sub.at)} 제출 · PC 보관 확인: ${selected.backup?'참여자가 직접 확인함':'아직 확인하지 않음'}</p><pre class="result-preview">${esc(sub.text)}</pre><h3>모임지기 피드백</h3>${S.role==='teacher'?`<label class="field"><span class="sr-only">피드백 내용</span><textarea id="feedback-text" rows="4" placeholder="잘한 점 하나와 다음에 바꿀 점 하나를 남겨보세요.">${esc(sub.feedback)}</textarea></label>${button('피드백 남기기','feedback','primary',`data-id="${selected.id}"`)}`:`<div class="feedback-box">${esc(sub.feedback||'아직 피드백이 없습니다. 제출한 내용은 여기에 보관됩니다.')}</div><div class="action-toolbar">${button('이어서 수정하기','resume','secondary')}${button(icon('download')+' 내려받기','download','primary',`data-id="${selected.id}"`)}</div>`}`:`<div class="empty-state"><div>${icon('file')}<h3>아직 제출물이 없습니다</h3><p>실습실에서 결과.txt를 확인하고 제출해 보세요.</p>${button(S.role==='teacher'?'참여자 화면으로 체험':'실습실로 돌아가기',S.role==='teacher'?'as-learner':'resume','primary',`data-id="${selected.id}"`)}</div></div>`}</section></div>`;}
+const chapters=[{at:0,title:'메모에서 사실 찾기',step:0},{at:480,title:'AI에게 요청을 구체적으로 쓰기',step:1},{at:960,title:'확정과 제안 구분하기',step:2},{at:1560,title:'결과물 제출과 피드백',step:3},{at:2100,title:'내 파일 보관하고 다음 연습 정하기',step:4}];
+const mm = n => `${String(Math.floor(n/60)).padStart(2,'0')}:${String(Math.floor(n%60)).padStart(2,'0')}`;
+function review() {const chapter=[...chapters].reverse().find(c=>c.at<=S.reviewAt)||chapters[0];return pageHead('놓친 부분부터 다시 연습하세요','자료, 수업 흐름과 내 결과물을 함께 찾을 수 있습니다.')+`<div class="review-layout"><section class="playback"><div class="play-screen"><div><span class="pill blue">수업 흐름 재생 · 예시</span><h2 id="chapter-title">${esc(chapter.title)}</h2><pre id="replay-text">${esc(chapter.step<2?requestMemo:corrected)}</pre><p>실제 녹화 영상 대신 단계별 예시 화면을 재생합니다.</p></div></div><div class="play-controls">${button(icon(S.playing?'pause':'play'),S.playing?'replay-pause':'replay-play','primary small',`aria-label="${S.playing?'흐름 일시정지':'흐름 재생'}"`)}<span id="replay-time">${mm(S.reviewAt)} / 40:00</span><input class="scrubber" aria-label="복습할 시각" type="range" min="0" max="2400" value="${S.reviewAt}" data-scrub></div><div class="action-toolbar">${button(icon('edit')+' 이 단계부터 연습','resume','primary',`data-value="${chapter.step}"`)}${button(icon('book')+' 복습 표시','bookmark','secondary')}</div></section><aside class="panel"><h2>수업의 중요한 순간</h2><div class="timeline">${chapters.map(c=>`<button class="timeline-item ${c.at===chapter.at?'active':''}" data-action="chapter" data-value="${c.at}"><span>${mm(c.at)}</span><strong>${esc(c.title)}</strong></button>`).join('')}</div><div class="divider"></div><h3>함께 볼 자료</h3>${button('메모 두 개 읽기','show-materials','ghost')}${button('내 제출물과 피드백','view','ghost','data-value="submissions"')}<p class="hint">북마크 ${person(S.learnerId).bookmarks.length}개 · 마지막 실습 단계 ${person(S.learnerId).step+1}</p></aside></div>`;}
+function render() {for(const p of S.students)if(p.consent==='active'&&p.consentUntil<=Date.now())p.consent='none';$('#app').innerHTML=header()+`<div class="app-shell">${sidebar()}<main class="main-content" id="main-view">${S.view==='live'?(S.role==='teacher'?teacherLive():(window.renderLearner?window.renderLearner(S,H):fallbackLearner())):S.view==='prep'?prep():S.view==='submissions'?submissions():review()}</main></div>`;window.mockState=S;}
+function toast(text) {$('#toast').textContent=text;$('#toast').classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('#toast').classList.remove('show'),3500);}
+function modal(title,body,actions='') {modalReturn=document.activeElement;$('#modal').innerHTML=`<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><h2 id="modal-title">${title}</h2>${button(icon('close'),'modal-close','ghost','aria-label="닫기"')}</div><div class="modal-body">${body}</div><div class="modal-actions">${actions||button('확인','modal-close','primary')}</div></section></div>`;$('#modal').hidden=false;$('#app').inert=true;requestAnimationFrame(()=>$('#modal button, #modal input, #modal textarea')?.focus());}
+function closeModal() {$('#modal').hidden=true;$('#modal').replaceChildren();$('#app').inert=false;modalReturn?.isConnected&&modalReturn.focus();}
+function download(id) {const p=person(id||S.learnerId);const text=p.files['결과.txt'];if(!text?.trim())return toast('먼저 결과.txt에 내용을 만들어 주세요.');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'text/plain;charset=utf-8'}));a.download='결과.txt';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);modal('내 컴퓨터에서 열어 확인하세요','<p>내려받은 결과.txt를 다운로드 폴더에서 직접 열어보세요.</p><p class="muted">전송과 직접 보관 확인은 별개의 기록입니다.</p>',button('아직 확인하지 않았어요','modal-close','secondary')+button('열어서 내용 확인했어요','backup-confirm','primary',`data-id="${p.id}"`));}
+function execute(p,text) {if(!text.trim())return;text=text.trim();p.log.push('› '+text);if(text==='pwd')p.log.push('/home/daytona/work');else if(text==='ls')p.log.push(Object.keys(p.files).join('   '));else if(text.startsWith('cat '))p.log.push(p.files[text.slice(4)]??'해당 파일이 없습니다. 작업 파일 목록을 확인해 주세요.');else if(text==='opencode')p.log.push('OpenCode가 열렸습니다. 메모를 근거로 요청해 보세요.');else if(/대조|검토|검토 중|확인 필요|수정|사실/.test(text)){p.files['결과.txt']=corrected;p.activeFile='결과.txt';p.log.push('메모를 대조해 검토·제안·확인 필요를 구분했습니다. 결과.txt를 직접 확인하세요.');}else if(/보고서|초안|5줄|메모/.test(text)){p.files['결과.txt']=draft;p.activeFile='결과.txt';p.log.push('결과.txt에 예시 초안을 만들었습니다. 원문과 비교하는 단계가 남았습니다.');}else p.log.push('체험용 응답: pwd, ls, opencode 또는 메모 보고서 요청을 사용해 보세요.');p.log=p.log.slice(-20);}
+async function copy(text) {try{await navigator.clipboard.writeText(text);toast('복사했습니다. 원하는 입력칸에 붙여넣으세요.');}catch{modal('복사할 내용',`<textarea class="copy-area" readonly rows="5">${esc(text)}</textarea>`);}}
+function tour() {modal('이 순서로 눌러보세요',`<ol class="tour-steps"><li class="tour-item"><strong>내 시연실에서 실행</strong><span>‘예시 초안 만들기’를 누르고 메모와 대조해 보세요.</span></li><li class="tour-item"><strong>막힌 참여자 도와주기</strong><span>도움 대기열의 준호를 열고 제어 요청을 보내보세요.</span></li><li class="tour-item"><strong>참여자 관점으로 전환</strong><span>같은 요청에 허용·거절을 선택할 수 있습니다.</span></li><li class="tour-item"><strong>제출하고 피드백 남기기</strong><span>참여자 결과물을 제출한 뒤 모임지기 화면에서 확인하세요.</span></li><li class="tour-item"><strong>복습에서 이어가기</strong><span>수업 흐름의 시각을 골라 해당 단계로 돌아가세요.</span></li></ol><p class="inline-note">이 화면의 참여자와 실행 결과는 예시입니다. 실제 실습실·AI·보안 키를 사용하지 않습니다.</p>`);}
+const actions={
+ home:()=>{S.view='live';render();},role:el=>{S.role=el.dataset.value;S.view='live';if(S.role==='learner'&&S.focusId)S.learnerId=S.focusId;render();},view:el=>{S.view=el.dataset.value;document.body.classList.remove('sidebar-open');render();},menu:()=>document.body.classList.toggle('sidebar-open'),tour,
+ reset:()=>modal('체험을 처음으로 되돌릴까요?','<p>이 탭에서 입력한 예시 파일과 제출 기록을 초기화합니다. 실제 실습실에는 영향을 주지 않습니다.</p>',button('계속 체험','modal-close','secondary')+button('초기화','reset-confirm','danger')),
+ 'reset-confirm':()=>{clearInterval(playTimer);S=initial();closeModal();render();toast('처음 상태로 돌아왔습니다.');},'modal-close':closeModal,
+ step:el=>{S.step=Number(el.dataset.value);render();toast('현재 단계 안내를 바꿨습니다. 참여자의 파일과 실습 단계는 그대로입니다.');},'next-step':()=>{S.step=Math.min(4,S.step+1);render();toast('다음 단계 안내를 보냈습니다. 참여자는 자기 속도로 이어갈 수 있습니다.');},'learner-step':el=>{person(S.learnerId).step=Number(el.dataset.value);render();},
+ mode:el=>{S.mode=el.dataset.value;render();toast(modeText()+'로 전환했습니다. 명령은 자동 실행되지 않습니다.');},'focus-close':()=>{S.focusId=null;S.previewFile=null;render();},focus:el=>{S.focusId=el.dataset.id;S.previewFile=null;S.view='live';render();},'as-learner':el=>{S.learnerId=el.dataset.id;S.role='learner';S.view='live';render();},participants:()=>toast('참여자 행을 선택하면 해당 사람의 지원 화면으로 이동합니다.'),
+ file:el=>{const p=person(el.dataset.id);if(el.dataset.preview)S.previewFile=el.dataset.file;else p.activeFile=el.dataset.file;render();},save:()=>toast('체험 공간에 파일 내용을 유지했습니다. 화면을 새로고침하면 초기화됩니다.'),
+ generate:el=>{const p=person(el.dataset.id||S.learnerId);execute(p,'메모 두 개로 5줄 보고서 초안을 만들어 주세요.');render();toast('예시 초안을 만들었습니다. 원문과 대조해 주세요.');},compare:el=>{execute(person(el.dataset.id||S.learnerId),'메모와 대조해 검토 중·제안·확인 필요를 구분해 수정해 주세요.');render();toast('정원·시간·참가비 표현을 수정했습니다. 직접 확인해 보세요.');},
+ 'show-materials':()=>modal('오늘의 메모 두 개',`<div class="materials-grid"><section><h3>01_요청메모.txt</h3><pre>${esc(requestMemo)}</pre></section><section><h3>02_진행메모.txt</h3><pre>${esc(progressMemo)}</pre></section></div>`),material:el=>modal(esc(el.dataset.file),`<pre>${esc(el.dataset.file.startsWith('01')?requestMemo:progressMemo)}</pre>`),
+ 'toggle-demo':()=>{S.showDemo=!S.showDemo;render();},'copy-prompt':()=>copy(stepData(person(S.learnerId).step).prompt),'insert-prompt':()=>{S.showDemo=false;render();const input=$(`[data-terminal="${S.learnerId}"] input`);if(input){input.value=stepData(person(S.learnerId).step).prompt;input.focus();}},
+ help:()=>modal('어디에서 막혔나요?',`<p>${person(S.learnerId).step+1}단계 · ${esc(stepData(person(S.learnerId).step).title)}</p><label class="field">모임지기에게 알려줄 내용<textarea id="help-text" rows="3" placeholder="어디까지 했는지, 어떤 화면이 보이는지 적어보세요.">${esc(person(S.learnerId).helpText)}</textarea></label>`,button('취소','modal-close','secondary')+button('도움 요청 보내기','help-send','primary')),
+ 'help-send':()=>{const p=person(S.learnerId);p.helpText=$('#help-text').value.trim()||'이 단계에서 도움이 필요해요.';p.status='help';closeModal();render();toast('단계와 함께 도움 대기열에 등록했습니다.');},status:el=>{person(S.learnerId).status=el.dataset.value;render();toast(el.dataset.value==='done'?'참여자가 완료로 표시했습니다. 제출·검토 기록과는 별도입니다.':'현재 상태를 모임지기에게 알렸습니다.');},
+ 'consent-request':el=>{const p=person(el.dataset.id);p.consent='requested';render();modal('참여자에게 제어 요청을 보냈습니다',`<p>${esc(p.name)}가 자기 화면에서 허용해야 제어를 시작할 수 있습니다.</p>`,button('기다리기','modal-close','secondary')+button('참여자 화면에서 확인','consent-preview','primary',`data-id="${p.id}"`));},'consent-preview':el=>{closeModal();S.role='learner';S.learnerId=el.dataset.id;S.view='live';render();},'consent-allow':el=>{person(el.dataset.id||S.learnerId).consent='active';person(el.dataset.id||S.learnerId).consentUntil=Date.now()+300000;render();toast('참여자가 실습실 제어를 허용했습니다. 언제든 끝낼 수 있습니다.');},'consent-deny':el=>{person(el.dataset.id||S.learnerId).consent='none';render();toast('제어 요청을 거절했습니다.');},'consent-end':el=>{person(el.dataset.id||S.learnerId).consent='none';render();toast('제어를 끝냈습니다. 보기와 개인 실습은 계속할 수 있습니다.');},resolve:el=>modal('도움을 마쳤나요?',`<p>${esc(person(el.dataset.id).name)}에게 해결됐는지 먼저 확인해 주세요.</p><p>지원 완료 기록은 과제 완료·파일 보관 확인을 대신하지 않습니다.</p>`,button('계속 지원','modal-close','secondary')+button('참여자와 확인하고 기록','resolve-confirm','primary',`data-id="${el.dataset.id}"`)),'resolve-confirm':el=>{person(el.dataset.id).status='working';person(el.dataset.id).helpText='';closeModal();render();toast('도움 대기에서 내리고 지원 완료를 기록했습니다.');},
+ submit:()=>{const p=person(S.learnerId),text=p.files['결과.txt'];if(!text?.trim())return toast('결과.txt에 내용을 만든 뒤 제출해 주세요.');modal('이 결과물을 제출할까요?',`<p>${esc(p.name)} · 결과.txt · ${text.split('\n').filter(x=>x.trim()).length}줄</p><pre>${esc(text)}</pre><p class="hint">제출한 버전이 남습니다. 수정 후 다시 제출할 수 있습니다.</p>`,button('다시 읽어보기','modal-close','secondary')+button('이 내용 제출','submit-confirm','primary'));},'submit-confirm':()=>{const p=person(S.learnerId);p.submission={text:p.files['결과.txt'],version:(p.submission?.version||0)+1,feedback:'',at:new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit'})};closeModal();S.view='submissions';S.reviewId=p.id;render();toast('결과물을 제출했습니다. 검토와 PC 보관 확인은 아직 별도입니다.');},'review-person':el=>{S.reviewId=el.dataset.id;render();},feedback:el=>{person(el.dataset.id).submission.feedback=$('#feedback-text').value.trim();toast('피드백을 남겼습니다. 참여자 화면에서 확인할 수 있습니다.');},download:el=>download(el.dataset.id),'backup-confirm':el=>{person(el.dataset.id).backup=true;closeModal();render();toast('참여자가 직접 파일을 열어 확인했다고 기록했습니다.');},
+ upload:()=>$('#upload-input').click(),'terminal-view':el=>{const p=person(el.dataset.id);p.terminalView=p.terminalView==='lesson'?'personal':'lesson';render();},
+ pause:()=>{if(S.paused)modal('새 명령 전달을 재개할까요?','<p>이전에 보냈던 명령은 다시 실행하지 않습니다. 이후 명령부터 전달할 수 있습니다.</p>',button('계속 중지','modal-close','secondary')+button('전달 재개','resume-delivery','primary'));else{S.paused=true;render();toast('새 명령 전달을 막았습니다. 실행 중인 프로그램은 계속됩니다.');}},'resume-delivery':()=>{S.paused=false;closeModal();render();},poll:()=>modal('지금 속도는 어떤가요?',`<p>참여자 화면의 상태 버튼과 연결됩니다. 체험할 응답을 골라보세요.</p><div class="action-toolbar">${button('계속해도 돼요','poll-answer','secondary','data-value="working"')}${button('조금 더 필요해요','poll-answer','secondary','data-value="needs-time"')}${button('도와주세요','poll-answer','primary','data-value="help"')}</div><p class="hint">응답이 없는 사람의 이해도를 추측하지 않습니다.</p>`),'poll-answer':el=>{const p=person(S.learnerId);p.status=el.dataset.value;if(p.status==='help')p.helpText='이번 단계에서 도움이 필요합니다.';closeModal();render();toast(p.name+'의 응답을 반영했습니다.');},
+ time:()=>toast('45분 수업의 예시 시간입니다. 실제 수업 타이머와 연결되지 않습니다.'),'room-view':()=>{S.focusId=null;S.view='live';render();},'room-open':()=>{S.roomReady=true;closeModal();S.view='live';render();toast('가상 시연실을 열었습니다. 실제 샌드박스는 만들지 않습니다.');},'room-settings':()=>modal('모임지기 전용 시연실','<p>내 파일과 터미널로 먼저 실행하고, 참여자에게는 시연 화면을 보여줍니다.</p><label class="field">시연실 사양<select><option>2 CPU · 4 GB 메모리</option><option>1 CPU · 2 GB 메모리</option></select></label><p class="hint">참여자 인원과 분리된 한 자리입니다. 이 목업에서는 실제 자원을 사용하지 않습니다.</p>',button('닫기','modal-close','secondary')+button('시연실 다시 열기','room-open','primary')),start:()=>{S.classStarted=true;render();toast('가상 모임을 시작했습니다.');},finish:()=>modal('모임을 마무리하기 전에',`<p>제출 ${S.students.filter(p=>p.submission).length} / ${S.students.length}명 · PC 보관 직접 확인 ${S.students.filter(p=>p.backup).length} / ${S.students.length}명</p><p>참여자에게 파일을 저장하고 내려받아 직접 열어보도록 안내하세요.</p><p class="hint">목업에서는 어떤 실습실도 삭제하지 않습니다.</p>`,button('계속 진행','modal-close','secondary')+button('복습 화면으로 마무리','finish-confirm','primary')),'finish-confirm':()=>{S.classStarted=false;S.view='review';closeModal();render();},
+ template:()=>{S.templates.push({title:S.classTitle,steps:steps.map(x=>x.title)});toast('단계와 자료를 템플릿으로 저장했습니다. 참여자 기록은 복사하지 않습니다.');},'approve-room':()=>modal('개설 조건을 확인하세요','<p><strong>가상 참여자 하늘 · 개인 복습</strong></p><div class="form-grid"><label class="field">사양<select id="approval-spec"><option>1 CPU / 2 GB / 디스크 5 GB</option><option>2 CPU / 4 GB / 디스크 5 GB</option><option>4 CPU / 8 GB / 디스크 10 GB</option></select></label><label class="field">사용 시간<select><option>1시간</option><option>2시간</option></select></label></div><p class="inline-note">실제 서비스에서는 이 조건을 고정한 뒤 보안 키로 승인합니다. 지금은 승인 흐름만 체험합니다.</p>',button('취소','modal-close','secondary')+button('보안 키 승인 흐름 체험','approve-confirm','primary')),'approve-confirm':()=>{const spec=$('#approval-spec').value;closeModal();toast('체험 승인: '+spec+' · 실제 생성이나 보안 키 확인은 하지 않았습니다.');},
+ bookmark:()=>{const p=person(S.learnerId);if(!p.bookmarks.includes(S.reviewAt))p.bookmarks.push(S.reviewAt);toast(mm(S.reviewAt)+'에 복습 표시를 남겼습니다.');},chapter:el=>{S.reviewAt=Number(el.dataset.value);render();},resume:el=>{if(el.dataset.value!==undefined)person(S.learnerId).step=Number(el.dataset.value);S.role='learner';S.view='live';S.showDemo=false;render();},'replay-play':()=>{S.playing=true;clearInterval(playTimer);playTimer=setInterval(()=>{if(S.reviewAt>=2400){clearInterval(playTimer);S.playing=false;}else S.reviewAt+=2;if(S.view==='review')render();},1000);render();},'replay-pause':()=>{S.playing=false;clearInterval(playTimer);render();},'batch-confirm':el=>{if(S.paused)return toast('새 명령 전달이 일시정지돼 있습니다.');const text=el.dataset.command;for(const id of S.selected)execute(person(id),text);closeModal();render();toast(S.selected.length+'명의 개별 환경에 같은 입력을 전달했습니다. 내 시연실은 바뀌지 않았습니다.');}
+};
+document.addEventListener('click',e=>{const el=e.target.closest('[data-action]');if(!el||el.disabled)return;if(el.tagName==='A')e.preventDefault();actions[el.dataset.action]?.(el);});
+document.addEventListener('input',e=>{if(e.target.matches('[data-editor]')){const id=e.target.dataset.editor;if(S.role==='teacher'&&id!=='teacher'&&person(id).consent!=='active')return;person(id).files[e.target.dataset.editorFile]=e.target.value;}if(e.target.matches('[data-scrub]')){S.reviewAt=Number(e.target.value);$('#replay-time').textContent=mm(S.reviewAt)+' / 40:00';}});
+document.addEventListener('change',async e=>{if(e.target.matches('[data-target]'))S.selected=[...document.querySelectorAll('[data-target]:checked')].map(x=>x.dataset.target);if(e.target.matches('[data-scrub]'))render();if(e.target.id==='learner-select'){S.learnerId=e.target.value;render();}if(e.target.id==='upload-input'){const file=e.target.files[0];if(!file)return;if(file.size>2*1024*1024){toast('목업에서는 2 MB 이하의 텍스트 파일을 선택해 주세요.');e.target.value='';return;}try{const p=person(S.learnerId);p.files[file.name]=await file.text();p.activeFile=file.name;S.showDemo=false;render();toast('브라우저의 체험 공간에서 파일을 열었습니다. 서버로 전송하지 않았습니다.');}catch{toast('파일을 읽지 못했습니다. 다른 텍스트 파일로 다시 시도해 주세요.');}e.target.value='';}});
+document.addEventListener('submit',e=>{if(e.target.matches('[data-terminal]')){e.preventDefault();const id=e.target.dataset.terminal;if(S.role==='teacher'&&id!=='teacher'&&person(id).consent!=='active')return;execute(person(id),new FormData(e.target).get('command'));render();}else if(e.target.matches('[data-batch]')){e.preventDefault();const text=String(new FormData(e.target).get('batch')||'').trim();if(S.paused)return toast('새 명령 전달이 일시정지돼 있습니다.');if(!S.selected.length)return toast('실행할 참여자를 한 명 이상 선택해 주세요.');if(!text)return toast('보낼 한 줄을 입력해 주세요.');modal('이 참여자들에게 실행할까요?',`<p>대상: ${S.selected.map(id=>esc(person(id).name)).join(', ')}</p><pre>${esc(text)}</pre><p>선택한 각 실습실의 수업 터미널에서 따로 실행합니다. 결과는 환경마다 다를 수 있습니다.</p>`,button('취소','modal-close','secondary')+button('선택한 참여자에게 보내기','batch-confirm','primary',`data-command="${esc(text)}"`));}else if(e.target.matches('[data-prep]')){e.preventDefault();S.classTitle=String(new FormData(e.target).get('title')).trim()||S.classTitle;render();toast('체험용 수업 준비 내용을 저장했습니다.');}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){if(!$('#modal').hidden)closeModal();else document.body.classList.remove('sidebar-open');}if(e.key==='Tab'&&!$('#modal').hidden){const items=[...$('#modal').querySelectorAll('button,input,textarea,select,a[href]')].filter(x=>!x.disabled);if(!items.length)return;const first=items[0],last=items.at(-1);if(e.shiftKey&&document.activeElement===first){last.focus();e.preventDefault();}else if(!e.shiftKey&&document.activeElement===last){first.focus();e.preventDefault();}}});
+window.mockActions=actions;setInterval(()=>{if(S.students.some(p=>p.consent==='active'&&p.consentUntil<=Date.now())){render();toast('5분 제어 허용이 끝났습니다. 다시 요청해야 입력할 수 있습니다.');}},1000);render();
+})();
+</script></body></html>

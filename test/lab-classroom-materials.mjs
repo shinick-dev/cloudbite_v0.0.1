@@ -1,0 +1,42 @@
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+const b = await build({ entryPoints: ['src/lab-classroom-materials.ts'], bundle: true, write: false, platform: 'node', format: 'esm' });
+const { applyClassroomMaterials } = await import('data:text/javascript;base64,' + Buffer.from(b.outputFiles[0].text).toString('base64'));
+const hostBuild = await build({ entryPoints: ['src/lab-classroom-materials-host.ts'], bundle: true, write: false, platform: 'node', format: 'esm' });
+const { classroomMaterialsHost } = await import('data:text/javascript;base64,' + Buffer.from(hostBuild.outputFiles[0].text).toString('base64'));
+const hostUrl = new URL('https://s-fixture.lab.invalid/__lab/classroom/materials');
+let rpc = 0;
+const st = { labClassroomMaterials: async (code, label) => { rpc++; assert.equal(code, 'seatcode00000001'); assert.equal(label, 'fixture'); return { files: [] }; } };
+const request = (body = '{}', more = {}) => new Request(hostUrl, { method: 'POST', headers: { origin: hostUrl.origin, 'content-type': 'application/json', cookie: '__Host-lab_seat=seatcode00000001', ...more }, body });
+assert.equal((await classroomMaterialsHost(request('{}', { origin: 'https://other.invalid' }), st, hostUrl, 'fixture')).status, 403);
+assert.equal((await classroomMaterialsHost(request('{}', { cookie: '' }), st, hostUrl, 'fixture')).status, 401);
+assert.equal((await classroomMaterialsHost(request('{"content":"attacker"}'), st, hostUrl, 'fixture')).status, 400);
+assert.equal((await classroomMaterialsHost(request('x'.repeat(65)), st, hostUrl, 'fixture')).status, 413);
+assert.equal(rpc, 0);
+assert.equal((await classroomMaterialsHost(request(), st, hostUrl, 'fixture')).status, 200); assert.equal(rpc, 1);
+const dir = mkdtempSync(join(tmpdir(), 'classroom-materials-')), c = { api: 'https://fixture.invalid', key: 'fixture-only' }, sb = { id: 'own-seat', state: 'started', toolboxProxyUrl: 'https://toolbox.invalid' };
+let calls = 0;
+globalThis.fetch = async (url, init) => {
+  calls++; assert.equal(url, 'https://toolbox.invalid/own-seat/process/execute');
+  const command = JSON.parse(init.body).command;
+  const source = command.slice(9, -1).replaceAll("'\\''", "'").replace("'/home/daytona/work'", JSON.stringify(dir));
+  return Response.json({ exitCode: 0, result: execFileSync(process.execPath, ['-e', source], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) });
+};
+try {
+  const materials = [{ name: '01_요청메모.txt', content: '요청은 5줄 보고서입니다.' }, { name: '02_진행메모.txt', content: '10명 신청, 12명 검토 중, 40분 제안' }];
+  writeFileSync(join(dir, '01_요청메모.txt'), '내가 이미 수정한 메모');
+  const r = await applyClassroomMaterials(c, sb, materials, async () => true);
+  assert.deepEqual(r.files.map(f => f.state), ['exists', 'added']);
+  assert.equal(readFileSync(join(dir, '01_요청메모.txt'), 'utf8'), '내가 이미 수정한 메모');
+  assert.equal(readFileSync(join(dir, '02_진행메모.txt'), 'utf8'), materials[1].content);
+  assert.deepEqual((await applyClassroomMaterials(c, sb, materials, async () => true)).files.map(f => f.state), ['exists', 'exists']);
+  const before = calls;
+  await assert.rejects(applyClassroomMaterials(c, sb, materials, async () => false)); assert.equal(calls, before);
+  for (const name of ['../outside.txt', '.env', 'nested/file.txt']) await assert.rejects(applyClassroomMaterials(c, sb, [{ name, content: 'x' }], async () => true));
+  assert.equal(calls, before);
+  console.log('PASS materials: actual UTF8 files, preserve existing, repeat safely, final seat gate, reject arbitrary paths');
+} finally { rmSync(dir, { recursive: true, force: true }); }

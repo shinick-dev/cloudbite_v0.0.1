@@ -1,0 +1,32 @@
+// 실제 index → lab-api 경로. 가짜 DO, 네트워크 없음; 새 상태 조회의 읽기 상한/Origin/권한 표면.
+import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { build } from 'esbuild';
+const stub={name:'cf-stub',setup(b){b.onResolve({filter:/^cloudflare:workers$/},()=>({path:'cf',namespace:'stub'}));b.onLoad({filter:/.*/,namespace:'stub'},()=>({contents:'export class DurableObject { constructor(ctx,env){this.ctx=ctx;this.env=env;} }'}));}};
+const out=await build({entryPoints:['src/index.ts'],bundle:true,write:false,format:'esm',platform:'node',plugins:[stub],loader:{'.ps1':'text'}});
+const dir=mkdtempSync(join(tmpdir(),'lab-create-api-'));writeFileSync(join(dir,'index.mjs'),out.outputFiles[0].text);const {default:worker}=await import(pathToFileURL(join(dir,'index.mjs')));rmSync(dir,{recursive:true,force:true});
+globalThis.fetch=()=>{throw Error('network forbidden')};
+let calls=0,stateResult={requestId:'',creationState:'unknown',retryAfterMs:5000};
+const id=`lc_${Date.now()}_${'a'.repeat(32)}`;
+const env={ORIGIN:'https://k.fake',LAB_ORIGIN:'https://lab.fake',LAB_SEAT_DOMAIN:'seat.fake',STATE:{idFromName(){return 'main'},get(){return {async labCreateStatus(token,requestId){calls++;if(token!=='admin')return{status:401,error:'expired'};return{...stateResult,requestId}}}}}};
+const call=(body,headers={},method='POST')=>worker.fetch(new Request('https://k.fake/api/lab/create-status',{method,headers:{origin:env.ORIGIN,'x-admin-token':'admin',...headers},...(method==='POST'?{body,duplex:'half'}:{})}),env,{});
+let checks=0;const check=async(name,body,status,headers={},method)=>{const before=calls;const r=await call(body,headers,method);assert.equal(r.status,status,name);checks++;console.log('ok',name);return{r,before}};
+await check('valid fixed ID status202',JSON.stringify({requestId:id}),202);assert.equal(calls,1);
+let x=await check('badOrigin denied before parser/DO','{'.repeat(10000),403,{origin:'https://evil.fake'});assert.equal(calls,x.before);
+x=await check('method boundary405',undefined,405,{},'PUT');assert.equal(calls,x.before);
+x=await check('missing admin401 before bodyread','{'.repeat(10000),401,{'x-admin-token':''});assert.equal(calls,x.before);
+x=await check('oversized body413 no DO','x'.repeat(257),413);assert.equal(calls,x.before);
+x=await check('declared size413 no DO','{}',413,{'content-length':'1000'});assert.equal(calls,x.before);
+let read=0,cancelled=false;
+const chunks=new ReadableStream({pull(c){read++;c.enqueue(new TextEncoder().encode('x'.repeat(200)));if(read>=4)c.close()},cancel(){cancelled=true}});
+x=await check('chunked no Content-Length capped before DO',chunks,413);assert.equal(calls,x.before);assert.ok(cancelled);assert.ok(read<=3);
+for(const body of ['null','[]','{}','{"requestId":1}',JSON.stringify({requestId:id,evil:1}),JSON.stringify({requestId:id+'\n'}),'{']){x=await check('invalid exact status body400',body,400);assert.equal(calls,x.before)}
+x=await check('bad token reaches admin check and401',JSON.stringify({requestId:id}),401,{'x-admin-token':'expired'});assert.equal(calls,x.before+1);
+stateResult={status:410,error:'ended'};await check('ended status410',JSON.stringify({requestId:id}),410);
+stateResult={creationState:'not-started'};await check('confirmed unarmed status200',JSON.stringify({requestId:id}),200);
+stateResult={status:422,error:'메모리 상한은 8 GiB입니다.'};await check('resource policy rejection422',JSON.stringify({requestId:id}),422);
+stateResult={ok:true,creationState:'completed',lab:{id:'L',name:'class',createdAt:1,expiresAt:2,seatCount:1,failedSeats:0}};await check('completed fixed summary200',JSON.stringify({requestId:id}),200);
+console.log(`${checks} route checks passed`);

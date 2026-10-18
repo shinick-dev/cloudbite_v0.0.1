@@ -1,0 +1,58 @@
+// Local renderer contract: no server/provider requests; hostile fields remain text.
+import assert from 'node:assert/strict';
+import { chromium } from 'playwright-core';
+import { LAB_RENDERER_JS } from '../src/lab-renderer.generated.ts';
+const browser = await chromium.launch({ channel: 'msedge', headless: true });
+try {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  await page.setContent('<style>*{box-sizing:border-box}body{margin:0}#box{padding:16px}.card{padding:16px}table{width:100%}</style><div id="box"></div>');
+  await page.addScriptTag({ content: LAB_RENDERER_JS });
+  const result = await page.evaluate(() => {
+    const now = 1800000000000;
+    const D = { now: () => now, fmt: t => String(t), ago: () => '방금', dur: String };
+    const LR = createLabRenderer(D);
+    const states = ['queued', 'preparing', 'ready', 'error', 'unknown'];
+    const seats = states.map((state, i) => ({ n: i + 1, who: '이름만', preparation: { state, at: now }, opened: i === 2 ? now : 0 }));
+    seats.push({ n: 6, who: '<img src=x onerror=alert(1)>', opened: 'bad' });
+    seats.push({ n: 7, preparation: { state: 'ready', at: null } });
+    seats.push({ n: 8, preparation: { state: 'ready', at: now - 300001 } });
+    seats[2].diagnostics = { usage: 1.25, limit: 5, usageAt: now, aiError: { at: now, status: 429, count: 2, kind: 'rate-limit', msg: 'RAW_SECRET' } };
+    seats[3].diagnostics = { usage: 2, limit: 5, usageAt: now - 300001, aiError: { at: now - 300001, status: 500, count: 1, kind: 'upstream' } };
+    seats.push({ n: 9, preparation: { state: 'ready', at: now + 1 }, diagnostics: { usage: 0.75, limit: null, usageAt: now, aiError: null } });
+    seats.push({ n: 10, preparation: { state: 'ready', at: -1 }, diagnostics: { usage: 2, limit: 5, usageAt: now + 1, aiError: { at: now + 1, count: 1, kind: 'access' } } });
+    seats.push({ n: 11, diagnostics: { usage: 2, limit: null, usageAt: -1, aiError: { at: -1, count: 1, kind: 'upstream' } } });
+    seats.push({ n: 12, diagnostics: { usage: 2, limit: 5, usageAt: now, aiError: { at: now, count: '2', kind: 'request' } } });
+    seats.push({ n: 13, diagnostics: { usage: 2, limit: 5, usageAt: now, aiError: { at: now, count: Number.MAX_SAFE_INTEGER + 1, kind: 'other' } } });
+    const delivery = [{status:'none',at:null},{status:'pending',at:now},{status:'sent',at:now},{status:'error',at:now-300001},{status:'unknown',at:now},{status:'<img src=x>',at:now},{status:'sent',at:null},{status:'sent',at:now-300001},{status:'sent',at:now+1},{status:'sent',at:-1},{status:'skipped',at:now}];
+    delivery.forEach((d,i)=>seats[i].delivery=d);
+    LR.renderMonitor(document.getElementById('box'), [{ id: 'A', name: '수업', expiresAt: now+3660000, seats }]);
+    const box = document.getElementById('box');
+    return { text: box.textContent, rows: [...box.querySelectorAll('tbody tr')].map(r => r.textContent), buttons: box.querySelectorAll('button').length, images: box.querySelectorAll('img').length, overflow: document.documentElement.scrollWidth > innerWidth };
+  });
+  assert.match(result.text, /1 \/ 13 명 입장/);
+  assert.match(result.text, /서버 준비 확인 2 \/ 13자리 · 대기 1 · 준비 중 1 · 실패 1 · 확인 안 됨 8/);
+  assert.match(result.text, /마지막 서버 준비 확인/);
+  assert.match(result.text, /사용액 \$1\.25 \/ \$5\.00 · 기준 1800000000000/);
+  assert.match(result.text, /최근 AI 오류: 요청 한도/);
+  assert.match(result.text, /사용액 확인 안 됨 · 마지막 기준/);
+  assert.ok(!result.text.includes('RAW_SECRET'));
+  assert.equal(result.buttons, 0);
+  assert.equal(result.images, 0);
+  assert.equal(result.overflow, false);
+  assert.match(result.rows[8], /사용액 \$0\.75 · 한도 없음/);
+  assert.match(result.rows[8], /서버 준비 확인 안 됨/);
+  assert.match(result.rows[9], /서버 준비 확인 안 됨.*사용액 확인 안 됨.*최근 AI 오류 확인 안 됨/);
+  assert.match(result.rows[10], /사용액 확인 안 됨.*최근 AI 오류 확인 안 됨/);
+  assert.match(result.rows[11], /최근 AI 오류 확인 안 됨/);
+  assert.match(result.rows[12], /최근 AI 오류 확인 안 됨/);
+  assert.match(result.text, /남은 시간 1시간 1분/);
+  assert.match(result.rows[0], /아직 전달 기록 없음/);
+  assert.match(result.rows[1], /전달 처리 중/);
+  assert.match(result.rows[2], /입력 보냄.*상태 기록/);
+  assert.match(result.rows[3], /전달 실패.*오래된 기록/);
+  assert.match(result.rows[4], /결과 확인 필요/);
+  for(const i of[5,6,8,9])assert.match(result.rows[i], /마지막 명령 전달: 확인 안 됨/);
+  assert.match(result.rows[7], /입력 보냄.*오래된 기록/);
+  assert.match(result.rows[10], /전달 건너뜀/);
+  console.log('lab-readiness-ui: readiness, delivery freshness, safe text and remaining time passed');
+} finally { await browser.close(); }
