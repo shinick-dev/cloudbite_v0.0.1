@@ -74,9 +74,15 @@ export const COMPUTER_PROXY_SUFFIXES = ['.proxy.daytona.works'];
 export const COMPUTER_REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const COMPUTER_SNAPSHOT_NAME = /^[a-z0-9][a-z0-9-]{2,62}$/;
 export const COMPUTER_OWNER_TAG = /^[a-z0-9]{8,32}$/;
+/** Same stable hex identity for the HTTP router and deployment bootstrap; State.sha uses base64url instead. */
+export async function computerOwnerTag(): Promise<string> {
+  const d=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode('cloudbite-personal-computer-owner-v1')));
+  return [...d].map(v=>v.toString(16).padStart(2,'0')).join('').slice(0,24);
+}
 
 /** Env subset the computer reads. Keys are Worker secrets; the snapshot is organization-scoped and never inherited. */
 export interface ComputerEnv {
+  CLOUDBITE_COMPUTER_NOSANA_API_KEY?: string;
   CLOUDBITE_DAYTONA_API_URL?: string;
   CLOUDBITE_DAYTONA_API_KEY?: string;
   CLOUDBITE_DAYTONA_SECONDARY_API_URL?: string;

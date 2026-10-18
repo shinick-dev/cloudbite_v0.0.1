@@ -1,12 +1,15 @@
 import type { Env, State } from './state';
-import { sha, isFail } from './state';
+import {computerAuthRoute,personalComputerCookieValid} from './cloudbite-computer-auth-api';
+import { isFail } from './state';
 import { ownerCookieValid } from './cloudbite-owner';
 import { COMPUTER_COOKIE, COMPUTER_DESKTOP_PATH, COMPUTER_TICKET_PARAM } from './cloudbite-computer-contract';
 import { proxyComputerDesktop } from './cloudbite-computer-daytona';
-import { computerAccounts, computerLabels, COMPUTER_REQUEST_ID } from './cloudbite-computer-contract';
+import { computerAccounts, computerLabels, computerOwnerTag, COMPUTER_REQUEST_ID } from './cloudbite-computer-contract';
 import { cbExec, cbGetSandbox, cbUpload } from './cloudbite-daytona';
 import type { CbNestedInstall } from './cloudbite-computer-nested';
 import { CLOUDBITE_COMPUTER_HTML, CLOUDBITE_COMPUTER_JS, CLOUDBITE_COMPUTER_CSS } from './cloudbite-computer-page';
+import { COMPUTER_COMPOSE_JS, COMPUTER_COMPOSE_CSS, COMPUTER_COMPOSE_HEAD, COMPUTER_COMPOSE_JS_PATH, COMPUTER_COMPOSE_CSS_PATH, COMPUTER_COMPOSE_INPUT_PATH } from './cloudbite-computer-compose';
+import { boundedText } from './cloudbite-inference';
 
 const API = '/api/cloudbite/computer';
 const PAGE = '/cloudbite/computer';
@@ -14,17 +17,18 @@ const headers = { 'cache-control':'no-store', 'x-content-type-options':'nosniff'
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {status, headers:{...headers,'content-type':'application/json'}});
 const error = (code: string, status: number) => json({error:{code,message:code}},status);
 
-async function body(req: Request): Promise<Record<string, unknown> | null> {
+async function body(req: Request, max=8192): Promise<Record<string, unknown> | null> {
   if (!req.headers.get('content-type')?.toLowerCase().startsWith('application/json')) return null;
-  if (Number(req.headers.get('content-length') ?? 0) > 8192 || !req.body) return null;
+  if (Number(req.headers.get('content-length') ?? 0) > max || !req.body) return null;
   const reader = req.body.getReader(); let n=0; const parts: Uint8Array[]=[];
-  for (;;) { const {done,value}=await reader.read(); if(done)break; n+=value.byteLength; if(n>8192){await reader.cancel();return null;} parts.push(value); }
+  for (;;) { const {done,value}=await reader.read(); if(done)break; n+=value.byteLength; if(n>max){await reader.cancel();return null;} parts.push(value); }
   const bytes=new Uint8Array(n); let at=0; for(const p of parts){bytes.set(p,at);at+=p.byteLength;}
   try {const v=JSON.parse(new TextDecoder().decode(bytes));return v && typeof v==='object' && !Array.isArray(v)?v:null;} catch{return null;}
 }
 
 /** Owner control stays on the public origin. Untrusted desktop content lives only on the separate gateway. */
 export async function computerRoute(req: Request, env: Env, url: URL, state: DurableObjectStub<State>): Promise<Response|null> {
+  const auth=await computerAuthRoute(req,env,url,state);if(auth)return auth;
   const p=url.pathname;
   const gateway=env.CLOUDBITE_COMPUTER_GATEWAY_ORIGIN;
   if(p.startsWith('/p/_cloudbite/computer/nested/')) {
@@ -32,7 +36,7 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
     return env.CLOUDBITE_COMPUTER_NESTED.get(env.CLOUDBITE_COMPUTER_NESTED.idFromName('owner')).fetch(req);
   }
   if(p===COMPUTER_DESKTOP_PATH || p.startsWith(COMPUTER_DESKTOP_PATH+'/')) {
-    if(!gateway || url.origin!==gateway || url.origin===env.ORIGIN || url.hostname===env.RP_ID || url.origin===env.CLOUDBITE_PUBLIC_ORIGIN || !env.CLOUDBITE_COMPUTER) return error('not_found',404);
+    if(env.CLOUDBITE_CANONICAL_ONLY!=='1' || !gateway || url.origin!==gateway || url.origin===env.ORIGIN || url.hostname===env.RP_ID || url.origin===env.CLOUDBITE_PUBLIC_ORIGIN || !env.CLOUDBITE_COMPUTER) return error('not_found',404);
     const computer=env.CLOUDBITE_COMPUTER.get(env.CLOUDBITE_COMPUTER.idFromName('owner'));
     const ticket=url.searchParams.get(COMPUTER_TICKET_PARAM);
     if(ticket!==null) {
@@ -52,13 +56,42 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
     if(!('ok' in upstream))return error('desktop_sign_in',401);
     const origin=req.headers.get('origin');
     if(origin && origin!==gateway)return error('bad_origin',403);
+    const renewal={...headers,'permissions-policy':'publickey-credentials-get=(), publickey-credentials-create=()',
+      'set-cookie':`${COMPUTER_COOKIE}=${cookies[0].slice(COMPUTER_COOKIE.length+1)}; Path=/; Max-Age=${upstream.maxAge}; HttpOnly; Secure; SameSite=Strict`};
+    if(p===COMPUTER_COMPOSE_JS_PATH || p===COMPUTER_COMPOSE_CSS_PATH){
+      if(req.method!=='GET')return error('method_not_allowed',405);
+      return new Response(p===COMPUTER_COMPOSE_JS_PATH?COMPUTER_COMPOSE_JS:COMPUTER_COMPOSE_CSS,{headers:{...renewal,'content-type':p===COMPUTER_COMPOSE_JS_PATH?'text/javascript; charset=utf-8':'text/css; charset=utf-8'}});
+    }
+    if(p===COMPUTER_COMPOSE_INPUT_PATH){
+      if(req.method!=='POST')return error('method_not_allowed',405);
+      if(origin!==gateway)return error('bad_origin',403);
+      if(!env.CLOUDBITE_COMPUTER_INPUT)return error('not_configured',503);
+      const input=await body(req,32*1024);if(!input)return error('bad_request',400);
+      const tag=await computerOwnerTag(),target=await computer.computerMachine(tag);
+      if(!('ok' in target)||!target.machine||target.machine.status!=='running')return error('not_running',409);
+      const result=await env.CLOUDBITE_COMPUTER_INPUT.get(env.CLOUDBITE_COMPUTER_INPUT.idFromName(tag)).send(target.machine,input);
+      const status='status' in result?result.status:200;
+      return new Response(JSON.stringify(result),{status,headers:{...renewal,'content-type':'application/json'}});
+    }
     try {
-      const response=await proxyComputerDesktop(req,upstream);
+      const index=req.method==='GET' && (p===COMPUTER_DESKTOP_PATH||p===COMPUTER_DESKTOP_PATH+'/');
+      let forward=req;
+      if(index){const rh=new Headers(req.headers);rh.set('accept-encoding','identity');rh.delete('if-none-match');rh.delete('if-modified-since');forward=new Request(req,{headers:rh});}
+      const response=await proxyComputerDesktop(forward,upstream);
       if(response.status===401 || response.status===403){await computer.computerDesktopPreviewRejected(cookies[0].slice(COMPUTER_COOKIE.length+1));return error('desktop_unavailable',502);}
       const h=new Headers(response.headers);
       h.delete('set-cookie');h.delete('clear-site-data');h.delete('access-control-allow-origin');h.delete('access-control-allow-credentials');
       h.set('permissions-policy','publickey-credentials-get=(), publickey-credentials-create=()');
       h.set('set-cookie',`${COMPUTER_COOKIE}=${cookies[0].slice(COMPUTER_COOKIE.length+1)}; Path=/; Max-Age=${upstream.maxAge}; HttpOnly; Secure; SameSite=Strict`);
+      if(index && response.status===200 && response.headers.get('content-type')?.includes('text/html')){
+        try {
+          const html=await boundedText(response.clone(),512*1024);
+          if(/<head(?:\s[^>]*)?>/i.test(html)){
+            h.delete('content-length');h.delete('content-encoding');h.delete('etag');h.delete('last-modified');h.set('cache-control','no-store');
+            return new Response(html.replace(/<head(?:\s[^>]*)?>/i,m=>m+COMPUTER_COMPOSE_HEAD),{status:200,headers:h});
+          }
+        }catch{/* The original response remains available if an unknown document is too large to enhance. */}
+      }
       return new Response(response.status===101?null:response.body,{status:response.status,statusText:response.statusText,headers:h,...(response.webSocket?{webSocket:response.webSocket}:{})});
     } catch{return error('desktop_unavailable',502);}
   }
@@ -72,13 +105,13 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
   if(p!==API && !p.startsWith(API+'/'))return null;
   const admin=req.headers.get('x-admin-token');
   // Existing project-only operator tokens never gain access to this private computer.
-  const authorized=admin!==null ? (!admin.startsWith('cbo_') && !isFail(await state.adminList(admin))) : await ownerCookieValid(req,env,state);
+  const authorized=admin!==null ? (!admin.startsWith('cbo_') && !isFail(await state.adminList(admin))) : (await ownerCookieValid(req,env,state) || await personalComputerCookieValid(req,env));
   if(!authorized)return error('owner_required',401);
   if(!env.CLOUDBITE_COMPUTER)return error('not_configured',503);
   const op=p.slice(API.length+1);
   const computer=env.CLOUDBITE_COMPUTER.get(env.CLOUDBITE_COMPUTER.idFromName('owner'));
-  const tag=(await sha('cloudbite-personal-computer-owner-v1')).slice(0,24);
-  if(req.method==='GET' && op==='state')return json(await computer.computerState(tag));
+  const tag=await computerOwnerTag();
+  if(req.method==='GET' && op==='state'){const result=await computer.computerState(tag);return json(result,'status' in result&&typeof result.status==='number'?result.status:200);}
   const nested=env.CLOUDBITE_COMPUTER_NESTED?.get(env.CLOUDBITE_COMPUTER_NESTED.idFromName('owner'));
   if(req.method==='GET' && op==='nested/jobs') {
     if(!nested)return error('not_configured',503);

@@ -53,7 +53,8 @@ def run(argv, timeout=STEP_TIMEOUT_S):
 
 
 def verified(python):
-    probe = ("import importlib.metadata as m, selkies, pixelflux, pcmflux;"
+    # selkies.display_utils is the RandR helper the computer start script sizes the screen with.
+    probe = ("import importlib.metadata as m, selkies, selkies.display_utils, pixelflux, pcmflux;"
              "print(m.version('selkies'))")
     try:
         out = subprocess.run([python, "-c", probe], stdin=subprocess.DEVNULL, capture_output=True,

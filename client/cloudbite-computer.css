@@ -22,7 +22,7 @@ p{margin:0 0 12px}
 .cc-header-side{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .cc-nav-link{color:#fff;font-size:14px;font-weight:600;min-height:44px;display:inline-flex;align-items:center}
 .cc-lang{display:inline-flex;border:1px solid #3c5378;border-radius:8px;overflow:hidden}
-.cc-lang-btn{min-width:44px;min-height:44px;border:0;background:transparent;color:#c9d8ed;font-family:inherit;font-weight:600;font-size:12px;line-height:1;letter-spacing:.04em;cursor:pointer}
+.cc-lang-btn{min-width:48px;min-height:48px;border:0;background:transparent;color:#c9d8ed;font-family:inherit;font-weight:600;font-size:12px;line-height:1;letter-spacing:.04em;cursor:pointer}
 .cc-lang-btn+.cc-lang-btn{border-left:1px solid #3c5378}
 .cc-lang-btn[aria-pressed=true]{background:#fff;color:var(--navy)}
 
@@ -34,6 +34,9 @@ p{margin:0 0 12px}
 .cc-side{display:grid;gap:16px;min-width:0}
 .cc-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px 16px;min-width:0}
 .cc-auth{margin-top:16px;max-width:560px}
+.cc-phone{grid-column:1/-1}
+.cc-phone-paired{border:2px solid var(--blue)}
+.cc-phone .cc-btn{width:100%}
 
 .cc-machine-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:4px}
 .cc-machine-head h2{margin:0}

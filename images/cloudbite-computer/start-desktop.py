@@ -10,8 +10,14 @@ display and XFCE.  Idempotent: a second run reuses a healthy Selkies and live se
 3. gnome-keyring (secrets) on that bus, so Chromium and native CLIs keep their own
    OAuth tokens in the user's keyring.  The login keyring has an empty password: its
    protection is the private sandbox filesystem, not a passphrase;
-4. Selkies 2.0.0 (websocket, CPU H.264, no basic auth) on port 8082 under the subfolder
-   /p/_cloudbite/computer/desktop, ready only after its HTTP health answers ``OK``.
+4. a fixed 1920x1080 desktop, sized with the pinned Selkies' own RandR helper before
+   Selkies starts, so the desktop has that size even with no client connected;
+5. Selkies 2.0.0 (websocket, CPU H.264, no basic auth) on port 8082 under the subfolder
+   /p/_cloudbite/computer/desktop, ready only after its HTTP health answers ``OK``.  Its
+   manual resolution is locked to the same size and client resizing is locked off, so no
+   phone or browser window resizes the desktop; the web client letterboxes the 16:9
+   stream into whatever viewport it has.  A Selkies already running with other settings
+   is reused but reported as ``"display_config": "stale"`` (it needs a restart).
 
 The last stdout line is one JSON object, ``{"ok": true, ...}`` or
 ``{"ok": false, "code": "computer_..."}``.  No credential or environment secret is read.
@@ -31,6 +37,8 @@ SELKIES_INSTALLER = "/opt/cloudbite/computer/lib/install_selkies.py"
 SELKIES_PREPARED = "/opt/cloudbite/selkies"
 FIRST_RUN = "/opt/cloudbite/computer/bin/cloudbite-first-run"
 HEALTH_S = 65
+WIDTH, HEIGHT = 1920, 1080
+DISPLAY_CONFIG = BASE + "/selkies-display.json"
 # Same documented SELKIES_<NAME> settings as cloudbite/desktop.py, under the computer subfolder.
 SELKIES_ENV = {
     "SELKIES_MODE": "websockets", "SELKIES_ENABLE_DUAL_MODE": "false",
@@ -40,7 +48,14 @@ SELKIES_ENV = {
     "SELKIES_AUDIO_ENABLED": "false", "SELKIES_MICROPHONE_ENABLED": "false",
     "SELKIES_WEBCAM_ENABLED": "false", "SELKIES_GAMEPAD_ENABLED": "false",
     "SELKIES_COMMAND_ENABLED": "false", "SELKIES_ENABLE_METRICS_HTTP": "false",
+    # Fixed desktop: the server applies this size on every connection and ignores client
+    # resize requests; "|locked" keeps clients from switching either back.  No second
+    # screen, which would widen the X root beyond the fixed size.
+    "SELKIES_MANUAL_RESOLUTION": "true|locked", "SELKIES_MANUAL_WIDTH": str(WIDTH),
+    "SELKIES_MANUAL_HEIGHT": str(HEIGHT), "SELKIES_ENABLE_RESIZE": "false|locked",
+    "SELKIES_FORCE_ALIGNED_RESOLUTION": "false|locked", "SELKIES_SECOND_SCREEN": "false",
 }
+DISPLAY_EXPECTED = {"width": WIDTH, "height": HEIGHT, "selkies_env": SELKIES_ENV}
 
 
 def emit(obj):
@@ -124,6 +139,29 @@ def start_keyring(env):
     return "started" if out.returncode == 0 else "unavailable"
 
 
+def fix_size(python, env):
+    """Size the X screen with the pinned Selkies' RandR helper (its ``selkies-resize``).
+
+    The helper's X connection retains the mode after it exits and Selkies adopts it on
+    start.  Returns the realized ``"WxH"``, or None when the X server refused the size.
+    """
+    try:
+        out = subprocess.run([python, "-m", "selkies.display_utils", "%dx%d" % (WIDTH, HEIGHT)], env=env,
+                             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, cwd=BASE)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    line = (out.stdout.strip().splitlines() or [""])[-1].strip("() ").split(", ")
+    return "%sx%s" % tuple(line) if len(line) == 2 and all(p.isdigit() for p in line) else None
+
+
+def display_config():
+    try:
+        with open(DISPLAY_CONFIG) as fh:
+            return "current" if json.load(fh) == DISPLAY_EXPECTED else "stale"
+    except (OSError, ValueError):
+        return "stale"
+
+
 def main():
     if os.geteuid() == 0:
         fail("computer_start_as_root")
@@ -147,6 +185,7 @@ def main():
             ok = False
         if not ok:
             fail("computer_first_run_failed")
+    resolution = None
     if not healthy():
         try:
             out = subprocess.run([sys.executable, SELKIES_INSTALLER, BASE + "/selkies-venv", SELKIES_PREPARED],
@@ -157,6 +196,11 @@ def main():
         python = result.get("python")
         if not result.get("ok") or python not in (BASE + "/selkies-venv/bin/python", SELKIES_PREPARED + "/bin/python"):
             fail("computer_selkies_install_failed")
+        resolution = fix_size(python, env)
+        try:
+            os.remove(DISPLAY_CONFIG)
+        except OSError:
+            pass
         log = open(os.path.join(BASE, "selkies.log"), "ab")
         proc = subprocess.Popen([python, "-m", "selkies"], env=dict(env, **SELKIES_ENV), stdin=subprocess.DEVNULL,
                                 stdout=log, stderr=log, start_new_session=True, cwd=BASE)
@@ -167,8 +211,11 @@ def main():
             if time.monotonic() > deadline:
                 fail("computer_selkies_health_timeout")
             time.sleep(0.5)
+        with open(DISPLAY_CONFIG, "w") as fh:
+            json.dump(DISPLAY_EXPECTED, fh)
     emit({"ok": True, "display": env["DISPLAY"], "keyring": keyring, "port": PORT,
-          "health": PREFIX + "/api/health"})
+          "health": PREFIX + "/api/health", "size": "%dx%d" % (WIDTH, HEIGHT),
+          "resolution": resolution, "display_config": display_config()})
 
 
 if __name__ == "__main__":

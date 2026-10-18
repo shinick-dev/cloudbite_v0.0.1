@@ -1,6 +1,9 @@
 // Cloudbite personal cloud computer (browser). tools/build-cloudbite-computer.mjs transforms this file (no bundling) into
 // src/cloudbite-computer-page.ts → CLOUDBITE_COMPUTER_JS, served same-origin at /cloudbite/computer.js for the page /cloudbite/computer.
-// The owner signs in with the existing security-key flow (/api/cloudbite/owner/*, HttpOnly cookie — this script never sees a secret).
+// Sign-in is a passkey scoped to this computer (/api/cloudbite/computer/auth/*, HttpOnly cookie — this script never sees a secret):
+// the phone's own biometric passkey, or the owner's existing security key as a fallback. A one-use #pair= setup link (first phone)
+// is lifted out of the URL before anything renders or fetches, sent once, and then enrollment of this phone's passkey is offered.
+// WebAuthn create/get run only from a button press; a registration counts only after the server verified it.
 // Machine state comes only from GET /api/cloudbite/computer/state; nothing here starts, provisions or switches accounts on its own.
 // Mutations carry a requestId that is kept in memory until the server gives a definite answer, so a retry after a lost response
 // repeats the same request instead of creating a second one. Polling runs only while the tab is visible and something is pending.
@@ -8,7 +11,7 @@
 // Everything is drawn with createElement/textContent. Text comes from DICT (EN/KO, ?lang=); server error codes are shown verbatim.
 
 const API = '/api/cloudbite/computer';
-const OWNER_API = '/api/cloudbite/owner';
+const AUTH_API = `${API}/auth`;
 const WORKBENCH_PATH = '/cloudbite';
 const OWNER_SETUP_PATH = '/cloudbite/requests';
 const GATEWAY_ORIGIN = 'https://cloudbite-desktop.ai-gongbu.workers.dev';
@@ -20,6 +23,8 @@ const POLL_SLOW_MS = 8000;
 const POLL_FAST_COUNT = 20;
 const POLL_MAX = 90;
 const SNAPSHOT_NAME = /^[a-z0-9](?:[a-z0-9-]{1,46})[a-z0-9]$/;
+// optional short prefix, then 32 random bytes as canonical unpadded base64url (43 chars)
+const PAIR_TOKEN = /^(?:[a-z][a-z0-9]{0,15}_)?([A-Za-z0-9_-]{43})$/;
 
 type Status = 'absent' | 'starting' | 'running' | 'stopped' | 'stopping' | 'snapshotting' | 'error' | 'unknown';
 const STATUSES: Status[] = ['absent', 'starting', 'running', 'stopped', 'stopping', 'snapshotting', 'error', 'unknown'];
@@ -100,11 +105,21 @@ const DICT = {
   en: {
     title: 'Cloudbite — Cloud computer', brand: 'Cloudbite', sub: 'Your cloud computer', workbench: 'Expert workbench', langLabel: 'Language',
     h1: 'Your Linux desktop in the cloud', lead: 'One persistent machine you open from this phone or any browser. Your tools run there, not on this device.',
-    signInTitle: 'Sign in as owner', signInLead: 'Use the security key or passkey registered for Cloudbite. The session lives in a secure cookie.',
-    signIn: 'Sign in with security key', signingIn: 'Waiting for your key…', noKey: 'No security key is registered yet.', setupLink: 'Register one on the owner page',
-    unsupported: 'This browser cannot use security keys.', cancelled: 'Sign-in was cancelled.', keyFailed: 'The security key did not respond.',
-    loginFailed: 'Sign-in failed.', signOut: 'Sign out', signedOut: 'Signed out.', checking: 'Checking your session…',
-    sessionFailed: 'Could not check the owner session.', netErr: 'Network error — nothing was confirmed.', httpErr: (n: number) => `Server answered ${n}.`,
+    signInTitle: 'Sign in', signInLead: 'Use this phone\'s passkey (fingerprint, face or screen lock) or the security key already registered for Cloudbite. The session lives in a secure cookie.',
+    signIn: 'Sign in with passkey', signingIn: 'Waiting for your passkey…', noKey: 'No passkey is registered yet. Open the one-time phone setup link, or use the owner page.', setupLink: 'Register a security key on the owner page',
+    unsupported: 'This browser cannot use passkeys.', cancelled: 'Sign-in was cancelled.', keyFailed: 'The passkey did not respond.',
+    loginFailed: 'Sign-in failed.', signOut: 'Sign out', signedOut: 'Signed out.', checking: 'Checking your session…', pairing: 'Checking the one-time setup link…',
+    pairBad: 'This setup link is not valid, so it was not used. Sign in with a passkey, or ask for a new link.',
+    pairGone: (c: string) => `This setup link has expired or was already used (${c}). Sign in with a passkey, or ask for a new link.`,
+    pairUnknown: 'Could not confirm the setup link. It works only once, so it was not sent again. Sign in with a passkey, or ask for a new link.',
+    pairOk: 'This phone is now signed in to this cloud computer only. Register its passkey below so that next time the phone alone signs you in.',
+    phoneTitle: 'This phone\'s passkey',
+    phoneLead: 'One-time setup: save a passkey on this phone. After that, this phone alone signs in with its fingerprint, face or screen lock — no security key needed. It opens only this cloud computer; the owner page and key vault still use the security key.',
+    phoneRegister: 'Register this phone\'s passkey', phoneAdd: 'Add this phone\'s passkey', phoneBusy: 'Waiting for this phone…',
+    phoneDone: 'Passkey saved for this phone. Next time, sign in with it.', phoneCancelled: 'Passkey setup was cancelled. Nothing was changed.',
+    phoneExists: 'This phone already has a Cloudbite passkey.', phoneDevice: 'This phone did not create a passkey.', phoneUnsupported: 'This browser cannot create passkeys.',
+    phoneFailed: 'The passkey was not saved.', phoneUnknown: 'The server did not confirm the passkey, so treat it as not saved. Sign in with it once before relying on it.',
+    sessionFailed: 'Could not check the session.', netErr: 'Network error — nothing was confirmed.', httpErr: (n: number) => `Server answered ${n}.`,
     machine: 'Machine', status: {
       absent: 'No machine yet', starting: 'Starting', running: 'Running', stopped: 'Stopped', stopping: 'Stopping',
       snapshotting: 'Saving environment', error: 'Error', unknown: 'State unknown',
@@ -140,6 +155,8 @@ const DICT = {
     snapName: 'Snapshot name', snapHint: '3–48 lowercase letters, digits or hyphens.', snapBad: 'Use 3–48 lowercase letters, digits or hyphens, starting and ending with a letter or digit.',
     snapSave: 'Save environment', snapSaving: 'Saving…', snapLast: (n: string, s: string) => `Last snapshot: ${n} — ${s}`, snapErr: (e: string) => `Snapshot error: ${e}`,
     snapNeedsMachine: 'Available once a machine exists and is running or stopped.',
+    snapUnconfirmed: (n: string) => `Last snapshot: ${n} — not confirmed. The provider has not reported it, so it may not exist.`,
+    snapExists: 'A snapshot with this name already exists. Nothing was overwritten — choose another name.',
     termTitle: 'Terminal and phone keyboard', termBtn: 'How to type on the remote desktop',
     termSteps: [
       'Open the desktop, then open Terminal from the desktop menu. Commands run on the cloud machine, never on this phone.',
@@ -161,11 +178,21 @@ const DICT = {
   ko: {
     title: 'Cloudbite — 클라우드 컴퓨터', brand: 'Cloudbite', sub: '나의 클라우드 컴퓨터', workbench: '전문가 작업대', langLabel: '언어',
     h1: '클라우드의 내 리눅스 데스크톱', lead: '이 휴대폰이나 어느 브라우저에서든 여는 영구 머신 하나. 도구는 이 기기가 아니라 그 머신에서 돕니다.',
-    signInTitle: '소유자 로그인', signInLead: 'Cloudbite 에 등록한 보안 키나 패스키를 씁니다. 세션은 보안 쿠키에만 있습니다.',
-    signIn: '보안 키로 로그인', signingIn: '키를 기다리는 중…', noKey: '등록된 보안 키가 아직 없습니다.', setupLink: '소유자 화면에서 등록하기',
-    unsupported: '이 브라우저는 보안 키를 쓸 수 없습니다.', cancelled: '로그인을 취소했습니다.', keyFailed: '보안 키가 응답하지 않았습니다.',
-    loginFailed: '로그인에 실패했습니다.', signOut: '로그아웃', signedOut: '로그아웃했습니다.', checking: '세션 확인 중…',
-    sessionFailed: '소유자 세션을 확인하지 못했습니다.', netErr: '네트워크 오류 — 확인된 것은 없습니다.', httpErr: (n: number) => `서버 응답 ${n}.`,
+    signInTitle: '로그인', signInLead: '이 휴대폰의 패스키(지문·얼굴·화면 잠금)나 Cloudbite 에 이미 등록한 보안 키를 씁니다. 세션은 보안 쿠키에만 있습니다.',
+    signIn: '패스키로 로그인', signingIn: '패스키를 기다리는 중…', noKey: '등록된 패스키가 아직 없습니다. 1회용 휴대폰 설정 링크를 열거나 소유자 화면을 쓰세요.', setupLink: '소유자 화면에서 보안 키 등록하기',
+    unsupported: '이 브라우저는 패스키를 쓸 수 없습니다.', cancelled: '로그인을 취소했습니다.', keyFailed: '패스키가 응답하지 않았습니다.',
+    loginFailed: '로그인에 실패했습니다.', signOut: '로그아웃', signedOut: '로그아웃했습니다.', checking: '세션 확인 중…', pairing: '1회용 설정 링크 확인 중…',
+    pairBad: '설정 링크 형식이 올바르지 않아 쓰지 않았습니다. 패스키로 로그인하거나 새 링크를 받으세요.',
+    pairGone: (c: string) => `설정 링크가 만료됐거나 이미 쓰였습니다 (${c}). 패스키로 로그인하거나 새 링크를 받으세요.`,
+    pairUnknown: '설정 링크 결과를 확인하지 못했습니다. 한 번만 쓰이는 링크라 다시 보내지 않았습니다. 패스키로 로그인하거나 새 링크를 받으세요.',
+    pairOk: '이 휴대폰이 이 클라우드 컴퓨터에만 로그인됐습니다. 다음부터 휴대폰만으로 로그인하도록 아래에서 패스키를 등록하세요.',
+    phoneTitle: '이 휴대폰의 패스키',
+    phoneLead: '1회 설정: 이 휴대폰에 패스키를 저장합니다. 그 뒤에는 보안 키 없이 이 휴대폰의 지문·얼굴·화면 잠금만으로 로그인합니다. 이 클라우드 컴퓨터만 열며, 소유자 화면과 키 금고는 계속 보안 키를 씁니다.',
+    phoneRegister: '이 휴대폰의 패스키 등록', phoneAdd: '이 휴대폰의 패스키 추가', phoneBusy: '휴대폰을 기다리는 중…',
+    phoneDone: '이 휴대폰의 패스키를 저장했습니다. 다음부터 이것으로 로그인하세요.', phoneCancelled: '패스키 설정을 취소했습니다. 바뀐 것은 없습니다.',
+    phoneExists: '이 휴대폰에는 이미 Cloudbite 패스키가 있습니다.', phoneDevice: '휴대폰이 패스키를 만들지 않았습니다.', phoneUnsupported: '이 브라우저는 패스키를 만들 수 없습니다.',
+    phoneFailed: '패스키를 저장하지 않았습니다.', phoneUnknown: '서버가 패스키를 확인해 주지 않았으므로 저장되지 않은 것으로 보세요. 믿고 쓰기 전에 한 번 로그인해 보세요.',
+    sessionFailed: '세션을 확인하지 못했습니다.', netErr: '네트워크 오류 — 확인된 것은 없습니다.', httpErr: (n: number) => `서버 응답 ${n}.`,
     machine: '머신', status: {
       absent: '머신 없음', starting: '시작 중', running: '실행 중', stopped: '중지됨', stopping: '중지 중',
       snapshotting: '환경 저장 중', error: '오류', unknown: '상태 모름',
@@ -201,6 +228,8 @@ const DICT = {
     snapName: '스냅샷 이름', snapHint: '소문자·숫자·하이픈 3–48자.', snapBad: '소문자·숫자·하이픈 3–48자, 처음과 끝은 문자나 숫자여야 합니다.',
     snapSave: '환경 저장', snapSaving: '저장 중…', snapLast: (n: string, s: string) => `마지막 스냅샷: ${n} — ${s}`, snapErr: (e: string) => `스냅샷 오류: ${e}`,
     snapNeedsMachine: '머신이 있고 실행 중이거나 중지됐을 때 쓸 수 있습니다.',
+    snapUnconfirmed: (n: string) => `마지막 스냅샷: ${n} — 확인 안 됨. 공급자가 보고하지 않아 없을 수도 있습니다.`,
+    snapExists: '같은 이름의 스냅샷이 이미 있습니다. 덮어쓰지 않았습니다 — 다른 이름을 고르세요.',
     termTitle: '터미널과 휴대폰 키보드', termBtn: '원격 데스크톱에서 입력하는 법',
     termSteps: [
       '데스크톱을 연 뒤 데스크톱 메뉴에서 터미널을 엽니다. 명령은 이 휴대폰이 아니라 클라우드 머신에서 실행됩니다.',
@@ -345,6 +374,54 @@ function assertionJSON(c: Assertion): Record<string, unknown> {
     ...(c.authenticatorAttachment ? { authenticatorAttachment: c.authenticatorAttachment } : {}),
   };
 }
+/** register/options JSON (bare or {publicKey}) → creation options with challenge, user.id and excludeCredentials ids decoded */
+function creationOptions(raw: unknown): PublicKeyCredentialCreationOptions | null {
+  const o = isObj(raw) && isObj(raw.publicKey) ? raw.publicKey : raw;
+  if (!isObj(o) || typeof o.challenge !== 'string' || !o.challenge || !isObj(o.user) || typeof o.user.id !== 'string' || !o.user.id) return null;
+  const exclude = o.excludeCredentials === undefined ? [] : o.excludeCredentials;
+  if (!Array.isArray(exclude) || !exclude.every(x => isObj(x) && typeof x.id === 'string')) return null;
+  try {
+    return {
+      ...(o as object),
+      challenge: fromB64u(o.challenge),
+      user: { ...(o.user as object), id: fromB64u(o.user.id) },
+      excludeCredentials: (exclude as Record<string, unknown>[]).map(x => ({ ...x, type: 'public-key', id: fromB64u(x.id as string) }) as PublicKeyCredentialDescriptor),
+    } as PublicKeyCredentialCreationOptions;
+  } catch { return null; }
+}
+type Attestation = {
+  id: string; rawId: ArrayBuffer; type: string; authenticatorAttachment?: string | null;
+  response: { clientDataJSON: ArrayBuffer; attestationObject: ArrayBuffer; getTransports?: () => unknown };
+  getClientExtensionResults?: () => unknown;
+};
+function attestationJSON(c: Attestation): Record<string, unknown> {
+  const t = typeof c.response.getTransports === 'function' ? c.response.getTransports() : [];
+  return {
+    id: c.id, rawId: toB64u(c.rawId), type: c.type,
+    response: {
+      attestationObject: toB64u(c.response.attestationObject), clientDataJSON: toB64u(c.response.clientDataJSON),
+      transports: Array.isArray(t) ? t.filter(x => typeof x === 'string') : [],
+    },
+    clientExtensionResults: typeof c.getClientExtensionResults === 'function' ? c.getClientExtensionResults() : {},
+    ...(c.authenticatorAttachment ? { authenticatorAttachment: c.authenticatorAttachment } : {}),
+  };
+}
+
+/** prefix + canonical base64url of exactly 32 bytes; anything else is never sent */
+function validPairToken(t: string): boolean {
+  const m = PAIR_TOKEN.exec(t);
+  if (!m) return false;
+  try { const b = fromB64u(m[1]); return b.byteLength === 32 && toB64u(b) === m[1]; } catch { return false; }
+}
+type PairLink = { present: boolean; token: string | null };
+/** Runs before mount: a #pair= fragment leaves the address bar (and history) before any render or fetch. */
+function takePairLink(): PairLink {
+  const raw = typeof location.hash === 'string' ? location.hash : '';
+  if (!raw.startsWith('#pair=')) return { present: false, token: null };
+  try { history.replaceState(history.state, '', `${location.pathname}${location.search}`); } catch { location.hash = ''; }
+  const t = raw.slice('#pair='.length);
+  return { present: true, token: validPairToken(t) ? t : null };
+}
 
 type Kid = Node | string | null | undefined | false;
 function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', ...kids: Kid[]): HTMLElementTagNameMap[K] {
@@ -368,13 +445,14 @@ function link(cls: string, href: string, external: boolean): HTMLAnchorElement {
 
 // ───────────────────────── App ─────────────────────────
 
-function mount(root: HTMLElement): void {
+function mount(root: HTMLElement, pair: PairLink): void {
   const qs = new URLSearchParams(location.search).get('lang');
   let lang: Lang = qs === 'ko' || qs === 'en' ? qs : (navigator.language || '').toLowerCase().startsWith('ko') ? 'ko' : 'en';
   const T = (): Dict => DICT[lang] as Dict;
 
   const S = {
     auth: 'checking' as 'checking' | 'in' | 'out' | 'failed', hasCredentials: false, authBusy: false, authMsg: null as Msg,
+    pairing: pair.present, paired: false, enrollBusy: false, enrollMsg: null as Msg,
     state: null as MachineState | null, loading: false, loadMsg: null as Msg,
     account: '' as AccountId | '', op: null as Op | null, opMsg: null as Msg,
     launching: false, launchUrl: '', launchMsg: null as Msg, snapName: '', snapMsg: null as Msg, termOpen: false,
@@ -431,6 +509,11 @@ function mount(root: HTMLElement): void {
     h('div', 'cc-machine-head', machineH, statusPill), statusLead, loadMsg, facts, sessionLine, sessionNote,
     accountWrap, accountNote, actions, opBox, launchBox, h('div', 'cc-keep', keepTitle, keepText));
 
+  const phoneTitle = h('h2'), phoneLead = h('p', 'cc-muted'), phonePaired = h('p', 'cc-msg cc-ok'), phoneMsg = h('p', 'cc-msg');
+  phoneMsg.setAttribute('role', 'status');
+  const phoneBtn = button('cc-btn', () => { void enroll(); });
+  const phoneCard = h('section', 'cc-card cc-phone', phoneTitle, phonePaired, phoneLead, phoneBtn, phoneMsg);
+
   const termTitle = h('h2'), termBtn = button('cc-btn cc-quiet cc-term-btn', () => { S.termOpen = !S.termOpen; render(); });
   const termList = h('ol', 'cc-steps');
   termList.id = 'cc-term-steps'; termBtn.setAttribute('aria-controls', 'cc-term-steps');
@@ -464,7 +547,7 @@ function mount(root: HTMLElement): void {
   const signOutBtn = button('cc-btn cc-quiet', () => { void logout(); });
   const footer = h('footer', 'cc-footer', signOutBtn);
 
-  const signedIn = h('div', 'cc-grid', machineCard, h('div', 'cc-side', termCard, snapCard, keysCard, nestedCard), appsCard);
+  const signedIn = h('div', 'cc-grid', phoneCard, machineCard, h('div', 'cc-side', termCard, snapCard, keysCard, nestedCard), appsCard);
   const main = h('main', 'cc-main', h1, lead, authCard, signedIn, footer);
   root.replaceChildren(header, main);
 
@@ -497,8 +580,17 @@ function mount(root: HTMLElement): void {
     signInBtn.hidden = S.auth === 'out' && !S.hasCredentials;
     setupNote.textContent = d.noKey; setupLink.textContent = d.setupLink;
     setupNote.parentElement!.hidden = !(S.auth === 'out' && !S.hasCredentials);
-    setMsg(authMsg, S.auth === 'checking' ? { text: () => d.checking, kind: 'info' } : S.authMsg);
+    setMsg(authMsg, S.auth === 'checking' ? { text: () => (S.pairing ? d.pairing : d.checking), kind: 'info' } : S.authMsg);
     if (S.auth !== 'in') return;
+
+    // this phone's passkey: offered while signed in, only ever started by the button
+    phoneCard.className = `cc-card cc-phone${S.paired ? ' cc-phone-paired' : ''}`;
+    phoneTitle.textContent = d.phoneTitle; phoneLead.textContent = d.phoneLead;
+    phonePaired.textContent = d.pairOk; phonePaired.hidden = !S.paired;
+    phoneBtn.className = `cc-btn${S.paired || !S.hasCredentials ? ' cc-primary' : ''}`;
+    phoneBtn.textContent = S.enrollBusy ? d.phoneBusy : S.paired || !S.hasCredentials ? d.phoneRegister : d.phoneAdd;
+    phoneBtn.disabled = S.enrollBusy;
+    setMsg(phoneMsg, S.enrollMsg);
 
     // machine
     machineH.textContent = d.machine;
@@ -506,7 +598,7 @@ function mount(root: HTMLElement): void {
     statusPill.className = `cc-pill cc-s-${status ?? 'loading'}`;
     statusLead.textContent = status ? d.statusLead[status] : '';
     statusLead.hidden = !status;
-    setMsg(loadMsg, S.loadMsg ?? (st?.error ? { text: () => d.rejected(st.error as string), kind: 'warn' } : null));
+    setMsg(loadMsg, S.loadMsg ?? (st?.error ? { text: () => (st.error === 'snapshot_exists' ? d.snapExists : d.rejected(st.error as string)), kind: 'warn' } : null));
 
     const m = st?.machine ?? null;
     facts.hidden = !m;
@@ -587,7 +679,8 @@ function mount(root: HTMLElement): void {
     setMsg(snapMsg, S.snapMsg ?? (!canSnap && st ? { text: () => d.snapNeedsMachine, kind: 'info' } : null));
     const snap = st?.snapshot;
     snapLast.hidden = !snap;
-    snapLast.textContent = snap ? (snap.error ? d.snapErr(snap.error) : d.snapLast(snap.name || '–', snap.state || '–')) : '';
+    snapLast.textContent = !snap ? '' : snap.error === 'snapshot_exists' ? d.snapExists : snap.error ? d.snapErr(snap.error)
+      : snap.state === 'unconfirmed' ? d.snapUnconfirmed(snap.name || '–') : d.snapLast(snap.name || '–', snap.state || '–');
 
     // apps
     appsTitle.textContent = d.appsTitle; appsLead.textContent = d.appsLead;
@@ -626,9 +719,11 @@ function mount(root: HTMLElement): void {
         : r.status === 'not_installed' ? ind(d.notInstalled, 'no') : ind(d.unprobed, 'none'));
     }
     if (t.rows.web && row('web')?.status === 'web') state.append(ind(d.webLauncher, 'none'));
-    if (t.rows.api && row('api')?.status === 'api_broker') state.append(ind(d.brokerKey, 'none'));
-    const connected = surfaces.map(row).find(r => r && r.connected !== null);
-    if (connected) state.append(connected.connected ? ind(d.connected, 'yes') : ind(d.notConnected, 'no'));
+    if (t.rows.api && row('api')?.status === 'api_broker' && row('api')?.connected == null) state.append(ind(d.brokerKey, 'none'));
+    for (const surface of surfaces) {
+      const connection=row(surface)?.connected;
+      if(connection!==null && connection!==undefined)state.append(ind(`${d.surf[surface]} · ${connection?d.connected:d.notConnected}`,connection?'yes':'no'));
+    }
     const li = h('li', 'cc-app', h('div', 'cc-app-head', h('strong', '', t.name), chips), h('p', 'cc-fine', t.about[lang]), state);
     if (!state.children.length) state.hidden = true;
     li.setAttribute('data-tool', t.id);
@@ -659,18 +754,71 @@ function mount(root: HTMLElement): void {
   // ── server calls ──
   function signedOut(): void {
     stopPoll();
-    S.auth = 'out'; S.state = null; S.launchUrl = '';
+    S.auth = 'out'; S.state = null; S.launchUrl = ''; S.paired = false; S.enrollMsg = null;
     void checkSession();
   }
 
-  async function checkSession(): Promise<void> {
-    const r = await call(`${OWNER_API}/session`);
-    if (!r.ok || !isObj(r.body)) { S.auth = 'failed'; S.authMsg = { text: () => (r.ok ? T().sessionFailed : r.status === 0 ? T().netErr : `${T().sessionFailed} ${T().httpErr(r.status)}`), kind: 'warn' }; S.hasCredentials = true; render(); return; }
+  async function checkSession(): Promise<boolean> {
+    const r = await call(`${AUTH_API}/session`);
+    if (!r.ok || !isObj(r.body)) { S.auth = 'failed'; S.authMsg = { text: () => (r.ok ? T().sessionFailed : r.status === 0 ? T().netErr : `${T().sessionFailed} ${T().httpErr(r.status)}`), kind: 'warn' }; S.hasCredentials = true; render(); return false; }
     const authed = r.body.authenticated === true;
-    S.hasCredentials = authed || r.body.hasCredentials === true;
+    S.hasCredentials = r.body.hasCredentials === true || (authed && r.body.hasCredentials === undefined);
     S.auth = authed ? 'in' : 'out';
     render();
     if (authed) void loadState();
+    return authed;
+  }
+
+  // One-use setup link: sent exactly once, never retried. An unknown outcome is reconciled with GET session only.
+  async function pairDevice(): Promise<void> {
+    let token = pair.token;
+    pair.token = null;
+    if (!token) { S.pairing = false; S.authMsg = { text: () => T().pairBad, kind: 'warn' }; await checkSession(); return; }
+    let r: Reply;
+    try { r = await call(`${AUTH_API}/pair`, { token }); } finally { token = null; }
+    S.pairing = false;
+    if (r.ok && isObj(r.body) && r.body.authenticated === true) {
+      S.auth = 'in'; S.paired = true; S.hasCredentials = r.body.hasCredentials === true; S.authMsg = null;
+      render(); void loadState(); return;
+    }
+    if (!r.ok && r.status !== 0 && r.status < 500 && r.status !== 408) {
+      const code = r.code || String(r.status);
+      S.authMsg = { text: () => T().pairGone(code), kind: 'warn' };
+      await checkSession(); return;
+    }
+    S.authMsg = { text: () => T().pairUnknown, kind: 'warn' };
+    if (await checkSession()) { S.paired = true; S.authMsg = null; render(); }
+  }
+
+  async function enroll(): Promise<void> {
+    if (S.enrollBusy || S.auth !== 'in') return;
+    const done = (m: Msg) => { S.enrollBusy = false; S.enrollMsg = m; render(); };
+    const warn = (text: () => string) => done({ text, kind: 'warn' });
+    if (typeof PublicKeyCredential === 'undefined' || !navigator.credentials || typeof navigator.credentials.create !== 'function') { warn(() => T().phoneUnsupported); return; }
+    S.enrollBusy = true; S.enrollMsg = null; render();
+    const opts = await call(`${AUTH_API}/register/options`, {});
+    if (!opts.ok && (opts.status === 401 || opts.status === 403)) { S.enrollBusy = false; signedOut(); return; }
+    if (!opts.ok) { warn(() => `${T().phoneFailed} ${opts.status === 0 ? T().netErr : T().rejected(opts.code || String(opts.status))}`); return; }
+    const publicKey = creationOptions(opts.body);
+    if (!publicKey) { warn(() => T().phoneFailed); return; }
+    let cred: Attestation | null;
+    try { cred = await (navigator.credentials.create({ publicKey }) as Promise<unknown>) as Attestation | null; }
+    catch (e) {
+      const n = isObj(e) ? e.name : '';
+      warn(() => (n === 'NotAllowedError' || n === 'AbortError' ? T().phoneCancelled : n === 'InvalidStateError' ? T().phoneExists : T().phoneDevice)); return;
+    }
+    if (!cred || !isObj(cred.response)) { warn(() => T().phoneCancelled); return; }
+    let response: Record<string, unknown>;
+    try { response = attestationJSON(cred); } catch { warn(() => T().phoneDevice); return; }
+    const r = await call(`${AUTH_API}/register/verify`, { response });
+    if (r.ok && isObj(r.body) && (r.body.registered === true || r.body.verified === true)) {
+      S.hasCredentials = true; S.paired = false;
+      done({ text: () => T().phoneDone, kind: 'ok' }); return;
+    }
+    if (!r.ok && (r.status === 401 || r.status === 403)) { S.enrollBusy = false; signedOut(); return; }
+    if (r.ok || r.status === 0 || r.status >= 500 || r.status === 408) { warn(() => T().phoneUnknown); return; }
+    const code = r.code || String(r.status);
+    warn(() => `${T().phoneFailed} ${T().rejected(code)}`);
   }
 
   async function loadState(): Promise<void> {
@@ -714,7 +862,7 @@ function mount(root: HTMLElement): void {
     S.op = null;
     if (r.status === 401 || r.status === 403) { signedOut(); return; }
     const code = r.code || T().httpErr(r.status);
-    S.opMsg = { text: () => T().rejected(code), kind: 'warn' };
+    S.opMsg = { text: () => (op.kind === 'snapshot' && code === 'snapshot_exists' ? T().snapExists : T().rejected(code)), kind: 'warn' };
     if (op.kind === 'snapshot') S.snapMsg = S.opMsg;
     render(); void loadState();
   }
@@ -765,7 +913,7 @@ function mount(root: HTMLElement): void {
     const fail = (text: () => string) => { S.authBusy = false; S.authMsg = { text, kind: 'warn' }; render(); };
     if (typeof PublicKeyCredential === 'undefined' || !navigator.credentials || typeof navigator.credentials.get !== 'function') { fail(() => T().unsupported); return; }
     S.authBusy = true; S.authMsg = null; render();
-    const opts = await call(`${OWNER_API}/options`, {});
+    const opts = await call(`${AUTH_API}/options`, {});
     if (!opts.ok) { fail(() => `${T().loginFailed} ${opts.status === 0 ? T().netErr : opts.code || T().httpErr(opts.status)}`); return; }
     const publicKey = requestOptions(opts.body);
     if (!publicKey) { fail(() => T().loginFailed); return; }
@@ -775,7 +923,7 @@ function mount(root: HTMLElement): void {
     if (!cred || !isObj(cred.response)) { fail(() => T().cancelled); return; }
     let response: Record<string, unknown>;
     try { response = assertionJSON(cred); } catch { fail(() => T().keyFailed); return; }
-    const r = await call(`${OWNER_API}/login`, { response });
+    const r = await call(`${AUTH_API}/login`, { response });
     if (!r.ok || !isObj(r.body) || r.body.authenticated !== true) { fail(() => `${T().loginFailed} ${r.ok ? '' : r.status === 0 ? T().netErr : r.code || T().httpErr(r.status)}`); return; }
     S.authBusy = false; S.auth = 'in'; S.hasCredentials = true; S.authMsg = null;
     render(); void loadState();
@@ -784,10 +932,10 @@ function mount(root: HTMLElement): void {
   async function logout(): Promise<void> {
     if (S.authBusy) return;
     S.authBusy = true; stopPoll(); render();
-    const r = await call(`${OWNER_API}/logout`, {});
+    const r = await call(`${AUTH_API}/logout`, {});
     S.authBusy = false;
     if (r.ok && isObj(r.body) && r.body.authenticated === false) {
-      S.auth = 'out'; S.state = null; S.op = null; S.opMsg = null; S.launchUrl = ''; S.authMsg = { text: () => T().signedOut, kind: 'ok' };
+      S.auth = 'out'; S.state = null; S.op = null; S.opMsg = null; S.launchUrl = ''; S.paired = false; S.enrollMsg = null; S.authMsg = { text: () => T().signedOut, kind: 'ok' };
     } else {
       S.authMsg = { text: () => (r.ok ? T().sessionFailed : r.status === 0 ? T().netErr : T().httpErr(r.status)), kind: 'warn' };
       S.opMsg = S.authMsg;
@@ -796,11 +944,14 @@ function mount(root: HTMLElement): void {
   }
 
   render();
-  void checkSession();
+  void (pair.present ? pairDevice() : checkSession());
 }
 
+// The setup fragment is taken (and cleared from the URL) before mount renders or fetches anything.
+const pairLink = takePairLink();
 const rootEl = document.getElementById('cb-computer');
-if (rootEl) mount(rootEl);
+if (rootEl) mount(rootEl, pairLink);
+else pairLink.token = null;
 
 // Module scope for tsc only (keeps names out of the shared client global scope); the build strips this line.
 export {};

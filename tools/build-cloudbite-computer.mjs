@@ -65,7 +65,7 @@ const out = '// Generated file — do not edit. Sources: client/cloudbite-comput
   + `// esbuild ${ESBUILD} transform (ES2022, unbundled) · ts sha256 ${sha(srcBytes)} · css sha256 ${sha(Buffer.from(css))}\n`
   + '// Routing (runtime): GET CLOUDBITE_COMPUTER_PATH → CLOUDBITE_COMPUTER_HTML, CLOUDBITE_COMPUTER_JS_PATH → CLOUDBITE_COMPUTER_JS (text/javascript),\n'
   + '// CLOUDBITE_COMPUTER_CSS_PATH → CLOUDBITE_COMPUTER_CSS (text/css). CSP script-src \'self\'; style-src \'self\' suffices (no inline).\n'
-  + '// The script calls /api/cloudbite/owner/* and /api/cloudbite/computer/* same-origin and links out only to the gateway and k.shinick.dev.\n'
+  + '// The script calls /api/cloudbite/computer/* (sign-in under /api/cloudbite/computer/auth/*) same-origin and links out only to the gateway and k.shinick.dev.\n'
   + `export const CLOUDBITE_COMPUTER_PATH = ${JSON.stringify(PAGE_PATH)};\n`
   + `export const CLOUDBITE_COMPUTER_JS_PATH = ${JSON.stringify(JS_PATH)};\n`
   + `export const CLOUDBITE_COMPUTER_CSS_PATH = ${JSON.stringify(CSS_PATH)};\n`

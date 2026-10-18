@@ -46,7 +46,9 @@
       { "name": "CLOUDBITE_ACCESS", "class_name": "CloudbiteAccess" },
       { "name": "CLOUDBITE_HISTORY", "class_name": "CloudbiteHistory" },
       { "name": "CLOUDBITE_COMPUTER", "class_name": "CloudbiteComputer" },
-      { "name": "CLOUDBITE_COMPUTER_NESTED", "class_name": "CloudbiteComputerNested" }
+      { "name": "CLOUDBITE_COMPUTER_NESTED", "class_name": "CloudbiteComputerNested" },
+      { "name": "CLOUDBITE_COMPUTER_ACCESS", "class_name": "CloudbiteComputerAccess" },
+      { "name": "CLOUDBITE_COMPUTER_INPUT", "class_name": "CloudbiteComputerInput" }
     ]
   },
   "migrations": [
@@ -54,7 +56,9 @@
     // Audience access inbox (src/cloudbite-access-service.ts). v1 is never edited.
     { "tag": "v2", "new_sqlite_classes": ["CloudbiteAccess"] },
     { "tag": "v3", "new_sqlite_classes": ["CloudbiteHistory"] },
-    { "tag": "v4", "new_sqlite_classes": ["CloudbiteComputer", "CloudbiteComputerNested"] }
+    { "tag": "v4", "new_sqlite_classes": ["CloudbiteComputer", "CloudbiteComputerNested"] },
+    { "tag": "v5", "new_sqlite_classes": ["CloudbiteComputerAccess"] },
+    { "tag": "v6", "new_sqlite_classes": ["CloudbiteComputerInput"] }
   ],
   "observability": { "enabled": true, "traces": { "enabled": true, "head_sampling_rate": 1 } },
   "env": {
@@ -75,7 +79,9 @@
           { "name": "CLOUDBITE_ACCESS", "class_name": "CloudbiteAccess" },
           { "name": "CLOUDBITE_HISTORY", "class_name": "CloudbiteHistory" },
       { "name": "CLOUDBITE_COMPUTER", "class_name": "CloudbiteComputer" },
-      { "name": "CLOUDBITE_COMPUTER_NESTED", "class_name": "CloudbiteComputerNested" }
+      { "name": "CLOUDBITE_COMPUTER_NESTED", "class_name": "CloudbiteComputerNested" },
+      { "name": "CLOUDBITE_COMPUTER_ACCESS", "class_name": "CloudbiteComputerAccess" },
+      { "name": "CLOUDBITE_COMPUTER_INPUT", "class_name": "CloudbiteComputerInput" }
         ]
       }
     }

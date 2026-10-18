@@ -32,6 +32,8 @@ export { CloudbiteAccess } from './cloudbite-access-service';
 export { CloudbiteHistory } from './cloudbite-history';
 export { CloudbiteComputer } from './cloudbite-computer-service';
 export { CloudbiteComputerNested } from './cloudbite-computer-nested';
+export { CloudbiteComputerAccess } from './cloudbite-computer-access';
+export { CloudbiteComputerInput } from './cloudbite-computer-input';
 
 const SECURITY_HEADERS = {
   'cache-control': 'no-store',

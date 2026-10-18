@@ -3,7 +3,10 @@
 // scoped, revocable, hashed 2h capability. The Worker-stored Daytona/Nosana master keys stay in this object: the
 // owner machine holds only the capability, and each Daytona sandbox holds only its own per-job callback token.
 // Nosana job definitions are public (IPFS), so a Nosana job carries NO secret: its status comes only from the
-// authenticated deployment job list, a Nosana job never gets a callback, and its output is reported as unavailable.
+// authenticated deployment job list and a Nosana job never gets a callback. Its result is collected read-only, before
+// cleanup, from the authenticated GET /deployments/{deployment}/jobs/{job} (jobResult FlowState, @nosana/api 2.20.0)
+// for the exact job address that list returned, falling back to the public indexer/IPFS reader; the runner prints one
+// `CLOUDBITE_RESULT_JSON:` stdout line. A result that does not arrive within CBN_NOSANA_COLLECT is reported unavailable.
 //
 // Contract (root owns routing; this module owns behaviour):
 //   Owner RPC (owner WebAuthn cookie already checked by the root route):
@@ -31,8 +34,9 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { Env } from './state';
 import { dt, DtError, type Dt, type Sandbox } from './lab';
-import { cbDeleteSandbox, cbFindByLabels, cbGetSandbox, cbUpload, CbDaytonaError, type CbSandbox } from './cloudbite-daytona';
+import { cbDeleteSandbox, cbExec, cbFindByLabels, cbGetSandbox, cbUpload, CbDaytonaError, type CbSandbox } from './cloudbite-daytona';
 import { cloudbiteConfig, type CbAccountId } from './cloudbite-config';
+import { isJobAddress, parseRunnerStdout, readNosanaJobResult, RESULT_MARKER, workStdout, type NosanaJobResult } from './cloudbite-computer-nosana-results';
 
 export const CBN_CAP_TTL = 2 * 3600_000;
 export const CBN_MAX_CAPS = 3;
@@ -57,6 +61,9 @@ export const CBN_NOSANA_MAX_MINUTES = 10;
 export const CBN_NOSANA_PAGES = 5;               // bounded cursor pagination of owner deployment lists
 export const CBN_NOSANA_OUTPUT_NOTE = 'nosana_output_unavailable';
 export const CBN_NOSANA_PUBLIC_NOTE = 'Nosana GPU job definitions (image and command) are public; never put secrets in them.';
+export const CBN_NOSANA_COLLECT = 120_000;       // result collection budget after COMPLETED, before the deployment is deleted
+export const CBN_NOSANA_RESULT_MAX = 2 * 1024 * 1024;
+export const CBN_NOSANA_RESULT_TIMEOUT = 15_000;
 export const CBN_LABEL_JOB = 'cloudbite-nested';
 export const CBN_LABEL_OWNER = 'cloudbite-nested-owner';
 export const CBN_WORKDIR = '/home/daytona/cloudbite-nested';
@@ -72,7 +79,7 @@ const MACHINE = /^[\w.:-]{1,128}$/;
 const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/;
 
 export type CbNestedProvider = 'daytona' | 'nosana';
-export type CbNestedStatus = 'creating' | 'running' | 'uncertain' | 'succeeded' | 'failed' | 'timed_out' | 'stopped' | 'completed' | 'error';
+export type CbNestedStatus = 'creating' | 'queued' | 'running' | 'collecting' | 'uncertain' | 'succeeded' | 'failed' | 'timed_out' | 'stopped' | 'completed' | 'error';
 type Cleanup = 'none' | 'pending' | 'done' | 'failed' | 'unknown';
 
 interface Capability { id: string; ownerMachineId: string; scopes: string[]; createdAt: number; expiresAt: number; revoked?: boolean }
@@ -89,7 +96,8 @@ interface NestedJob {
   callbackHash?: string;        // Daytona only; a Nosana job has no callback
   providerState?: string;       // Nosana job state from the authenticated deployment job list
   providerJob?: string;         // Nosana job address from that list
-  result?: { exitCode: number; timedOut: boolean; output: string; truncated: boolean; at: number };
+  collectUntil?: number;        // Nosana: COMPLETED, result being collected until this time
+  result?: { exitCode: number | null; timedOut: boolean; output: string; truncated: boolean; at: number };
   cleanup: Cleanup; cleanupTries: number;
   error?: string;               // fixed code only
 }
@@ -97,7 +105,7 @@ interface NestedJob {
 export interface CbNestedJobView {
   id: string; provider: CbNestedProvider; status: CbNestedStatus; image: string; command: string[]; timeoutSec: number;
   createdAt: string; deadline: string; finishedAt: string | null; cleanup: Cleanup; error: string | null;
-  result: { exitCode: number; timedOut: boolean; output: string; truncated: boolean } | null;
+  result: { exitCode: number | null; timedOut: boolean; output: string; truncated: boolean } | null;
   providerState: string | null; public: boolean; note: string | null;
 }
 
@@ -169,7 +177,7 @@ function view(j: NestedJob): CbNestedJobView {
     createdAt: iso(j.createdAt)!, deadline: iso(j.deadline)!, finishedAt: iso(j.finishedAt), cleanup: j.cleanup, error: j.error ?? null,
     result: j.result ? { exitCode: j.result.exitCode, timedOut: j.result.timedOut, output: j.result.output, truncated: j.result.truncated } : null,
     providerState: j.providerState ?? null, public: j.provider === 'nosana',
-    note: j.provider === 'nosana' ? `${CBN_NOSANA_PUBLIC_NOTE} Output: ${CBN_NOSANA_OUTPUT_NOTE}` : null,
+    note: j.provider === 'nosana' ? CBN_NOSANA_PUBLIC_NOTE : null,
   };
 }
 
@@ -193,13 +201,64 @@ async function nosana<T>(key: string, method: string, path: string, body?: unkno
   let r: Response;
   try {
     r = await fetch(CBN_NOSANA_API + path, {
-      method, headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+      // The Nosana API rejects an empty POST/DELETE advertised as JSON (HTTP 400).
+      method, redirect: 'manual', headers: { authorization: `Bearer ${key}`, 'user-agent': 'CloudBiteCompute/1.0', ...(body===undefined?{}:{'content-type':'application/json'}) },
       body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(30_000),
     });
   } catch { throw new NosanaError(0); }
   const text = await r.text().catch(() => '');
   if (!r.ok) throw new NosanaError(r.status);
   try { return (text ? JSON.parse(text) : {}) as T; } catch { throw new NosanaError(0); }
+}
+
+/** Authenticated, bounded, read-only GET of one owned deployment job (@nosana/api 2.20.0 deploymentGetJob). */
+async function nosanaDeploymentJob(key: string, deployment: string, job: string): Promise<{ status: 'ok'; json: unknown } | { status: 'pending' | 'unavailable' }> {
+  let r: Response;
+  try {
+    r = await fetch(`${CBN_NOSANA_API}/deployments/${encodeURIComponent(deployment)}/jobs/${encodeURIComponent(job)}`, {
+      method: 'GET', redirect: 'manual', headers: { authorization: `Bearer ${key}`, accept: 'application/json', 'user-agent': 'CloudBiteCompute/1.0' },
+      signal: AbortSignal.timeout(CBN_NOSANA_RESULT_TIMEOUT),
+    });
+  } catch { return { status: 'pending' }; }
+  const drop = async (status: 'pending' | 'unavailable') => { try { await r.body?.cancel(); } catch { /* closed */ } return { status }; };
+  if (r.status === 404 || r.status === 408 || r.status === 429 || r.status >= 500) return drop('pending');
+  if (r.status !== 200 || Number(r.headers.get('content-length')) > CBN_NOSANA_RESULT_MAX) return drop('unavailable');
+  try {
+    const chunks: Uint8Array[] = []; let size = 0;
+    if (r.body) {
+      const rd = r.body.getReader();
+      for (;;) {
+        const { done, value } = await rd.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > CBN_NOSANA_RESULT_MAX) { await rd.cancel().catch(() => {}); return { status: 'unavailable' }; }
+        chunks.push(value);
+      }
+    }
+    const buf = new Uint8Array(size); let at = 0;
+    for (const c of chunks) { buf.set(c, at); at += c.byteLength; }
+    return { status: 'ok', json: JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(buf)) };
+  } catch { return { status: 'unavailable' }; }
+}
+
+/** The public job argument: the runner's job, base64url. Also the ownership stamp checked on a fetched job definition. */
+function nosanaJobArg(j: NestedJob) {
+  return b64u(new TextEncoder().encode(JSON.stringify({ jobId: j.id, command: j.command, timeout: j.timeoutSec })));
+}
+
+/** Deployment job body -> result, only when its market and its 'work' op command are exactly this job's. */
+export function cbNestedNosanaJobResult(body: unknown, expectedArg: string): NosanaJobResult {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { kind: 'unavailable' };
+  const o = body as Record<string, unknown>;
+  if (o.market !== CBN_NOSANA_MARKET || !('jobResult' in o)) return { kind: 'unavailable' };
+  const ops = (o.jobDefinition as { ops?: unknown } | null)?.ops;
+  const work = Array.isArray(ops) ? ops.filter((x) => x && (x as { id?: unknown }).id === 'work') : [];
+  const cmd = (work[0] as { args?: { cmd?: unknown } } | undefined)?.args?.cmd;
+  if (work.length !== 1 || !Array.isArray(cmd) || cmd[cmd.length - 1] !== expectedArg) return { kind: 'unavailable' };
+  if (o.jobResult === null) return { kind: 'pending' };
+  const stdout = workStdout(o.jobResult);
+  const result = stdout === null ? null : parseRunnerStdout(stdout);
+  return result ? { kind: 'ready', result } : { kind: 'unavailable' };
 }
 
 /** The nested job service. Every state change runs in one serial queue; provider calls happen between steps. */
@@ -383,6 +442,8 @@ export class CbNestedService {
     const t: Dt = { ...dy.c, api: sb.toolboxProxyUrl ?? 'https://proxy.app.daytona.io/toolbox' };
     const sessionId = `cbn-${j.id}`;
     try {
+      // Fixed command (no job data): the toolbox upload does not create the parent directory.
+      if ((await cbExec(dy.c, sb, `mkdir -p ${CBN_WORKDIR}`)).exitCode !== 0) throw new Error('mkdir');
       await cbUpload(dy.c, sb, `${CBN_WORKDIR}/runner.py`, CBN_RUNNER_PY);
       await cbUpload(dy.c, sb, `${CBN_WORKDIR}/job.json`, JSON.stringify(job));
       try { await dt(t, 'POST', `/${sb.id}/process/session`, { sessionId }, AbortSignal.timeout(20_000)); }
@@ -400,7 +461,7 @@ export class CbNestedService {
   private async createNosana(j: NestedJob) {
     const key = this.d.nosanaKey()!;
     // Public job definition: no callback URL, no token, no key. The runner prints its bounded JSON result to stdout.
-    const job = b64u(new TextEncoder().encode(JSON.stringify({ jobId: j.id, command: j.command, timeout: j.timeoutSec })));
+    const job = nosanaJobArg(j);
     const body = {
       idempotency_key: j.idempotencyKey, name: j.name, market: CBN_NOSANA_MARKET, replicas: 1,
       timeout: Math.min(CBN_NOSANA_MAX_MINUTES, Math.ceil(j.timeoutSec / 60) + 2), autostart: true, strategy: 'SIMPLE',
@@ -414,7 +475,8 @@ export class CbNestedService {
     };
     try {
       const d = await nosana<NosanaDeployment>(key, 'POST', '/deployments/create', body);
-      return this.patch(j.id, (x) => { x.resourceId = d.id; x.status = 'running'; });
+      // A deployment is not an executing job: 'queued' until the owner job list shows a job for it.
+      return this.patch(j.id, (x) => { x.resourceId = d.id; x.status = 'queued'; });
     } catch (e) {
       const st = e instanceof NosanaError ? e.status : 0;
       if (st === 409) return this.reconcileNosana(j.id);
@@ -443,7 +505,7 @@ export class CbNestedService {
         if (!cursor) break;
       }
       return this.patch(id, (x) => {
-        if (hit) { x.resourceId = hit.id; if (x.status === 'uncertain' || x.status === 'creating') x.status = 'running'; if (x.cleanup === 'unknown') x.cleanup = terminal(x.status) ? 'pending' : 'none'; delete x.error; }
+        if (hit) { x.resourceId = hit.id; if (x.status === 'uncertain' || x.status === 'creating') x.status = 'queued'; if (x.cleanup === 'unknown') x.cleanup = terminal(x.status) ? 'pending' : 'none'; delete x.error; }
         else if (x.status === 'creating') { x.status = 'uncertain'; x.cleanup = 'unknown'; x.error = 'create_uncertain'; }
       });
     } catch { return this.patch(id, (x) => { if (x.status === 'creating') { x.status = 'uncertain'; x.cleanup = 'unknown'; x.error = 'create_uncertain'; } }); }
@@ -511,8 +573,8 @@ export class CbNestedService {
     const soon = (t: number) => { next = next === null ? t : Math.min(next, t); };
     for (const j0 of await this.jobs()) {
       let j: NestedJob | undefined = j0;
-      if (!terminal(j.status) && now >= j.deadline) {
-        j = await this.patch(j.id, (x) => { if (!terminal(x.status)) { x.status = x.status === 'uncertain' ? 'error' : 'timed_out'; x.finishedAt = now; } if (x.resourceId && x.cleanup === 'none') x.cleanup = 'pending'; });
+      if (!terminal(j.status) && j.status !== 'collecting' && now >= j.deadline) {
+        j = await this.patch(j.id, (x) => { if (!terminal(x.status)) { if (x.status === 'queued') x.error = 'not_scheduled'; x.status = x.status === 'uncertain' ? 'error' : 'timed_out'; x.finishedAt = now; } if (x.resourceId && x.cleanup === 'none') x.cleanup = 'pending'; });
       }
       if (!j) continue;
       if (j.status === 'creating' && j.provider === 'nosana' && now - j.createdAt > 60_000) j = await this.reconcileNosana(j.id);
@@ -523,9 +585,14 @@ export class CbNestedService {
         if (!j) continue;
         if (j.cleanup === 'unknown') { soon(now + 60_000); continue; }
       }
-      if (j.provider === 'nosana' && j.status === 'running' && j.resourceId && j.cleanup === 'none') {
+      if (j.provider === 'nosana' && (j.status === 'queued' || j.status === 'running') && j.resourceId && j.cleanup === 'none') {
         j = await this.pollNosana(j);
         if (!j) continue;
+      }
+      if (j.provider === 'nosana' && j.status === 'collecting' && j.cleanup === 'none') {
+        j = await this.collectNosana(j);
+        if (!j) continue;
+        if (j.status === 'collecting') { soon(Math.min(j.collectUntil ?? now, now + CBN_TICK)); continue; }
       }
       if (j.provider === 'daytona' && j.status === 'running' && j.resourceId && !j.launched && j.cleanup === 'none') {
         await this.tryLaunch(j);
@@ -578,11 +645,38 @@ export class CbNestedService {
     return this.patch(j.id, (x) => {
       if (terminal(x.status)) return;
       x.providerState = f.state; x.providerJob = f.job;
-      if (f.state === 'COMPLETED' || f.state === 'STOPPED') {
-        x.status = f.state === 'COMPLETED' ? 'completed' : 'stopped';
-        x.finishedAt = this.d.now(); x.error = CBN_NOSANA_OUTPUT_NOTE;
-        x.cleanup = 'pending';
+      if (f.state === 'RUNNING') x.status = 'running';
+      else if (f.state === 'COMPLETED') {
+        // Keep the deployment (SIMPLE strategy: the job is done, nothing more runs) until its result is read.
+        x.status = 'collecting'; x.finishedAt = this.d.now(); x.collectUntil = this.d.now() + CBN_NOSANA_COLLECT;
+      } else if (f.state === 'STOPPED') {
+        x.status = 'stopped'; x.finishedAt = this.d.now(); x.error = CBN_NOSANA_OUTPUT_NOTE; x.cleanup = 'pending';
       }
+    });
+  }
+
+  /** Read-only, bounded: the result of the exact job address the owner deployment list returned; cleanup follows. */
+  private async collectNosana(j: NestedJob): Promise<NestedJob | undefined> {
+    const key = this.d.nosanaKey();
+    let got: NosanaJobResult = { kind: 'unavailable' };
+    if (key && j.resourceId && isJobAddress(j.providerJob)) {
+      const r = await nosanaDeploymentJob(key, j.resourceId, j.providerJob);
+      got = r.status === 'ok' ? cbNestedNosanaJobResult(r.json, nosanaJobArg(j)) : { kind: r.status };
+      // The deployment job body may lag; the public indexer/IPFS copy of the same job is the fallback.
+      if (got.kind === 'pending') { const pub = await readNosanaJobResult(j.providerJob).catch(() => null); if (pub?.kind === 'ready') got = pub; }
+    }
+    const now = this.d.now();
+    return this.patch(j.id, (x) => {
+      if (x.status !== 'collecting') return;
+      if (got.kind === 'ready') {
+        const r = got.result;
+        x.result = { exitCode: r.exitCode, timedOut: r.timedOut, output: r.output, truncated: r.truncated, at: now };
+        // An unknown exit code is never reported as success.
+        x.status = r.timedOut ? 'timed_out' : r.exitCode === 0 ? 'succeeded' : r.exitCode === null ? 'completed' : 'failed';
+      } else if (got.kind === 'unavailable' || now >= (x.collectUntil ?? 0)) {
+        x.status = 'completed'; x.error = CBN_NOSANA_OUTPUT_NOTE;
+      } else return;
+      delete x.collectUntil; x.cleanup = 'pending';
     });
   }
 
@@ -619,7 +713,7 @@ export class CbNestedService {
       try { await nosana(key, 'DELETE', `/deployments/${encodeURIComponent(j.resourceId)}`); }
       catch (e) { if (!(e instanceof NosanaError && e.status === 404)) throw e; }
       return mark('done');
-    } catch { return mark('pending'); }
+    } catch(e) { return mark('pending',e instanceof NosanaError?`cleanup_http_${e.status}`:'cleanup_unavailable'); }
   }
 
   private async prune(all: NestedJob[], now: number) {
@@ -681,7 +775,7 @@ export class CloudbiteComputerNested extends DurableObject<Env> {
       now: () => Date.now(),
       random: (n) => crypto.getRandomValues(new Uint8Array(n)),
       daytona: () => (cfg ? { account: 'primary', c: { api: cfg.daytona.api, key: cfg.daytona.key } } : null),
-      nosanaKey: () => this.env.CLOUDBITE_NOSANA_API_KEY || null,
+      nosanaKey: () => this.env.CLOUDBITE_COMPUTER_NOSANA_API_KEY || null,
       gateway: () => cfg?.gateway ?? null,
     };
   }
@@ -746,7 +840,7 @@ except Exception as e:
     buf += ('runner: could not start command: %s' % type(e).__name__).encode()
 body = json.dumps({'exitCode': int(code), 'timedOut': timed, 'output': buf.decode('utf-8', 'replace'), 'truncated': cut}, ensure_ascii=False).encode()
 if not job.get('callback'):
-    sys.stdout.write('CLOUDBITE_RESULT ' + body.decode() + '\n'); sys.stdout.flush(); sys.exit(0)
+    sys.stdout.write('${RESULT_MARKER}' + body.decode() + '\n'); sys.stdout.flush(); sys.exit(0)
 req = urllib.request.Request(job['callback'], data=body, method='POST', headers={'authorization': 'Bearer ' + token, 'content-type': 'application/json', 'user-agent': 'CloudBiteCompute/1.0'})
 for i in range(4):
     try:
@@ -842,15 +936,20 @@ def main(argv):
     body = {'requestId': str(uuid.uuid4()), 'provider': a['provider'], 'timeout': a['timeout'], 'command': a['command']}
     if a['image']: body['image'] = a['image']
     if a['provider'] == 'nosana':
-        print('notice: Nosana GPU job definitions (image and command) are public; output is not returned to Cloudbite.', file=sys.stderr)
+        print('notice: Nosana GPU job definitions (image and command) are public; never put API keys or secrets in them.', file=sys.stderr)
     job = call(c, 'POST', 'run', body)['job']; show(job)
     if not a['wait']: return 0
     end = time.time() + a['timeout'] + 900
-    while time.time() < end and job['status'] in ('creating', 'running', 'uncertain'):
+    while time.time() < end and job['status'] in ('creating', 'queued', 'running', 'collecting', 'uncertain'):
         time.sleep(5)
         job = next((j for j in call(c, 'GET', 'jobs').get('jobs', []) if j['id'] == job['id']), job)
     show(job)
-    if job.get('result'): sys.stdout.write(job['result']['output']); return job['result']['exitCode'] if job['status'] == 'succeeded' else 1
+    r = job.get('result')
+    if r:
+        sys.stdout.write(r['output'])
+        if job['status'] in ('succeeded', 'failed') and isinstance(r['exitCode'], int): return r['exitCode'] or (0 if job['status'] == 'succeeded' else 1)
+        if r['exitCode'] is None: print('exit code unknown', file=sys.stderr)
+        return 1
     if job['status'] == 'completed': print('provider reports completed; output unavailable', file=sys.stderr); return 0
     return 1
 

@@ -52,6 +52,8 @@ function fakeNet() {
     if (raw instanceof FormData) text = await raw.get('file').text(); else text = raw;
     const call = { method: req.method, url: req.url, auth: req.headers.get('authorization'), body: text };
     calls.push(call);
+    // Real client-manager rejects empty JSON POST/DELETE before it reaches the stop/delete handler.
+    if(req.url.startsWith(M.CBN_NOSANA_API) && ['POST','DELETE'].includes(req.method) && raw===null && req.headers.get('content-type')?.includes('application/json'))return json({error:'empty_json_body'},400);
     for (const [m, re, h] of handlers) { const g = re.exec(req.url); if (m === req.method && g) return h(call, g); }
     throw new Error('unexpected fetch ' + req.method + ' ' + req.url);
   };
@@ -169,7 +171,7 @@ await check('nosana run: exact client-manager create body, master key only in th
   const { token } = await owner(svc);
   nosanaCreateOk(net);
   const r = await gw(svc, 'POST', 'run', token, { requestId: uuid(), provider: 'nosana', timeout: 300, command: ['nvidia-smi'] });
-  assert.equal(r.status, 202); assert.equal(r.body.job.status, 'running');
+  assert.equal(r.status, 202); assert.equal(r.body.job.status, 'queued');
   noSecrets(r.body);
   assert.equal(net.calls.length, 1);
   const c = net.calls[0];
@@ -239,7 +241,7 @@ await check('uncertain Nosana create is never retried; alarm reconciles read-onl
   await svc.alarm();
   assert.equal(net.calls.filter((c) => c.method === 'POST').length, 0, 'no automatic paid retry');
   let j = (await svc.ownerJobs()).body.jobs[0];
-  assert.equal(j.status, 'running'); assert.equal(j.cleanup, 'none');
+  assert.equal(j.status, 'queued'); assert.equal(j.cleanup, 'none');
   // Past the deadline: stop, then delete once STOPPED, each only after the name ownership check.
   clock.t += 20 * 60_000;
   let status = 'RUNNING';
@@ -260,7 +262,7 @@ await check('409 on create reconciles the existing deployment instead of creatin
   net.on('POST', /deployments\/create$/, () => json({ error: 'exists' }, 409));
   net.on('GET', /\/deployments\?idempotency_key=/, (c) => json({ deployments: [{ id: 'dep-9', name: 'cbn-' + /cbn-(nj\w+)/.exec(net.calls[0].body)[1], status: 'STARTING' }] }));
   const r = await gw(svc, 'POST', 'run', token, { requestId: uuid(), provider: 'nosana', command: ['x'] });
-  assert.equal(r.body.job.status, 'running');
+  assert.equal(r.body.job.status, 'queued');
   assert.equal(net.calls.filter((c) => c.method === 'POST').length, 1);
 });
 
@@ -268,6 +270,7 @@ const daytonaOk = (net, id = 'sb-N') => {
   let labels;
   net.on('POST', /dt\.example\.test\/api\/sandbox$/, (c) => { labels = JSON.parse(c.body).labels; return json({ id, state: 'started', toolboxProxyUrl: 'https://tb.example.test/toolbox', labels }); });
   net.on('POST', /tb\.example\.test\/toolbox\/.+\/files\/upload/, () => new Response('', { status: 200 }));
+  net.on('POST', /tb\.example\.test\/toolbox\/.+\/process\/execute$/, () => json({ exitCode: 0, result: '' }));
   net.on('POST', /tb\.example\.test\/toolbox\/.+\/process\/session$/, () => json({}));
   net.on('POST', /tb\.example\.test\/toolbox\/.+\/process\/session\/[\w-]+\/exec$/, () => json({ cmdId: 'c1' }));
   return () => labels;
@@ -337,6 +340,113 @@ await check('nosana: no callback is ever accepted; status only from the owner de
   assert.deepEqual(net.calls.filter((c) => c.method !== 'GET').map((c) => c.method + ' ' + new URL(c.url).pathname), ['DELETE /deployments/dep-G']);
 });
 
+await check('nosana result: collected read-only from the owned deployment job before cleanup; lag, tamper, oversize, expiry', async () => {
+  const JOB = 'So11111111111111111111111111111111111111112';
+  const marker = (r) => 'CLOUDBITE_RESULT_JSON:' + JSON.stringify(r) + '\n';
+  const flow = (logs) => ({ status: 'success', startTime: 1, endTime: 2, opStates: [{ operationId: 'work', providerId: null, group: null, status: 'success', startTime: 1, endTime: 2, exitCode: 0, logs, diagnostics: {} }] });
+  const start = async (dep, listedJob = JOB) => {
+    const t = setup(); const { token } = await owner(t.svc);
+    nosanaCreateOk(t.net, dep);
+    const r = await gw(t.svc, 'POST', 'run', token, { requestId: uuid(), provider: 'nosana', command: ['nvidia-smi'] });
+    const arg = JSON.parse(t.net.calls.at(-1).body).job_definition.ops[0].args.cmd.at(-1);
+    t.net.reset();
+    t.net.on('GET', new RegExp(`/deployments/${dep}/jobs(\\?|$)`), () => json({ jobs: [{ job: listedJob, deployment: dep, market: M.CBN_NOSANA_MARKET, state: 'COMPLETED' }], pagination: { cursor_next: null } }));
+    t.net.on('GET', /blockchain-indexer\.k8s\.prd\.nos\.ci\/jobs\//, () => new Response('', { status: 404 }));
+    t.net.on('GET', new RegExp(`/deployments/${dep}$`), () => json({ id: dep, name: 'cbn-' + r.body.job.id, status: 'STOPPED' }));
+    t.net.on('DELETE', new RegExp(`/deployments/${dep}$`), () => json({}));
+    return { ...t, token, id: r.body.job.id, arg, body: (jobResult, over = {}) => ({ confidential: false, revision: 1, market: M.CBN_NOSANA_MARKET, node: 'n', state: 2, jobStatus: null, jobDefinition: { version: '0.1', type: 'container', ops: [{ id: 'work', type: 'container/run', args: { cmd: ['python3', '-I', '-c', 'x', '--b64', arg] } }] }, jobResult, timeStart: 1, timeEnd: 2, listedAt: 1, ...over }) };
+  };
+  const jobUrl = (dep) => new RegExp(`/deployments/${dep}/jobs/${JOB}$`);
+  const paths = (net) => net.calls.map((c) => c.method + ' ' + new URL(c.url).pathname);
+
+  // Lag (404, then jobResult null) keeps the deployment and the job 'collecting'; then the marked result arrives.
+  let t = await start('dep-L');
+  let reply = () => new Response('{}', { status: 404 });
+  t.net.on('GET', jobUrl('dep-L'), () => reply());
+  await t.svc.alarm();
+  let j = (await t.svc.ownerJobs()).body.jobs[0];
+  assert.deepEqual([j.status, j.cleanup, j.result], ['collecting', 'none', null]);
+  assert.ok(!t.net.calls.some((c) => c.method === 'DELETE' || c.url.endsWith('/stop')), 'no cleanup while collecting');
+  const jobCall = t.net.calls.find((c) => jobUrl('dep-L').test(c.url));
+  assert.equal(jobCall.auth, 'Bearer ' + NOSANA_KEY);
+  assert.ok(!t.net.calls.filter((c) => c.url.includes('indexer')).some((c) => c.auth), 'public fallback carries no key');
+  reply = () => json(t.body(null));
+  t.clock.t += 15_000; await t.svc.alarm();
+  assert.equal((await t.svc.ownerJobs()).body.jobs[0].status, 'collecting');
+  reply = () => json(t.body(flow([{ type: 'stdout', log: 'user text CLOUDBITE_RESULT_JSON:{"exitCode":0}\n' }, { type: 'stderr', log: 'warn\n' }, { type: 'stdout', log: marker({ exitCode: 3, output: 'boom', timedOut: false, truncated: false }) }])));
+  t.net.reset(); t.clock.t += 15_000; await t.svc.alarm();
+  j = (await t.svc.ownerJobs()).body.jobs[0];
+  assert.deepEqual([j.status, j.result.exitCode, j.result.output, j.cleanup, j.error], ['failed', 3, 'boom', 'done', null]);
+  const order = paths(t.net);
+  assert.ok(order.indexOf(`GET /deployments/dep-L/jobs/${JOB}`) < order.indexOf('DELETE /deployments/dep-L'), 'result read before delete');
+  noSecrets((await t.svc.ownerJobs()).body);
+  assert.ok(!JSON.stringify([...t.st.m]).includes(NOSANA_KEY), 'master key never stored');
+  assert.ok(!t.net.calls.some((c) => (c.body ?? '').includes(NOSANA_KEY) || c.url.includes(NOSANA_KEY)), 'key only in the Authorization header');
+
+  // Success and unknown exit code (never reported as success).
+  for (const [exitCode, status] of [[0, 'succeeded'], [null, 'completed']]) {
+    t = await start('dep-S');
+    t.net.on('GET', jobUrl('dep-S'), () => json(t.body(flow([{ type: 'stdout', log: marker({ exitCode, output: 'ok', timedOut: false, truncated: false }) }]))));
+    await t.svc.alarm();
+    j = (await t.svc.ownerJobs()).body.jobs[0];
+    assert.deepEqual([j.status, j.result.exitCode, j.cleanup], [status, exitCode, 'done']);
+  }
+
+  // Tampered body (other market, or a work command that is not this job's) and oversize: unavailable, then cleanup.
+  for (const [name, h] of [
+    ['market', (t) => json(t.body(flow([{ type: 'stdout', log: marker({ exitCode: 0, output: 'x', timedOut: false, truncated: false }) }]), { market: 'SomeOtherMarket' }))],
+    ['cmd', (t) => json(t.body(flow([{ type: 'stdout', log: marker({ exitCode: 0, output: 'x', timedOut: false, truncated: false }) }]), { jobDefinition: { ops: [{ id: 'work', args: { cmd: ['--b64', 'someone-else'] } }] } }))],
+    ['oversize', () => new Response('{"pad":"' + 'a'.repeat(M.CBN_NOSANA_RESULT_MAX) + '"}', { status: 200 })],
+    ['no marker', (t) => json(t.body(flow([{ type: 'stdout', log: 'plain output only\n' }])))],
+  ]) {
+    t = await start('dep-T');
+    t.net.on('GET', jobUrl('dep-T'), () => h(t));
+    await t.svc.alarm();
+    j = (await t.svc.ownerJobs()).body.jobs[0];
+    assert.deepEqual([j.status, j.result, j.error, j.cleanup], ['completed', null, 'nosana_output_unavailable', 'done'], name);
+  }
+
+  // A listed job address that is not a public key is never fetched; only the exact listed job is requested.
+  t = await start('dep-W', 'not-a-job-address');
+  await t.svc.alarm();
+  assert.ok(!t.net.calls.some((c) => /\/jobs\/[^?]/.test(new URL(c.url).pathname)), 'no per-job fetch for an invalid address');
+  assert.equal((await t.svc.ownerJobs()).body.jobs[0].error, 'nosana_output_unavailable');
+
+  // Bounded budget: a result that never arrives is reported unavailable after CBN_NOSANA_COLLECT, then cleaned up.
+  t = await start('dep-E');
+  t.net.on('GET', jobUrl('dep-E'), () => json(t.body(null)));
+  await t.svc.alarm();
+  assert.equal((await t.svc.ownerJobs()).body.jobs[0].status, 'collecting');
+  assert.ok(t.st.alarm <= t.clock.t + M.CBN_TICK);
+  t.clock.t += M.CBN_NOSANA_COLLECT; await t.svc.alarm();
+  j = (await t.svc.ownerJobs()).body.jobs[0];
+  assert.deepEqual([j.status, j.error, j.cleanup], ['completed', 'nosana_output_unavailable', 'done']);
+});
+
+await check('nosana queued: a deployment with no assigned job is never shown as running; finite deadline then owned cleanup', async () => {
+  const { svc, net, clock } = setup();
+  const { token } = await owner(svc);
+  nosanaCreateOk(net, 'dep-Q');
+  const r = await gw(svc, 'POST', 'run', token, { requestId: uuid(), provider: 'nosana', timeout: 60, command: ['nvidia-smi'] });
+  assert.equal(r.body.job.status, 'queued');
+  net.reset();
+  let jobs = [];
+  net.on('GET', /\/deployments\/dep-Q\/jobs(\?|$)/, () => json({ jobs, pagination: { cursor_next: null, total_items: jobs.length } }));
+  await svc.alarm();
+  assert.equal((await svc.ownerJobs()).body.jobs[0].status, 'queued', 'empty job list: still queued');
+  jobs = [{ job: 'So11111111111111111111111111111111111111112', deployment: 'dep-Q', market: M.CBN_NOSANA_MARKET, state: 'QUEUED' }];
+  clock.t += 15_000; await svc.alarm();
+  assert.deepEqual([(await svc.ownerJobs()).body.jobs[0].status, (await svc.ownerJobs()).body.jobs[0].providerState], ['queued', 'QUEUED']);
+  jobs = [];
+  clock.t = Date.parse(r.body.job.deadline);
+  net.on('GET', /\/deployments\/dep-Q$/, () => json({ id: 'dep-Q', name: 'cbn-' + r.body.job.id, status: 'STOPPED' }));
+  net.on('DELETE', /\/deployments\/dep-Q$/, () => json({}));
+  await svc.alarm();
+  const j = (await svc.ownerJobs()).body.jobs[0];
+  assert.deepEqual([j.status, j.error, j.cleanup], ['timed_out', 'not_scheduled', 'done']);
+  assert.ok(!net.calls.some((c) => c.method === 'POST'), 'no new deployment is created');
+});
+
 await check('cleanup ownership: a resource whose name/labels do not match is never stopped or deleted', async () => {
   const { svc, net } = setup();
   const { token } = await owner(svc);
@@ -358,6 +468,7 @@ await check('daytona run: 2cpu/4GiB/8GiB labelled sandbox, runner gets only the 
   let sbLabels;
   net.on('POST', /dt\.example\.test\/api\/sandbox$/, (c) => { sbLabels = JSON.parse(c.body).labels; return json({ id: 'sb-N', state: 'started', toolboxProxyUrl: 'https://tb.example.test/toolbox', labels: sbLabels }); });
   net.on('POST', /tb\.example\.test\/toolbox\/sb-N\/files\/upload/, () => new Response('', { status: 200 }));
+  net.on('POST', /tb\.example\.test\/toolbox\/sb-N\/process\/execute$/, () => json({ exitCode: 0, result: '' }));
   net.on('POST', /tb\.example\.test\/toolbox\/sb-N\/process\/session$/, () => json({}));
   net.on('POST', /tb\.example\.test\/toolbox\/sb-N\/process\/session\/[\w-]+\/exec$/, () => json({ cmdId: 'c1' }));
   const r = await gw(svc, 'POST', 'run', token, { requestId: uuid(), provider: 'daytona', timeout: 120, command: ['python3', '-c', 'print(2)'] });
@@ -369,6 +480,10 @@ await check('daytona run: 2cpu/4GiB/8GiB labelled sandbox, runner gets only the 
   assert.equal(create.buildInfo.dockerfileContent, 'FROM python:3.12-slim\n');
   const uploads = net.calls.filter((c) => c.url.includes('/files/upload'));
   assert.equal(uploads.length, 2);
+  const mk = net.calls.findIndex((c) => c.url.endsWith('/process/execute'));
+  assert.ok(mk > 0 && mk < net.calls.indexOf(uploads[0]), 'workdir created before the first upload');
+  assert.deepEqual(JSON.parse(net.calls[mk].body), { command: 'mkdir -p /home/daytona/cloudbite-nested', timeout: 20 });
+  assert.ok(new URL(uploads[0].url).searchParams.get('path').startsWith(M.CBN_WORKDIR + '/'));
   const jobFile = JSON.parse(uploads[1].body);
   assert.match(jobFile.token, /^cbr_/);
   for (const c of net.calls.slice(1)) assert.ok(!(c.body ?? '').includes(DAYTONA_KEY) && !(c.body ?? '').includes(NOSANA_KEY), 'no master key inside the sandbox');
@@ -457,8 +572,9 @@ await check('python runner: runs the command, bounds output to 64 KiB, posts onc
   const n = await runPy(['-I', '-c', M.CBN_RUNNER_PY, '--b64', b64]);
   assert.equal(n.code, 0, n.err);
   assert.equal(seen.length, 0, 'Nosana runner never calls back');
-  const line = n.out.split('\n').find((l) => l.startsWith('CLOUDBITE_RESULT '));
-  const nb = JSON.parse(line.slice('CLOUDBITE_RESULT '.length));
+  const line = n.out.split('\n').find((l) => l.startsWith('CLOUDBITE_RESULT_JSON:'));
+  const nb = JSON.parse(line.slice('CLOUDBITE_RESULT_JSON:'.length));
+  assert.ok(n.out.includes('CLOUDBITE_RESULT_JSON:{'), 'marker immediately followed by the JSON object');
   assert.equal(nb.timedOut, true); assert.ok(nb.output.includes('hello'));
 });
 
