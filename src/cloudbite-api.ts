@@ -6,7 +6,8 @@ import { CLOUDBITE_POOL } from './cloudbite-pool';
 import { CLOUDBITE_CSS, CLOUDBITE_CSS_PATH, CLOUDBITE_HTML, CLOUDBITE_JS, CLOUDBITE_JS_PATH } from './cloudbite-page';
 import { CLOUDBITE_ACCESS_HTML, CLOUDBITE_ACCESS_CSS, CLOUDBITE_ACCESS_QR, CLOUDBITE_REQUEST_HTML, CLOUDBITE_REQUESTS_HTML, CLOUDBITE_ACCESS_JS } from './cloudbite-access-page';
 import { CB_ACTIVITY_BODY_MAX, CB_COMPLETE_BODY_MAX, CB_CREATE_BODY_MAX, CB_INFERENCE_BODY_MAX, CB_MAX_EXPERTS, cloudbiteMissing } from './cloudbite-config';
-import { cbProjectId, isCbFail } from './cloudbite-project';
+import { cbHash, cbProjectId, isCbFail } from './cloudbite-project';
+import { JEV_MODEL, routingReady, routingQuery, isRoutingFailure } from './cloudbite-routing';
 import { CB_OPERATOR_PREFIX, verifyCloudbiteOperator } from './cloudbite-operator';
 import { boundedText } from './cloudbite-inference';
 import { isInvalid, PROJECT_ID, RUN_ID, validateBrief } from './cloudbite-validate';
@@ -37,7 +38,8 @@ export function cloudbitePage(path: string, sec: Record<string, string>): Respon
 
 export function cloudbiteBootstrap(env: Env): CloudbiteBootstrap {
   const missing = cloudbiteMissing(env, CLOUDBITE_EXPERTS.length);
-  return { experts: [...CLOUDBITE_EXPERTS], configuration: { liveReady: missing.length === 0, missing, maxExperts: CB_MAX_EXPERTS, ...(env.CLOUDBITE_HISTORY ? { historyRetentionDays: 30 } : {}) }, pool: CLOUDBITE_POOL };
+  return { experts: [...CLOUDBITE_EXPERTS], configuration: { liveReady: missing.length === 0, missing, maxExperts: CB_MAX_EXPERTS, ...(env.CLOUDBITE_HISTORY ? { historyRetentionDays: 30 } : {}),
+    routing: { provider: 'typesafe', model: JEV_MODEL, ready: routingReady(env.TYPESAFE_API_KEY), maxExperts: CB_MAX_EXPERTS } }, pool: CLOUDBITE_POOL };
 }
 
 function bearer(req: Request) {
@@ -100,6 +102,27 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
 
   const strictOrigin = () => req.headers.get('origin') === env.ORIGIN;
 
+  if (path === '/api/cloudbite/route') {
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
+    if (!strictOrigin()) return json({ error: 'bad origin' }, 403);
+    if (!(req.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) return json({ error: 'content-type must be application/json' }, 415);
+    const b = await readJson(req, CB_CREATE_BODY_MAX); if ('error' in b) return json({ error: b.error }, b.status);
+    const owner = await ownerAuth();
+    const visitor = hasAdmin || owner ? null : await visitorGrant.check(req, env);
+    if (!owner && !visitor) return json({ error: 'admin session or approved access required' }, 401);
+    const query = routingQuery(b.ok); if (isRoutingFailure(query)) return json({ error: query.error }, query.status);
+    if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);
+    const session = visitor ? await accessSession(req, env) : null;
+    if (visitor && session?.request?.id !== visitor.id) return json({ error: 'approved access required' }, 401);
+    const max = Math.max(1, Math.min(CB_MAX_EXPERTS, session?.request?.maxExperts ?? CB_MAX_EXPERTS));
+    const router = ns.getByName('routing:' + await cbHash(owner ? 'owner' : 'visitor:' + visitor!.id));
+    if (visitor && !session?.canCreate) {
+      const cached = await router.routingRead(query, max);
+      return isCbFail(cached) ? json({ error: 'visitor project quota exhausted' }, 429) : json(cached);
+    }
+    return result(json, await router.routingPlan(query, max));
+  }
+
   if (path === '/api/cloudbite/projects') {
     if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
     if (!strictOrigin()) return json({ error: 'bad origin' }, 403);
@@ -112,7 +135,25 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     const ownerSession = !hasAdmin && await ownerCookieValid(req, env, state);
     const visitor = hasAdmin || ownerSession ? null : await visitorGrant.check(req, env);
     if (hasAdmin ? !await isOwner(admin) : !ownerSession && !visitor) return json({ error: 'admin session required' }, 401);
-    const brief = validateBrief(b.ok, visitor ? CLOUDBITE_EXPERTS : undefined);
+    let input = b.ok;
+    let routing: import('./cloudbite-contract').CloudbiteRoutingDecision | undefined;
+    if (input && typeof input === 'object' && !Array.isArray(input) && 'routing' in input) {
+      const { routing: kind, ...raw } = input as Record<string, unknown>;
+      if (kind !== 'jev') return json({ error: 'unknown routing mode' }, 400);
+      const query = routingQuery({ title: raw.title, objective: raw.objective, context: raw.context, requestId: raw.requestId });
+      if (isRoutingFailure(query)) return json({ error: query.error }, query.status);
+      if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);
+      const session = visitor ? await accessSession(req, env) : null;
+      if (visitor && session?.request?.id !== visitor.id) return json({ error: 'approved access required' }, 401);
+      const max = Math.max(1, Math.min(CB_MAX_EXPERTS, session?.request?.maxExperts ?? CB_MAX_EXPERTS));
+      const router = ns.getByName('routing:' + await cbHash(visitor ? 'visitor:' + visitor.id : 'owner'));
+      const chosen = await router.routingRead(query, max);
+      if (isCbFail(chosen)) return json({ error: chosen.error }, chosen.status);
+      if (raw.expertIds !== undefined && JSON.stringify(raw.expertIds) !== JSON.stringify(chosen.expertIds)) return json({ error: 'expert selection differs from the Jev routing decision' }, 409);
+      routing = chosen;
+      input = { ...raw, expertIds: chosen.expertIds };
+    }
+    const brief = validateBrief(input, visitor ? CLOUDBITE_EXPERTS : undefined);
     if (isInvalid(brief)) return json({ error: brief.invalid }, 400);
     if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);
     if (brief.mode === 'live') {
@@ -138,7 +179,7 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
       if (isCbFail(slot)) return refused(slot.status, slot.error);
     }
     const history = await prepareHistory(req, env, visitor?.cred ?? null);
-    const created = await ns.getByName(id).create(id, brief, history?.actor);
+    const created = await ns.getByName(id).create(id, brief, history?.actor, routing);
     // A failed first create must not hold a live slot. (Idempotent retries of an existing project return success.)
     if (isCbFail(created) && brief.mode === 'live' && created.status !== 409) await ns.getByName('registry').registryRelease(id);
     if (isCbFail(created)) {

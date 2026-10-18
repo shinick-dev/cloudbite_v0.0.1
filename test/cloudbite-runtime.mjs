@@ -114,6 +114,12 @@ globalThis.fetch = async (u, init = {}) => {
   const url = new URL(typeof u === 'string' ? u : u.url), method = init.method ?? 'GET', w = W;
   w.fetches.push([url.host, method, url.pathname]);
   const auth = new Headers(init.headers).get('authorization');
+  if (url.host === 'api.typesafe.ai') {
+    assert.equal(url.pathname, '/v1/systemone'); assert.equal(auth, 'Bearer TYPESAFE-TEST-KEY');
+    const req = JSON.parse(init.body); (w.jev ??= []).push(req);
+    if (w.jevFail) return new Response('TYPESAFE-TEST-KEY private error', { status: 500 });
+    return jr({ model: 'jev-1.13.0', answers: Object.fromEntries(Object.keys(req.questions).map(id => [id, { type: 'noul', noul: id === 'cb-role-022' ? 0.97 : 0.02 }])) });
+  }
   if (url.host === 'nosana.fake') {
     assert.equal(auth, 'Bearer ' + SECRETS[1]);
     const req = JSON.parse(init.body);
@@ -535,6 +541,73 @@ await check('validators: workspace paths and opinion schema', async () => {
   for (const bad of [{ title: 't'.repeat(B.title + 1) }, { objective: 'o'.repeat(B.objective + 1) }, { context: 'c'.repeat(B.context + 1) }, { requestId: 'r'.repeat(B.requestIdMin - 1) }, { requestId: 'r'.repeat(B.requestId + 1) }])
     assert.ok(M.isInvalid(M.validateBrief({ ...ok, ...bad })), Object.keys(bad)[0]);
   assert.ok(M.CB_RUNNER_PY.includes("os.remove(CAP_FILE)"));
+});
+
+await check('Jev routing API: authenticated, actor-bound, cached and authoritative before project creation', async () => {
+  const w = freshWorld({ M: REAL, env: { TYPESAFE_API_KEY: 'TYPESAFE-TEST-KEY' } });
+  const query = { title: 'Frontend release', objective: 'Review the browser state flow.', context: '', requestId: 'jev-api-test-001' };
+  assert.equal((await call(w, 'POST', '/api/cloudbite/route', { body: query })).status, 403);
+  assert.equal((await call(w, 'POST', '/api/cloudbite/route', { body: query, headers: { origin: w.env.ORIGIN } })).status, 401);
+  assert.equal((await call(w, 'POST', '/api/cloudbite/route', { body: query, headers: { ...admin, 'x-admin-token': 'invalid' } })).status, 401);
+  assert.equal(w.jev?.length ?? 0, 0);
+  const routed = await call(w, 'POST', '/api/cloudbite/route', { body: query, headers: admin });
+  assert.equal(routed.status, 200, routed.text); assert.deepEqual(routed.j.expertIds, ['cb-role-022']);
+  assert.equal(routed.j.evaluatedCount, 100); assert.equal(w.jev.length, 1); assert.equal(w.posts, 0); assert.equal(w.nosana.length, 0);
+  assert.equal((await call(w, 'POST', '/api/cloudbite/route', { body: query, headers: admin })).status, 200);
+  assert.equal(w.jev.length, 1, 'same actor/query/request does not incur a second Jev call');
+  const create = { ...query, mode: 'demo', routing: 'jev', expertIds: routed.j.expertIds };
+  const changed = await call(w, 'POST', '/api/cloudbite/projects', { body: { ...create, objective: 'Different question' }, headers: admin });
+  assert.equal(changed.status, 409);
+  assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: { ...create, expertIds: ['agency-product-manager'] }, headers: admin })).status, 409);
+  const created = await call(w, 'POST', '/api/cloudbite/projects', { body: create, headers: admin });
+  assert.equal(created.status, 201, created.text); assert.deepEqual(created.j.project.brief.expertIds, ['cb-role-022']);
+  assert.equal(created.j.project.routing.queryHash, routed.j.queryHash); assert.equal(created.j.project.routing.model, 'jev-1.13.0');
+  const retry = await call(w, 'POST', '/api/cloudbite/projects', { body: create, headers: admin });
+  assert.equal(retry.status, 201); assert.equal(retry.j.project.id, created.j.project.id); assert.equal(w.jev.length, 1);
+  assert.equal(w.posts, 0); assert.equal(w.nosana.length, 0, 'browser demo remains simulated after actual Jev routing');
+  const boot = await call(w, 'GET', '/api/cloudbite/bootstrap');
+  assert.equal(boot.j.configuration.routing.ready, true); assert.ok(!JSON.stringify(boot.j).includes('TYPESAFE-TEST-KEY'));
+});
+
+await check('Jev routing API: missing key, provider error and direct auto-create do not start jobs or leak keys', async () => {
+  const w = freshWorld({ M: REAL, env: { TYPESAFE_API_KEY: 'TYPESAFE-TEST-KEY' }, jevFail: true });
+  const query = { title: 'Frontend release', objective: 'Review browser state.', context: '', requestId: 'jev-api-test-002' };
+  const noRoute = await call(w, 'POST', '/api/cloudbite/projects', { body: { ...query, mode: 'live', routing: 'jev' }, headers: admin });
+  assert.equal(noRoute.status, 409);
+  const failed = await call(w, 'POST', '/api/cloudbite/route', { body: query, headers: admin });
+  assert.equal(failed.status, 503); assert.ok(!failed.text.includes('TYPESAFE-TEST-KEY')); assert.equal(w.posts, 0); assert.equal(w.nosana.length, 0);
+  delete w.env.TYPESAFE_API_KEY;
+  assert.equal((await call(w, 'POST', '/api/cloudbite/route', { body: { ...query, requestId: 'jev-api-test-003' }, headers: admin })).status, 503);
+  assert.equal(w.jev.length, 1, 'no provider call when key is missing');
+});
+
+await check('Jev visitor routing: approved actor isolation, exhausted-quota cache-only and invalid-header precedence', async () => {
+  const w = freshWorld({ M: REAL, env: { TYPESAFE_API_KEY: 'TYPESAFE-TEST-KEY' } });
+  const credA = 'cbv_' + 'A'.repeat(43), credB = 'cbv_' + 'B'.repeat(43);
+  const hash = s => createHash('sha256').update(s).digest('hex');
+  let quotaLeft = true, reserves = 0;
+  const identity = cred => cred === hash(credA) ? 'cb-access-a' : cred === hash(credB) ? 'cb-access-b' : null;
+  w.env.CLOUDBITE_ACCESS = { getByName: () => ({
+    grant: async cred => identity(cred) ? { id: identity(cred) } : { error: 'not approved', status: 401 },
+    refundCandidate: async cred => ({ scoped: [], session: { request: { id: identity(cred), status: 'approved', maxExperts: 2, maxProjects: 10, usedProjects: quotaLeft ? 0 : 10 }, canCreate: quotaLeft } }),
+    reserve: async cred => { reserves++; return { id: identity(cred), fresh: true }; },
+    confirm: async () => ({ ok: true }),
+  }) };
+  const query = { title: 'Visitor frontend review', objective: 'Review browser state.', context: '', requestId: 'jev-visitor-001' };
+  const visitorHeaders = cookie => ({ origin: w.env.ORIGIN, cookie: '__Host-cb-access=' + cookie });
+  const headersA = visitorHeaders(credA), headersB = visitorHeaders(credB);
+  const routed = await call(w, 'POST', '/api/cloudbite/route', { body: query, headers: headersA });
+  assert.equal(routed.status, 200, routed.text); assert.equal(reserves, 0); assert.equal(w.posts, 0);
+  const raw = { ...query, mode: 'demo', routing: 'jev', expertIds: routed.j.expertIds };
+  assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: raw, headers: headersB })).status, 409, 'another actor cannot reuse the cached plan');
+  assert.equal((await call(w, 'POST', '/api/cloudbite/route', { body: query, headers: { ...headersA, 'x-admin-token': 'invalid' } })).status, 401);
+  quotaLeft = false;
+  assert.equal((await call(w, 'POST', '/api/cloudbite/route', { body: query, headers: headersA })).status, 200, 'free cache read can recover an in-flight request');
+  assert.equal((await call(w, 'POST', '/api/cloudbite/route', { body: { ...query, requestId: 'jev-visitor-new' }, headers: headersA })).status, 429);
+  assert.equal(w.jev.length, 1); assert.equal(reserves, 0);
+  quotaLeft = true;
+  const created = await call(w, 'POST', '/api/cloudbite/projects', { body: raw, headers: headersA });
+  assert.equal(created.status, 201, created.text); assert.equal(reserves, 1); assert.deepEqual(created.j.project.brief.expertIds, ['cb-role-022']);
 });
 
 await check('real catalogue: actual persona workspace -> python runner -> flat out/result.json -> server validation and artifact', async () => {

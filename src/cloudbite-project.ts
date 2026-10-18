@@ -28,6 +28,8 @@ import { chatMessages, nosanaChat } from './cloudbite-inference';
 import { CB_RUNNER_PY, runnerCapability } from './cloudbite-runner';
 import { historyIndex, historyRow } from './cloudbite-history';
 import { HISTORY_TTL, HISTORY_ISSUES, type HistoryIdentity, type HistoryFeedback, type HistoryDetail } from './cloudbite-history-contract';
+import { RoutingSession } from './cloudbite-routing';
+import type { CloudbiteRoutingQuery, CloudbiteRoutingDecision } from './cloudbite-contract';
 
 export type CbFail = { error: string; status: number };
 const fail = (status: number, error: string): CbFail => ({ error, status });
@@ -52,6 +54,7 @@ interface ProjectRecord {
   createdAt: number; updatedAt: number; finishedAt?: number; purgeAt: number;
   tokens: string[]; runs: string[]; released?: boolean;
   history?: HistoryIdentity; feedback?: HistoryFeedback[];
+  routing?: CloudbiteRoutingDecision;
 }
 interface CleanupEntry { run: string; sandboxId?: string; label?: string; tries: number; nextAt: number; done?: boolean; stuck?: boolean }
 
@@ -73,6 +76,13 @@ export async function cbProjectId(requestId: string) { return 'cb' + (await cbHa
 const clean = (s: string, max: number) => s.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, ' ').slice(0, max);
 
 export class CloudbiteProject extends DurableObject<Env> {
+  // Actor-specific router instances use the existing binding, not project records or sandbox capacity.
+  async routingPlan(query: CloudbiteRoutingQuery, max: number) {
+    return new RoutingSession(this.ctx.storage, this.catalogue(), this.env.TYPESAFE_API_KEY, () => this.clock()).plan(query, max);
+  }
+  async routingRead(query: CloudbiteRoutingQuery, max: number) {
+    return new RoutingSession(this.ctx.storage, this.catalogue(), this.env.TYPESAFE_API_KEY, () => this.clock()).read(query, max);
+  }
   // ── overridable seams (tests inject a catalogue/clock; production uses the persona module) ──
   protected catalogue(): readonly ExpertDefinition[] { return CLOUDBITE_EXPERTS; }
   protected workspace(expert: ExpertDefinition, brief: ProjectBrief) { return buildExpertWorkspace(expert, brief); }
@@ -103,7 +113,7 @@ export class CloudbiteProject extends DurableObject<Env> {
     return { p, experts: p.runs.map((r) => m.get(`expert:${r}`)!).filter(Boolean) };
   }
   private view(p: ProjectRecord, experts: ExpertRecord[]): ProjectRun {
-    return { id: p.id, brief: p.brief, status: p.status, experts: experts.map((e) => e.run), createdAt: p.createdAt, updatedAt: p.updatedAt };
+    return { id: p.id, brief: p.brief, status: p.status, experts: experts.map((e) => e.run), createdAt: p.createdAt, updatedAt: p.updatedAt, ...(p.routing ? { routing: p.routing } : {}) };
   }
   private log(e: ExpertRecord, kind: ExpertActivity['kind'], message: string) {
     const at = this.clock();
@@ -143,7 +153,7 @@ export class CloudbiteProject extends DurableObject<Env> {
   }
 
   // ── create / read / cancel / artifact (Worker has already checked admin, Origin and body size) ──
-  async create(projectId: string, rawBrief: unknown, historyActor?: string): Promise<{ project: ProjectRun; accessToken: string } | CbFail> {
+  async create(projectId: string, rawBrief: unknown, historyActor?: string, routing?: CloudbiteRoutingDecision): Promise<{ project: ProjectRun; accessToken: string } | CbFail> {
     if (!PROJECT_ID.test(projectId)) return fail(400, 'invalid project id');
     const catalogue = this.catalogue();
     if (!catalogue.length) return fail(503, 'expert catalogue is not integrated yet');
@@ -188,7 +198,7 @@ export class CloudbiteProject extends DurableObject<Env> {
       this.log(rec, 'status', brief.mode === 'demo' ? '[demo] queued — simulated run, no sandbox or model is contacted' : 'queued for an independent Daytona sandbox');
       return rec;
     });
-    const p: ProjectRecord = { id: projectId, brief, briefHash, status: 'running', createdAt: now, updatedAt: now, purgeAt: now + (history ? HISTORY_TTL : CB_RETENTION), tokens: [tokenHash], runs, ...(history ? { history } : {}) };
+    const p: ProjectRecord = { id: projectId, brief, briefHash, status: 'running', createdAt: now, updatedAt: now, purgeAt: now + (history ? HISTORY_TTL : CB_RETENTION), tokens: [tokenHash], runs, ...(history ? { history } : {}), ...(routing ? { routing } : {}) };
     await this.ctx.storage.put({ project: p, ...Object.fromEntries(experts.map((e) => [`expert:${e.run.id}`, e])) });
     await this.ctx.storage.setAlarm(now);
     return { project: this.view(p, experts), accessToken: token };
@@ -385,6 +395,10 @@ export class CloudbiteProject extends DurableObject<Env> {
 
   // ── alarm: advance experts, clean up owned sandboxes, finalize, purge ──
   async alarm() {
+    if (await this.ctx.storage.get('routing:instance')) {
+      await new RoutingSession(this.ctx.storage, this.catalogue(), this.env.TYPESAFE_API_KEY, () => this.clock()).cleanup();
+      return;
+    }
     await this.tick();
   }
 

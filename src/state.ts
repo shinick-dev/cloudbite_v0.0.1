@@ -126,6 +126,7 @@ export interface Env {
   CLOUDBITE_NOSANA_BASE_URL?: string;   // OpenAI 호환 …/v1
   CLOUDBITE_NOSANA_API_KEY?: string;    // Worker secret
   CLOUDBITE_NOSANA_MODEL?: string;
+  TYPESAFE_API_KEY?: string;          // Cloudbite Jev router only; Worker secret, never sent to the browser
   CLOUDBITE_GATEWAY_URL?: string;       // 샌드박스가 /p/_cloudbite/worker/ 로 부르는 이 Worker 의 workers.dev 주소
   CLOUDBITE_ALLOW_HTTP?: string;        // dev 전용: http://localhost 주소 허용
   CLOUDBITE_OPERATOR_TOKEN_HASH?: string; // Worker secret: 임시 Cloudbite 운영자 토큰의 SHA-256 (소문자 hex) — src/cloudbite-operator.ts

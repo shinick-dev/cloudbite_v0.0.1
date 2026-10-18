@@ -20,6 +20,11 @@ export interface ProjectBrief {
   mode: 'demo' | 'live';
   requestId: string;
 }
+export interface CloudbiteRoutingQuery { title: string; objective: string; context: string; requestId: string }
+export interface CloudbiteRoutingDecision {
+  provider: 'typesafe'; model: string; policyVersion: string; evaluatedCount: number; threshold: number;
+  expertIds: string[]; matches: Array<{ expertId: string; relevance: number }>; queryHash: string; expiresAt: number;
+}
 export interface ExpertOpinion {
   direction: OpinionDirection;
   confidence: number;
@@ -54,10 +59,13 @@ export interface ProjectRun {
   experts: ExpertRun[];
   createdAt: number;
   updatedAt: number;
+  /** Observed routing result at creation; expiresAt refers to the pre-create decision cache. */
+  routing?: CloudbiteRoutingDecision;
 }
 export interface CloudbiteBootstrap {
   experts: ExpertDefinition[];
-  configuration: { liveReady: boolean; missing: string[]; maxExperts: number; historyRetentionDays?: number };
+  configuration: { liveReady: boolean; missing: string[]; maxExperts: number; historyRetentionDays?: number;
+    routing?: { provider: 'typesafe'; model: string; ready: boolean; maxExperts: number } };
   access?: import('./cloudbite-access-contract').CloudbiteAccessSession;
   /** Optional 100-role planning catalogue. Only `available` entries map to runnable `experts`; all are unvalidated. */
   pool?: import('./cloudbite-pool').ExpertPool;
