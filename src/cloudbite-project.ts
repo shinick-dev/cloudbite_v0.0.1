@@ -7,6 +7,8 @@
 //   cleanup:<run>:<kind>:<ref>  CleanupEntry — owned sandbox id or creation label to delete; one key each (no lost updates)
 //                               and the Daytona account (+ credential binding) that owns it
 //   artifact:<run>:<path>       collected text artifact (≤ 64 KiB)
+//   crossreview                 CrossReviewRecord — opt-in second pass (src/cloudbite-cross-review.ts); never part of
+//                               the project/expert records, so original opinions, statuses and confidence stay untouched
 // Registry instance: reg → { [projectId]: expiresAt }
 //
 // Execution state machine per expert (alarm-driven, every external call bracketed by a claim):
@@ -18,7 +20,7 @@
 // call and cleanup for it uses that account only. Records without an account are legacy and resolve to primary.
 import { DurableObject } from 'cloudflare:workers';
 import type { Env } from './state';
-import type { ExpertActivity, ExpertArtifact, ExpertDefinition, ExpertRun, ProjectBrief, ProjectRun, ProjectStatus } from './cloudbite-contract';
+import type { CrossReviewReport, ExpertActivity, ExpertArtifact, ExpertDefinition, ExpertRun, ProjectBrief, ProjectCrossReview, ProjectRun, ProjectStatus } from './cloudbite-contract';
 import { CLOUDBITE_EXPERTS, buildExpertWorkspace } from './cloudbite-personas';
 import {
   CB_ACTIVITY_MAX, CB_ACTIVITY_POSTS, CB_ARTIFACT_FILES, CB_ARTIFACT_MAX, CB_CAPABILITY_TTL, CB_CLAIM_STALE, CB_CLEANUP_MAX_TRIES,
@@ -27,7 +29,8 @@ import {
 } from './cloudbite-config';
 import { artifactPath, extraArtifactPath, isInvalid, PROJECT_ID, validateBrief, validateResult, validateWorkspace } from './cloudbite-validate';
 import { CbDaytonaError, CB_LABEL_CLAIM, CB_LABEL_PROJECT, CB_LABEL_RUN, cbCreateSandbox, cbDeleteSandbox, cbDownload, cbExec, cbFindByLabels, cbGetSandbox, cbStartRunner, cbUpload, type CbSandbox } from './cloudbite-daytona';
-import { chatMessages, nosanaChat } from './cloudbite-inference';
+import { chatMessages, nosanaChat, type ChatMessage, type InferenceResult } from './cloudbite-inference';
+import { CB_CROSS_REVIEW_STALE, parseReviewReply, peersFor, reviewMessages, reviewSnapshot, selectReviewers, type CompletedOpinion } from './cloudbite-cross-review';
 import { CB_RUNNER_PY, RUNNER_DIAGNOSTIC_MAX, runnerCapability, runnerFailureMessage } from './cloudbite-runner';
 import { historyIndex, historyRow } from './cloudbite-history';
 import { HISTORY_TTL, HISTORY_ISSUES, type HistoryIdentity, type HistoryFeedback, type HistoryDetail } from './cloudbite-history-contract';
@@ -60,6 +63,9 @@ interface ProjectRecord {
   history?: HistoryIdentity; feedback?: HistoryFeedback[];
   routing?: CloudbiteRoutingDecision;
 }
+/** claim = the attempt that may write results; reviewers = the calls it reserved (never retried). */
+interface CrossReviewRecord { review: ProjectCrossReview; claim: string; reviewers: string[] }
+const CROSS_REVIEW = 'crossreview';
 interface CleanupEntry { run: string; sandboxId?: string; label?: string; tries: number; nextAt: number; done?: boolean; stuck?: boolean; account?: CbAccountId; binding?: string }
 type Account = CbDaytonaAccount & { binding: string };
 type Owner = { account: CbAccountId; binding: string };
@@ -99,6 +105,8 @@ export class CloudbiteProject extends DurableObject<Env> {
   protected workspace(expert: ExpertDefinition, brief: ProjectBrief) { return buildExpertWorkspace(expert, brief); }
   protected clock() { return Date.now(); }
   protected config(): CloudbiteConfig | null { return cloudbiteConfig(this.env); }
+  /** The one provider call of a cross-review reviewer (tests replace it to observe or fail calls). */
+  protected reviewInference(cfg: CloudbiteConfig, messages: ChatMessage[]): Promise<InferenceResult> { return nosanaChat(cfg.nosana, messages); }
   private async accounts(cfg: CloudbiteConfig | null): Promise<Account[]> {
     return cfg ? Promise.all(cfg.daytonaAccounts.map(async (a) => ({ ...a, binding: await cbAccountBinding(a) }))) : [];
   }
@@ -120,14 +128,16 @@ export class CloudbiteProject extends DurableObject<Env> {
   }
 
   // ── storage helpers ──
-  private async load(): Promise<{ p: ProjectRecord; experts: ExpertRecord[] } | null> {
+  private async load(): Promise<{ p: ProjectRecord; experts: ExpertRecord[]; cr?: CrossReviewRecord } | null> {
     const p = await this.ctx.storage.get<ProjectRecord>('project');
     if (!p) return null;
-    const m = await this.ctx.storage.get<ExpertRecord>(p.runs.map((r) => `expert:${r}`));
-    return { p, experts: p.runs.map((r) => m.get(`expert:${r}`)!).filter(Boolean) };
+    const m = await this.ctx.storage.get<ExpertRecord | CrossReviewRecord>([...p.runs.map((r) => `expert:${r}`), CROSS_REVIEW]);
+    return { p, experts: p.runs.map((r) => m.get(`expert:${r}`) as ExpertRecord).filter(Boolean), cr: m.get(CROSS_REVIEW) as CrossReviewRecord | undefined };
   }
-  private view(p: ProjectRecord, experts: ExpertRecord[]): ProjectRun {
-    return { id: p.id, brief: p.brief, status: p.status, experts: experts.map((e) => e.run), createdAt: p.createdAt, updatedAt: p.updatedAt, ...(p.routing ? { routing: p.routing } : {}) };
+  /** Public projection. Optional views (routing, crossReview, …) are appended here and only when present. */
+  private view(p: ProjectRecord, experts: ExpertRecord[], cr?: CrossReviewRecord): ProjectRun {
+    return { id: p.id, brief: p.brief, status: p.status, experts: experts.map((e) => e.run), createdAt: p.createdAt, updatedAt: p.updatedAt, ...(p.routing ? { routing: p.routing } : {}),
+      ...(cr ? { crossReview: cr.review } : {}) };
   }
   private log(e: ExpertRecord, kind: ExpertActivity['kind'], message: string) {
     const at = this.clock();
@@ -200,7 +210,7 @@ export class CloudbiteProject extends DurableObject<Env> {
       existing.tokens.push(tokenHash);
       await this.ctx.storage.put('project', existing);
       const s = (await this.load())!;
-      return { project: this.view(s.p, s.experts), accessToken: token };
+      return { project: this.view(s.p, s.experts, s.cr), accessToken: token };
     }
     const runs = brief.expertIds.map((_, i) => `e${i}`);
     const experts: ExpertRecord[] = brief.expertIds.map((id, i) => {
@@ -228,7 +238,7 @@ export class CloudbiteProject extends DurableObject<Env> {
 
   async read(token: unknown): Promise<ProjectRun | CbFail> {
     const s = await this.authorize(token);
-    return isCbFail(s) ? s : this.view(s.p, s.experts);
+    return isCbFail(s) ? s : this.view(s.p, s.experts, s.cr);
   }
 
   /** Internal history reads: the HTTP adapter derives actor from an HttpOnly cookie, never a query parameter. */
@@ -236,7 +246,7 @@ export class CloudbiteProject extends DurableObject<Env> {
     const s = await this.load();
     if (!s?.p.history || s.p.history.deleted || s.p.purgeAt <= this.clock() || (!owner && s.p.history.actor !== actor)) return fail(404, 'history record not found');
     const reports = await this.ctx.storage.get<string>(s.experts.map(e => `artifact:${e.run.id}:out/report.md`));
-    return { project: this.view(s.p, s.experts), model: s.p.history.model, roles: s.p.history.roles,
+    return { project: this.view(s.p, s.experts, s.cr), model: s.p.history.model, roles: s.p.history.roles,
       reports: Object.fromEntries(s.experts.flatMap(e => { const content = reports.get(`artifact:${e.run.id}:out/report.md`); return content === undefined ? [] : [[e.run.expertId, content]]; })),
       feedback: s.p.feedback ?? [], expiresAt: s.p.purgeAt, canFeedback: s.p.history.actor === actor && TERMINAL_PROJECT.has(s.p.status) };
   }
@@ -270,6 +280,8 @@ export class CloudbiteProject extends DurableObject<Env> {
       if (!TERMINAL_PROJECT.has(p.status)) return fail(409, 'stop the running project before deleting its history');
       const hadRouting = !!p.routing;
       delete p.routing;
+      // Review inputs/results quote original opinions: remove them, and the claim with them (an in-flight attempt cannot write back).
+      await tx.delete(CROSS_REVIEW);
       if (!p.history.deleted) {
         p.history.deleted = true; p.history.revision++; p.history.nextAt = 0;
         p.brief.title = '[deleted]'; p.brief.objective = '[deleted]'; p.brief.context = ''; p.feedback = [];
@@ -312,7 +324,7 @@ export class CloudbiteProject extends DurableObject<Env> {
   async cancel(token: unknown): Promise<ProjectRun | CbFail> {
     const s = await this.authorize(token);
     if (isCbFail(s)) return s;
-    if (TERMINAL_PROJECT.has(s.p.status)) return this.view(s.p, s.experts);
+    if (TERMINAL_PROJECT.has(s.p.status)) return this.view(s.p, s.experts, s.cr);
     const now = this.clock();
     s.p.status = 'cancelled'; s.p.finishedAt = now; s.p.updatedAt = now;
     if (s.p.history) { s.p.history.revision++; s.p.history.nextAt = 0; }
@@ -337,6 +349,91 @@ export class CloudbiteProject extends DurableObject<Env> {
     const content = await this.ctx.storage.get<string>(`artifact:${e.run.id}:${path}`);
     if (content === undefined) return fail(404, 'artifact not found');
     return { ...meta, content };
+  }
+
+  /**
+   * POST /api/cloudbite/projects/<id>/review (Worker has already checked Origin and the empty JSON body).
+   * Opt-in second pass on a finished live project: up to 3 completed experts each review up to 3 OTHER completed
+   * opinions with one server-side Nosana call. One paid attempt per project: the claim is persisted before inference,
+   * a completed or failed review is returned as stored (zero calls), a running one answers 409, and a claim older than
+   * CB_CROSS_REVIEW_STALE is closed as failed instead of being retried. Results are written only if the same claim is
+   * still current and the project is still live, authorized and undeleted after the provider returns.
+   */
+  async crossReview(token: unknown): Promise<ProjectRun | CbFail> {
+    const s = await this.authorize(token);
+    if (isCbFail(s)) return s;
+    const tokenHash = await cbHash(token as string);
+    if (s.p.brief.mode === 'demo') return fail(409, 'cross-review runs only on live projects; demo opinions are simulated');
+    if (!TERMINAL_PROJECT.has(s.p.status) || s.p.status === 'cancelled') return fail(409, 'cross-review needs a finished, non-cancelled project');
+    if (s.p.history?.deleted) return fail(409, 'this project\'s content was deleted');
+    if (s.cr) return this.existingReview(s.cr, tokenHash);
+    const completed: CompletedOpinion[] = s.experts.filter((e) => e.run.status === 'completed' && e.run.opinion).map((e) => ({ expertId: e.run.expertId, name: e.run.name, opinion: e.run.opinion! }));
+    if (completed.length < 2) return fail(409, 'cross-review needs at least two completed expert opinions');
+    const cfg = this.config();
+    if (!cfg) return fail(503, 'cross-review inference is not configured');
+    const snapshotHash = await cbHash(reviewSnapshot(s.p.brief, completed));
+    const reviewers = selectReviewers(completed, this.catalogue());
+    const claim = crypto.randomUUID();
+    const now = this.clock();
+    const live = (p: ProjectRecord | undefined, at: number): p is ProjectRecord => !!p && p.purgeAt > at && p.tokens.includes(tokenHash) && !p.history?.deleted;
+    const claimed = await this.ctx.storage.transaction(async (tx) => {
+      const [p, cur] = await Promise.all([tx.get<ProjectRecord>('project'), tx.get<CrossReviewRecord>(CROSS_REVIEW)]);
+      if (!live(p, now)) return fail(404, 'project not found');
+      if (cur) return cur;
+      await tx.put(CROSS_REVIEW, { review: { status: 'running', snapshotHash, startedAt: now, reports: [], execution: 'server-nosana' }, claim, reviewers: reviewers.map((r) => r.expertId) } satisfies CrossReviewRecord);
+      return null;
+    });
+    if (claimed) return isCbFail(claimed) ? claimed : this.existingReview(claimed, tokenHash);
+
+    const reports: CrossReviewReport[] = [], failures: string[] = [];
+    await Promise.all(reviewers.map(async (r) => {
+      const peers = peersFor(r, completed);
+      const reply = await this.reviewInference(cfg, reviewMessages(r, peers, s.p.brief)).catch((): InferenceResult => ({ error: 'inference upstream unavailable', status: 504 }));
+      const report = 'error' in reply ? { invalid: reply.error } : parseReviewReply(reply.content, r, peers);
+      if ('invalid' in report) failures.push(`${r.expertId}: ${report.invalid}`);
+      else reports.push(report);
+    }));
+    const order = reviewers.map((r) => r.expertId);
+    reports.sort((a, b) => order.indexOf(a.reviewerExpertId) - order.indexOf(b.reviewerExpertId));
+    failures.sort();
+
+    const after = this.clock();
+    const written = await this.ctx.storage.transaction(async (tx) => {
+      const [p, cur] = await Promise.all([tx.get<ProjectRecord>('project'), tx.get<CrossReviewRecord>(CROSS_REVIEW)]);
+      // Deleted, purged or expired meanwhile: write nothing (never recreate removed history).
+      if (!live(p, after)) return fail(410, 'the project was deleted or expired during cross-review; results were discarded');
+      if (!cur || cur.claim !== claim || cur.review.status !== 'running') return fail(409, 'this cross-review attempt is no longer current; results were discarded');
+      cur.review = { ...cur.review, status: failures.length ? 'failed' : 'completed', completedAt: after, reports,
+        ...(failures.length ? { error: clean(`${failures.length} of ${reviewers.length} reviewers failed — ${failures.join('; ')}`, 600) } : {}) };
+      p.updatedAt = after;
+      if (p.history) { p.history.revision++; p.history.nextAt = 0; }
+      await tx.put({ project: p, [CROSS_REVIEW]: cur });
+      return null;
+    });
+    if (written) return written;
+    await this.publishHistory();
+    await this.wake(this.clock() + 1000);
+    const fresh = await this.load();
+    return fresh ? this.view(fresh.p, fresh.experts, fresh.cr) : fail(410, 'the project was deleted or expired during cross-review');
+  }
+
+  /** A stored attempt: completed/failed are returned as-is, running answers 409, a stale running claim is closed as failed. */
+  private async existingReview(cr: CrossReviewRecord, tokenHash: string): Promise<ProjectRun | CbFail> {
+    const now = this.clock();
+    if (cr.review.status === 'running') {
+      if (cr.review.startedAt + CB_CROSS_REVIEW_STALE > now) return fail(409, 'a cross-review is already running for this project');
+      await this.ctx.storage.transaction(async (tx) => {
+        const [p, cur] = await Promise.all([tx.get<ProjectRecord>('project'), tx.get<CrossReviewRecord>(CROSS_REVIEW)]);
+        if (!p || p.history?.deleted || !cur || cur.claim !== cr.claim || cur.review.status !== 'running') return;
+        cur.review = { ...cur.review, status: 'failed', completedAt: now, error: 'cross-review did not finish in time; it is not retried (one paid attempt per project)' };
+        p.updatedAt = now;
+        if (p.history) { p.history.revision++; p.history.nextAt = 0; }
+        await tx.put({ project: p, [CROSS_REVIEW]: cur });
+      });
+    }
+    const s = await this.load();
+    if (!s || s.p.purgeAt <= now || !s.p.tokens.includes(tokenHash)) return fail(401, 'project access token is not valid');
+    return this.view(s.p, s.experts, s.cr);
   }
 
   /**

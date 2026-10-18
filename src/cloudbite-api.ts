@@ -194,7 +194,7 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     return response;
   }
 
-  const m = path.match(/^\/api\/cloudbite\/projects\/([^/]+)(\/cancel|\/artifact)?$/);
+  const m = path.match(/^\/api\/cloudbite\/projects\/([^/]+)(\/cancel|\/artifact|\/review)?$/);
   if (!m || !PROJECT_ID.test(m[1])) return json({ error: 'not found' }, 404);
   if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);
   const stub = ns.getByName(m[1]);
@@ -206,6 +206,16 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     const b = await readJson(req, 256);
     if ('error' in b) return json({ error: b.error }, b.status);
     return result(json, await stub.cancel(token));
+  }
+  if (m[2] === '/review') {
+    // Opt-in paid second pass (src/cloudbite-cross-review.ts): the body carries no options, only {}.
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
+    if (!strictOrigin()) return json({ error: 'bad origin' }, 403);
+    if (!(req.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) return json({ error: 'content-type must be application/json' }, 415);
+    const b = await readJson(req, 256);
+    if ('error' in b) return json({ error: b.error }, b.status);
+    if (typeof b.ok !== 'object' || b.ok === null || Array.isArray(b.ok) || Object.keys(b.ok).length) return json({ error: 'request body must be an empty JSON object' }, 400);
+    return result(json, await stub.crossReview(token));
   }
   if (req.method !== 'GET') return json({ error: 'method not allowed' }, 405);
   if (m[2] === '/artifact') return result(json, await stub.artifact(token, url.searchParams.get('expert'), url.searchParams.get('path')));
