@@ -57,3 +57,21 @@ misconfigured-provider rejection and no credential output; they do not claim act
 
 Read-only local-key probes authenticated all three keys, identified three distinct organizations and verified
 sandbox create/delete permissions. Key values and organization identifiers were not written to the report.
+
+## Production acceptance (2026-10-19 KST)
+
+Source `5b7397031bb269b1c4ff599db0a1b4ad9f2e5e33` was deployed to the existing independent `cloudbite-v001`
+Worker. After the tertiary secret upload, active version `49d284a6-114c-401e-8cd5-4391503b10f6` served
+`https://cloudbite.shinick.dev`; bootstrap reported live execution and Jev routing ready with no missing settings.
+`npm run check` and all ten suites in `npm run test:cloudbite` passed, including 42 runtime checks.
+
+One synthetic browser run selected Product Manager, Business Strategist and Software Architect. Read-only
+label-filtered Daytona queries, authenticated separately with each account, observed exactly one running QA
+sandbox in each of the three organizations. All three experts completed with three valid opinions and zero
+failures (6, 5 and 6 collected artifacts respectively). Every assigned sandbox then returned 404 with its owning
+key, and all three organizations' project-label listings were empty. The coordinator deleted only its own QA
+history through the UI, verified its source returned 404 and it left the index, then restored the default Jev
+new-question screen. This was a connectivity and lifecycle test, not a throughput or quota benchmark.
+
+The user confirmed local key entry only. Remote API-provider Vault registration still requires the existing
+physical-security-key approval, and encrypted backup remains unconfirmed. Neither was claimed complete.
