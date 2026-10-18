@@ -12,7 +12,7 @@ fs.writeFileSync(path.join(TMP,'wrangler.json'),JSON.stringify({name:'gw-assista
 async function start(){
  child=spawn(process.execPath,[path.join(ROOT,'node_modules/wrangler/bin/wrangler.js'),'dev','--config',path.join(TMP,'wrangler.json'),'--port',String(PORT),'--ip','127.0.0.1','--inspector-port',String(INSP),'--persist-to',path.join(TMP,'state'),'--show-interactive-dev-session=false','--log-level','warn'],{cwd:TMP,windowsHide:true,env:{...process.env,WRANGLER_SEND_METRICS:'false',NO_COLOR:'1'},stdio:['ignore','pipe','pipe']});
  child.stdout.on('data',d=>log+=d);child.stderr.on('data',d=>log+=d);
- const end=Date.now()+25000;while(Date.now()<end){try{if((await fetch(GW,{redirect:'manual',signal:AbortSignal.timeout(500)})).status===302)return}catch{}if(child.exitCode!==null)break;await sleep(100)}throw Error('fixture did not start '+log.slice(-1200))
+ const end=Date.now()+25000;while(Date.now()<end){try{if((await fetch(GW,{redirect:'manual',signal:AbortSignal.timeout(500)})).status===200)return}catch{}if(child.exitCode!==null)break;await sleep(100)}throw Error('fixture did not start '+log.slice(-1200))
 }
 async function stop(){if(!child)return;const own=child;child=null;try{if(process.platform==='win32')execFileSync('taskkill',['/PID',String(own.pid),'/T','/F'],{stdio:'ignore',windowsHide:true});else own.kill('SIGTERM')}catch{}if(own.exitCode===null)await Promise.race([new Promise(r=>own.once('exit',r)),sleep(3000)])}
 async function fx(name,...args){const r=await fetch(GW+'/'+name,{method:'POST',body:JSON.stringify(args),redirect:'manual',signal:AbortSignal.timeout(15000)});assert.equal(r.status,200);return r.json()}
