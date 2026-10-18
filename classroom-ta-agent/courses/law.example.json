@@ -1,0 +1,15 @@
+{
+  "id": "contract-law-basics",
+  "title": "Contract Law Basics for Business",
+  "domain": "law",
+  "language": "en",
+  "instructor": "Park",
+  "persona_name": "Lex",
+  "description": "One-day introduction to contract formation, breach, and remedies for non-lawyers",
+  "schedule": ["09:00-12:00 Formation and interpretation", "13:00-17:00 Breach, remedies, and review workshop"],
+  "topics": ["Offer and acceptance", "Consideration", "Breach and damages", "Standard clauses"],
+  "materials": ["Handout: company LMS > Legal > Contract basics"],
+  "faq": [],
+  "answer_key_secrets": [],
+  "blocked_categories": ["self_harm", "violence", "illegal", "sexual"]
+}

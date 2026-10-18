@@ -71,3 +71,7 @@
 `node tools/test-classroom-assistants.mjs`로 서비스·독립 경계 검사·HTTP 인증·화면·실제 로컬 Worker와 SQLite를 함께 확인합니다.
 
 자동 테스트는 합성 모임·참여자·권한과 로컬 런타임을 사용합니다. 실제 Grok Bot 접속·유료 샌드박스·참여자 파일·실제 질문의 운영 성공은 별도 더미 모임 시험으로 확인합니다.
+
+## AI 조교 봇 (classroom-ta-agent)
+
+`classroom-ta-agent/`에 조교 역할을 맡는 파이썬 봇이 있습니다. 이 문서의 외부 봇 자리에서 x-lab-assistant 헤더로 인증하고 status:read·help:read·help:reply만 사용합니다. 요청문 전달과 일시정지는 호출하지 않습니다. 질문은 페르소나와 가드레일을 거쳐 OpenRouter 모델로 답하고, 답변은 requestId를 먼저 저장한 뒤 한 번만 보냅니다. 응답을 모르면 같은 ID와 같은 본문으로만 다시 확인합니다. 위기 신호가 보이는 질문은 답하지 않고 열어 둡니다. 모임이 일시정지 상태이면 답하지 않습니다. 실행 방법과 한계는 `classroom-ta-agent/README.md`를 참고하세요. 무인 운영 전 더미 모임 왕복 시험은 그대로 필요합니다.

@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# cloudbite bot state (reply texts and question ids)
+cloudbite-bot-state.json*
