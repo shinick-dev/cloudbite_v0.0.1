@@ -1,51 +1,47 @@
-CLOUDBITE — QR DEMO HANDOFF
-==========================
+CLOUDBITE — AUDIENCE ACCESS REQUEST
+==================================
 
-Attendee request: https://k.shinick.dev/lab/request
-Host approval:    https://k.shinick.dev/lab/requests
-The final s distinguishes the host's inbox from the attendee's form.
+Public request: https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/request
+Owner inbox:   https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/requests
+QR showcase:  https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/access
+Public image: demo/cloudbite-access-request.png (SVG available alongside it)
+
+This grants access to Cloudbite's expert project console. It does not request a
+classroom seat or use the old k.shinick.dev lab approval service.
 
 ON STAGE
-Show demo/access-qr.html or demo/cloudbite-sandbox-request.png.
-English: "Scan the QR to request your own sandbox. Your entry link appears after approval."
-Korean:  "QR로 체험실을 신청하세요. 승인되면 개별 입장 링크가 나옵니다."
-This closing is already included in both three-minute scripts.
+Show demo/access-qr.html or the public image above.
+English: "Scan to request Cloudbite access. Once approved, try your own project."
+Korean:  "QR로 Cloudbite 접근을 신청하세요. 승인 후 직접 체험해 보세요."
+Never display the owner's private operator QR or credential.
 
-CURRENT PRESENTATION MODE — 2026-10-18
-Physical-key approval is currently unavailable. Collect requests during the pitch;
-approval and provisioning wait until the host can authenticate. Do not promise
-instant entry. The temporary Cloudbite operator credential is private and only
-creates expert projects; it cannot approve these participant requests. Never
-show its private operator QR in the presentation.
+PARTICIPANT
+1. Scan the public QR. Enter your name and what you want to try in Cloudbite.
+2. Keep the request page open in the same browser. A server-managed HttpOnly
+   cookie identifies your application; the request ID alone grants no access.
+3. When the host approves, use Continue to Cloudbite in that browser.
+4. Enter a shared project, choose up to five expert roles, then press Run experts.
+   Approval alone never starts compute. The approved trial permits one project
+   for one hour; pending requests expire after 30 minutes.
+5. The project and its experts use independent workspaces. Other participants
+   cannot recover your project by reusing the same client request ID.
 
-HOST PROCEDURE
-1. Open the host approval URL and sign in as the configured owner through
-   Cloudflare Access. Have the already registered physical security key ready.
-2. Review the pending request. For this demo, choose personal practice and
-   check its duration, AI budget and resource limits.
-3. Press "보안 키로 승인하고 열기". Select the security key, enter the key's
-   PIN if requested, and touch the key. The key must be enrolled for shinick.dev.
-4. Approval starts resource creation. If the page stays in the approved /
-   creating state, press "같은 요청으로 생성 결과 확인" on the SAME request.
-   Creation does not retry automatically. Do not submit a second request.
-5. The attendee keeps the original request page open in the same browser.
-   Its status checks run every 10 seconds while visible. Once ready, the
-   attendee sees their personal entry link. The host inbox does not expose it.
-6. Continue the pitch while the sandbox is being prepared. Provisioning
-   speed and capacity are not guaranteed.
+OWNER
+1. Open the Cloudbite owner inbox using the private owner access file's inbox
+   button, or enter a valid temporary Cloudbite operator / Cloudbite admin token.
+2. Review the applicant's name and purpose. Press Approve or Deny.
+3. Approval is recorded by Cloudbite itself. The temporary owner credential is
+   sufficient; no physical-key tap is required for this Cloudbite flow.
+4. Use Revoke to stop future creation by an approved visitor. Already issued
+   project capabilities retain their existing 24-hour read/cancel policy.
 
-VERIFICATION — 2026-10-18
-- Independent Claude Code worker traced request, owner login, per-request
-  WebAuthn challenge, approval, provisioning and same-request resume paths.
-- Focused API (21), request-service (16) and State (51) checks passed: 88 total.
-  These include signed test assertions and stand-in compute, not physical-key proof.
-- The deployed participant script and WebAuthn helper matched local source.
-- The deployed host URL redirected to Cloudflare Access login in the inspected
-  browser. Its authenticated inbox, physical-key touch and real provisioning
-  have not yet been verified in this task. Complete these before a live pitch.
-- An old request record on a previously used device may hide the new form.
-  The existing page offers "이 기기의 요청 기록 지우기" to start again; only
-  clear it when intentionally discarding that device's old request tracking.
+BOUNDS
+One approved project per visitor, up to five experts; existing global live limits
+still apply (two active projects, three expert workers per project at once).
+Resource contention and provider errors are shown explicitly. No immediate
+successful Daytona + Nosana execution is promised by admission approval.
 
-This real participant access service is separate from the scripted expert
-preview in demo/cloudbite-pitch.html. Scanning the QR alone grants no access.
+VERIFY
+See docs/cloudbite/access-service.txt for implementation tests and the production
+access verification receipt for the actual request -> approval -> isolated project
+checks. Do not describe the offline pitch's sample opinions as live model output.

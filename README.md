@@ -27,19 +27,17 @@
 
 이 HTML은 모든 결과와 활동을 합성한 피치 목업입니다. 실제 실행 콘솔과 별개이며, 실서비스 연결이나 통계적 정확도를 증명하지 않습니다.
 
-3분 피치 원고: [영어](docs/pitch/3min.en.txt) · [한국어](docs/pitch/3min.ko.txt) · [리허설 메모](docs/pitch/rehearsal-notes.txt). 두 원고의 마지막에는 QR 신청·보안키 승인 안내가 포함되어 있습니다.
+3분 피치 원고: [영어](docs/pitch/3min.en.txt) · [한국어](docs/pitch/3min.ko.txt) · [리허설 메모](docs/pitch/rehearsal-notes.txt). 두 원고의 마지막에는 Cloudbite 접근 신청·운영자 승인 안내가 포함되어 있습니다.
 
 제출용 통합 시나리오: [한국어](docs/pitch/submission-scenario.ko.txt) · [영어](docs/pitch/submission-scenario.en.txt). 공통 브리프, 6개 발표 장면, Daytona·Nosana 역할, QR 체험, 검증 증거와 다음 검증 과제를 함께 정리합니다.
 
-## 참가자 체험용 QR
+## Cloudbite 접근 요청 QR
 
-[QR PNG](demo/cloudbite-sandbox-request.png) · [SVG](demo/cloudbite-sandbox-request.svg) · [영문 QR 안내 화면](demo/access-qr.html)
+[QR PNG](demo/cloudbite-access-request.png) · [SVG](demo/cloudbite-access-request.svg) · [영문 QR 안내](demo/access-qr.html)
 
-QR은 기존 공개 신청 주소 `https://k.shinick.dev/lab/request`를 엽니다. 참가자는 개인 체험실을 신청하고, 모임지기는 `https://k.shinick.dev/lab/requests`에서 해당 요청의 조건을 보안키로 승인합니다. 준비가 끝나면 요청자에게만 개별 입장 링크가 나옵니다. 새 Cloudbite Worker를 배포하지 않아도 QR은 사용할 수 있습니다.
+공개 QR은 `https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/request`를 엽니다. 이름과 체험 목적을 신청하면 진행자가 `https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/requests`에서 승인합니다. 승인 후 같은 브라우저에서 Cloudbite에 들어가 공통 프로젝트와 전문가를 선택해 실행합니다. 1시간 동안 프로젝트 1개, 최대 5명의 전문가를 체험할 수 있습니다. 승인은 외부 자원을 자동 생성하지 않습니다.
 
-Cloudbite 로컬 콘솔에서는 `/cloudbite/access`에 같은 안내 화면이 있습니다. 기존 신청 서비스의 화면과 인증은 유지합니다. [운영·검증 메모](docs/cloudbite/sandbox-access.txt)를 참고하세요.
-
-정확한 승인 버튼·보안키 절차·생성 결과 재확인은 [피치 QR 진행 안내](docs/pitch/qr-handoff.txt)에 정리되어 있습니다. 승인 후 환경 생성이 끝나지 않으면 같은 요청에서 ‘같은 요청으로 생성 결과 확인’을 누릅니다.
+운영자용 비공개 접속 파일의 승인함 버튼이나 유효한 Cloudbite 관리자 세션으로 승인합니다. 임시 Cloudbite 운영자 권한으로도 가능하며 기존 공부방 보안키 승인 경로를 사용하지 않습니다. 진행 절차는 [QR 안내](docs/pitch/qr-handoff.txt), 서버 범위는 [접근 서비스](docs/cloudbite/access-service.txt)에 정리합니다. 비공개 운영자 QR을 청중에게 공개하지 마세요.
 
 ## 로컬 실행
 

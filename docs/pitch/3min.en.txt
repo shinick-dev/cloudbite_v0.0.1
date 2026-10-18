@@ -83,11 +83,11 @@ A hundred is our direction, with each new role earning its place through evidenc
 
 [2:48-3:00] CLOSE
 
->>> NOT SPOKEN: show demo/access-qr.html or the QR PNG. Pause 2 s. <<<
->>> NOT SPOKEN: Show only the public request QR at https://k.shinick.dev/lab/request. Physical-key approval is currently unavailable: collect requests, then approve and provision after authentication becomes available. Do not promise immediate entry. Never show the private Cloudbite operator QR to the audience. <<<
+>>> NOT SPOKEN: show demo/access-qr.html or demo/cloudbite-access-request.png. Pause 2 s. <<<
+>>> NOT SPOKEN: The public QR opens https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/request. Review applications in /cloudbite/requests with the private owner credential. Approval opens Cloudbite for that browser; it does not start a project. Never show the private owner QR to the audience. <<<
 
-Scan the QR to request your own sandbox.
-Your entry link appears after approval.
+Scan to request Cloudbite access.
+Once approved, try your own project.
 That's Cloudbite. Thank you.
 
 

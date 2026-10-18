@@ -7,14 +7,16 @@ Purpose
   WebAuthn / security-key / biometric proof, and the console never labels it as "admin-key verified".
 
 Scope (enforced in src/cloudbite-api.ts + src/cloudbite-operator.ts)
-  Accepted ONLY as the x-admin-token header of POST /api/cloudbite/projects. A header value starting with "cbo_" is checked
+  Accepted as the x-admin-token header of POST /api/cloudbite/projects and the Cloudbite access inbox owner APIs
+  (/api/cloudbite/access/requests list and approve/deny/revoke actions). A header starting with "cbo_" is checked
   against the operator secrets only and is never sent to the legacy State object. Any other value still goes through the
   existing State admin session check (State.adminList), unchanged.
   Every other create guard is unchanged: exact Origin, application/json, 16 KiB body limit, catalogue-only experts,
   at most 5 experts, 3 concurrent experts per project, 2 active live projects, per-project access tokens, runner callbacks.
-  It does NOT open /api/admin, the vault, QR approvals, legacy gw-shinick services, participant workspaces, project reads
+  It does NOT open /api/admin, the vault, legacy studyroom approvals or gw-shinick services, project reads
   or cancel (those need the per-project cbt_ token returned by create). Wrong, missing, malformed or expired -> 401.
-  The public participant QR remains k.shinick.dev/lab/request.
+  The public QR opens https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/request.
+  Owner-approved visitors receive their own HttpOnly browser session, never the operator credential.
 
 Format and secrets
   Token  : "cbo_" + unpadded base64url of exactly 32 random bytes (47 characters; the 43rd character is canonical).
@@ -34,8 +36,9 @@ Issuance (owner, 8 hours)
   2. Deploy the code and updated protected secrets file atomically to the independent Cloudbite worker:
        node node_modules/wrangler/bin/wrangler.js deploy --config wrangler.cloudbite.jsonc --env= --secrets-file .artifacts/production/secrets.json --strict
      Keep MASTER_KEY and all other existing credentials. Follow production.txt for checks and target verification.
-  3. Open the private HTML file on the PC; its button opens Cloudbite. Scan its QR to open the same credential on a
-     phone. This is bearer access, not phone biometric verification. No physical security key is needed for this scope.
+  3. Open the private HTML file on the PC. Open Cloudbite starts the console; Manage Cloudbite access requests opens
+     the owner inbox. The separate private owner-inbox.png QR opens that inbox on a phone. This is bearer access,
+     not phone biometric verification. No physical security key is needed for these Cloudbite actions.
      These files must stay outside deliverables/, demo/, public QR material, Git, chat logs and public hosting.
 
 Browser handoff (client/cloudbite-console.ts)

@@ -83,11 +83,11 @@ Nosana는 그 작업을 이어가는 추론 엔진입니다.
 
 [2:48-3:00] 마무리
 
->>> NOT SPOKEN: demo/access-qr.html 또는 QR PNG를 보여 준다. 2초 멈춤. <<<
->>> NOT SPOKEN: 공개 신청 QR은 https://k.shinick.dev/lab/request. 현재 물리 보안키 승인을 할 수 없으므로 신청만 받고, 승인·생성은 인증이 가능해진 뒤 진행한다. 즉시 입장을 약속하지 않는다. Cloudbite 운영자용 비공개 QR은 청중에게 보여 주지 않는다. <<<
+>>> NOT SPOKEN: demo/access-qr.html 또는 demo/cloudbite-access-request.png를 보여 준다. 2초 멈춤. <<<
+>>> NOT SPOKEN: 공개 QR은 https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/request. 비공개 운영자 자격으로 /cloudbite/requests에서 신청을 검토·승인한다. 신청자의 같은 브라우저에 Cloudbite 입장 버튼이 나온다. 승인은 프로젝트를 자동 실행하지 않는다. 비공개 운영자 QR은 청중에게 보여 주지 않는다. <<<
 
-QR로 체험실을 신청하세요.
-승인되면 개별 입장 링크가 나옵니다.
+QR로 Cloudbite 접근을 신청하세요.
+승인 후 직접 체험해 보세요.
 Cloudbite입니다. 감사합니다.
 
 

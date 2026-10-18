@@ -91,36 +91,20 @@ Q: Business model?
 A: Not decided yet. Our hypothesis is the customer, early product teams
    making launch decisions; we have not validated pricing or demand.
 
-The console is now deployed at https://cloudbite-v001.ai-gongbu.workers.dev.
-Production access and a persisted server-demo project were verified, without
-Daytona or Nosana calls. This does not change the live-provider claim boundary.
-
-Current QR presentation mode: the host cannot use the physical key now.
-Collect requests during the pitch and defer approval/provisioning until the
-host can authenticate. Do not promise immediate entry. Never show the private
-Cloudbite operator QR; it is unrelated to audience request approval.
-
-The closing QR is real: it opens the existing k.shinick.dev/lab/request
-service. Participants request a personal workspace, and the host approves
-the exact request/limits with the security key in /lab/requests. This is
-separate from the scripted expert preview. Show demo/access-qr.html or
-demo/cloudbite-sandbox-request.png. Do not promise instant provisioning.
-
-QR handoff checklist (stage directions, not additional spoken script):
-- Attendee request: https://k.shinick.dev/lab/request (singular request).
-- Host approval inbox: https://k.shinick.dev/lab/requests (plural requests).
-- Before the pitch, sign in as the owner and have the registered physical
-  security key available. Review each request and its limits before approving.
-- The host's approval invokes the browser's security-key prompt. Touch the
-  registered key and enter its PIN if the browser requests one.
-- The attendee keeps their original request page/browser open. It polls for
-  status and shows their personal join link when provisioning reaches ready.
-- Approval starts provisioning; it is not a guarantee of immediate access.
-  Do not wait for resource creation during the three-minute pitch.
-- A real physical-key approval and paid sandbox provisioning still require
-  an on-site run; local cryptographic fixtures do not prove that live flow.
-- See qr-handoff.txt for the exact live button labels, same-request resume
-  procedure, prerequisites and current verification boundary.
+The console is deployed at https://cloudbite-v001.ai-gongbu.workers.dev.
+The public QR now opens Cloudbite's own access form:
+  https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/request
+The owner reviews applications at:
+  https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/requests
+Use the private owner file's inbox button; temporary operator access can approve
+without a physical-key tap. Never show that private QR to the audience.
+Participants keep the same browser open, then use Continue to Cloudbite after
+approval. The one-hour trial permits one expert project with up to five experts.
+Approval does not start resources; the participant explicitly presses Run experts.
+Cloudbite projects are isolated per participant. This is access to the product,
+not a classroom workspace request. See qr-handoff.txt for the full handoff.
+The offline pitch remains a labeled simulation; paid-provider end-to-end success
+is a separate verification claim.
 
 5. FALLBACK (network or provider failure)
 

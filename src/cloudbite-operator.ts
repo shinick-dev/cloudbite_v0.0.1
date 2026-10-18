@@ -1,6 +1,6 @@
 // Temporary Cloudbite operator bearer (docs/cloudbite/temporary-operator.txt). The owner issues it for 8 hours when the
-// security key is out of reach. It is accepted ONLY by POST /api/cloudbite/projects in place of a State admin session;
-// it never reaches State and never opens /api/admin, the vault, QR approvals or participant workspaces.
+// security key is out of reach. It is accepted by Cloudbite project creation and Cloudbite access-inbox owner APIs;
+// its Cloudbite checks never reach State or open /api/admin, the vault or legacy studyroom approvals.
 // Secrets: CLOUDBITE_OPERATOR_TOKEN_HASH = lowercase hex SHA-256 of the full token text (`cbo_…`),
 // CLOUDBITE_OPERATOR_EXPIRES_AT = epoch milliseconds. Anything missing, malformed or past expiry fails closed.
 // @ts-ignore — nodejs_compat provides node:crypto at runtime; this repo carries no @types/node

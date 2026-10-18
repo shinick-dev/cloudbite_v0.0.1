@@ -74,8 +74,8 @@ The list above is a proposed five-role live selection from the actual catalogue.
   - Spoken Narrative Summary: State clearly that the walkthrough just shown is our labeled scripted preview. Explain that the real console connects to our live API with cancellation and real artifact files, local checks pass end-to-end with stand-in providers, and a recorded run used three real Daytona sandboxes—with the first full live Nosana run as the next verification. Daytona gives each expert a separate computer to execute code and leave files; Nosana drives the reasoning loop; together they connect opinions to inspectable work as we grow from 5 experts (3 concurrent) toward the 100-expert vision.
 
 - Scene 6 [2:48-3:00] Close & Live Audience QR Handoff | 2 s pause
-  - Screen / Action: Display `demo/access-qr.html` or `demo/cloudbite-sandbox-request.png` (pause 2 s). Keep the host inbox `https://k.shinick.dev/lab/requests` open in another tab.
-  - Spoken Narrative Summary: Invite the audience to scan the public QR to request their own personal sandbox. Their entry link appears after approval. Physical-key approval is currently unavailable, so collect requests now and approve/provision once the host can authenticate; do not promise immediate entry. Never show the private Cloudbite operator QR.
+  - Screen / Action: Display `demo/access-qr.html` or `demo/cloudbite-access-request.png` (pause 2 s). Keep the host inbox `https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/requests` open in another tab.
+  - Spoken Narrative Summary: Invite the audience to request Cloudbite access. After host approval, they open the product in the same browser, choose AI experts and start their own project. Never show the private owner QR.
 
 
 4. Sponsor Evidence & Technical Story (Daytona & Nosana)
@@ -96,20 +96,20 @@ The list above is a proposed five-role live selection from the actual catalogue.
 - Nosana supplies the multi-turn reasoning that decides what analysis to run and synthesizes findings into the common `ExpertOpinion` schema; Daytona supplies the isolated computer where that analysis actually executes and leaves verifiable files. Together they replace uncheckable chat paragraphs with inspectable work.
 
 
-5. QR Audience Participation Flow
+5. Cloudbite Audience Access Request
 -----------------------------------------------------------------------------
-- On-Stage Display: Show `demo/access-qr.html` (or `demo/cloudbite-sandbox-request.png`) during the final 12 seconds (`[2:48-3:00]`).
-- Participant Flow (`https://k.shinick.dev/lab/request` — singular `request`):
-  1) Scan the QR code to open the deployed public request form.
-  2) Select **`혼자 복습할 개인 실습실`** (personal practice workspace) and submit.
-  3) Keep the original request page open in the same browser. It polls status every 10 seconds while visible and reveals a personal entry link only to that participant once ready.
-  * Crucial Distinction: Each participant receives an **independent personal practice workspace**. This does NOT grant access into the AI experts' running advisory workspaces shown in the pitch. (If a previously used device hides the form behind an old record, use `이 기기의 요청 기록 지우기` only when intentionally discarding that device's prior request tracking.)
-- Host Approval Flow (`https://k.shinick.dev/lab/requests` — plural `requests`):
-  1) Before going on stage, open `https://k.shinick.dev/lab/requests` and sign in as the configured owner through Cloudflare Access.
-  2) Review the participant's pending request and verify its exact resource, duration, and AI budget plan.
-  3) Click **`보안 키로 승인하고 열기`**, enter the security-key PIN if prompted by the browser, and touch the physical security key enrolled for `shinick.dev`.
-  4) Approval starts provisioning; immediate creation is not guaranteed. If a request stays in the approved/creating state, do NOT submit a second request—click **`같은 요청으로 생성 결과 확인`** on the SAME request to resume/check status (creation does not auto-retry).
-
+Public application: https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/request
+Owner inbox: https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/requests
+Public QR: demo/cloudbite-access-request.png; display demo/access-qr.html.
+1) The participant enters a name and project purpose, then keeps that browser open.
+2) The host opens the Cloudbite inbox with a private operator credential or valid
+   Cloudbite admin session, reviews the application and presses Approve or Deny.
+3) Approval grants that browser one hour and one project with up to five experts.
+   Continue to Cloudbite opens the shared-brief and expert selection screen.
+4) The participant presses Run experts. Neither scanning nor approval starts compute.
+5) Requests and project identities are scoped to each visitor; other visitors cannot
+   recover a project by repeating its client request ID. Existing runtime limits apply.
+Never share the private owner QR. This service is separate from the legacy classroom.
 
 6. Submission Paragraph, Truth Boundaries & Fallback Protocol
 -----------------------------------------------------------------------------
@@ -123,11 +123,11 @@ Cloudbite is a multi-expert decision workbench where a single shared project bri
 [VERIFIED EVIDENCE]
 - Local Automated Validation: `npm run check` passes generated-file and TypeScript checks. Separate checks pass 308 persona/registry cross-checks, 18 runtime checks (executing the real local Python `runner.py` against fake/stand-in Daytona and Nosana providers), 23 console checks, and 19 real Worker browser checks. This proves local end-to-end integration, not live paid-provider execution.
 - Recorded Real Daytona Execution (`demo/evidence.json`): `demo/run-council.ps1` created 3 real Daytona sandboxes, executed remote Python inside each, and cleaned them up. Sandboxes ran sequentially (no parallel benchmark claims), and the advice/confidence values in `evidence.json` were deterministic seeded placeholders rather than live Nosana model outputs.
-- QR Audience Access Service (`https://k.shinick.dev/lab/request` & `/lab/requests`): Deployed public participant script and WebAuthn helper match local source, backed by 88 passing local fixture checks (21 API, 16 request-service, 51 State). In browser inspection, the deployed host URL (`/lab/requests`) properly redirects to Cloudflare Access login.
+- Cloudbite Audience Access: https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/request uses Cloudbite-owned request storage, host approval, an HttpOnly browser session and visitor-scoped project authorization. Legacy classroom fixtures are not evidence for this new service.
 
 [NEXT VALIDATION]
 1) First full live end-to-end run combining the configured Nosana inference gateway with live Daytona sandboxes in the new console.
-2) Live rehearsal checkpoint for the QR handoff: completing authenticated owner login behind Cloudflare Access, physical security-key touch, and live participant sandbox provisioning on-site.
+2) QR rehearsal: request Cloudbite access, approve in its own inbox, then open the approved visitor console without automatically starting paid compute.
 3) Running a real project end-to-end to measure actual per-expert inference and sandbox unit costs and test our early-product-team customer hypothesis.
 
 [FALLBACK PROTOCOL (If Live Provider or Venue Network Is Unavailable)]
@@ -136,4 +136,4 @@ Cloudbite is a multi-expert decision workbench where a single shared project bri
 - Continue seamlessly from Cue A in the offline walkthrough and keep the Scene 5 implementation/verification boundary statement unchanged.
 
 
-Production update — 18 October 2026: https://cloudbite-v001.ai-gongbu.workers.dev is deployed. Production access controls and a persisted server-demo project are verified; no live Daytona + Nosana end-to-end run is claimed. Audience requests wait for physical-key approval; the private operator QR is not presentation material.
+Production update — 18 October 2026: https://cloudbite-v001.ai-gongbu.workers.dev is deployed. Production access controls and a persisted server-demo project are verified; no live Daytona + Nosana end-to-end run is claimed. Audience access uses the Cloudbite host approval inbox; the private operator QR is not presentation material.
