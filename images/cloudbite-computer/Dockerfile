@@ -23,11 +23,13 @@ USER root
 ENV VNC_RESOLUTION=1920x1080
 ENV PATH=/opt/cloudbite/computer/tools:/opt/cloudbite/node/bin:${PATH}
 ENV BROWSER=/usr/local/bin/cloudbite-browser
-COPY install_selkies.py install.py start-desktop.py probe-tools.py first-run.sh configure-display.py keyring-default.py /tmp/cloudbite-computer/
+ENV SHELL=/bin/bash GTK_IM_MODULE=ibus QT_IM_MODULE=ibus XMODIFIERS=@im=ibus
+COPY install_selkies.py install.py start-desktop.py probe-tools.py first-run.sh configure-display.py keyring-default.py configure-input.py terminal-wrapper.sh shell.sh shell-rc.sh /tmp/cloudbite-computer/
 RUN python3 /tmp/cloudbite-computer/install_selkies.py /opt/cloudbite/selkies \
  && test -f /opt/cloudbite/selkies/.cloudbite-selkies.json \
  && python3 /tmp/cloudbite-computer/configure-display.py \
  && python3 /tmp/cloudbite-computer/install.py /tmp/cloudbite-computer \
+ && localedef -i ko_KR -f UTF-8 ko_KR.UTF-8 \
  && rm -rf /tmp/cloudbite-computer \
  && chmod -R a+rX /opt/cloudbite
 USER daytona

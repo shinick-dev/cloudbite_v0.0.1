@@ -39,5 +39,17 @@ mkdir -p "$HOME/.config/xfce4"
 grep -qs '^WebBrowser=' "$HOME/.config/xfce4/helpers.rc" ||
   printf '\nWebBrowser=cloudbite-browser\n' >>"$HOME/.config/xfce4/helpers.rc"
 
+# Route the stock panel/menu terminal through a fresh process with IBus and pinned
+# tools. Keep an explicitly chosen third-party terminal helper.
+terminal=$(sed -n 's/^TerminalEmulator=//p' "$HOME/.config/xfce4/helpers.rc" | head -n 1)
+case "$terminal" in
+  ''|debian-x-terminal-emulator|xfce4-terminal|cloudbite-terminal)
+    if [ -n "$terminal" ]; then
+      sed -i 's/^TerminalEmulator=.*/TerminalEmulator=cloudbite-terminal/' "$HOME/.config/xfce4/helpers.rc"
+    else
+      printf '\nTerminalEmulator=cloudbite-terminal\n' >>"$HOME/.config/xfce4/helpers.rc"
+    fi ;;
+esac
+
 printf '{"schema": 1, "completed": true}\n' > "$HOME/.config/cloudbite/first-run.json"
 echo '{"ok": true}'

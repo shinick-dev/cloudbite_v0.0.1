@@ -47,7 +47,7 @@ assert module.configure(s, lambda _: None) == {'ok': True, 'engine': 'hangul', '
 assert module.parse_strv(s.values[(module.GENERAL, 'preload-engines')]) == ['hangul', 'xkb:us::eng', 'anthy']
 assert module.parse_strv(s.values[(module.GENERAL, 'engines-order')]) == ['hangul', 'xkb:us::eng']
 assert s.values[(module.HANGUL, 'switch-keys')] == "'Hangul,Shift+space'", 'existing toggle kept'
-assert s.values[(module.HANGUL, 'initial-input-mode')] == "'hangul'"
+assert s.values[(module.HANGUL, 'initial-input-mode')] == "'latin'"
 assert s.starts == 1
 sets = len(s.sets)
 assert module.configure(s, lambda _: None)['ok'] and len(s.sets) == sets and s.starts == 1, 'idempotent'

@@ -287,7 +287,8 @@ class FirstRun(unittest.TestCase):
         with open(os.path.join(self.home, "Desktop", "signin-codex.desktop"), "w") as fh:
             fh.write("mine\n")
         self.run_first()
-        self.assertEqual(self.helpers(), "WebBrowser=firefox\n")
+        self.assertIn("WebBrowser=firefox\n", self.helpers())
+        self.assertIn("TerminalEmulator=cloudbite-terminal", self.helpers())
         with open(os.path.join(self.home, "Desktop", "signin-codex.desktop")) as fh:
             self.assertEqual(fh.read(), "mine\n")
 

@@ -191,6 +191,13 @@ def main():
     env["DISPLAY"] = ":%d" % displays()[0]
     env["DBUS_SESSION_BUS_ADDRESS"] = start_bus(env)
     keyring = start_keyring(env)
+    env.update(GTK_IM_MODULE="ibus", QT_IM_MODULE="ibus", XMODIFIERS="@im=ibus")
+    try:
+        im = subprocess.run(["/usr/bin/python3", "/opt/cloudbite/computer/lib/configure-input.py"],
+                            env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        input_method = last_json(im.stdout) or {"ok": False}
+    except (OSError, subprocess.SubprocessError):
+        input_method = {"ok": False}
     if not os.path.exists(home + "/.config/cloudbite/first-run.json"):
         try:
             ok = subprocess.run([FIRST_RUN], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -229,7 +236,7 @@ def main():
             json.dump(DISPLAY_EXPECTED, fh)
     emit({"ok": True, "display": env["DISPLAY"], "keyring": keyring, "port": PORT,
           "health": PREFIX + "/api/health", "size": "%dx%d" % (WIDTH, HEIGHT),
-          "resolution": resolution, "display_config": display_config()})
+          "resolution": resolution, "display_config": display_config(), "input_method": input_method})
 
 
 if __name__ == "__main__":

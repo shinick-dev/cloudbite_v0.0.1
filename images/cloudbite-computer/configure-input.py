@@ -61,8 +61,8 @@ def configure(cmd=run, wait=time.sleep):
         if merged != keys:
             cmd(['gsettings', 'set', HANGUL, 'switch-keys', ','.join(merged)])
     if 'initial-input-mode' in hangul:
-        if (cmd(['gsettings', 'get', HANGUL, 'initial-input-mode']) or '') != "'hangul'":
-            cmd(['gsettings', 'set', HANGUL, 'initial-input-mode', 'hangul'])
+        if (cmd(['gsettings', 'get', HANGUL, 'initial-input-mode']) or '') != "'latin'":
+            cmd(['gsettings', 'set', HANGUL, 'initial-input-mode', 'latin'])
 
     if cmd(['ibus', 'address']) is None or cmd(['ibus', 'engine']) is None:
         cmd(['ibus-daemon', '--daemonize', '--xim'], timeout=10)
