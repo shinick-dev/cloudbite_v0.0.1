@@ -1,0 +1,119 @@
+CLOUDBITE PITCH - REHEARSAL NOTES
+(timing, click cues, claim boundaries; applies to 3min.en.txt and 3min.ko.txt)
+==============================================================================
+
+1. TIMING PLAN (estimated, not audio-verified)
+
+Segment          Slot   Pauses  EN words  KO chars*  Main screen
+0:00-0:22        22 s   0 s        45        112     project screen, idle
+0:22-0:42        20 s   0 s        46        121     project screen, idle
+0:42-1:56        74 s  14 s       133        316     demo clicks (5 cues)
+1:56-2:20        24 s   2 s        48        131     decision view, idle
+2:20-2:48        28 s   0 s        56        130     decision view, idle
+2:48-3:00        12 s   2 s        19         46     participant QR
+TOTAL           180 s  18 s       347        856
+* Korean characters counted without spaces.
+
+Assumed cadence: English about 130 words/min, Korean about 320 chars/min,
+over 162 s of speech plus 18 s of silent click pauses. The close is
+deliberately slow. Counts come from a local script over the spoken lines
+(stage directions, headers and the fallback block excluded). No recording
+was made; time one full read-through aloud before the event and trim
+the demo segment first if it runs long.
+
+2. CLICK CUES (target concepts, not pixel positions; UI labels may still change)
+
+Cue  When                          Action                                      Pause
+A    "...the shared brief."        open the expert list / team                 2 s
+B    "...security's question."     start replay, show the execution stream     4 s
+C    "...three at a time."         select the finance expert, open its         3 s
+                                   cost-model artifact
+D    "...the file says so."        go to the decision view / distribution      2 s
+E    "...A signal, not accuracy."  switch option: full launch -> paid pilot    3 s
+     then 2 s pause before segment 1:56; show the participant QR for 2 s
+     at the start of the closing segment.
+
+Which surface: the offline pitch file demo/cloudbite-pitch.html is fully
+scripted and is the safe default on stage. Use the real console only if it
+was rehearsed on the venue network. Replay has 3x speed and stage stepping;
+step instead of waiting if the stream runs long.
+
+Numbers spoken in the demo come from the pitch file's scripted data
+(full launch: 2 support / 2 conditional / 1 concern; paid pilot: 3 support /
+2 conditional; cost model 20 vs 400 inferences = 20x). Re-check them
+against the final English UI before rehearsal, because the UI is being
+redesigned. If they changed, change the spoken numbers, not the screen.
+
+3. CLAIM BOUNDARIES - say these, never stretch them
+
+OK to say
+- Five roles selected from a twelve-role catalogue; up to three run at once.
+  Five experts and three concurrent are the designed limits.
+- A hundred experts is the direction / vision, not current capacity.
+- The pitch walkthrough is scripted and labeled as such.
+- The real console connects to the live API, supports explicit browser demo
+  mode, cancellation and real artifact retrieval.
+- Local checks pass: npm run check, 308 persona checks with registry
+  cross-check, 18 runtime checks including a real local Python runner through
+  validation, with fake (stand-in) Daytona and Nosana. This is local
+  integration proof, not paid-provider success.
+- A recorded run (demo/evidence.json) created three real Daytona sandboxes,
+  executed Python remotely in each, and cleaned them up.
+- Confidence is each model's self-reported estimate.
+- Next step: first full run with live Nosana inference.
+
+Do NOT say or imply
+- That live Nosana inference has already run, or that any provider
+  end-to-end flow was verified in the new console.
+- That the recorded Daytona run produced model advice: its stance and
+  confidence were deterministic seeded placeholders, not Nosana, not a model.
+- That the recorded run shows parallel execution (the script ran sandboxes
+  one after another) or that its timings are benchmarks (one-off run).
+- That confidence is calibrated accuracy or agreement of real experts.
+- Any customer demand, quotes, pricing, revenue or ARR. Target customer
+  (early product teams making launch decisions) is a hypothesis.
+- That a hundred sandboxes have been run.
+
+4. LIKELY QUESTIONS - short honest answers
+
+Q: Did Nosana actually run?
+A: The gateway path is implemented for a configured endpoint; the first live
+   end-to-end run is our next verification. Today's proof is local, with
+   stand-ins, plus real Daytona sandboxes in a separate recorded run.
+Q: Is the confidence meaningful?
+A: It is self-reported and uncalibrated. We show it as a signal next to the
+   evidence, not as a probability of being right.
+Q: Why not just ask one big model?
+A: You get an answer you can't inspect. Here each opinion comes with the
+   file, numbers and assumptions behind it.
+Q: Business model?
+A: Not decided yet. Our hypothesis is the customer, early product teams
+   making launch decisions; we have not validated pricing or demand.
+
+The closing QR is real: it opens the existing k.shinick.dev/lab/request
+service. Participants request a personal workspace, and the host approves
+the exact request/limits with the security key in /lab/requests. This is
+separate from the scripted expert preview. Show demo/access-qr.html or
+demo/cloudbite-sandbox-request.png. Do not promise instant provisioning.
+
+QR handoff checklist (stage directions, not additional spoken script):
+- Attendee request: https://k.shinick.dev/lab/request (singular request).
+- Host approval inbox: https://k.shinick.dev/lab/requests (plural requests).
+- Before the pitch, sign in as the owner and have the registered physical
+  security key available. Review each request and its limits before approving.
+- The host's approval invokes the browser's security-key prompt. Touch the
+  registered key and enter its PIN if the browser requests one.
+- The attendee keeps their original request page/browser open. It polls for
+  status and shows their personal join link when provisioning reaches ready.
+- Approval starts provisioning; it is not a guarantee of immediate access.
+  Do not wait for resource creation during the three-minute pitch.
+- A real physical-key approval and paid sandbox provisioning still require
+  an on-site run; local cryptographic fixtures do not prove that live flow.
+- See qr-handoff.txt for the exact live button labels, same-request resume
+  procedure, prerequisites and current verification boundary.
+
+5. FALLBACK (network or provider failure)
+
+Say the fallback line at the end of the script once, switch to the offline
+pitch file, and continue from cue A. Do not show the recorded Daytona run as
+if it were live. Keep the 1:56 status segment unchanged.

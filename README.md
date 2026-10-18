@@ -12,6 +12,31 @@
 
 초기 실행 범위는 최대 5명의 전문가입니다. 100인 자문이라는 제품 비전과 동시에 100개의 실제 샌드박스를 실행했다는 주장은 구분합니다. 확신도는 모델의 자기 평가이며, 실제 정확도나 사업 성공 확률이 아닙니다.
 
+## 피치용 완성 경험 미리보기
+
+[demo/cloudbite-pitch.html](demo/cloudbite-pitch.html)을 브라우저에서 열면 됩니다. 파일 하나로 오프라인에서 동작합니다.
+
+- ‘Replay pitch’: 프로젝트 전달 → 전문가별 작업실 → 실행과 근거 → 종합 판단의 30초 흐름. 3배속과 단계 이동을 지원합니다.
+- 전문가 선택: 의견·페르소나·작업 지시·산출물 원문·활동을 확인합니다.
+- ‘Full launch / Paid pilot’: 준비된 두 대안의 조언·분포를 비교합니다.
+- ‘Save brief’: 현재 대안의 예시 판단을 텍스트 파일로 내보냅니다.
+
+이 HTML은 모든 결과와 활동을 합성한 피치 목업입니다. 실제 실행 콘솔과 별개이며, 실서비스 연결이나 통계적 정확도를 증명하지 않습니다.
+
+3분 피치 원고: [영어](docs/pitch/3min.en.txt) · [한국어](docs/pitch/3min.ko.txt) · [리허설 메모](docs/pitch/rehearsal-notes.txt). 두 원고의 마지막에는 QR 신청·보안키 승인 안내가 포함되어 있습니다.
+
+제출용 통합 시나리오: [한국어](docs/pitch/submission-scenario.ko.txt) · [영어](docs/pitch/submission-scenario.en.txt). 공통 브리프, 6개 발표 장면, Daytona·Nosana 역할, QR 체험, 검증 증거와 다음 검증 과제를 함께 정리합니다.
+
+## 참가자 체험용 QR
+
+[QR PNG](demo/cloudbite-sandbox-request.png) · [SVG](demo/cloudbite-sandbox-request.svg) · [영문 QR 안내 화면](demo/access-qr.html)
+
+QR은 기존 공개 신청 주소 `https://k.shinick.dev/lab/request`를 엽니다. 참가자는 개인 체험실을 신청하고, 모임지기는 `https://k.shinick.dev/lab/requests`에서 해당 요청의 조건을 보안키로 승인합니다. 준비가 끝나면 요청자에게만 개별 입장 링크가 나옵니다. 새 Cloudbite Worker를 배포하지 않아도 QR은 사용할 수 있습니다.
+
+Cloudbite 로컬 콘솔에서는 `/cloudbite/access`에 같은 안내 화면이 있습니다. 기존 신청 서비스의 화면과 인증은 유지합니다. [운영·검증 메모](docs/cloudbite/sandbox-access.txt)를 참고하세요.
+
+정확한 승인 버튼·보안키 절차·생성 결과 재확인은 [피치 QR 진행 안내](docs/pitch/qr-handoff.txt)에 정리되어 있습니다. 승인 후 환경 생성이 끝나지 않으면 같은 요청에서 ‘같은 요청으로 생성 결과 확인’을 누릅니다.
+
 ## 로컬 실행
 
 ```powershell
@@ -41,6 +66,10 @@ npm run check
 ```
 
 Cloudbite의 목적과 범위는 [구현 계약](docs/cloudbite/implementation-contract.md), 모듈 경계와 API는 [연동 계약](docs/cloudbite/api-contract.md)에 정리합니다. 기능별 검증 명령과 실행 결과는 각 작업 문서 및 [HANDOFF.md](HANDOFF.md)에 기록합니다. 설정과 연결을 확인하지 않은 실제 외부 실행은 통과했다고 기록하지 않습니다.
+
+## 선택 조교 모듈
+
+`agent_chatbot`의 [classroom-ta-agent](classroom-ta-agent/README.md)는 기존 실습실의 제한된 조교 API에 연결하는 별도 Python 봇입니다. 자체 OpenRouter 설정을 사용하며, 전문가 샌드박스 런타임의 Nosana 연결이나 12인 페르소나 레지스트리를 교체하지 않습니다. 기본 Cloudbite Worker가 이 봇을 자동 실행하지 않으며, 별도 실행·인증 설정이 필요합니다.
 
 ## 재사용한 기반
 

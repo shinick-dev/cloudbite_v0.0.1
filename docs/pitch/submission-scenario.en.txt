@@ -1,0 +1,136 @@
+CLOUDBITE (v0.0.1) — DAYTONA HACKSPRINT SUBMISSION & PITCH SCENARIO (ENGLISH)
+=============================================================================
+
+1. Product Title, Hook, Problem & User Value
+-----------------------------------------------------------------------------
+- Product Title: Cloudbite — Multi-Expert Sandbox Decision Workbench
+- One-Sentence Hook: Instead of asking one chatbot to role-play five experts and getting five unverifiable paragraphs, Cloudbite gives five AI specialists their own isolated Daytona computers and server-side Nosana inference so every opinion comes back with inspectable files, numbers, and explicit assumptions.
+- Problem: When a team faces a launch decision, it needs product, finance, security, engineering, and design perspectives; asking a single chat thread yields confident prose where nobody can check where a number came from or what was assumed.
+- User Value: A founder or project lead submits one shared project brief, dispatches role-specific work orders to isolated expert sandboxes that run Python and write real files, compares structured opinions and self-assessed confidence across decision options, and turns expert disagreements directly into the next concrete validation experiment.
+  * Target-User Boundary: Targeting early product teams making launch decisions is our current product hypothesis. We make no claims of validated customer demand, paying customers, revenue, or pricing.
+
+
+2. Main User Journey & Five-Expert Project Flow
+-----------------------------------------------------------------------------
+[Concrete Shared Brief]
+- Decision Maker: A founder deciding whether to launch a 100-expert AI advisory service.
+- Shared Project Question: "Should we launch a 100-expert AI advisory service right now (Full Launch), or start with a bounded Paid Pilot to measure unit economics and workflow reliability?"
+- Delivery Mechanism: One validated brief (title, objective, context) is sanitized and written identically into `PROJECT.md` and `project.json` inside each selected expert's workspace.
+
+[Selected 5 Roles (Chosen from the 12-Role Metadata-Derived Catalogue)]
+* Catalogue & Scale Boundary: Cloudbite ships 12 metadata-derived AI expert roles built from the `Shinick-Han/pro-bably` registry seed (coverage tier T0; prompts freshly authored from metadata). A live project runs 1–5 selected experts with up to 3 concurrent sandboxes. 100 experts is the long-term product vision, not tested runtime capacity.
+1) Product Manager (`agency-product-manager`) — Scope boundaries, launch criteria, phased roadmap (`out/prd.md`, `out/roadmap.md`)
+2) Finance / FP&A Analyst (`agency-finance-fpa-analyst`) — Inference multiplier modeling, sensitivity table (`out/financial-model.md`, `out/forecast.csv`)
+3) Security Architect (`agency-security-architect`) — Per-sandbox isolation boundaries, credential protection, threat model (`out/threat-model.md`, `out/security-controls.md`)
+4) Software Architect (`agency-engineering-software-architect`) — Concurrency caps, Durable Object state machine, failure recovery (`out/architecture.md`, `out/adr-001.md`)
+5) UX Architect (`agency-design-ux-architect`) — Multi-expert comparison flow, cognitive-load risks (`out/user-flows.md`, `out/ux-risks.md`)
+
+The list above is a proposed five-role live selection from the actual catalogue. The offline preview uses its own authored role display names and embedded artifacts; these are examples, not live run outputs.
+
+[Scene-by-Scene Product Flow]
+- Scene A. Shared Brief -> Expert Workspaces, Personas & Work Orders:
+  From the single brief, Cloudbite builds an isolated workspace pack for each of the 5 experts (`INSTRUCTIONS.md`, `PERSONA.md`, `PROJECT.md`, `project.json`, `WORKORDER.md`, `RESULT.schema.json`, `provenance.json`). Finance receives unit-economics questions while Security receives isolation and credential-boundary questions.
+- Scene B. Isolated Execution & Inspectable Artifacts:
+  Up to 3 experts run concurrently. Inside `/home/daytona/cloudbite` in its own Daytona sandbox, each expert runs `runner.py`, executes Python in `./work`, writes role artifacts to `out/`, and requests Nosana inference through the Cloudbite server gateway.
+  Crucial proof point: Finance (`agency-finance-fpa-analyst`) does not merely say "100 experts is expensive." It leaves a cost-model artifact showing that under the same multi-turn assumptions (4 turns per expert), 100 experts require 400 inference calls versus 20 calls for 5 experts (20x inference volume), while leaving unmeasured provider unit prices as explicit variables rather than invented numbers.
+- Scene C. Common Opinion Schema & Confidence Distribution (Full Launch):
+  Every expert must output `out/result.json` matching the strict six-field `ExpertOpinion` schema (`direction`, `confidence`, `summary`, `evidence`, `assumptions`, `nextActions`) alongside `out/report.md`.
+  In the scripted pitch walkthrough (`demo/cloudbite-pitch.html`), the **Full Launch** option produces **2 Support / 2 Conditional / 1 Concern** with an unweighted average self-assessed confidence of **82**.
+  * Confidence Boundary: Confidence (integer 0–100) is each model's uncalibrated self-assessment—a signal displayed next to evidence, not statistical accuracy, expert consensus, or business success probability. Counts and averages are unweighted.
+- Scene D. Paid Pilot Option Comparison:
+  Switching the decision board from **Full Launch** to **Paid Pilot** (a bounded 5-expert, 3-concurrent pilot to measure real run costs first) shifts the authored sample distribution to **3 Support / 2 Conditional / 0 Concern** with an unweighted average self-assessed confidence of **84**.
+- Scene E. Decision Brief Export & Next Validation:
+  The user clicks `Save brief` to export the structured decision brief, turning disagreements and unverified cost variables into the immediate next experiment: run one real project end-to-end and measure actual sandbox and inference cost.
+
+
+3. Three-Minute Stage Scenario (6 Scenes, Aligned with Bilingual Scripts)
+-----------------------------------------------------------------------------
+* Timing & Word Estimate: 180 seconds total (~162 seconds of speech at ~130 words/min EN or ~320 non-space chars/min KO, plus ~18 seconds of silent click pauses). Estimated from script word/character counts (`docs/pitch/3min.en.txt`, `docs/pitch/3min.ko.txt`, `docs/pitch/rehearsal-notes.txt`), not timed from an audio recording.
+* Primary Stage Surface: `demo/cloudbite-pitch.html` (English, blue-and-white AI Coding Lab-adapted layout at 1536x1024, explicitly labeled as a scripted simulation).
+
+- Scene 1 [0:00-0:22] The Problem | 0 s pause
+  - Screen / Action: Cloudbite open on the project screen, idle. Do not click yet.
+  - Spoken Narrative Summary: Every product team asks whether they should launch now. You need product, finance, security, engineering, and design views. Ask one chatbot to play all five and you get five confident paragraphs you cannot verify—where did that number come from, and what was assumed?
+
+- Scene 2 [0:22-0:42] What Cloudbite Is | 0 s pause
+  - Screen / Action: Stay on the project overview screen.
+  - Spoken Narrative Summary: Cloudbite gives one shared project to a team of expert AI personas. Each expert gets its own Daytona workspace—an isolated computer to run Python and write files—with reasoning powered by Nosana inference through our server, returning artifacts, evidence, assumptions, and a structured opinion.
+
+- Scene 3 [0:42-1:18] Demo Part 1: Shared Brief, 5 Roles & Finance Cost Artifact | 9 s pauses (2 s + 4 s + 3 s)
+  - Screen / Action:
+    [Cue A] Open the expert list after introducing the shared brief (pause 2 s).
+    [Cue B] Start the replay / show the execution stream running up to 3 experts at a time (pause 4 s).
+    [Cue C] Select the Finance expert and open its cost-model artifact (pause 3 s).
+  - Spoken Narrative Summary: Our example project asks whether to launch a 100-expert AI advisory service. We selected five roles from our twelve-role catalogue; each gets its own persona and work order, running up to three at a time. Finance didn't just say "it's expensive"—it left a cost model showing 100 experts need 20 times the inference of 5 under the same assumptions, while keeping unmeasured unit prices as explicit variables.
+
+- Scene 4 [1:18-1:56] Demo Part 2: Opinion Distribution & Paid Pilot Switch | 5 s pauses (2 s + 3 s)
+  - Screen / Action:
+    [Cue D] Navigate to the decision view and opinion distribution (pause 2 s).
+    [Cue E] Switch the option toggle from `Full launch` to `Paid pilot` (pause 3 s).
+  - Spoken Narrative Summary: On Full Launch, the board shows 2 support, 2 conditional, and 1 concern (average self-assessed confidence 82—a model self-estimate, not accuracy). Switch to Paid Pilot and it moves to 3 support and 2 conditional (average 84). The disagreement becomes our next test: run one real project and measure its cost.
+
+- Scene 5 [1:56-2:48] Honest Implementation Status & Why Daytona + Nosana Matter | 2 s pause
+  - Screen / Action: Hold on the decision view (pause 2 s), then take hands off the mouse and address the judges.
+  - Spoken Narrative Summary: State clearly that the walkthrough just shown is our labeled scripted preview. Explain that the real console connects to our live API with cancellation and real artifact files, local checks pass end-to-end with stand-in providers, and a recorded run used three real Daytona sandboxes—with the first full live Nosana run as the next verification. Daytona gives each expert a separate computer to execute code and leave files; Nosana drives the reasoning loop; together they connect opinions to inspectable work as we grow from 5 experts (3 concurrent) toward the 100-expert vision.
+
+- Scene 6 [2:48-3:00] Close & Live Audience QR Handoff | 2 s pause
+  - Screen / Action: Display `demo/access-qr.html` or `demo/cloudbite-sandbox-request.png` (pause 2 s). Keep the host inbox `https://k.shinick.dev/lab/requests` open in another tab.
+  - Spoken Narrative Summary: Invite the audience to scan the QR to request their own personal sandbox, which the host approves with a registered physical security key. Finish within the 3-minute mark; resource provisioning continues afterward without waiting on stage.
+
+
+4. Sponsor Evidence & Technical Story (Daytona & Nosana)
+-----------------------------------------------------------------------------
+* Sponsor Rules Boundary: No sponsor event rules or judging rubrics were supplied, so no external prize criteria are invented here.
+
+[Daytona — Isolated Per-Expert Execution & Inspectable File Outputs]
+- Role in Architecture: Rather than multiplexing five personas in one prompt window, Cloudbite provisions a separate Daytona sandbox per expert (`/home/daytona/cloudbite`), uploads the validated workspace pack (`PERSONA.md`, `PROJECT.md`, `WORKORDER.md`, `RESULT.schema.json`, `runner.py`), and runs an isolated Python session (`timeout 600 python3 -I runner.py`).
+- Why It Matters Practically: Each specialist can execute Python scripts in `./work` and write structured deliverables (`out/result.json`, `out/report.md`, and up to four role files such as `.csv` forecasts or `.md` threat models) without cross-contaminating another expert's filesystem or environment. Claim-label deduplication and bounded cleanup (`autoStopInterval 20`, `autoDeleteInterval 30`, plus 8-try backoff deletion) reduce duplicate creation and provide bounded cleanup retries; they do not guarantee that every external cleanup succeeds.
+- Verified Evidence on Hand: `demo/evidence.json` (generated by `demo/run-council.ps1`) records three real Daytona sandboxes provisioned, executing remote Python analysis, and cleaning up cleanly.
+
+[Nosana — Server-Side Inference Gateway Driving the Reasoning Loop]
+- Role in Architecture: Inside each sandbox, `runner.py` reads and immediately deletes its short-lived capability file (`.cloudbite/capability.json`) and calls the Cloudbite worker gateway (`/p/_cloudbite/worker/<project>/<run>/inference`) using its per-expert `cbw_...` token. The server (`src/cloudbite-inference.ts`) proxies bounded requests to the configured OpenAI-compatible Nosana `chat/completions` endpoint using server-held credentials.
+- Why It Matters Practically: Upstream Nosana credentials never enter browser responses, prompts, or sandbox files. The server enforces strict per-expert budgets (up to 6 runner turns, max 8 gateway calls reserved before upstream fetch, one in flight, <= 48 KiB body, `max_tokens` 1200) and revokes capability hashes atomically on project cancellation so late inference calls immediately receive `410`.
+- Verified Evidence on Hand: The Nosana gateway module, capability enforcement, cancellation cutoff, and real local Python runner pass 18 runtime integration checks against deterministic stand-in providers. The first full live Nosana E2E run is our immediate next validation step.
+
+[Why Both Matter Together]
+- Nosana supplies the multi-turn reasoning that decides what analysis to run and synthesizes findings into the common `ExpertOpinion` schema; Daytona supplies the isolated computer where that analysis actually executes and leaves verifiable files. Together they replace uncheckable chat paragraphs with inspectable work.
+
+
+5. QR Audience Participation Flow
+-----------------------------------------------------------------------------
+- On-Stage Display: Show `demo/access-qr.html` (or `demo/cloudbite-sandbox-request.png`) during the final 12 seconds (`[2:48-3:00]`).
+- Participant Flow (`https://k.shinick.dev/lab/request` — singular `request`):
+  1) Scan the QR code to open the deployed public request form.
+  2) Select **`혼자 복습할 개인 실습실`** (personal practice workspace) and submit.
+  3) Keep the original request page open in the same browser. It polls status every 10 seconds while visible and reveals a personal entry link only to that participant once ready.
+  * Crucial Distinction: Each participant receives an **independent personal practice workspace**. This does NOT grant access into the AI experts' running advisory workspaces shown in the pitch. (If a previously used device hides the form behind an old record, use `이 기기의 요청 기록 지우기` only when intentionally discarding that device's prior request tracking.)
+- Host Approval Flow (`https://k.shinick.dev/lab/requests` — plural `requests`):
+  1) Before going on stage, open `https://k.shinick.dev/lab/requests` and sign in as the configured owner through Cloudflare Access.
+  2) Review the participant's pending request and verify its exact resource, duration, and AI budget plan.
+  3) Click **`보안 키로 승인하고 열기`**, enter the security-key PIN if prompted by the browser, and touch the physical security key enrolled for `shinick.dev`.
+  4) Approval starts provisioning; immediate creation is not guaranteed. If a request stays in the approved/creating state, do NOT submit a second request—click **`같은 요청으로 생성 결과 확인`** on the SAME request to resume/check status (creation does not auto-retry).
+
+
+6. Submission Paragraph, Truth Boundaries & Fallback Protocol
+-----------------------------------------------------------------------------
+[Short Submission Paragraph]
+Cloudbite is a multi-expert decision workbench where a single shared project brief is dispatched to distinct AI specialist personas—spanning Product, Finance, Security, Engineering, and UX—each working inside its own isolated Daytona sandbox and powered by Nosana inference through a capability-guarded server gateway. Instead of a single chatbot role-playing five opinions in one unverifiable thread, Cloudbite gives up to five selected experts (from a 12-role metadata-derived catalogue, running up to three concurrently) role-specific work orders to run Python, generate inspectable files (`out/financial-model.md`, `out/threat-model.md`, `out/architecture.md`), and return a strict common `ExpertOpinion` schema (`direction`, self-assessed `confidence`, `summary`, `evidence`, `assumptions`, `nextActions`). Decision makers (hypothesized as early product teams) can inspect the artifacts behind every number, compare stance distributions across options like Full Launch versus Paid Pilot, and convert expert disagreements directly into their next validation experiment.
+
+[CURRENT IMPLEMENTATION]
+- Real Console & Runtime Engine: Implemented HTTP console API (`src/cloudbite-api.ts`), per-project `CloudbiteProject` Durable Object alarm state machine, 12-role metadata-derived persona catalogue (`src/cloudbite-personas.ts`; 1–5 experts per project, max 3 concurrent; 100 experts is the long-term product vision, not tested capacity), sandbox Python `runner.py`, allowlisted artifact retrieval, atomic project cancellation, `requestId` idempotency, and server-side OpenAI-compatible Nosana gateway (`src/cloudbite-inference.ts`).
+- Offline Pitch Preview: `demo/cloudbite-pitch.html` is a self-contained English, blue-and-white scripted walkthrough with zero external network calls. Its Full Launch (2 Support / 2 Conditional / 1 Concern, unweighted avg confidence 82) and Paid Pilot (3 Support / 2 Conditional, unweighted avg confidence 84) distributions are authored sample data; confidence is model self-assessment, not calibrated reliability or business success probability.
+
+[VERIFIED EVIDENCE]
+- Local Automated Validation: `npm run check` passes generated-file and TypeScript checks. Separate checks pass 308 persona/registry cross-checks, 18 runtime checks (executing the real local Python `runner.py` against fake/stand-in Daytona and Nosana providers), 23 console checks, and 19 real Worker browser checks. This proves local end-to-end integration, not live paid-provider execution.
+- Recorded Real Daytona Execution (`demo/evidence.json`): `demo/run-council.ps1` created 3 real Daytona sandboxes, executed remote Python inside each, and cleaned them up. Sandboxes ran sequentially (no parallel benchmark claims), and the advice/confidence values in `evidence.json` were deterministic seeded placeholders rather than live Nosana model outputs.
+- QR Audience Access Service (`https://k.shinick.dev/lab/request` & `/lab/requests`): Deployed public participant script and WebAuthn helper match local source, backed by 88 passing local fixture checks (21 API, 16 request-service, 51 State). In browser inspection, the deployed host URL (`/lab/requests`) properly redirects to Cloudflare Access login.
+
+[NEXT VALIDATION]
+1) First full live end-to-end run combining the configured Nosana inference gateway with live Daytona sandboxes in the new console.
+2) Live rehearsal checkpoint for the QR handoff: completing authenticated owner login behind Cloudflare Access, physical security-key touch, and live participant sandbox provisioning on-site.
+3) Running a real project end-to-end to measure actual per-expert inference and sandbox unit costs and test our early-product-team customer hypothesis.
+
+[FALLBACK PROTOCOL (If Live Provider or Venue Network Is Unavailable)]
+- Never fake a live call or present recorded/scripted outputs as live execution. If the venue network or an external provider fails, state once clearly on stage:
+  "The live connection isn't answering, so I'll use our scripted walkthrough (`demo/cloudbite-pitch.html`), which is clearly labeled as a simulation, plus our recorded Daytona sandbox run (`demo/evidence.json`) from earlier. Nothing I show now is a live call."
+- Continue seamlessly from Cue A in the offline walkthrough and keep the Scene 5 implementation/verification boundary statement unchanged.

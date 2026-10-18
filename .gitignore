@@ -10,3 +10,4 @@ dev.log
 _trash/
 .artifacts/
 .worktrees/
+.impeccable/review/

@@ -1,0 +1,18 @@
+{
+  "id": "genai-101",
+  "title": "Generative AI for Practitioners",
+  "domain": "ai",
+  "language": "ko",
+  "instructor": "Kim",
+  "persona_name": "Hana",
+  "description": "Two-day course from LLM basics to in-house workflow automation labs",
+  "schedule": ["Day 1 09:00-12:00 LLM concepts", "Day 1 13:00-17:00 Prompting lab", "Day 2 09:00-17:00 API integration lab"],
+  "topics": ["Tokens and context windows", "Prompt engineering", "Calling OpenAI-compatible APIs", "RAG basics"],
+  "materials": ["Slides: company LMS > Generative AI course > Resources", "Lab repository: shared on day 1"],
+  "faq": [
+    {"q": "What are the completion requirements?", "a": "80% attendance and submitting the final lab assignment."},
+    {"q": "Do I need a laptop?", "a": "Yes, with Python 3.10 or newer installed."}
+  ],
+  "answer_key_secrets": ["Quiz 1 answer key: C, A, D, B"],
+  "blocked_categories": ["self_harm", "violence", "illegal", "sexual"]
+}

@@ -8,6 +8,7 @@ import { LAB_ASSISTANT_HTML } from './lab-assistant-page';
 import { labOpenParticipantPage, labOpenManagerPage } from './lab-open-pages';
 import { PRESETS } from './providers';
 import type { Env, State } from './state';
+import { cloudbitePage } from './cloudbite-api';
 
 export interface PublicGet {
   path: string;
@@ -24,7 +25,8 @@ export interface PublicGet {
 export async function publicGet({ path, url, env, state, sec, html, json, out }: PublicGet): Promise<Response> {
   const m = (re: RegExp) => path.match(re);
   let g: RegExpMatchArray | null;
-  if (path === '/' ) return Response.redirect(`${url.origin}/borrow`, 302);
+  const cloudbite = cloudbitePage(path, sec); // '/' 는 Cloudbite 콘솔. 예전 /borrow 는 그대로
+  if (cloudbite) return cloudbite;
   if (path === '/borrow') return html(borrowPage());
   if (path === '/register') return html(registerPage());
   if (path === '/admin') return html(adminPage());

@@ -1,0 +1,56 @@
+{
+  // Cloudbite v0.0.1 — independent Worker. Never deploy gw-shinick's wrangler.jsonc for Cloudbite, and never point
+  // this config at k.shinick.dev, lab.shinick.dev or *.shinick.dev. No routes: workers.dev only.
+  //   npx wrangler dev -c wrangler.cloudbite.jsonc --env dev     (local; no external resources unless you set secrets)
+  //   npx wrangler deploy -c wrangler.cloudbite.jsonc            (coordinator/operator decision, not done by workers)
+  // Secrets (wrangler secret put … -c wrangler.cloudbite.jsonc): MASTER_KEY, SETUP_TOKEN (first admin key registration),
+  //   CLOUDBITE_DAYTONA_API_KEY, CLOUDBITE_NOSANA_API_KEY. Missing settings are reported by name in /api/cloudbite/bootstrap.
+  "name": "cloudbite-v001",
+  "main": "src/index.ts",
+  "build": { "command": "node tools/build-lab-renderer.mjs --check && node tools/build-lab-dom-capture.mjs --check && node tools/build-lab-demo-broadcast.mjs --check && node tools/build-cloudbite-console.mjs --check && node tools/build-cloudbite-access.mjs --check" },
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "rules": [{ "type": "Text", "globs": ["**/*.ps1"], "fallthrough": true }],
+  "workers_dev": true,
+  "routes": [],
+  "vars": {
+    // Replace SUBDOMAIN with this account's workers.dev subdomain before any deploy.
+    // WebAuthn RP is this workers.dev host; admin keys are registered against this Worker's own State (not gw-shinick's).
+    "RP_ID": "cloudbite-v001.SUBDOMAIN.workers.dev",
+    "ORIGIN": "https://cloudbite-v001.SUBDOMAIN.workers.dev",
+    // Legacy lab hosts are disabled here: a non-routable placeholder origin and no seat domain.
+    "LAB_ORIGIN": "https://lab.cloudbite.invalid",
+    // Gateway the sandbox runner calls (/p/_cloudbite/worker/…). Same workers.dev host.
+    "CLOUDBITE_GATEWAY_URL": "https://cloudbite-v001.SUBDOMAIN.workers.dev",
+    // OpenAI-compatible Nosana inference endpoint and model (no key here — secret CLOUDBITE_NOSANA_API_KEY).
+    "CLOUDBITE_NOSANA_BASE_URL": "",
+    "CLOUDBITE_NOSANA_MODEL": "",
+    // Daytona API for Cloudbite's own organization/key (secret CLOUDBITE_DAYTONA_API_KEY). Optional snapshot with python3.
+    "CLOUDBITE_DAYTONA_API_URL": "",
+    "CLOUDBITE_DAYTONA_SNAPSHOT": ""
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "STATE", "class_name": "State" },
+      { "name": "CLOUDBITE", "class_name": "CloudbiteProject" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["State", "CloudbiteProject"] }],
+  "observability": { "enabled": true },
+  "env": {
+    "dev": {
+      "vars": {
+        "RP_ID": "localhost", "ORIGIN": "http://localhost:8808", "LAB_ORIGIN": "http://lab.cloudbite.invalid",
+        "CLOUDBITE_GATEWAY_URL": "", "CLOUDBITE_ALLOW_HTTP": "1",
+        "CLOUDBITE_NOSANA_BASE_URL": "", "CLOUDBITE_NOSANA_MODEL": "", "CLOUDBITE_DAYTONA_API_URL": "", "CLOUDBITE_DAYTONA_SNAPSHOT": ""
+      },
+      "routes": [],
+      "durable_objects": {
+        "bindings": [
+          { "name": "STATE", "class_name": "State" },
+          { "name": "CLOUDBITE", "class_name": "CloudbiteProject" }
+        ]
+      }
+    }
+  }
+}

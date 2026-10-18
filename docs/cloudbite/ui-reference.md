@@ -1,0 +1,11 @@
+# Confirmed Cloudbite UI direction
+
+The user supplied the AI Coding Lab UI Implementation Specification and explicitly selected **adapt its blue-and-white layout/design to Cloudbite**, keeping the expert-persona concept. They also requested English. No screenshot was attached to the current message; visual acceptance uses these written dimensions and theme, not a claim of pixel equivalence to an unseen image.
+
+Primary viewport1536×1024. Full-width navy header70px; light navigation sidebar224px; remaining main area has a central workspace and right progress/decision panel. Canvas is a very light blue-white; panels white, thin light-blue borders, moderate rounding. Bright blue primary controls, pale blue guidance cards, dark navy execution stream about394px tall. Use consistent real SVG icons, not emoji. English text throughout the pitch surface and console interface.
+
+Cloudbite adaptation: project brief replaces classroom steps; expert workspaces replace the coding lesson; actual returned activities replace terminal-looking invented output. Daytona provides isolated workspaces, Nosana provides server-configured inference. This runtime does not expose an interactive Claude/OpenCode CLI terminal, so do not add fake tool selection, command prompts or unrestricted execution APIs. Existing legacy lab/terminal code remains intact and outside this redesign.
+
+Keep project edits, expert selection, explicit browser demo/live mode, admin readiness, real create/poll/cancel/artifact calls, persona/workorder/artifact tabs, honest completed-only aggregation, confidence distribution, failures and export. A read-only execution stream may offer fullscreen and clear-view controls with accurate labels. Clearing the view must not mutate persisted history. Sidebar Home/Guide/Help/Settings must actually reveal relevant content; no decorative navigation. Existing generation/cancellation/stale-response guards and credential-in-memory boundary remain required.
+
+The separate offline pitch HTML remains a transparent scripted simulation. The served console stays connected to the existing API. Do not imply an external provider call occurred in the preview or local demo. Five experts/project, three active concurrently; twelve catalogue roles, hundred-expert scale is future work.
