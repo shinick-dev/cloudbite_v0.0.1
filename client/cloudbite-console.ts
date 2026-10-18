@@ -695,7 +695,7 @@ function boot(): void {
       guideStep(2, 'Choose up to five experts', 'Pick roles from the catalogue in Project setup. Each selected expert works in its own isolated workspace with its own persona and work order. Three to five experts are recommended.'),
       guideStep(3, 'Run in demo or live mode', 'Browser demo simulates the run inside this tab. Live run asks the server to create one Daytona sandbox per expert, with inference configured on the server. Choose the mode in Settings.'),
       guideStep(4, 'Watch the execution stream', 'The stream lists the activity each expert reports — status changes, tool steps, notes and files. It is read-only: you cannot type commands into it.'),
-      guideStep(5, 'Inspect files and personas', 'Select an expert in the workspace to open its files, activity, work order and persona. Files are read from the run itself; nothing is invented.'),
+      guideStep(5, 'Inspect files and personas', 'Select an expert to open available run artifacts, activity and its role definition. A work order may be shown as a labelled preview. Browser-demo files are simulated.'),
       guideStep(6, 'Review the synthesis', 'The right panel counts only completed, valid opinions. Failed, pending and cancelled experts are listed separately. Export a report or JSON when you are done.')),
     h('div', null, goHome));
 
@@ -738,7 +738,7 @@ function boot(): void {
     h('div', { class: 'cb-shell' },
       h('nav', { class: 'cb-nav', 'aria-label': 'Primary' }, h('span', { class: 'cb-nav-label' }, 'Workspace'),
         h('ul', { class: 'cb-nav-list' }, ...navBtns.map(b => h('li', null, b))),
-        h('div', { class: 'cb-nav-foot' }, h('span', null, 'Up to 5 experts per project · 3 run at once'), h('a', { href: '/lab' }, 'Legacy lab'))),
+        h('div', { class: 'cb-nav-foot' }, h('span', null, 'Up to 5 experts per project · 3 run at once'), h('a', { href: '/cloudbite/access', target: '_blank', rel: 'noopener noreferrer' }, 'Try a sandbox'), h('a', { href: '/lab' }, 'Legacy lab'))),
       h('main', { class: 'cb-main' }, banner, homeView, guideView, helpView, settingsView)));
 
   document.addEventListener('keydown', ev => { if ((ev as KeyboardEvent).key === 'Escape' && S.full) { ev.preventDefault(); setFull(false); } });
@@ -766,8 +766,8 @@ function boot(): void {
     modeBadge.className = `cb-badge ${runMode === 'demo' ? 'is-demo' : 'is-live'}`;
     profileState.textContent = S.adminToken.trim() ? 'Admin token held in memory' : 'No admin token';
     banner.textContent = runMode === 'demo'
-      ? 'Browser demo — the workspaces, activity and files on this screen are simulated in your browser. No real Daytona sandbox or Nosana inference is created.'
-      : 'Live run — the server creates one Daytona sandbox per expert; this screen only shows the state it returns. Confidence is self-assessed, not calibrated accuracy.';
+      ? 'Browser demo — simulated activity and files; no Daytona or Nosana calls.'
+      : 'Live run — server-reported activity. Confidence is self-assessed.';
     banner.className = `cb-banner ${runMode === 'demo' ? 'is-demo' : 'is-live'}`;
     modeLine.textContent = demo ? 'Next run: Browser demo (simulated in this tab).' : 'Next run: Live run (server sandboxes).';
     demoBox.hidden = !demo; liveBox.hidden = demo;
