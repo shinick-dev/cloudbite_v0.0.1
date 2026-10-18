@@ -46,4 +46,27 @@ References: [TypeSafe API](https://docs.typesafe.ai/api),
 
 ## Release
 
-Production deployment and smoke checks are recorded here after the verified build is released.
+Released to the independent `cloudbite-v001` Worker / `https://cloudbite.shinick.dev` on
+2026-10-19 KST. Active version: `8bb84d79-fd39-44e6-a769-f53756661811`.
+Deployed implementation commit: `3d01f8c`; follow-up `e4f700b` preserves State source line endings
+without changing application behavior. No legacy Worker or provider secret was changed.
+
+Production bootstrap reported 100 runnable roles, maxExperts=100, maxConcurrent=100, liveReady=true,
+Jev ready=true, and no missing configuration. The existing automatic visitor approval flow issued a
+one-hour QA session with ten projects and a 100-role allowance; no approval policy was changed.
+
+A real Jev request for a synthetic multi-domain brief selected 33 roles. Its subsequent expert run was
+explicitly a browser demo and was cancelled; it created no Daytona or Nosana resources or server history.
+This verifies routing above five, not 33 real concurrent sandboxes.
+
+A separate, manually selected six-role production project (`cb3fb23c82064aa0a7162ff5b7022ab553`)
+showed all six active before any completed. Product Manager, Business Strategist, Pricing Analyst,
+FP&A Analyst, UX Architect and Software Architect all completed through real Daytona sandboxes and
+Nosana, returning six valid opinions and zero failed experts. Artifact counts were 3/5/5/5/4/6;
+self-assessed confidences were 40/55/35/35/55/55. A malformed Pricing Analyst citation was rejected
+and corrected within the existing runner budget; zero failed experts does not mean zero recoverable
+activity errors. KO switching preserved the question, all six results and their aggregate.
+
+Cleanup was checked through all three owning account credentials: each of the six sandbox GETs returned
+404, and each organization listed zero sandboxes with this QA project label. No test attempted 100 real
+concurrent sandboxes. The synthetic history record is removed after verification.
