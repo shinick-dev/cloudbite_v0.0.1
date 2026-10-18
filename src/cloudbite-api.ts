@@ -3,7 +3,7 @@
 import type { CloudbiteBootstrap } from './cloudbite-contract';
 import { CLOUDBITE_EXPERTS } from './cloudbite-personas';
 import { CLOUDBITE_CSS, CLOUDBITE_CSS_PATH, CLOUDBITE_HTML, CLOUDBITE_JS, CLOUDBITE_JS_PATH } from './cloudbite-page';
-import { CLOUDBITE_ACCESS_HTML, CLOUDBITE_ACCESS_CSS, CLOUDBITE_ACCESS_QR } from './cloudbite-access-page';
+import { CLOUDBITE_ACCESS_HTML, CLOUDBITE_ACCESS_CSS, CLOUDBITE_ACCESS_QR, CLOUDBITE_REQUEST_HTML, CLOUDBITE_REQUESTS_HTML, CLOUDBITE_ACCESS_JS } from './cloudbite-access-page';
 import { CB_ACTIVITY_BODY_MAX, CB_COMPLETE_BODY_MAX, CB_CREATE_BODY_MAX, CB_INFERENCE_BODY_MAX, CB_MAX_EXPERTS, cloudbiteMissing } from './cloudbite-config';
 import { cbProjectId, isCbFail } from './cloudbite-project';
 import { CB_OPERATOR_PREFIX, verifyCloudbiteOperator } from './cloudbite-operator';
@@ -19,6 +19,9 @@ const CB_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src
 export function cloudbitePage(path: string, sec: Record<string, string>): Response | null {
   const page = (body: string, type: string, csp = false) =>
     new Response(body, { headers: { ...sec, 'content-type': type, ...(csp ? { 'content-security-policy': CB_CSP } : {}) } });
+  if (path === '/cloudbite/request' || path === '/cloudbite/request/') return page(CLOUDBITE_REQUEST_HTML, 'text/html; charset=utf-8', true);
+  if (path === '/cloudbite/requests' || path === '/cloudbite/requests/') return page(CLOUDBITE_REQUESTS_HTML, 'text/html; charset=utf-8', true);
+  if (path === '/cloudbite/access.js') return page(CLOUDBITE_ACCESS_JS, 'text/javascript; charset=utf-8');
   if (path === '/cloudbite/access' || path === '/cloudbite/access/') return page(CLOUDBITE_ACCESS_HTML, 'text/html; charset=utf-8', true);
   if (path === '/cloudbite/access.css') return page(CLOUDBITE_ACCESS_CSS, 'text/css; charset=utf-8');
   if (path === '/cloudbite/access-qr.svg') return page(CLOUDBITE_ACCESS_QR, 'image/svg+xml; charset=utf-8');
