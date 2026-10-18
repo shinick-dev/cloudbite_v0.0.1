@@ -22,6 +22,7 @@ import { vaultApi } from './vault-api';
 import { providerProxy } from './provider-proxy';
 import { publicGet } from './public-get';
 import { cloudbiteRoute } from './cloudbite-api';
+import { computerRoute } from './cloudbite-computer-api';
 import { cloudbiteAliasPath, cloudbiteIdentity, retiredCloudbiteOrigin } from './cloudbite-origin';
 import { isFail, sha, type Env, type State } from './state';
 
@@ -29,6 +30,8 @@ export { State } from './state';
 export { CloudbiteProject } from './cloudbite-project';
 export { CloudbiteAccess } from './cloudbite-access-service';
 export { CloudbiteHistory } from './cloudbite-history';
+export { CloudbiteComputer } from './cloudbite-computer-service';
+export { CloudbiteComputerNested } from './cloudbite-computer-nested';
 
 const SECURITY_HEADERS = {
   'cache-control': 'no-store',
@@ -166,6 +169,8 @@ export default {
     }
 
     // Cloudbite: /api/cloudbite/* (주 호스트) · /p/_cloudbite/worker/* (게이트웨이, 전문가별 짧은 권한) — src/cloudbite-api.ts
+    const computer = await computerRoute(req, env, url, state);
+    if (computer) return computer;
     const cloudbite = await cloudbiteRoute(req, env, url, state, json);
     if (cloudbite) return cloudbite;
 

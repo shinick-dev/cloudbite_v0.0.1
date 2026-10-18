@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Start the CloudBite computer session for the user daytona (never root).
+
+Run by the control plane after the SDK ``computer_use.start()`` has brought up the X
+display and XFCE.  Idempotent: a second run reuses a healthy Selkies and live session bus.
+
+1. per-user first-run (profile dirs, launchers, default browser) unless already done;
+2. a per-user DBus session bus at /tmp/cloudbite-dbus-<uid>/bus, shared with shells via
+   /etc/profile.d/cloudbite-computer.sh;
+3. gnome-keyring (secrets) on that bus, so Chromium and native CLIs keep their own
+   OAuth tokens in the user's keyring.  The login keyring has an empty password: its
+   protection is the private sandbox filesystem, not a passphrase;
+4. Selkies 2.0.0 (websocket, CPU H.264, no basic auth) on port 8082 under the subfolder
+   /p/_cloudbite/computer/desktop, ready only after its HTTP health answers ``OK``.
+
+The last stdout line is one JSON object, ``{"ok": true, ...}`` or
+``{"ok": false, "code": "computer_..."}``.  No credential or environment secret is read.
+"""
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+
+PORT = 8082
+PREFIX = "/p/_cloudbite/computer/desktop"
+BASE = "/tmp/cloudbite-computer"
+SELKIES_INSTALLER = "/opt/cloudbite/computer/lib/install_selkies.py"
+SELKIES_PREPARED = "/opt/cloudbite/selkies"
+FIRST_RUN = "/opt/cloudbite/computer/bin/cloudbite-first-run"
+HEALTH_S = 65
+# Same documented SELKIES_<NAME> settings as cloudbite/desktop.py, under the computer subfolder.
+SELKIES_ENV = {
+    "SELKIES_MODE": "websockets", "SELKIES_ENABLE_DUAL_MODE": "false",
+    "SELKIES_ENABLE_HTTPS": "false", "SELKIES_ENABLE_BASIC_AUTH": "false",
+    "SELKIES_ADDR": "0.0.0.0", "SELKIES_PORT": str(PORT), "SELKIES_SUBFOLDER": PREFIX,
+    "SELKIES_ENCODER": "h264enc", "SELKIES_USE_CPU": "true",
+    "SELKIES_AUDIO_ENABLED": "false", "SELKIES_MICROPHONE_ENABLED": "false",
+    "SELKIES_WEBCAM_ENABLED": "false", "SELKIES_GAMEPAD_ENABLED": "false",
+    "SELKIES_COMMAND_ENABLED": "false", "SELKIES_ENABLE_METRICS_HTTP": "false",
+}
+
+
+def emit(obj):
+    sys.stdout.write("\n" + json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+
+def fail(code):
+    emit({"ok": False, "code": code})
+    sys.exit(0)
+
+
+def last_json(text):
+    for line in reversed(text.strip().splitlines()):
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        return value if isinstance(value, dict) else None
+    return None
+
+
+def healthy():
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d%s/api/health" % (PORT, PREFIX), timeout=2) as r:
+            return r.status == 200 and r.read(16).strip() == b"OK"
+    except Exception:
+        return False
+
+
+def displays():
+    try:
+        names = os.listdir("/tmp/.X11-unix")
+    except OSError:
+        return []
+    return sorted(int(n[1:]) for n in names if n[:1] == "X" and n[1:].isdigit())
+
+
+def bus_alive(path):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(1)
+    try:
+        s.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def start_bus(env):
+    folder = "/tmp/cloudbite-dbus-%d" % os.getuid()
+    path = folder + "/bus"
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    if os.stat(folder).st_uid != os.getuid() or os.path.islink(folder):
+        fail("computer_dbus_dir_untrusted")
+    os.chmod(folder, 0o700)
+    if not bus_alive(path):
+        if os.path.exists(path):
+            os.remove(path)
+        subprocess.Popen(["dbus-daemon", "--session", "--nofork", "--nopidfile", "--address=unix:path=" + path],
+                         env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        deadline = time.monotonic() + 10
+        while not bus_alive(path):
+            if time.monotonic() > deadline:
+                fail("computer_dbus_start_failed")
+            time.sleep(0.2)
+    return "unix:path=" + path
+
+
+def start_keyring(env):
+    """Unlock (creating on first use) the login keyring; best effort, reported honestly."""
+    try:
+        subprocess.run(["gnome-keyring-daemon", "--unlock", "--components=secrets"], input=b"",
+                       env=env, capture_output=True, timeout=15)
+        out = subprocess.run(["gnome-keyring-daemon", "--start", "--components=secrets"],
+                             env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return "unavailable"
+    return "started" if out.returncode == 0 else "unavailable"
+
+
+def main():
+    if os.geteuid() == 0:
+        fail("computer_start_as_root")
+    home = os.path.expanduser("~")
+    os.makedirs(BASE, mode=0o700, exist_ok=True)
+    env = dict(os.environ)
+    env["PATH"] = home + "/.local/bin:/opt/cloudbite/computer/bin:" + env.get("PATH", "/usr/bin:/bin")
+    deadline = time.monotonic() + 15
+    while not displays():
+        if time.monotonic() > deadline:
+            fail("computer_no_display")
+        time.sleep(0.5)
+    env["DISPLAY"] = ":%d" % displays()[0]
+    env["DBUS_SESSION_BUS_ADDRESS"] = start_bus(env)
+    keyring = start_keyring(env)
+    if not os.path.exists(home + "/.config/cloudbite/first-run.json"):
+        try:
+            ok = subprocess.run([FIRST_RUN], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=60).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        if not ok:
+            fail("computer_first_run_failed")
+    if not healthy():
+        try:
+            out = subprocess.run([sys.executable, SELKIES_INSTALLER, BASE + "/selkies-venv", SELKIES_PREPARED],
+                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=200)
+        except (OSError, subprocess.SubprocessError):
+            fail("computer_selkies_install_timeout")
+        result = last_json(out.stdout) or {}
+        python = result.get("python")
+        if not result.get("ok") or python not in (BASE + "/selkies-venv/bin/python", SELKIES_PREPARED + "/bin/python"):
+            fail("computer_selkies_install_failed")
+        log = open(os.path.join(BASE, "selkies.log"), "ab")
+        proc = subprocess.Popen([python, "-m", "selkies"], env=dict(env, **SELKIES_ENV), stdin=subprocess.DEVNULL,
+                                stdout=log, stderr=log, start_new_session=True, cwd=BASE)
+        deadline = time.monotonic() + HEALTH_S
+        while not healthy():
+            if proc.poll() is not None:
+                fail("computer_selkies_exited")
+            if time.monotonic() > deadline:
+                fail("computer_selkies_health_timeout")
+            time.sleep(0.5)
+    emit({"ok": True, "display": env["DISPLAY"], "keyring": keyring, "port": PORT,
+          "health": PREFIX + "/api/health"})
+
+
+if __name__ == "__main__":
+    main()

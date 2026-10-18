@@ -1,4 +1,7 @@
 import { makeDemoService } from './lab-demo-state';
+import type { ComputerEnv } from './cloudbite-computer-contract';
+import type { CloudbiteComputer } from './cloudbite-computer-service';
+import type { CloudbiteComputerNested } from './cloudbite-computer-nested';
 import { applyClassroomMaterials } from './lab-classroom-materials';
 import { demoSandbox } from './lab-demo-native';
 // 모든 상태는 Durable Object 하나(idFromName('main'))에 있다.
@@ -96,7 +99,9 @@ import { LabOpenRequestService } from './lab-open-request-service';
 import { LabOpenPushService } from './lab-open-push-service';
 import { VaultService, type Sealed, type VaultMeta } from './vault-service';
 
-export interface Env {
+export interface Env extends ComputerEnv {
+  CLOUDBITE_COMPUTER?: DurableObjectNamespace<CloudbiteComputer>;
+  CLOUDBITE_COMPUTER_NESTED?: DurableObjectNamespace<CloudbiteComputerNested>;
   LAB_OPEN_ACCESS_TEAM?: string;
   LAB_OPEN_AUDIENCE?: string;
   LAB_OPEN_OWNER_EMAIL?: string;
