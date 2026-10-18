@@ -21,9 +21,21 @@ export interface ProjectBrief {
   requestId: string;
 }
 export interface CloudbiteRoutingQuery { title: string; objective: string; context: string; requestId: string }
+/** Team composition judgments, not answer correctness or a completed peer review. */
+export interface CloudbiteRoutingHarness {
+  version: 'project-team/v1';
+  stages: ['assessment', 'team-review'];
+  eligibleCount: number;
+  perspectives: Array<{ id: string; name: string; need: number; status: 'covered' | 'uncovered' | 'limited'; expertIds: string[] }>;
+  selections: Array<{ expertId: string; perspectiveIds: string[]; kind: 'coverage' | 'additional-domain' }>;
+  excluded: Array<{ expertId: string; reason: 'overlap' | 'limit' | 'below-threshold'; coveredBy?: string }>;
+  warnings: string[];
+  peerReview: 'not-performed';
+}
 export interface CloudbiteRoutingDecision {
   provider: 'typesafe'; model: string; policyVersion: string; evaluatedCount: number; threshold: number;
   expertIds: string[]; matches: Array<{ expertId: string; relevance: number }>; queryHash: string; expiresAt: number;
+  harness?: CloudbiteRoutingHarness;
 }
 export interface ExpertOpinion {
   direction: OpinionDirection;
