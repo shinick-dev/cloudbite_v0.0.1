@@ -10,6 +10,7 @@ import { CB_OPERATOR_PREFIX, verifyCloudbiteOperator } from './cloudbite-operato
 import { boundedText } from './cloudbite-inference';
 import { isInvalid, PROJECT_ID, RUN_ID, validateBrief } from './cloudbite-validate';
 import { accessRoute, accessSession, visitorGrant, visitorRequestId } from './cloudbite-access-api';
+import { ownerCookieValid, ownerRoute, type OwnerState } from './cloudbite-owner';
 import type { Env, State } from './state';
 
 type Json = (data: unknown, status?: number) => Response;
@@ -54,8 +55,10 @@ const result = (json: Json, r: unknown) => (isCbFail(r) ? json({ error: r.error 
  * Cloudbite API and worker callbacks. null = not a Cloudbite path (legacy routing continues).
  * Live/demo creation reuses the existing State admin session (x-admin-token, State.adminList: storage reads only),
  * or a temporary Cloudbite operator token in the same header (src/cloudbite-operator.ts; this route only).
+ * Without that header, a Cloudbite owner-session cookie (src/cloudbite-owner.ts) is checked before a visitor cookie;
+ * State's cloudbiteOwner* methods are called only on /api/cloudbite/owner/* or when that cookie is presented.
  */
-export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pick<DurableObjectStub<State>, 'adminList'>, json: Json): Promise<Response | null> {
+export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pick<DurableObjectStub<State>, 'adminList'> & OwnerState, json: Json): Promise<Response | null> {
   const path = url.pathname;
   if (!path.startsWith('/api/cloudbite/') && !path.startsWith('/p/_cloudbite/')) return null;
   const ns = env.CLOUDBITE;
@@ -82,7 +85,12 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
   // cbo_ = temporary Cloudbite operator: checked against its own secrets only, never sent to State.
   const isOwner = async (admin: string) => admin.startsWith(CB_OPERATOR_PREFIX) ? verifyCloudbiteOperator(env, admin)
     : !!admin && !isCbFail(await state.adminList(admin));
-  const access = await accessRoute(req, env, path, isOwner, json);
+  const owned = await ownerRoute(req, env, path, state, json);
+  if (owned) return owned;
+  // An x-admin-token header always decides by itself (a wrong one never falls back to a cookie).
+  const admin = req.headers.get('x-admin-token') ?? '';
+  const ownerAuth = () => (admin ? isOwner(admin) : ownerCookieValid(req, env, state));
+  const access = await accessRoute(req, env, path, ownerAuth, json);
   if (access) return access;
 
   const strictOrigin = () => req.headers.get('origin') === env.ORIGIN;
@@ -93,11 +101,12 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     if (!(req.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) return json({ error: 'content-type must be application/json' }, 415);
     const b = await readJson(req, CB_CREATE_BODY_MAX);
     if ('error' in b) return json({ error: b.error }, b.status);
-    const admin = req.headers.get('x-admin-token') ?? '';
-    // An x-admin-token header always takes the owner path (no fallback to a visitor cookie when it is wrong).
-    // Without one, an owner-approved visitor cookie may create its own projects within the grant quota (docs/cloudbite/access-service.txt).
-    const visitor = admin ? null : await visitorGrant.check(req, env);
-    if (admin ? !await isOwner(admin) : !visitor) return json({ error: 'admin session required' }, 401);
+    // An x-admin-token header always takes the owner path (no fallback to a cookie when it is wrong).
+    // Without one: a live owner-session cookie is the owner; otherwise an owner-approved visitor cookie may create its
+    // own projects within the grant quota (docs/cloudbite/access-service.txt). A dead owner cookie grants nothing itself.
+    const ownerSession = !admin && await ownerCookieValid(req, env, state);
+    const visitor = admin || ownerSession ? null : await visitorGrant.check(req, env);
+    if (admin ? !await isOwner(admin) : !ownerSession && !visitor) return json({ error: 'admin session required' }, 401);
     const brief = validateBrief(b.ok, visitor ? CLOUDBITE_EXPERTS : undefined);
     if (isInvalid(brief)) return json({ error: brief.invalid }, 400);
     if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);

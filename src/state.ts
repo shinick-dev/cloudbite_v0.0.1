@@ -19,6 +19,7 @@ import { demoSandbox } from './lab-demo-native';
 //   mig:grants       gen 도입 이전 공급자·세션에 gen 을 한 번 채워 넣었다는 표시
 //   tok:<sha256>     가짜 토큰 해시 → 세션 id. 토큰 원문은 저장하지 않는다
 //   admin:<sha256>   관리 세션 (8시간)
+//   cbown:<sha256hex> Cloudbite 소유자 세션 (보안 키 탭으로만 생김, 만료 없음 — 로그아웃·키 삭제로 끝). 쿠키 원문은 저장하지 않는다
 //   teacher:<sha256> 강사 보기 전용 세션 (8시간 고정, 기기 16개). 상태 읽기만 — 관리 API 는 admin: 만 받는다 (lab-teacher-service.ts)
 //   tpsub:<sha256>   강사 알림 구독 (endpoint 해시). 주인 = 보기 세션 해시·그 고정 만료, endpoint+keys 는 MASTER_KEY 봉인만 (lab-teacher-push-service.ts)
 //   tpush:outbox     새로 든 손 알림 일 (32개·자리마다 60초·3번·120초). 손 든 트랜잭션이 같이 쓴다
@@ -189,6 +190,13 @@ export interface LabInput { requestId?: unknown; name?: unknown; seats?: unknown
 interface LabCreatePrepared { demoFor?: string; demoExpiresAt?: number; v: Exclude<ReturnType<typeof labCreateInput>, { error: string }>; shared: { share: Record<string, LabShare>; defs: StoredProvider[] }; c: Dt; or: StoredProvider; clip: Clip; daytonaStamp: string; parentId?: string; parentFingerprint?: string; openRequestId?: string }
 export interface Choice { providers: string[]; ttlHours: number; budget: number; manage?: unknown; limits?: unknown }
 export type Fail = { error: string; status: number };
+
+// Cloudbite 소유자 세션 (cloudbiteOwner* 메서드). 만료 없음 — 알람 정리 대상(prefix) 이 아니다
+interface CbOwnerSession { createdAt: number; credentialId: string; credCreatedAt: number }
+const CB_OWNER_PURPOSE = 'cloudbite-owner';
+const CB_OWNER_PREFIX = 'cbown:';
+const CB_OWNER_HASH = /^[0-9a-f]{64}$/;
+const CB_OWNER_MAX = 16; // 동시에 남는 소유자 세션 (브라우저) 수. 넘치면 가장 오래된 것부터 끝낸다
 
 const REQ_TTL = 10 * 60e3;
 const CHAL_TTL = 3 * 60e3;
@@ -999,6 +1007,54 @@ export class State extends DurableObject<Env> {
     await this.s.delete(`vwrap:${credId}`);
     await this.audit('cred-delete', null, null, credId.slice(0, 8));
     return { ok: true };
+  }
+
+  // ── Cloudbite 소유자 세션 (src/cloudbite-owner.ts, docs/cloudbite/owner-session.txt) ──
+  // 보안 키 탭(purpose 'cloudbite-owner', 다른 의식과 challenge 를 나누지 않는다)으로만 생긴다. 서버 쪽 만료 없음 —
+  // 로그아웃·그 키 삭제(같은 id 로 다시 등록해도 createdAt 이 달라 안 통한다)가 끝낸다. 쿠키 원문은 Worker 에만, 여기는 해시만.
+  // 이 세션은 Cloudbite 요청함·프로젝트 만들기에만 쓰인다 — admin:·금고·실습실은 이 키를 보지 않는다
+
+  async cloudbiteOwnerStatus(sessionHash: string | null) {
+    const hasCredentials = (await this.creds()).length > 0;
+    const authenticated = hasCredentials && sessionHash !== null && (await this.cloudbiteOwnerCheck(sessionHash));
+    return { authenticated, hasCredentials };
+  }
+
+  async cloudbiteOwnerOptions(src: string) { return this.authOptions(CB_OWNER_PURPOSE, src); }
+
+  /** 탭 검증을 통과해야만 sessionHash 를 저장한다. replaces = 이 브라우저가 내던 예전 세션 (있으면 같이 끝낸다) */
+  async cloudbiteOwnerLogin(resp: AuthenticationResponseJSON, sessionHash: string, replaces: string | null) {
+    if (!CB_OWNER_HASH.test(sessionHash)) return fail(400, 'invalid session');
+    const cred = await this.verifyTap(CB_OWNER_PURPOSE, resp);
+    if (!cred) return fail(401, 'security key verification failed');
+    await this.ctx.blockConcurrencyWhile(async () => {
+      const all = [...(await this.s.list<CbOwnerSession>({ prefix: CB_OWNER_PREFIX }))].sort((a, b) => a[1].createdAt - b[1].createdAt);
+      const drop = all.slice(0, Math.max(0, all.length - CB_OWNER_MAX + 1)).map(([k]) => k);
+      if (replaces && CB_OWNER_HASH.test(replaces) && replaces !== sessionHash) drop.push(CB_OWNER_PREFIX + replaces);
+      if (drop.length) await this.deleteKeys(drop);
+      await this.s.put(CB_OWNER_PREFIX + sessionHash, { createdAt: now(), credentialId: cred.id, credCreatedAt: cred.createdAt } satisfies CbOwnerSession);
+    });
+    await this.audit('cloudbite-owner-login', null, null, cred.label);
+    return { authenticated: true as const, hasCredentials: true as const };
+  }
+
+  /** 세션이 있고 그 세션을 만든 키가 (같은 등록 그대로) 남아 있을 때만 true. 키가 없어졌으면 세션도 지운다 */
+  async cloudbiteOwnerCheck(sessionHash: string) {
+    if (typeof sessionHash !== 'string' || !CB_OWNER_HASH.test(sessionHash)) return false;
+    const k = CB_OWNER_PREFIX + sessionHash;
+    const sess = await this.s.get<CbOwnerSession>(k);
+    if (!sess) return false;
+    const cred = await this.s.get<Cred>(`cred:${sess.credentialId}`);
+    if (cred && cred.createdAt === sess.credCreatedAt) return true;
+    await this.s.delete(k);
+    return false;
+  }
+
+  /** 멱등: 없는 세션도 성공 */
+  async cloudbiteOwnerLogout(sessionHash: string) {
+    if (typeof sessionHash === 'string' && CB_OWNER_HASH.test(sessionHash) && (await this.s.delete(CB_OWNER_PREFIX + sessionHash)))
+      await this.audit('cloudbite-owner-logout', null, null, '');
+    return { authenticated: false as const };
   }
 
   // ── 금고 ─────────────────────────────────────────────────

@@ -112,13 +112,13 @@ async function readObject(req: Request, max: number): Promise<{ ok: Record<strin
 }
 
 /**
- * /api/cloudbite/access/*. null = not an access path. isOwner checks x-admin-token (temporary cbo_ operator or a
- * State admin session) — evaluated only on the owner paths below.
+ * /api/cloudbite/access/*. null = not an access path. owner decides owner authority (x-admin-token: temporary cbo_
+ * operator or a State admin session; without that header the Cloudbite owner-session cookie) — evaluated only on the
+ * owner paths below.
  */
-export async function accessRoute(req: Request, env: Env, path: string, isOwner: (token: string) => Promise<boolean>, json: Json): Promise<Response | null> {
+export async function accessRoute(req: Request, env: Env, path: string, owner: () => Promise<boolean>, json: Json): Promise<Response | null> {
   if (!path.startsWith('/api/cloudbite/access/')) return null;
   const strictOrigin = () => req.headers.get('origin') === env.ORIGIN;
-  const owner = () => isOwner(req.headers.get('x-admin-token') ?? '');
   const out = (r: unknown, status = 200) => (isCbFail(r) ? json({ error: r.error }, r.status) : json(r, status));
 
   if (path === '/api/cloudbite/access/status') {

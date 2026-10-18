@@ -1,0 +1,55 @@
+Cloudbite persistent owner session
+==================================
+
+Purpose: the owner taps a registered physical security key ONCE in the Cloudbite owner inbox and keeps approving
+across reloads, new tabs and browser restarts until an explicit logout. This replaces the 8-hour limit ONLY for this
+Cloudbite-scoped session. Legacy admin (/admin, CLI), vault and studyroom sessions keep their 8-hour policy.
+
+Code: src/cloudbite-owner.ts (HTTP + cookie), State.cloudbiteOwner* in src/state.ts (ceremony + storage),
+wired in src/cloudbite-api.ts and src/cloudbite-access-api.ts. Test: node test/cloudbite-owner.mjs.
+
+API
+  GET  /api/cloudbite/owner/session  -> 200 {authenticated, hasCredentials} (booleans only; never ids or keys).
+       Unauthenticated is 200 false. A live session re-sends the SAME cookie (Max-Age renewal); nothing new is minted.
+  POST /api/cloudbite/owner/options  body {} -> raw PublicKeyCredentialRequestOptionsJSON
+       (rpId = RP_ID, userVerification required, hints ['security-key'], allowCredentials = registered keys, usb/nfc).
+  POST /api/cloudbite/owner/login    body {response: AuthenticationResponseJSON} -> {authenticated:true, hasCredentials:true}
+       + Set-Cookie. Any failure -> 401 {error} and no cookie.
+  POST /api/cloudbite/owner/logout   body {} -> {authenticated:false} + clearing Set-Cookie (Max-Age=0). Idempotent.
+  POSTs: exact Origin == ORIGIN (403), content-type application/json (415), JSON object (400), body cap 256 B
+  (options/logout, must be exactly {}) or 32 KiB (login, only the `response` field) (413). Errors are {error} only.
+
+Ceremony
+  - Challenge purpose 'cloudbite-owner' in State (wch:cloudbite-owner|<challenge>, 3 min, single use). The generic
+    admin challenge cannot be redeemed here and an owner challenge cannot log into /admin.
+  - Same State mechanics as every other tap: per-source (16) / per-purpose (64) / global (256) challenge caps,
+    source = keyed hash of cf-connecting-ip (IPv6 grouped by /64), never the raw address.
+  - verifyAuthenticationResponse with expectedOrigin = ORIGIN, expectedRPID = RP_ID, requireUserVerification = true,
+    against the stored public key. Only a verified response deletes its challenge (replay refused). Counter kept.
+  - A session is minted ONLY after that verification. x-admin-token (legacy or cbo_ operator), visitor cookies or
+    anonymous requests cannot mint one.
+
+Session storage and cookie
+  - Credential: cbown_ + base64url(32 random bytes), generated in the Worker. State stores only
+    cbown:<sha256hex("cloudbite-owner-session-v1|" + credential)> = {createdAt, credentialId, credCreatedAt}.
+  - No server-side expiry (not an alarm prefix). It ends on logout, on deletion of the security key that created it
+    (checked on every use; re-registering the same credential id gets a new createdAt and does not revive it),
+    on re-login from the same browser (rotation), or when more than 16 owner sessions exist (oldest evicted).
+  - Cookie: __Host-cb-owner=<credential>; Path=/; Max-Age=34560000 (400 days); HttpOnly; SameSite=Strict; Secure.
+    Local http dev only (CLOUDBITE_ALLOW_HTTP=1 AND http ORIGIN): cb-owner-dev without Secure.
+    Nothing is kept in localStorage/sessionStorage or anything JS-readable. The browser may still clear or cap it.
+  - Logout revokes server-side first; the cookie is cleared only after that succeeded (State failure -> 503, cookie kept).
+    A copied old cookie is denied afterwards.
+
+Authority (Cloudbite only)
+  - Owner cookie authorizes: GET /api/cloudbite/access/requests, POST .../<id>/approve|deny|revoke,
+    POST /api/cloudbite/projects (owner rules, no visitor slot). Nothing else reads it (not /api/admin/*, vault, lab).
+  - A non-empty x-admin-token header decides alone, as before: an invalid header never falls back to an owner or
+    visitor cookie. Without it, the owner cookie is checked before a visitor cookie. A dead/malformed owner cookie
+    grants nothing by itself; a visitor cookie beside it is still only a visitor (quotas 10 / 1h / 5 experts / refund
+    unchanged). Project bearer tokens are unchanged.
+  - State.cloudbiteOwner* is called only on /api/cloudbite/owner/* or when a well-formed owner cookie is presented.
+  - CSRF: SameSite=Strict cookie plus exact Origin on every state-changing POST.
+
+Audit: State audit log records cloudbite-owner-login (key label) and cloudbite-owner-logout; never session values.
+Not proven here: hardware security key / real browser GUI flow (the test uses a software P-256 authenticator).
