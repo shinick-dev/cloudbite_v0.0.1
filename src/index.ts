@@ -21,9 +21,11 @@ import { labApi } from './lab-api';
 import { vaultApi } from './vault-api';
 import { providerProxy } from './provider-proxy';
 import { publicGet } from './public-get';
+import { cloudbiteRoute } from './cloudbite-api';
 import { isFail, sha, type Env, type State } from './state';
 
 export { State } from './state';
+export { CloudbiteProject } from './cloudbite-project';
 
 const SECURITY_HEADERS = {
   'cache-control': 'no-store',
@@ -144,6 +146,10 @@ export default {
       if (!token?.startsWith('kvt_')) return json({ error: 'missing gateway token' }, 401);
       return out(await state.labShareStatus(token));
     }
+
+    // Cloudbite: /api/cloudbite/* (주 호스트) · /p/_cloudbite/worker/* (게이트웨이, 전문가별 짧은 권한) — src/cloudbite-api.ts
+    const cloudbite = await cloudbiteRoute(req, env, url, state, json);
+    if (cloudbite) return cloudbite;
 
     // ── 프록시 ── (예약·키·upstream 호출은 src/provider-proxy.ts)
     const g = path.match(/^\/p\/([a-z0-9-]+)\/(.*)$/);

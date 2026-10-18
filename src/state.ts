@@ -112,6 +112,16 @@ export interface Env {
   REALTIME_API?: string;       // dev 전용: SFU 주소 바꾸기 (테스트의 가짜 SFU)
   LAB_SEAT_DOMAIN?: string;    // 자리 호스트의 상위 (shinick.dev → s-<label>.shinick.dev). 없으면 참가자 입장·수업 만들기를 막는다 (route 를 연 뒤에만 켠다)
   TEACHER_PUSH_VAPID_JWK?: string; // 강사 손 알림 VAPID 개인키 JWK (Worker secret). 없거나 틀리면 알림 꺼짐 — DO 밖으로 안 나간다 (공개키만 config 로)
+  // Cloudbite (wrangler.cloudbite.jsonc 전용). 원래 gw-shinick 공급자 키를 쓰지 않는 독립 설정 — src/cloudbite-config.ts
+  CLOUDBITE?: DurableObjectNamespace<import('./cloudbite-project').CloudbiteProject>;
+  CLOUDBITE_DAYTONA_API_URL?: string;
+  CLOUDBITE_DAYTONA_API_KEY?: string;   // Worker secret
+  CLOUDBITE_DAYTONA_SNAPSHOT?: string;
+  CLOUDBITE_NOSANA_BASE_URL?: string;   // OpenAI 호환 …/v1
+  CLOUDBITE_NOSANA_API_KEY?: string;    // Worker secret
+  CLOUDBITE_NOSANA_MODEL?: string;
+  CLOUDBITE_GATEWAY_URL?: string;       // 샌드박스가 /p/_cloudbite/worker/ 로 부르는 이 Worker 의 workers.dev 주소
+  CLOUDBITE_ALLOW_HTTP?: string;        // dev 전용: http://localhost 주소 허용
 }
 
 export interface ClientMeta { ip: string; country: string; city: string; ua: string }
