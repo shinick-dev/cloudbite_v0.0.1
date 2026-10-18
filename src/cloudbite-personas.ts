@@ -3,11 +3,10 @@ import { STA_EXPERT, staKnowledgeFiles } from './cloudbite-sta';
 
 // Cloudbite expert personas and per-expert workspace packs.
 //
-// Each persona is selected from the pro-bably registry seed and keeps that entry's id,
-// name, domain and source pin. The source prompt files are NOT vendored: every role
-// instruction below is freshly authored from registry metadata only (basis
-// 'metadata-derived'). These are AI roles, not real people, and the registry marks
-// all of them coverage tier T0 (automatically extracted, unvalidated).
+// Twelve general roles preserve the Pro-bably registry metadata and use freshly authored
+// prompts (metadata-derived). The separate PrimeTime STA pilot imports the user's authored
+// instructions and source-linked cards (curated-knowledge); see cloudbite-sta.ts.
+// These are unvalidated T0 AI roles, not real people or certified experts.
 //
 // Project briefs are untrusted task data. They are validated, bounded, stripped of
 // control/bidi characters and only ever written into data files (fenced Markdown and

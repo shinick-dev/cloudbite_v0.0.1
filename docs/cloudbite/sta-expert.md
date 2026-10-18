@@ -20,6 +20,8 @@ No PrimeTime installation, licence, signoff certification or fine-tuning is impl
 
 The runtime integration test executes the real Python runner with controlled model replies and provider simulators, verifies follow-up retrieval and rejection of a fabricated citation, and collects the audit via the authenticated artifact endpoint. A live smoke test is distinct from those checks. A full blinded 24-answer model evaluation, independent domain review, live source verification and calibrated confidence are still required before describing this expert as validated.
 
+On 2026-10-18 the deployed expert completed one real Daytona/Nosana smoke run in three model calls. It performed follow-up knowledge retrieval, cited source IDs, and correctly calculated the explicitly educational setup example: arrival 1.00 ns, required 0.99 ns, slack -0.01 ns. It also separated positive WNS from signoff and explicitly said it had not executed PrimeTime. Its self-assessed confidence was 85, which is not an accuracy estimate. The retrieved-source audit was collected through the authenticated artifact API. Retrieval diagnostics connected expected source IDs for 21 of the 24 held-out prompts; answer quality across all 24 was not scored.
+
 To refresh from an explicitly selected source checkout:
 
 ```powershell
