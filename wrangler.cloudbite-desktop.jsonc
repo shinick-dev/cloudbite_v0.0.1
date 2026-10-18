@@ -1,0 +1,8 @@
+{
+  "name":"cloudbite-desktop",
+  "account_id":"96aee9d5fb56f2efc3d90e147a67f558",
+  "main":"src/cloudbite-desktop-gateway.ts",
+  "compatibility_date":"2026-09-01",
+  "workers_dev":true,
+  "services":[{"binding":"COMPUTER_CONTROL","service":"cloudbite-v001"}]
+}

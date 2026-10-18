@@ -11,7 +11,7 @@
   "account_id": "96aee9d5fb56f2efc3d90e147a67f558",
   "assets": { "directory": "./deliverables" },
   "main": "src/index.ts",
-  "build": { "command": "node tools/build-lab-renderer.mjs --check && node tools/build-lab-dom-capture.mjs --check && node tools/build-lab-demo-broadcast.mjs --check && node tools/build-cloudbite-console.mjs --check && node tools/build-cloudbite-access.mjs --check" },
+  "build": { "command": "node tools/build-lab-renderer.mjs --check && node tools/build-lab-dom-capture.mjs --check && node tools/build-lab-demo-broadcast.mjs --check && node tools/build-cloudbite-console.mjs --check && node tools/build-cloudbite-access.mjs --check && node tools/build-cloudbite-computer.mjs --check" },
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
   "rules": [{ "type": "Text", "globs": ["**/*.ps1"], "fallthrough": true }],
@@ -34,21 +34,31 @@
     "CLOUDBITE_NOSANA_MODEL": "qwen/qwen3.8-27b",
     // Daytona API for Cloudbite's own organization/key (secret CLOUDBITE_DAYTONA_API_KEY). Optional snapshot with python3.
     "CLOUDBITE_DAYTONA_API_URL": "https://app.daytona.io/api",
-    "CLOUDBITE_DAYTONA_SNAPSHOT": ""
+    "CLOUDBITE_DAYTONA_SNAPSHOT": "",
+    "CLOUDBITE_COMPUTER_SNAPSHOT": "cloudbite-computer-989b229ebe47",
+    "CLOUDBITE_COMPUTER_GATEWAY_ORIGIN": "https://cloudbite-desktop.ai-gongbu.workers.dev",
+    "CLOUDBITE_COMPUTER_PROXY_SUFFIXES": ".daytonaproxy01.net,.proxy.daytona.works"
   },
   "durable_objects": {
     "bindings": [
       { "name": "STATE", "class_name": "State" },
       { "name": "CLOUDBITE", "class_name": "CloudbiteProject" },
       { "name": "CLOUDBITE_ACCESS", "class_name": "CloudbiteAccess" },
-      { "name": "CLOUDBITE_HISTORY", "class_name": "CloudbiteHistory" }
+      { "name": "CLOUDBITE_HISTORY", "class_name": "CloudbiteHistory" },
+      { "name": "CLOUDBITE_COMPUTER", "class_name": "CloudbiteComputer" },
+      { "name": "CLOUDBITE_COMPUTER_NESTED", "class_name": "CloudbiteComputerNested" },
+      { "name": "CLOUDBITE_COMPUTER_ACCESS", "class_name": "CloudbiteComputerAccess" },
+      { "name": "CLOUDBITE_COMPUTER_INPUT", "class_name": "CloudbiteComputerInput" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["State", "CloudbiteProject"] },
     // Audience access inbox (src/cloudbite-access-service.ts). v1 is never edited.
     { "tag": "v2", "new_sqlite_classes": ["CloudbiteAccess"] },
-    { "tag": "v3", "new_sqlite_classes": ["CloudbiteHistory"] }
+    { "tag": "v3", "new_sqlite_classes": ["CloudbiteHistory"] },
+    { "tag": "v4", "new_sqlite_classes": ["CloudbiteComputer", "CloudbiteComputerNested"] },
+    { "tag": "v5", "new_sqlite_classes": ["CloudbiteComputerAccess"] },
+    { "tag": "v6", "new_sqlite_classes": ["CloudbiteComputerInput"] }
   ],
   "observability": { "enabled": true, "traces": { "enabled": true, "head_sampling_rate": 1 } },
   "env": {
@@ -56,7 +66,10 @@
       "vars": {
         "RP_ID": "localhost", "ORIGIN": "http://localhost:8808", "LAB_ORIGIN": "http://lab.cloudbite.invalid",
         "CLOUDBITE_GATEWAY_URL": "", "CLOUDBITE_ALLOW_HTTP": "1",
-        "CLOUDBITE_NOSANA_BASE_URL": "", "CLOUDBITE_NOSANA_MODEL": "", "CLOUDBITE_DAYTONA_API_URL": "", "CLOUDBITE_DAYTONA_SNAPSHOT": ""
+        "CLOUDBITE_NOSANA_BASE_URL": "", "CLOUDBITE_NOSANA_MODEL": "", "CLOUDBITE_DAYTONA_API_URL": "", "CLOUDBITE_DAYTONA_SNAPSHOT": "",
+    "CLOUDBITE_COMPUTER_SNAPSHOT": "",
+    "CLOUDBITE_COMPUTER_GATEWAY_ORIGIN": "",
+    "CLOUDBITE_COMPUTER_PROXY_SUFFIXES": ".daytonaproxy01.net,.proxy.daytona.works"
       },
       "routes": [],
       "durable_objects": {
@@ -64,7 +77,11 @@
           { "name": "STATE", "class_name": "State" },
           { "name": "CLOUDBITE", "class_name": "CloudbiteProject" },
           { "name": "CLOUDBITE_ACCESS", "class_name": "CloudbiteAccess" },
-          { "name": "CLOUDBITE_HISTORY", "class_name": "CloudbiteHistory" }
+          { "name": "CLOUDBITE_HISTORY", "class_name": "CloudbiteHistory" },
+      { "name": "CLOUDBITE_COMPUTER", "class_name": "CloudbiteComputer" },
+      { "name": "CLOUDBITE_COMPUTER_NESTED", "class_name": "CloudbiteComputerNested" },
+      { "name": "CLOUDBITE_COMPUTER_ACCESS", "class_name": "CloudbiteComputerAccess" },
+      { "name": "CLOUDBITE_COMPUTER_INPUT", "class_name": "CloudbiteComputerInput" }
         ]
       }
     }

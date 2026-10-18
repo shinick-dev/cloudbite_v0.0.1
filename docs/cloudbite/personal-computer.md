@@ -38,7 +38,7 @@
 - 과금 마감: Durable Object 기준 2시간 + 명시적 **Extend**. Extend 시 last-activity 갱신. 공급자 측 130분 idle backstop.
 - **Snapshot**: 먼저 정지한 뒤 생성(RAM 미포함). 같은 이름은 409로 거부. 확인되지 않은 결과는 `unconfirmed`로 표시한다.
 - private cold snapshot에는 OAuth 자격증명이 들어 있을 수 있다 → **절대 공개하지 않는다.**
-- 캡처/복원/지연시간 최종 측정: **미측정(root 진행 중)**.
+- 실측 n=1: private snapshot 복원 9.282초(파일·0600 유지), 중지된 데스크톱 재개 ready까지 11.469초. 5초 목표 미달.
 
 ## 4. 중첩 CPU/GPU 작업 (`cloudbite-compute`)
 
@@ -64,7 +64,7 @@ cloudbite-compute run --provider nosana --timeout 60 --no-wait -- nvidia-smi
 ## 5. 배포 · 테스트
 
 - 메인: `wrangler.cloudbite.jsonc` → `cloudbite-v001` 하나뿐. 게이트웨이: `wrangler.cloudbite-desktop.jsonc` (service binding, 경로 prefix 전용).
-- DO 마이그레이션: v4 = Computer + Nested, v5 = ComputerAccess.
+- DO 마이그레이션: v4 = Computer + Nested, v5 = ComputerAccess, v6 = ComputerInput.
 - 게이트웨이는 `CANONICAL_ONLY=1` 필요. 기존 workers.dev/api의 GET/POST는 410 → 같은 사이트 형제 쿠키 권한 차단(회귀 테스트 10건).
 - 원본 `gw-shinick` / `k` / lab은 수정·배포하지 않는다.
 - **release worktree에서만 배포·재현한다.** release는 `e09a009`(Falsify 200 roles 포함 최신 운영 카탈로그) 기반으로 격리돼 있다. 공용 main(`6d14054`)은 관련 없는 누락 모듈 `cloudbite-decision`을 import하므로 배포하지 않는다.
@@ -92,13 +92,19 @@ node test/cloudbite-computer-ui.mjs
 - HTTP owner tag 버그(State.sha base64 vs hex) 수정: `computerOwnerTag()`가 실제 hex(`543bd0888b7460ae3b30d32a`)를 쓰고 테스트가 정확히 일치.
 
 미완료 / 주의:
-- owner tag 수정의 **운영 최종 QA는 소규모 재배포 대기**. root 최종 확인 전에는 기계 UI 통과를 주장하지 않는다.
-- **GPU 실행 미증명**: 첫 Nosana 요청은 접수됐으나 job이 배정되지 않았고(`GET jobs` = `[]`) timeout. root가 수동 정지·정리 중. VRAM 임대를 주장하지 않는다.
+- owner tag 수정 뒤 운영 모바일 QA 통과: running/ready, 4 CPU, 공개 nested 설치, 로그아웃/재로그인/폐기 확인.
+- **GPU 실행 미증명**: 첫 Nosana 요청은 접수됐으나 job이 배정되지 않았고(`GET jobs` = `[]`) timeout. 소유 배포 정지·삭제 완료, 공급자 목록에 해당 자원 없음. VRAM 임대를 주장하지 않는다.
 - Windows Tier 2는 금지·미구현, macOS 미구현, RAM/VRAM 풀링 없음.
 - 휴대폰은 소스가 서빙하는 페이지를 쓰며 로컬 8898 프로토타입이 필요 없다. 옛 Python 오프라인/local-first 흐름은 이번 단계에서 모든 공개 흐름으로 이식되지 않았다.
 
 자원 보존·정리:
 - 사용자 데이터 샌드박스 `1af294ee-b648-461c-a78a-039695413922` (`cloudbite-computer-primary-543bd0888b7460ae3b30d32a`) — **유지**.
-- QA 샌드박스(`d7a0…`)는 root 정리 시 자기 QA 라벨만 삭제.
+- QA 샌드박스 d7a0 및 복원 clone 44fd 삭제 확인. 누락 CLI 구 이미지도 삭제.
 - 임시 QA 컨트롤러 Worker `cloudbite-computer-qa-d5a322c6`(만료 20분)은 최종 페어링 발급 후 root가 **반드시 삭제**.
 - WorkBite T0067 checkpoint와 최종 사실 확정은 root 담당.
+
+## 7. 휴대폰 로컬 입력
+
+데스크톱의 ‘로컬에서 입력’을 열어 휴대폰 키보드로 작성한 뒤 보내기 + Enter를 누른다. 원격에서 선택된 입력란이 대상이다. 초안은 휘발성 DOM에만 존재하며 전송 전에는 공급자 호출이 없다. 입력 요청 원문은 DO ledger에 저장하지 않는다. 불명확한 전송은 같은 requestId를 유지하며 자동 재입력하지 않는다. 24시간 4096건 제한.
+
+실제 운영 390x844 모바일 QA에서 전송 전 TTY 초안 미노출, 한글·공백 명령 실행과 파일 내용 일치, 가로 넘침 없음 확인. 공급자 keyboard/type이 이모지를 누락함을 발견했다. 보조평면 Unicode는 서버에서 422로 거부하여 손상된 명령을 전송하지 않는다. 실제 휴대폰 OS 키보드/생체인증은 사용자 실사용 확인이 남는다.
