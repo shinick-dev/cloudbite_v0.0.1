@@ -30,8 +30,24 @@ const PROVENANCE = 'cloudbite-authored-synthesis 2026-10-18; paraphrased method 
 const NOT_FETCHED = 'not fetched during authoring yet';
 const LINK_ONLY = 'link-only: cite by URL, do not mirror or copy text into workspaces';
 
+// One bounded retrieval batch (10 documents, HTTP GET with redirects) run 2026-10-18; see docs/cloudbite/phase-one-knowledge.md.
+// Retrieval confirms the document was reachable and is the named document; it does not confirm every card's reading of it.
+const CHECKS: Record<string, { checkedAt: string; checkStatus: 'retrieved' | 'unverified'; checkNote: string }> = {
+  'hmt-aqua-book': { checkedAt: '2026-10-18T14:49:15Z', checkStatus: 'retrieved', checkNote: 'HTTP 200 text/html after redirect to https://www.gov.uk/guidance/the-aqua-book; title "The AQuA Book - GOV.UK"' },
+  'gov-uk-user-research': { checkedAt: '2026-10-18T14:49:18Z', checkStatus: 'retrieved', checkNote: 'HTTP 200 text/html; title "User research - Service Manual - GOV.UK"' },
+  'gov-uk-agile-delivery': { checkedAt: '2026-10-18T14:49:19Z', checkStatus: 'retrieved', checkNote: 'HTTP 200 text/html; title "Agile delivery - Service Manual - GOV.UK"' },
+  'owasp-llm-top10': { checkedAt: '2026-10-18T14:49:21Z', checkStatus: 'retrieved', checkNote: 'HTTP 200 text/html after redirect to owasp.org/projects/top-10-for-large-language-model-applications; title matches' },
+  'nist-ai-600-1': { checkedAt: '2026-10-18T14:49:22Z', checkStatus: 'retrieved', checkNote: 'HTTP 200 application/pdf (PDF-1.6, about 1.1 MB)' },
+  'odni-icd-203': { checkedAt: '', checkStatus: 'unverified', checkNote: 'fetch attempted 2026-10-18T14:49:24Z: HTTP 403 Access Denied; content not read' },
+  'finops-framework': { checkedAt: '2026-10-18T14:49:25Z', checkStatus: 'retrieved', checkNote: 'HTTP 200 text/html; title "FinOps Framework Overview"' },
+  'daytona-docs': { checkedAt: '2026-10-18T14:49:26Z', checkStatus: 'retrieved', checkNote: 'HTTP 200 text/html; title "Documentation - Daytona" (docs landing page only)' },
+  'owasp-asvs': { checkedAt: '2026-10-18T14:49:28Z', checkStatus: 'retrieved', checkNote: 'HTTP 200 text/html after redirect to owasp.org/projects/asvs; title matches' },
+  'nist-ai-rmf-core': { checkedAt: '2026-10-18T14:49:29Z', checkStatus: 'retrieved', checkNote: 'HTTP 200 text/html; section 5 Core heading with Govern/Map/Measure/Manage content present' },
+};
+
 function source(id: string, title: string, url: string, license: string, aliases: string[], toolScope: string[]): Source {
-  return { id, title, url, access: 'public-web', license, download_policy: LINK_ONLY, aliases, tool_scope: toolScope, checkedAt: '', checkStatus: 'unverified', checkNote: NOT_FETCHED };
+  const check = CHECKS[id] ?? { checkedAt: '', checkStatus: 'unverified' as const, checkNote: NOT_FETCHED };
+  return { id, title, url, access: 'public-web', license, download_policy: LINK_ONLY, aliases, tool_scope: toolScope, ...check };
 }
 
 // Source registry. Records are copied into each pack that cites them so every pack is self-contained.
@@ -62,7 +78,7 @@ const SOURCES: Record<string, Source> = {
   'sba-business-plan': source('sba-business-plan', 'US SBA: Write your business plan (financial projections section)', 'https://www.sba.gov/business-guide/plan-your-business/write-your-business-plan', 'US Government work (SBA)', ['sba-plan'], ['financial-planning']),
   'ifrs-standards': source('ifrs-standards', 'IFRS Foundation: List of IFRS Accounting Standards', 'https://www.ifrs.org/issued-standards/list-of-standards/', 'IFRS Foundation terms; standard text requires registration', ['ifrs'], ['financial-planning']),
   'hmt-green-book': source('hmt-green-book', 'HM Treasury: The Green Book (appraisal and evaluation in central government)', 'https://www.gov.uk/government/publications/the-green-book-appraisal-and-evaluation-in-central-government', 'Open Government Licence v3.0', ['green-book'], ['options-appraisal']),
-  'hmt-aqua-book': source('hmt-aqua-book', 'HM Treasury: The Aqua Book (producing quality analysis for government)', 'https://www.gov.uk/government/publications/the-aqua-book-guidance-on-producing-quality-analysis-for-government', 'Open Government Licence v3.0', ['aqua-book'], ['analysis-assurance']),
+  'hmt-aqua-book': source('hmt-aqua-book', 'HM Treasury: The Aqua Book (producing quality analysis for government)', 'https://www.gov.uk/guidance/the-aqua-book', 'Open Government Licence v3.0', ['aqua-book'], ['analysis-assurance']),
   'odni-icd-203': source('odni-icd-203', 'ODNI Intelligence Community Directive 203: Analytic Standards', 'https://www.dni.gov/files/documents/ICD/ICD-203.pdf', 'US Government work (ODNI)', ['icd-203'], ['analysis-assurance']),
   'nist-sp-811': source('nist-sp-811', 'NIST SP 811: Guide for the Use of the International System of Units (SI)', 'https://www.nist.gov/pml/special-publication-811', 'US Government work (NIST)', ['si-guide'], ['calculation']),
 };
@@ -501,7 +517,7 @@ export const PHASE_ONE_PACKS: PhaseOneKnowledgePack[] = [
       { id: 'aa-extraction', term: 'Explicit and implicit assumption extraction', kind: 'method', tool_scope: 'workspace-artifact', match: ['assumption', 'premise', 'hidden', 'implicit', 'taken for granted'], source_ids: ['odni-icd-203'], summary: 'List stated assumptions, then find implicit ones by asking for each recommendation: what must be true about customers, technology, cost, timing, competitors and the team for this to work. Typical hidden ones: users behave as in the demo, prices stay fixed, the team has capacity, a dependency stays available.' },
       { id: 'aa-register', term: 'Assumption register', kind: 'output-spec', tool_scope: 'workspace-artifact', match: ['register', 'log', 'list assumptions', 'track', 'raid'], source_ids: ['hmt-aqua-book'], summary: 'Record each assumption with type (customer, technical, financial, operational, external), criticality to the conclusion, current support (evidence, expert judgement, none), the evidence if any, a proposed test, and an owner. Assumptions without an owner tend never to be tested.' },
       { id: 'aa-criticality-grid', term: 'Criticality versus support grid', kind: 'method', tool_scope: 'reasoning-only', match: ['prioritise', 'prioritize', 'riskiest', 'critical', 'matrix'], source_ids: ['hmt-aqua-book', 'hmt-green-book'], summary: 'Place assumptions on two axes: how much the conclusion changes if wrong, and how much evidence supports them. High-criticality, low-support assumptions are the testing priority; low-criticality ones can be noted and left. Report the top three explicitly.' },
-      { id: 'aa-key-assumptions-check', term: 'Key assumptions check', kind: 'method', tool_scope: 'reasoning-only', match: ['key assumptions', 'challenge', 'still valid', 'review premises', 'changed'], source_ids: ['odni-icd-203'], summary: 'For each key assumption ask: why do we believe it, under what conditions would it fail, has anything changed since it was made, and would we hold it if it were stated aloud. Mark each as solid, supported with caveats, or unsupported.' },
+      { id: 'aa-key-assumptions-check', term: 'Key assumptions check', kind: 'checklist', tool_scope: 'reasoning-only', match: ['key assumptions', 'challenge', 'still valid', 'review premises', 'changed'], source_ids: ['odni-icd-203'], summary: 'For each key assumption ask: why do we believe it, under what conditions would it fail, has anything changed since it was made, and would we hold it if it were stated aloud. Mark each as solid, supported with caveats, or unsupported.' },
       { id: 'aa-negation-test', term: 'Load-bearing test by negation', kind: 'method', tool_scope: 'reasoning-only', match: ['what if wrong', 'negate', 'invert', 'depends on', 'load bearing'], source_ids: ['hmt-aqua-book'], summary: 'Negate one assumption at a time and trace the effect on the conclusion. If the conclusion survives, the assumption is not load-bearing. If it collapses, it is load-bearing and the recommendation should be stated as conditional on it until tested.' },
       { id: 'aa-cheap-tests', term: 'Cheap assumption tests', kind: 'output-spec', tool_scope: 'reasoning-only', match: ['test', 'validate', 'experiment', 'prove', 'de-risk'], source_ids: ['hmt-green-book'], summary: 'For each priority assumption propose the cheapest test that could falsify it: a data query, a handful of interviews, a prototype, a provider quote, or a time-boxed spike. State the result that would count against the assumption. Tests requiring other roles name that role.' },
     ],
