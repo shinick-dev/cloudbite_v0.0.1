@@ -2,7 +2,9 @@
 
 Date: 2026-10-19 (Asia/Seoul). Work Stack: T-0066 (started).
 Code candidate: `3d295796c66529ea8a7712c4fc13b1c134282997` on `feat/expert-sandboxes`.
-This is local implementation acceptance. It is not a production deployment or an expertise certification.
+The checks below describe the original local implementation acceptance. This is not an expertise certification.
+
+Production follow-up (2026-10-19 KST, explicitly authorized): release commit `07b1d60daaa0c6680b22ca9f364bbb8c99defcce` fast-forwarded to `main` and deployed to `https://cloudbite.shinick.dev`, Worker version `835a6ed2-6b4b-452b-ae6a-908abc267ed5`. Public bootstrap returned 100 catalogue entries /25 runnable roles, `liveReady: true`, max5. Aside verified the real catalogue and team suggestions. One real Customer Discovery run completed through Daytona and Nosana with all six artifacts and the knowledge audit (self-assessed confidence25; source pages not fetched, no peer verification). Its test history was deleted and Daytona confirmed its sandbox removed (HTTP404). Sanitized local receipt: `.artifacts/pool75/phase-one-live-receipt.json`. The subsequent 75-role extension is documented separately in `pool-expansion.md`.
 
 ## Delivered
 

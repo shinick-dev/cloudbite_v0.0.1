@@ -1,6 +1,7 @@
 import type { ExpertDefinition, ExpertOpinion, OpinionDirection, ProjectBrief } from './cloudbite-contract';
 import { STA_EXPERT, staKnowledgeFiles } from './cloudbite-sta';
 import { PHASE_ONE_PACKS, type PhaseOneKnowledgePack } from './cloudbite-phase-one-data';
+import { KNOWLEDGE_PACKS, knowledgeSourcePath } from './cloudbite-knowledge-registry';
 import { knowledgeDigest, knowledgeWorkspaceFiles, PEER_REVIEW_STATEMENT, REVIEW_ROLE_IDS } from './cloudbite-knowledge';
 
 // Cloudbite expert personas and per-expert workspace packs.
@@ -11,6 +12,8 @@ import { knowledgeDigest, knowledgeWorkspaceFiles, PEER_REVIEW_STATEMENT, REVIEW
 // Phase one of the 100-role plan (docs/cloudbite/expert-pool-100.md) attaches an authored, source-linked pack from
 // cloudbite-phase-one-data.ts to 20 roles: eight of the twelve above keep their ids and registry pins, twelve are new.
 // These are unvalidated T0 AI roles, not real people or certified experts.
+// The 75-role extension is assembled by cloudbite-knowledge-registry.ts; the four remaining original metadata roles
+// and the separate STA corpus keep their existing basis and ids. Extension packs have six starter cards each.
 //
 // Project briefs are untrusted task data. They are validated, bounded, stripped of
 // control/bidi characters and only ever written into data files (fenced Markdown and
@@ -468,14 +471,13 @@ const PROFILE_BY_ID = new Map(PROFILES.map(profile => [profile.registry.id, deep
 // Phase-one knowledge roles
 
 const PHASE_ONE_REPOSITORY = 'shinick-dev/cloudbite_v0.0.1';
-const PHASE_ONE_PATH = 'src/cloudbite-phase-one-data.ts';
 const PACK_LICENSE = 'Project-authored synthesis; individual source rights retained in knowledge records';
 const KNOWLEDGE_TOOLS = ['read-workspace', 'search-curated-knowledge', 'python', 'write-out-dir'];
 const KNOWLEDGE_OUTPUT = 'out/knowledge.json';
 
 const PACK_BY_ID = new Map<string, PhaseOneKnowledgePack>();
-for (const pack of PHASE_ONE_PACKS) {
-  if (PACK_BY_ID.has(pack.expertId) || pack.expertId === STA_EXPERT.id) throw new Error('duplicate phase-one knowledge role ' + pack.expertId);
+for (const pack of KNOWLEDGE_PACKS) {
+  if (PACK_BY_ID.has(pack.expertId) || pack.expertId === STA_EXPERT.id) throw new Error('duplicate knowledge role ' + pack.expertId);
   knowledgeDigest(pack); // structural integrity: bounded, unique, every card resolves to its own pack's sources
   PACK_BY_ID.set(pack.expertId, deepFreeze(pack));
 }
@@ -535,13 +537,15 @@ function knowledgeExpert(pack: PhaseOneKnowledgePack, profile?: RoleProfile): Ex
     source: profile
       ? { repository: profile.registry.source.repo, path: profile.registry.source.path, revision: profile.registry.source.commit,
         license: `${profile.registry.source.license} (registry metadata); knowledge pack: ${PACK_LICENSE}`, basis: 'curated-knowledge' }
-      : { repository: PHASE_ONE_REPOSITORY, path: PHASE_ONE_PATH, revision: knowledgeDigest(pack).packSha256.slice(0, 40), license: PACK_LICENSE, basis: 'curated-knowledge' },
+      : { repository: PHASE_ONE_REPOSITORY, path: knowledgeSourcePath(pack.expertId), revision: knowledgeDigest(pack).packSha256.slice(0, 40), license: PACK_LICENSE, basis: 'curated-knowledge' },
   };
 }
 
-const NEW_PACKS = [...PACK_BY_ID.values()].filter(pack => !PROFILE_BY_ID.has(pack.expertId)).sort((a, b) => a.catalogNumber - b.catalogNumber);
+const PHASE_ONE_IDS = new Set(PHASE_ONE_PACKS.map(pack => pack.expertId));
+const NEW_PACKS = [...PACK_BY_ID.values()].filter(pack => !PROFILE_BY_ID.has(pack.expertId)).sort((a, b) =>
+  Number(!PHASE_ONE_IDS.has(a.expertId)) - Number(!PHASE_ONE_IDS.has(b.expertId)) || a.catalogNumber - b.catalogNumber);
 
-// Order is stable: the original twelve roles, the STA pilot, then the new phase-one roles by plan number.
+// Preserve all 25 already released ids and their order, then append the 75 extension roles by plan number.
 export const CLOUDBITE_EXPERTS: readonly ExpertDefinition[] = deepFreeze([...PROFILES.map((profile): ExpertDefinition => {
   const pack = PACK_BY_ID.get(profile.registry.id);
   if (pack) return knowledgeExpert(pack, profile);
@@ -563,7 +567,7 @@ export const CLOUDBITE_EXPERTS: readonly ExpertDefinition[] = deepFreeze([...PRO
   };
 }), STA_EXPERT, ...NEW_PACKS.map(pack => knowledgeExpert(pack))]);
 
-/** Phase-one knowledge pack of a runnable role, if it has one. */
+/** Generic knowledge pack of a runnable role. Historical export name retained for existing integrations. */
 export function phaseOnePack(id: string): PhaseOneKnowledgePack | undefined {
   return typeof id === 'string' ? PACK_BY_ID.get(id) : undefined;
 }
@@ -712,7 +716,7 @@ function knowledgeProvenance(pack: PhaseOneKnowledgePack, profile?: RoleProfile)
     note: 'Role definition and knowledge cards are project-authored synthesis. Source records keep their own rights; no raw manuals, evaluation answers or private-corpus prompts are included.',
     catalogNumber: pack.catalogNumber,
     ...(profile ? { registry: { ...CLOUDBITE_REGISTRY, entry: profile.registry }, source: profile.registry.source } : {}),
-    knowledge: { repository: PHASE_ONE_REPOSITORY, path: PHASE_ONE_PATH, version: pack.version, packSha256: digest.packSha256, cardsSha256: digest.cardsSha256,
+    knowledge: { repository: PHASE_ONE_REPOSITORY, path: knowledgeSourcePath(pack.expertId), version: pack.version, packSha256: digest.packSha256, cardsSha256: digest.cardsSha256,
       sourcesSha256: digest.sourcesSha256, cards: pack.cards.length, sources: pack.sources.length, license: PACK_LICENSE },
     reviewRole: REVIEW_ROLE_IDS.has(pack.expertId),
     peerInputsProvided: false,
@@ -748,7 +752,7 @@ function knowledgePersonaFile(expert: ExpertDefinition, pack: PhaseOneKnowledgeP
     ...(profile ? [
       `Registry pin: \`${CLOUDBITE_REGISTRY.repository}\` \`${CLOUDBITE_REGISTRY.path}\` at \`${CLOUDBITE_REGISTRY.revision}\`; original source \`${profile.registry.source.repo}\` \`${profile.registry.source.path}\` at \`${profile.registry.source.commit}\` (${profile.registry.source.license}). The original prompt text is not included.`,
     ] : []),
-    `Knowledge pack \`${pack.version}\` from \`${PHASE_ONE_PATH}\` (pack sha256 \`${digest.packSha256}\`): project-authored synthesis; individual source rights are retained in each source record.`,
+    `Knowledge pack \`${pack.version}\` from \`${knowledgeSourcePath(pack.expertId)}\` (pack sha256 \`${digest.packSha256}\`): project-authored synthesis; individual source rights are retained in each source record.`,
     'Machine-readable copy: `provenance.json`.',
     '',
   ].join('\n');

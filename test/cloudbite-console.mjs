@@ -4,6 +4,7 @@
 //   node test/cloudbite-console.mjs
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import { build } from 'esbuild';
 import { CLOUDBITE_JS, CLOUDBITE_CSS, CLOUDBITE_HTML, CLOUDBITE_JS_PATH, CLOUDBITE_CSS_PATH } from '../src/cloudbite-page.ts';
 
 let pass = 0;
@@ -1510,6 +1511,22 @@ await test('방문자 + 카탈로그: 제안은 세션 한도(3명)까지만, �
   assert.equal(env.requests.length, n); assert.equal(env.boots(), boots);
   assert.ok(env.root.textContent.includes(left), 'visitor allowance unchanged');
   assert.equal(cards(env), 0);
+});
+
+await test('실제 100종 bootstrap: 전 역할 유지, 새 산업·반도체·검토 역할 추천 가능, 5명 한도와 평가 전 상태 유지', async () => {
+  const bundled = await build({ stdin: { contents: "export { CLOUDBITE_POOL } from './src/cloudbite-pool.ts'; export { CLOUDBITE_EXPERTS } from './src/cloudbite-personas.ts';", resolveDir: process.cwd(), loader: 'ts' }, bundle: true, write: false, format: 'esm', platform: 'neutral' });
+  const actual = await import('data:text/javascript;base64,' + Buffer.from(bundled.outputFiles[0].text).toString('base64'));
+  const normalized = core.normalizeBootstrap({ experts: actual.CLOUDBITE_EXPERTS, pool: actual.CLOUDBITE_POOL, configuration: { liveReady: true, missing: [], maxExperts: 5 } });
+  assert.equal(normalized.experts.length, 100);
+  assert.equal(normalized.pool.entries.length, 100);
+  assert.ok(normalized.pool.entries.every(e => e.availability === 'available' && e.evaluation === 'unvalidated'));
+  assert.equal(normalized.pool.entries.filter(e => e.knowledge === 'metadata-derived').length, 4);
+  const allowed = normalized.experts.map(e => e.id);
+  for (const [objective, wanted] of [['frontend browser rendering', 'cb-role-022'], ['semiconductor synthesis RTL chiplet', 'cb-role-075'], ['healthcare interoperability clinical', 'cb-role-085'], ['pre-mortem failure', 'cb-role-095']]) {
+    const selected = core.suggestTeam(objective, normalized.pool.entries, allowed, 5);
+    assert.ok(selected.length <= 5 && selected.some(e => e.expertId === wanted), objective + ' can select its new actual role');
+    assert.ok(selected.every(e => allowed.includes(e.expertId)));
+  }
 });
 
 console.log(`cloudbite-console: ${pass} passed`);

@@ -3,6 +3,7 @@
 // CLOUDBITE_EXPERTS id are 'available', and a project still selects runnable expert ids (max 5). Every entry is
 // unvalidated. Planned numbers are not runtime ids; pool-NNN ids can never be submitted as expertIds.
 import { findExpert } from './cloudbite-personas';
+import { KNOWLEDGE_PACKS } from './cloudbite-knowledge-registry';
 
 export interface ExpertPoolEntry {
   id: string; catalogNumber: number; name: string; domain: string; category: string; categoryLabel: { ko: string; en: string };
@@ -11,7 +12,7 @@ export interface ExpertPoolEntry {
 }
 export interface ExpertPool { version: string; entries: ExpertPoolEntry[]; priorityNumbers: number[] }
 
-export const POOL_VERSION = 'expert-pool-100/2026-10-18';
+export const POOL_VERSION = 'expert-pool-100/2026-10-19';
 export const POOL_LIMITS = Object.freeze({ entries: 100, name: 80, mission: 240, keywords: 12, keyword: 40, note: 240 });
 
 const CATEGORIES: Array<{ key: string; ko: string; en: string; domain: string }> = [
@@ -159,6 +160,13 @@ const MAPPING: Record<number, { expertId: string; note?: string }> = {
   99: { expertId: 'agency-product-feedback-synthesizer', note: 'Runs as the existing Feedback Synthesizer role, which covers related feedback-analysis scope; it is not a dedicated outcome-evaluation role.' },
   100: { expertId: 'cb-synthesis-editor' },
 };
+
+// Fill new runtime mappings from the actual pack registry while protecting all released ids.
+for (const pack of KNOWLEDGE_PACKS) {
+  const mapped = MAPPING[pack.catalogNumber];
+  if (mapped && mapped.expertId !== pack.expertId) throw new Error('Knowledge pack conflicts with released role mapping');
+  if (!mapped) MAPPING[pack.catalogNumber] = { expertId: pack.expertId };
+}
 
 /** The twenty phase-one plan numbers (15 common + 5 review roles). */
 export const PRIORITY_NUMBERS: readonly number[] = Object.freeze([1, 2, 4, 11, 20, 21, 31, 33, 35, 42, 49, 51, 57, 61, 62, 91, 92, 93, 94, 100]);

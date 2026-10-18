@@ -32,7 +32,7 @@
     "check": "node tools/build-lab-renderer.mjs --check && node tools/build-lab-dom-capture.mjs --check && node tools/build-lab-demo-broadcast.mjs --check && node tools/build-cloudbite-console.mjs --check && node tools/build-cloudbite-access.mjs --check && tsc --noEmit && tsc -p tsconfig.client.json",
     "build:cloudbite-access": "node tools/build-cloudbite-access.mjs",
     "build:cloudbite-console": "node tools/build-cloudbite-console.mjs",
-    "test:cloudbite": "node test/cloudbite-phase-one-data.mjs && node test/cloudbite-personas.mjs && node test/cloudbite-pool.mjs && node test/cloudbite-knowledge.mjs && node test/cloudbite-sta.mjs && node test/cloudbite-console.mjs && node test/cloudbite-runtime.mjs && node test/cloudbite-history.mjs",
+    "test:cloudbite": "node test/cloudbite-phase-one-data.mjs && node test/cloudbite-expansion.mjs && node test/cloudbite-personas.mjs && node test/cloudbite-pool.mjs && node test/cloudbite-knowledge.mjs && node test/cloudbite-sta.mjs && node test/cloudbite-console.mjs && node test/cloudbite-runtime.mjs && node test/cloudbite-history.mjs",
     "build:lab-renderer": "node tools/build-lab-renderer.mjs",
     "build:lab-dom-capture": "node tools/build-lab-dom-capture.mjs",
     "build:lab-demo-broadcast": "node tools/build-lab-demo-broadcast.mjs",

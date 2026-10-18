@@ -37,20 +37,20 @@ for (const e of pool.entries) {
 ok(new Set(pool.entries.map(e => e.category)).size === 10, 'ten plan categories');
 
 const available = pool.entries.filter(e => e.availability === 'available');
-ok(available.length === 25 && available.length === CLOUDBITE_EXPERTS.length, '25 available entries = the runnable catalogue');
+ok(available.length === 100 && available.length === CLOUDBITE_EXPERTS.length, '100 available entries = the runnable catalogue');
 assert.deepEqual(new Set(available.map(e => e.expertId)), new Set(CLOUDBITE_EXPERTS.map(e => e.id))); checks++;
-ok(new Set(available.map(e => e.expertId)).size === 25, 'each runtime role maps to one plan number');
+ok(new Set(available.map(e => e.expertId)).size === 100, 'each runtime role maps to one plan number');
 const byNumber = n => pool.entries[n - 1];
 for (const [n, id] of [[14, 'agency-design-ux-architect'], [65, 'agency-marketing-growth-hacker'], [67, 'agency-operations-manager'], [99, 'agency-product-feedback-synthesizer']])
   ok(byNumber(n).expertId === id && byNumber(n).knowledge === 'metadata-derived' && /related/.test(byNumber(n).mappingNote), `plan ${n} maps to existing ${id} as related scope`);
 ok(byNumber(77).expertId === 'probably-primetime-sta' && byNumber(77).knowledge === 'curated-knowledge', 'plan 77 is the STA pilot');
 ok(byNumber(31).name === 'AI Systems Engineer' && byNumber(31).expertId === 'agency-engineering-ai-engineer' && /AI Engineer/.test(byNumber(31).mappingNote), 'plan names are preserved; runtime name shown separately');
 for (const n of pool.priorityNumbers) ok(byNumber(n).availability === 'available' && byNumber(n).knowledge === 'curated-knowledge', `priority ${n} is available with curated knowledge`);
-ok(pool.entries.filter(e => e.availability === 'planned').length === 75, '75 entries are planned only');
+ok(pool.entries.filter(e => e.availability === 'planned').length === 0, 'all 75 extension entries now have real runtime roles');
 
-// planned entries cannot launch through either validator; the selection limit is unchanged
+// Catalogue display ids can never launch through either validator; the selection limit is unchanged
 const brief = ids => ({ title: 'Pool check', objective: 'Check planned roles.', context: '', expertIds: ids, mode: 'demo', requestId: 'pool-check-1' });
-for (const e of pool.entries.filter(e => e.availability === 'planned').slice(0, 10)) {
+for (const e of pool.entries.slice(0, 10)) {
   assert.throws(() => m.validateProjectBrief(brief([e.id])), /unknown expert/); checks++;
   ok(m.isInvalid(m.validateBrief(brief([e.id]), CLOUDBITE_EXPERTS)), `${e.id} rejected by the runtime gate`);
 }

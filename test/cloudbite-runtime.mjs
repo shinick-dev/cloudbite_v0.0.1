@@ -540,7 +540,7 @@ await check('validators: workspace paths and opinion schema', async () => {
 await check('real catalogue: actual persona workspace -> python runner -> flat out/result.json -> server validation and artifact', async () => {
   const w = freshWorld({ M: REAL });
   const boot = await call(w, 'GET', '/api/cloudbite/bootstrap');
-  assert.ok(boot.j.experts.length === 25 && boot.j.experts.some((e) => e.id === 'probably-primetime-sta'), 'actual catalogue, including the curated STA role');
+  assert.ok(boot.j.experts.length === 100 && boot.j.experts.some((e) => e.id === 'probably-primetime-sta'), 'actual 100-role catalogue, including the curated STA role');
   assert.equal(boot.j.pool.entries.length, 100); assert.equal(boot.j.configuration.maxExperts, 5);
   assert.deepEqual(new Set(boot.j.pool.entries.filter((e) => e.availability === 'available').map((e) => e.expertId)), new Set(boot.j.experts.map((e) => e.id)));
   const ids = boot.j.experts.slice(0, 3).map((e) => e.id);
@@ -831,15 +831,15 @@ await check('phase-one knowledge: role-bound packs, unknown citation and missing
     const known = JSON.parse(req.messages[1].content.match(/"sources":(\[.*?\])\}\s*$/m)[1])[0].id;
     // follow-up search uses a term of THIS role's own last card, so a second retrieval is guaranteed per role
     if (turn === 0) return JSON.stringify({ action: 'knowledge', query: REAL.phaseOnePack(id).cards.at(-1).match[0] });
-    const reviewer = id === 'cb-evidence-auditor';
+    const reviewer = id === 'cb-evidence-auditor' || id === 'cb-role-095';
     const cite = turn === 1 ? 'made-up-source' : known;
     const report = reviewer && turn < 3 ? '# Review\nI verified the pricing analyst result.' : '# Review\nNo peer result verification occurred. Only the brief was reviewed.';
     return JSON.stringify({ action: 'final', opinion: { direction: 'conditional', confidence: 58, summary: `${id} conditional view`, evidence: [`[source:${cite}] reference card`], assumptions: ['brief is complete'], nextActions: ['collect evidence'] }, report });
   } });
-  const ids = ['agency-specialized-pricing-analyst', 'cb-evidence-auditor'], rows = [];
+  const ids = ['agency-specialized-pricing-analyst', 'cb-evidence-auditor', 'cb-role-022', 'cb-role-095'], rows = [];
   w.env.CLOUDBITE_HISTORY = { getByName: () => ({ upsert: async (row) => { rows.push(structuredClone(row)); } }) };
   const planned = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['pool-003'] }), headers: admin });
-  assert.equal(planned.status, 400, 'a planned catalogue entry cannot launch');
+  assert.equal(planned.status, 400, 'a catalogue display id cannot launch');
   const six = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['cb-evidence-auditor', 'cb-quantitative-reviewer', 'cb-assumption-auditor', 'cb-adversarial-reviewer', 'cb-synthesis-editor', 'cb-finops'] }), headers: admin });
   assert.equal(six.status, 400, 'max 5 experts unchanged');
   const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ids, objective: 'Check the pricing evidence for launch.' }), headers: admin });
@@ -847,7 +847,8 @@ await check('phase-one knowledge: role-bound packs, unknown citation and missing
   const obj = await project(w, created);
   await drive(w, obj, (p) => p.status !== 'running', 2000); await Promise.all(w.procs);
   const ex = await experts(obj);
-  assert.deepEqual(ex.map((e) => e.run.status), ['completed', 'completed'], JSON.stringify(ex.map((e) => e.run.activity.slice(-4))));
+  assert.deepEqual(ex.map((e) => e.run.status), ids.map(() => 'completed'), JSON.stringify(ex.map((e) => e.run.activity.slice(-4))));
+  assert.ok(ex[3].run.activity.some(a => /must state/.test(a.message)), 'new pre-mortem reviewer has the actual runner no-peer guard');
   const [analyst, auditor] = ex;
   assert.ok(analyst.run.activity.some((a) => /curated role knowledge loaded/.test(a.message)));
   assert.ok(analyst.run.activity.some((a) => /not retrieved for this role/.test(a.message)), 'invented source rejected');

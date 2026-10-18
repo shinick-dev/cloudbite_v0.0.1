@@ -24,13 +24,13 @@ const PHASE_ONE = { 1: 'agency-product-manager', 2: 'cb-customer-discovery', 4: 
   92: 'cb-quantitative-reviewer', 93: 'cb-assumption-auditor', 94: 'cb-adversarial-reviewer', 100: 'cb-synthesis-editor' };
 const PHASE_ONE_IDS = Object.values(PHASE_ONE);
 const REVIEWERS = ['cb-evidence-auditor', 'cb-quantitative-reviewer', 'cb-assumption-auditor', 'cb-adversarial-reviewer', 'cb-synthesis-editor'];
-const knowledgeBacked = id => PHASE_ONE_IDS.includes(id);
+const knowledgeBacked = id => !!phaseOnePack(id);
 
 // --- catalog shape and distinctness
 const experts = CLOUDBITE_EXPERTS;
-ok(experts.length === 25, 'catalog has the original 13 roles plus 12 new phase-one roles');
+ok(experts.length === 100, 'catalog preserves the released 25 roles and adds 75 extension roles');
 assert.deepEqual(experts.slice(0, 13).map(e => e.id), ORIGINAL_IDS); checks++;
-assert.deepEqual(experts.slice(13).map(e => e.id), PHASE_ONE_IDS.filter(id => id.startsWith('cb-'))); checks++;
+assert.deepEqual(experts.slice(13, 25).map(e => e.id), PHASE_ONE_IDS.filter(id => id.startsWith('cb-'))); checks++;
 ok(Object.isFrozen(experts) && Object.isFrozen(experts[0]) && Object.isFrozen(experts[0].source), 'catalog is deeply frozen');
 const ids = experts.map(e => e.id);
 ok(new Set(ids).size === ids.length, 'expert ids are unique');
@@ -52,7 +52,8 @@ for (const e of experts) {
   if (curated) ok(e.outputs.includes('out/knowledge.json') && e.tools.includes('search-curated-knowledge'), `${e.id} declares the knowledge audit and search tool`);
   ok(e.outputs.every(p => /^out\/[a-z0-9-]+\.(md|json|csv)$/.test(p)), `${e.id} outputs are allowlist-friendly`);
   ok(e.prompt.includes(e.name) && e.prompt.includes('not a real person') && e.prompt.includes('T0') && /fabricate/.test(e.prompt) && /not calibrated/.test(e.prompt), `${e.id} prompt has role, no-impersonation, T0 and evidence rules`);
-  ok(!/\b(certified|board-certified|licensed professional)\b/i.test(e.prompt.replace(/do not claim credentials/i, '')), `${e.id} prompt does not claim credentials`);
+  // Negative limits such as "not a licensed professional" must not be mistaken for a credential claim.
+  ok(!/\b(?:I am|you are|act as)\s+(?:an?\s+)?(?:certified|board-certified|licensed professional)\b/i.test(e.prompt), `${e.id} prompt contains no affirmative credential claim`);
   ok(findExpert(e.id) === e, `${e.id} findExpert returns catalog object`);
 }
 const roleOutputs = experts.flatMap(e => e.outputs.filter(p => !['out/result.json', 'out/report.md', 'out/knowledge.json'].includes(p)));
@@ -201,7 +202,7 @@ for (const [number, id] of Object.entries(PHASE_ONE)) {
   const pack = phaseOnePack(id);
   ok(findExpert(id)?.source.basis === 'curated-knowledge' && pack?.catalogNumber === Number(number) && Object.isFrozen(pack), `phase-one ${number} ${id} is a runnable knowledge-backed role`);
 }
-ok(experts.filter(e => e.source.basis === 'curated-knowledge').length === 21 && experts.filter(e => e.source.basis === 'metadata-derived').length === 4, '20 phase-one knowledge roles + STA; four original roles stay metadata-derived');
+ok(experts.filter(e => e.source.basis === 'curated-knowledge').length === 96 && experts.filter(e => e.source.basis === 'metadata-derived').length === 4, '95 starter knowledge roles + STA; four original roles stay metadata-derived');
 ok(phaseOnePack('probably-primetime-sta') === undefined && phaseOnePack('agency-design-ux-architect') === undefined && phaseOnePack('__proto__') === undefined, 'STA keeps its own pack; other roles have none');
 for (const planned of ['pool-001', 'pool-003', '3', 'cb-market-research']) assert.throws(() => validateProjectBrief(brief([planned])), /unknown expert/, `planned ${planned} cannot launch`), checks++;
 ok(CLOUDBITE_BRIEF_LIMITS.maxExperts === 5, 'maximum selection is unchanged at 5');
