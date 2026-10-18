@@ -2,7 +2,7 @@
 // The runner holds only an expiring per-expert capability for /p/_cloudbite/worker/<project>/<run>/…;
 // Daytona and Nosana credentials never enter the sandbox. Model output can only run bounded Python in ./work
 // and write flat files under ./out — it gains no new authority.
-import { CB_CAPABILITY_TTL, CB_INFERENCE_MAX_CALLS } from './cloudbite-config';
+import { CB_CAPABILITY_TTL, CB_INFERENCE_MAX_CALLS, CB_INFERENCE_MAX_TOKENS } from './cloudbite-config';
 import { CLOUDBITE_OPINION_LIMITS as OPINION } from './cloudbite-personas';
 
 export const CB_RUNNER_ROUNDS = 6;
@@ -36,6 +36,17 @@ TOOL_SECONDS = 20
 TOOL_OUTPUT = 4000
 MAX_EXTRA = 4
 MAX_FILE = 32 * 1024
+# The gateway caps every model reply at ${CB_INFERENCE_MAX_TOKENS} tokens; a longer reply is cut off mid-JSON and rejected.
+# These are prompt guidelines only: a valid final within the schema limits is accepted and saved unchanged.
+BUDGET_RULES = ('Each reply is limited to about ${CB_INFERENCE_MAX_TOKENS} tokens; a longer reply is cut off and rejected as invalid JSON.\n'
+                'Keep every reply one compact JSON object under 2500 characters. In final keep the report under 100 words,\n'
+                'the summary under 300 characters, and each list to 1-3 short items under 120 characters.')
+FINAL_EXAMPLE = ('{"action":"final","opinion":{"direction":"conditional","confidence":60,"summary":"One or two sentences.",'
+                 '"evidence":["short fact from your tool"],"assumptions":["short assumption"],"nextActions":["short step"]},'
+                 '"report":"# Title\\nThree short sentences."}')
+FINAL_TURN = ('This is the last turn. Reply with only the compact final JSON object now: no python, no write, no text\n'
+              'outside the JSON. Exact keys: action, opinion (direction, confidence, summary, evidence, assumptions,\n'
+              'nextActions) and report. For example:\n' + FINAL_EXAMPLE)
 # An honest, explicit User-Agent: Cloudflare refuses urllib's default one (403, error 1010) before the Worker runs.
 USER_AGENT = 'Cloudbite-Runner/0.0.1'
 # Inference failures are reported by local category only: never the upstream body, model output or credentials.
@@ -94,13 +105,14 @@ def inference_failure(e):
 
 
 def first_json(text):
+    """The first complete JSON object in text, or a short reason why there is none (never a partial object)."""
     text = text.strip()
     m = re.search(r'` + '```' + String.raw`(?:json)?\s*(\{.*\})\s*` + '```' + String.raw`', text, re.S)
     if m:
         text = m.group(1)
     start = text.find('{')
     if start < 0:
-        return None
+        return 'no JSON object found'
     depth, inside, esc = 0, False, False
     for i in range(start, len(text)):
         ch = text[i]
@@ -117,8 +129,21 @@ def first_json(text):
                 try:
                     return json.loads(text[start:i + 1])
                 except ValueError:
-                    return None
+                    return 'JSON object did not parse'
+    return 'JSON object is incomplete (reply cut off at the token budget?)'
+
+
+def action_problem(act):
+    if isinstance(act, str): return act
+    if not isinstance(act, dict) or act.get('action') not in ('python', 'write', 'final'):
+        return 'action must be python, write or final'
     return None
+
+
+def retry_hint(problem):
+    return ('%s. Reply with exactly one compact JSON action under 2500 characters: about ${CB_INFERENCE_MAX_TOKENS} tokens '
+            'is the hard limit and longer replies are cut off. For final: report under 100 words, summary under 300 '
+            'characters, 1-3 short items per list; do not write out/result.json or out/report.md yourself.' % problem)
 
 
 def check_opinion(o):
@@ -162,7 +187,9 @@ def run_python(code, step):
 
 
 def write_file(path, content):
-    if not isinstance(path, str) or not EXTRA.match(path) or path in RESERVED:
+    if path in RESERVED:
+        return 'rejected: %s is reserved and saved automatically by action=final; send the compact final action instead' % path
+    if not isinstance(path, str) or not EXTRA.match(path):
         return 'rejected: path must be out/<name>.(md|txt|json|csv) and not reserved'
     if path not in extras and len(extras) >= MAX_EXTRA:
         return 'rejected: at most %d extra files' % MAX_EXTRA
@@ -204,8 +231,13 @@ Reply with exactly one JSON object per turn, one of:
      "summary":"...","evidence":["..."],"assumptions":["..."],"nextActions":["..."]},"report":"<markdown report>"}
 The opinion is saved as out/result.json and must match RESULT.schema.json: exactly those six properties,
 summary 1-${OPINION.summary} characters, each list 1-${OPINION.items} non-empty strings of at most ${OPINION.item} characters.
-Confidence is your own self-assessment, not calibrated accuracy. Use at least one tool before final when it helps.
-You have %d turns; the last turn must be final."""
+""" + BUDGET_RULES + """
+out/result.json, out/report.md, out/manifest.json and out/done are reserved: the final action saves them
+automatically. Never write them; use write only for supporting files such as out/analysis.md.
+Compact final example:
+""" + FINAL_EXAMPLE + """
+Confidence is your own self-assessment, not calibrated accuracy. Use a tool when it helps; you may send final
+as soon as one useful tool result supports your opinion. You have %d turns; the last turn must be final."""
 
 
 def finish(status, opinion=None, report='', error=''):
@@ -243,7 +275,7 @@ def main():
                 {'role': 'user', 'content': workspace_text()}]
     for step in range(1, rounds + 1):
         if step == rounds:
-            messages.append({'role': 'user', 'content': 'This is the last turn. Reply with the final action now.'})
+            messages.append({'role': 'user', 'content': FINAL_TURN})
         try:
             reply = infer(messages)
         except Exception as e:
@@ -253,11 +285,15 @@ def main():
             return 1
         messages.append({'role': 'assistant', 'content': reply[:8000]})
         act = first_json(reply)
-        if not isinstance(act, dict) or act.get('action') not in ('python', 'write', 'final'):
-            activity('error', 'turn %d: reply was not a valid action' % step)
-            messages.append({'role': 'user', 'content': 'Invalid reply. Respond with exactly one JSON action object.'})
+        problem = action_problem(act)
+        if problem:
+            activity('error', 'turn %d: reply was not a valid action: %s (%d chars)' % (step, problem, len(reply)))
+            messages.append({'role': 'user', 'content': 'Invalid reply: ' + retry_hint(problem)})
             continue
         kind = act['action']
+        if step == rounds and kind != 'final':
+            activity('error', 'turn %d: %s action not run on the last turn; final was required' % (step, kind))
+            break
         if kind == 'python':
             code = str(act.get('code', ''))
             activity('tool', 'turn %d: python (%d chars)' % (step, len(code)))
@@ -275,7 +311,7 @@ def main():
                 problem = 'report must be non-empty markdown'
             if problem:
                 activity('error', 'turn %d: final rejected: %s' % (step, problem))
-                messages.append({'role': 'user', 'content': 'Final rejected: %s. Send a corrected final action.' % problem})
+                messages.append({'role': 'user', 'content': 'Final rejected: ' + retry_hint(problem)})
                 continue
             activity('thought', 'turn %d: final opinion %s (self-assessed confidence %s)' % (step, act['opinion']['direction'], act['opinion']['confidence']))
             finish('ok', act['opinion'], report)

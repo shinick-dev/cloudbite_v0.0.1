@@ -72,7 +72,18 @@ Each step persists a claim id first and applies its result only if that claim is
   (subprocess, 20 s, ./work, empty env), `write` (flat `out/<name>.(md|txt|json|csv)`, ≤ 4 files), `final` (validated opinion +
   report). Writes `out/result.json`, `out/report.md`, `out/manifest.json`, `out/done`; posts activity and `complete`.
   Every callback sends `User-Agent: Cloudbite-Runner/0.0.1`: Cloudflare refuses Python urllib's default UA (403, error
-  1010) before the Worker runs. A failed inference call ends the run with one `error` activity and `out/error.txt` naming a
+  1010) before the Worker runs.
+- **compact protocol**: the gateway caps each reply at `max_tokens` 1200, and a long final cut off mid-JSON was the
+  production failure (PM/strategy turn 6, pricing turns 3/4). The system prompt states that budget, asks for one JSON action
+  under 2500 characters and, for final, a report under 100 words, a summary under 300 characters and 1–3 items under 120
+  characters per list, with a valid compact example. These are prompt guidelines only: the schema limits below are
+  unchanged and a valid final is saved exactly as the model sent it. The prompt names `out/result.json`, `out/report.md`,
+  `out/manifest.json`, `out/done` as reserved (saved by `final`); a write to one is rejected with that explanation. An
+  invalid or incomplete reply or a rejected final gets one short retry hint (reason, budget, compact rules) inside the same
+  six turns; incomplete JSON is never repaired or partially accepted. The last turn's message demands only the final JSON
+  with its exact keys; a `python`/`write` action on that turn is not run, and without a valid final the expert fails with
+  `no valid final opinion within 6 turns`. No extra model call, retry loop or larger budget.
+- A failed inference call ends the run with one `error` activity and `out/error.txt` naming a
   local category and allowlisted HTTP status only (e.g. `model provider returned an error (HTTP 502)`) — never the upstream
   body, model output or credentials. No retry and no other provider.
 - **`out/result.json` is a flat `ExpertOpinion`** — exactly the workspace's `RESULT.schema.json`: the six properties

@@ -181,6 +181,7 @@ function script(req) {
   const turn = req.messages.filter((m) => m.role === 'assistant').length;
   const ws = req.messages[1].content;
   const id = (ws.match(/EXPERT_ID=(\w+)/) ?? ws.match(/^Expert id: `([a-z0-9-]+)`/m) ?? [])[1];
+  if (W.model) return W.model(req, turn);
   if (W.badFinal) return '{"action":"final","opinion":{"direction":"maybe"},"report":""}';
   if (W.finalPatch && turn >= 2) return JSON.stringify({ action: 'final', opinion: { direction: 'support', confidence: 72, summary: 's', evidence: ['e'], assumptions: ['a'], nextActions: ['n'], ...W.finalPatch }, report: '# r' });
   if (turn === 0) return 'Plan: compute.\n```json\n{"action":"python","code":"import json\\nprint(\\"ROI\\", sum(range(10)))\\nopen(\\"calc.txt\\",\\"w\\").write(\\"45\\")"}\n```';
@@ -677,6 +678,100 @@ await check('real python runner: a length-exhausted empty answer fails the exper
     assert.ok(!text.includes(HIDDEN), 'hidden reasoning never reflected');
     for (const s of SECRETS) assert.ok(!text.includes(s));
   }
+});
+
+// ── compact final protocol: the 1200-token reply budget, reserved outputs and the last turn ──
+const lastUser = (req) => req.messages.filter((m) => m.role === 'user').at(-1).content;
+// What a 1200-token cut-off looks like: a final whose long report never reaches its closing braces.
+const TRUNCATED = '{"action":"final","opinion":{"direction":"support","confidence":70,"summary":"Long.","evidence":["a"],"assumptions":["b"],"nextActions":["c"]},"report":"# Report\\n' + 'Very long analysis. '.repeat(240);
+const oneExpert = async (w) => {
+  const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['market'] }), headers: admin });
+  const obj = await project(w, created);
+  const p = await drive(w, obj, (p) => p.status !== 'running', 3000);
+  const procs = await Promise.all(w.procs);
+  const [e] = await experts(obj);
+  return { created, p, e, dir: sbDir(w, e.run.sandboxId), procs };
+};
+
+await check('real python runner: the prompt states the reply budget, reserved outputs and a valid compact final example', async () => {
+  const w = freshWorld();
+  const { p } = await oneExpert(w);
+  assert.equal(p.status, 'completed');
+  const system = w.nosana[0].messages[0].content;
+  assert.match(system, /limited to about 1200 tokens/);
+  assert.match(system, /out\/result\.json, out\/report\.md, out\/manifest\.json and out\/done are reserved/);
+  // the example the model is shown is itself a final the runner and the server accept
+  const example = JSON.parse(system.match(/^\{"action":"final".*\}$/m)[0]);
+  assert.ok(!M.isInvalid(M.validateOpinion(example.opinion)) && example.report.trim());
+  assert.ok(JSON.stringify(example).length < 2500);
+});
+
+await check('real python runner: truncated final and reserved write get compact guidance; the model recovers with a real-script final', async () => {
+  const opinion = { direction: 'conditional', confidence: 64, summary: 'ROI is positive once the pilot cost is covered.', evidence: [], assumptions: ['pilot cost is fixed'], nextActions: ['run a two-week pilot', 'recheck ROI'] };
+  const w = freshWorld({ model: (req, turn) => {
+    const hint = lastUser(req);
+    if (turn === 0) return TRUNCATED;
+    // like the production PM/strategy roles: tries to save the reserved result file itself
+    if (turn === 1) return /cut off/.test(hint) && /under 2500 characters/.test(hint) ? JSON.stringify({ action: 'write', path: 'out/result.json', content: '{"direction":"support","forged":true}' }) : TRUNCATED;
+    if (turn === 2) return /reserved and saved automatically by action=final/.test(hint)
+      ? JSON.stringify({ action: 'python', code: 'cost, gain = 40, 58\nopen("roi.txt", "w").write(str(gain - cost))\nprint("ROI", gain - cost)' }) : TRUNCATED;
+    if (turn === 3) return JSON.stringify({ action: 'write', path: 'out/analysis.md', content: '# Analysis\n' + hint.split('\n')[1] });
+    // evidence comes from the tool output the runner actually returned
+    const tool = req.messages.find((m) => m.role === 'user' && m.content.startsWith('Tool output:')).content;
+    return JSON.stringify({ action: 'final', opinion: { ...opinion, evidence: [tool.split('\n')[2]] }, report: '# Market\n\nPilot first; ROI computed in the sandbox.' });
+  } });
+  const { p, e, dir } = await oneExpert(w);
+  assert.equal(p.status, 'completed', JSON.stringify(e.run.activity.map((a) => a.message)));
+  assert.equal(w.nosana.length, 5, 'recovered within the existing six turns, one call per turn');
+  const msgs = e.run.activity.map((a) => a.message);
+  assert.ok(msgs.some((m) => /turn 1: reply was not a valid action: JSON object is incomplete .* \(\d{4,} chars\)/.test(m)), msgs.join('\n'));
+  assert.ok(msgs.some((m) => /turn 2: rejected: out\/result\.json is reserved/.test(m)), msgs.join('\n'));
+  // the python tool really ran in the workspace and its output is the evidence
+  assert.equal(readFileSync(join(dir, 'work', 'roi.txt'), 'utf8'), '18');
+  const result = JSON.parse(readFileSync(join(dir, 'out', 'result.json'), 'utf8'));
+  assert.deepEqual(result, { ...opinion, evidence: ['ROI 18'] }, 'the model opinion is saved as given, nothing forged or trimmed');
+  assert.ok(!M.isInvalid(M.validateResult(readFileSync(join(dir, 'out', 'result.json'), 'utf8'))));
+  assert.deepEqual(e.run.opinion, result);
+  assert.equal(readFileSync(join(dir, 'out', 'report.md'), 'utf8').replace(/\r\n/g, '\n'), '# Market\n\nPilot first; ROI computed in the sandbox.');
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'out', 'manifest.json'), 'utf8')), { files: ['out/analysis.md'] });
+  assert.match(readFileSync(join(dir, 'out', 'analysis.md'), 'utf8').replace(/\r\n/g, '\n'), /^# Analysis\nexit 0$/);
+});
+
+await check('real python runner: the last turn demands only the final; a tool action there is not run and the expert fails', async () => {
+  const tool = (turn) => JSON.stringify({ action: 'python', code: `print(${turn})` });
+  const finalOnly = (req) => /^This is the last turn\. Reply with only the compact final JSON object now: no python, no write/.test(lastUser(req));
+  // a model that keeps using tools but obeys the last-turn instruction completes on turn 6
+  const w = freshWorld({ model: (req, turn) => finalOnly(req)
+    ? JSON.stringify({ action: 'final', opinion: { direction: 'support', confidence: 55, summary: 'Five checks ran.', evidence: ['five python runs'], assumptions: ['fixture'], nextActions: ['ship'] }, report: '# r' })
+    : tool(turn) });
+  const ok = await oneExpert(w);
+  assert.equal(ok.p.status, 'completed', JSON.stringify(ok.e.run.activity.map((a) => a.message)));
+  assert.equal(w.nosana.length, 6);
+  assert.deepEqual(w.nosana.map(finalOnly), [false, false, false, false, false, true]);
+  assert.deepEqual(readdirSync(join(ok.dir, 'work')).sort(), [1, 2, 3, 4, 5].map((i) => `step_${i}.py`));
+  // a model that ignores it: the last-turn python is not executed, no opinion is synthesized
+  const w2 = freshWorld({ model: (req, turn) => tool(turn) });
+  const bad = await oneExpert(w2);
+  assert.equal(bad.p.status, 'failed'); assert.equal(bad.e.run.opinion, undefined);
+  assert.equal(w2.nosana.length, 6);
+  assert.ok(!existsSync(join(bad.dir, 'work', 'step_6.py')), 'no tool run after the final turn instruction');
+  assert.ok(bad.e.run.activity.some((a) => /turn 6: python action not run on the last turn; final was required/.test(a.message)));
+  assert.equal(readFileSync(join(bad.dir, 'out', 'error.txt'), 'utf8'), 'no valid final opinion within 6 turns');
+  assert.ok(!existsSync(join(bad.dir, 'out', 'result.json')) && !existsSync(join(bad.dir, 'out', 'report.md')));
+});
+
+await check('real python runner: invalid replies on every turn fail honestly within six calls, never a partial or synthesized opinion', async () => {
+  const w = freshWorld({ model: (req, turn) => (turn % 2 ? '{"action":"final","opinion":{"direction":"support","confidence":70,"summary":"x"' : TRUNCATED) });
+  const { p, e, dir } = await oneExpert(w);
+  assert.equal(p.status, 'failed'); assert.equal(e.run.status, 'failed'); assert.equal(e.run.opinion, undefined);
+  assert.equal(w.nosana.length, 6, 'no extra retries or larger budget');
+  assert.ok(w.nosana.every((r) => r.max_tokens === 1200));
+  assert.equal(e.run.activity.filter((a) => /reply was not a valid action: JSON object is incomplete/.test(a.message)).length, 6);
+  // every retry after an invalid reply carried the compact protocol guidance
+  for (const r of w.nosana.slice(1)) assert.match(r.messages.filter((m) => m.role === 'user').find((m) => m.content.startsWith('Invalid reply: ')).content, /about 1200 tokens is the hard limit/);
+  assert.equal(readFileSync(join(dir, 'out', 'error.txt'), 'utf8'), 'no valid final opinion within 6 turns');
+  for (const f of ['result.json', 'report.md']) assert.ok(!existsSync(join(dir, 'out', f)), 'nothing fabricated: ' + f);
+  assert.equal(readFileSync(join(dir, 'out', 'done'), 'utf8'), 'error');
 });
 
 server.close();
