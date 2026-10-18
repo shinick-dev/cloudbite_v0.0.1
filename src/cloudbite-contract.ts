@@ -19,6 +19,30 @@ export interface ProjectBrief {
   expertIds: string[];
   mode: 'demo' | 'live';
   requestId: string;
+  decision?: DecisionFrame;
+  documents?: ProjectDocument[];
+}
+export interface DecisionFrame {
+  options: string[]; constraints: string[]; successCriteria: string[];
+  knownFacts: string[]; assumptions: string[]; unknowns: string[];
+}
+/** User-provided evidence, never trusted instructions or independently verified facts. */
+export interface ProjectDocument { id: string; name: string; content: string; origin?: string }
+export interface EvidenceClaim {
+  id: string; expertId: string; text: string;
+  references: Array<{ kind: 'document' | 'knowledge'; id: string; available: boolean }>;
+  status: 'linked' | 'unlinked';
+}
+export interface CrossReviewFinding {
+  targetExpertId: string; evidenceIndex: number; verdict: 'supported' | 'challenged' | 'insufficient';
+  rationale: string;
+}
+export interface CrossReviewReport { reviewerExpertId: string; findings: CrossReviewFinding[]; summary: string }
+export interface ProjectCrossReview {
+  status: 'running' | 'completed' | 'failed'; snapshotHash: string; startedAt: number; completedAt?: number;
+  reports: CrossReviewReport[]; error?: string;
+  /** No sandbox is created for this bounded server-side second pass. */
+  execution: 'server-nosana';
 }
 export interface CloudbiteRoutingQuery { title: string; objective: string; context: string; requestId: string }
 /** Team composition judgments, not answer correctness or a completed peer review. */
@@ -73,6 +97,8 @@ export interface ProjectRun {
   updatedAt: number;
   /** Observed routing result at creation; expiresAt refers to the pre-create decision cache. */
   routing?: CloudbiteRoutingDecision;
+  evidenceClaims?: EvidenceClaim[];
+  crossReview?: ProjectCrossReview;
 }
 export interface CloudbiteBootstrap {
   experts: ExpertDefinition[];
