@@ -14,7 +14,7 @@ export interface CloudbiteAccessSession {
   request: CloudbiteAccessRequest | null;
   canCreate: boolean;
   /**
-   * Only when this grant's one project failed with zero completed experts and no project slot was returned:
+   * Only while the grant has no free project slots and a failed run's slot could not be returned:
    * pending = cleanup not confirmed yet, unavailable = the project check could not run, limit = failed-run refunds used up.
    */
   recovery?: 'pending' | 'unavailable' | 'limit';
