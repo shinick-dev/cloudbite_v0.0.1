@@ -72,7 +72,7 @@ Next: the first full run with live Nosana inference.
 
 [2:20-2:48] WHY IT MATTERS
 
->>> NOT SPOKEN: hands off the mouse. Pause 2 s. <<<
+>>> NOT SPOKEN: hands off the mouse. <<<
 
 Daytona gives every expert a separate place to execute code and leave files.
 Nosana is the inference layer that drives the reasoning loop.
@@ -83,8 +83,10 @@ A hundred is our direction, with each new role earning its place through evidenc
 
 [2:48-3:00] CLOSE
 
-Not a hundred chatbots voting.
-A team of experts that shows its work.
+>>> NOT SPOKEN: show demo/access-qr.html or the QR PNG. Pause 2 s. <<<
+
+Scan the QR to request your own sandbox.
+I'll approve it with my security key.
 That's Cloudbite. Thank you.
 
 

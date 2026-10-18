@@ -20,7 +20,7 @@ The user selected a shared project worked on by expert personas in separate Dayt
 
 ## Next
 
-Finish merging the English blue-white console and pitch-preview workers, then run the final real-Worker browser checks and fresh finish review. Bilingual3minute scripts live in docs/pitch (345English words /855Korean characters excluding spaces,18s click pauses; timing is estimated, not recorded).
+Finish merging the English blue-white console and pitch-preview workers, then run the final real-Worker browser checks and fresh finish review. Bilingual3minute scripts live in docs/pitch (347English words /856Korean characters excluding spaces,18s click pauses; timing is estimated, not recorded). The closing cue shows the participant QR and offers host approval with the security key.
 
 The user confirmed collaborator target branch `agent_chatbot`. Latest verified remote tip is still the initial f8d3800 import, not a persona payload. The preparation worker produced docs/integration/persona-merge-readiness.txt. Inspect an immutable new tip and integrate into the tested current feature line before preparing main; main is behind the new runtime. No persona branch merge into main has been performed.
 

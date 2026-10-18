@@ -9,9 +9,9 @@ Segment          Slot   Pauses  EN words  KO chars*  Main screen
 0:22-0:42        20 s   0 s        46        121     project screen, idle
 0:42-1:56        74 s  14 s       133        316     demo clicks (5 cues)
 1:56-2:20        24 s   2 s        48        131     decision view, idle
-2:20-2:48        28 s   2 s        56        130     decision view, idle
-2:48-3:00        12 s   0 s        17         45     decision view
-TOTAL           180 s  18 s       345        855
+2:20-2:48        28 s   0 s        56        130     decision view, idle
+2:48-3:00        12 s   2 s        19         46     participant QR
+TOTAL           180 s  18 s       347        856
 * Korean characters counted without spaces.
 
 Assumed cadence: English about 130 words/min, Korean about 320 chars/min,
@@ -30,7 +30,8 @@ C    "...three at a time."         select the finance expert, open its         3
                                    cost-model artifact
 D    "...the file says so."        go to the decision view / distribution      2 s
 E    "...A signal, not accuracy."  switch option: full launch -> paid pilot    3 s
-     then 2 s pause before segment 1:56 and 2 s before segment 2:20.
+     then 2 s pause before segment 1:56; show the participant QR for 2 s
+     at the start of the closing segment.
 
 Which surface: the offline pitch file demo/cloudbite-pitch.html is fully
 scripted and is the safe default on stage. Use the real console only if it
@@ -88,6 +89,12 @@ A: You get an answer you can't inspect. Here each opinion comes with the
 Q: Business model?
 A: Not decided yet. Our hypothesis is the customer, early product teams
    making launch decisions; we have not validated pricing or demand.
+
+The closing QR is real: it opens the existing k.shinick.dev/lab/request
+service. Participants request a personal workspace, and the host approves
+the exact request/limits with the security key in /lab/requests. This is
+separate from the scripted expert preview. Show demo/access-qr.html or
+demo/cloudbite-sandbox-request.png. Do not promise instant provisioning.
 
 5. FALLBACK (network or provider failure)
 
