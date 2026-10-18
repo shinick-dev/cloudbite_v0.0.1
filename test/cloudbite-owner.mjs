@@ -274,17 +274,24 @@ await check('owner cookie: inbox list/approve/deny/revoke and project creation; 
   assert.equal(fetches, 0, 'no paid provider call');
 });
 
-await check('x-admin-token precedence: an invalid header never falls back to a valid owner (or visitor) cookie', async () => {
+await check('x-admin-token precedence: an invalid or empty header never falls back to a valid owner (or visitor) cookie', async () => {
   const w = world();
   await w.enroll();
   const { cookie } = await signIn(w);
   const v = await visitor(w);
   assert.equal((await act(w, v.id, 'approve', { cookie: `${cookie}; ${v.cookie}` })).status, 200);
-  for (const t of ['wrong', 'cbo_' + 'A'.repeat(43)]) {
-    assert.equal((await list(w, { cookie, 'x-admin-token': t })).status, 401, t);
-    assert.equal((await act(w, v.id, 'revoke', { cookie, 'x-admin-token': t })).status, 401, t);
-    assert.equal((await create(w, brief(), { cookie: `${cookie}; ${v.cookie}`, 'x-admin-token': t })).status, 401, t);
+  for (const t of ['', 'wrong', 'cbo_' + 'A'.repeat(43)]) {
+    assert.equal((await list(w, { cookie, 'x-admin-token': t })).status, 401, JSON.stringify(t));
+    assert.equal((await act(w, v.id, 'revoke', { cookie, 'x-admin-token': t })).status, 401, JSON.stringify(t));
+    assert.equal((await create(w, brief(), { cookie, 'x-admin-token': t })).status, 401, JSON.stringify(t));
+    assert.equal((await create(w, brief(), { cookie: `${cookie}; ${v.cookie}`, 'x-admin-token': t })).status, 401, JSON.stringify(t));
+    assert.equal((await create(w, brief(), { cookie: v.cookie, 'x-admin-token': t })).status, 401, 'approved visitor: ' + JSON.stringify(t));
   }
+  const st = await call(w, 'GET', '/api/cloudbite/access/status', { headers: { cookie: v.cookie } });
+  assert.equal(st.j.request.status, 'approved', 'refused header calls revoked nothing');
+  assert.equal(st.j.request.usedProjects, 0, 'refused header calls used no visitor slot');
+  assert.equal((await list(w, { cookie })).status, 200, 'missing header: owner cookie still decides');
+  assert.equal((await create(w, brief(), { cookie: v.cookie })).status, 201, 'missing header: visitor cookie still decides');
   assert.equal((await list(w, { 'x-admin-token': OPERATOR })).status, 200, 'valid header unchanged');
   const admin = (await w.state.newAdminToken('web')).token;
   assert.equal((await list(w, { 'x-admin-token': admin })).status, 200, 'legacy admin header unchanged');
@@ -372,7 +379,7 @@ await check('a dead owner cookie never promotes a visitor; visitor quota rules s
   assert.equal((await create(w, brief(), { cookie })).status, 401, 'dead owner cookie alone');
 });
 
-await check('re-login rotates this browser\'s session and the session count stays bounded', async () => {
+await check('re-login rotates this browser\'s session; at 16 sessions a new login is 409 and no existing session ends', async () => {
   const w = world();
   await w.enroll();
   const first = (await signIn(w)).cookie;
@@ -382,12 +389,40 @@ await check('re-login rotates this browser\'s session and the session count stay
   assert.notEqual(jar(r.cookie), first);
   assert.equal((await session(w, first)).j.authenticated, false, 'previous credential of this browser ended');
   assert.equal(ownerSessions(w).length, 1);
-  const cookies = [];
-  for (let i = 0; i < 20; i++) { cookies.push((await signIn(w)).cookie); clockOffset += 1; }
+  const relogin = async (cookie) => { const o = await options(w); return call(w, 'POST', '/api/cloudbite/owner/login', { body: { response: w.key.get(o.j) }, headers: { ...ORIGIN, ...(cookie ? { cookie } : {}) } }); };
+  const cookies = [jar(r.cookie)];
+  for (let i = 0; i < 15; i++) { cookies.push((await signIn(w)).cookie); clockOffset += 1; }
   clockOffset = 0;
   assert.equal(ownerSessions(w).length, 16);
-  assert.equal((await session(w, cookies[19])).j.authenticated, true, 'newest kept');
-  assert.equal((await session(w, cookies[0])).j.authenticated, false, 'oldest evicted');
+  const before = ownerSessions(w);
+  // 17th new browser: refused with no cookie, and nothing is revoked (the oldest stays valid).
+  const full = await relogin(null);
+  assert.equal(full.status, 409, full.text); assert.equal(full.cookie, null); assert.deepEqual(Object.keys(full.j), ['error']);
+  assert.deepEqual(ownerSessions(w), before);
+  assert.equal((await session(w, cookies[0])).j.authenticated, true, 'oldest kept');
+  // A missing / unknown / malformed / already-dead prior session cannot free a slot.
+  for (const fake of ['__Host-cb-owner=cbown_' + 'A'.repeat(43), '__Host-cb-owner=nope', first]) {
+    const x = await relogin(fake);
+    assert.equal(x.status, 409, fake); assert.equal(x.cookie, null, fake);
+  }
+  assert.deepEqual(ownerSessions(w), before);
+  for (const c of cookies) assert.equal((await session(w, c)).j.authenticated, true);
+  // A real prior session of this browser rotates at capacity: the old cookie dies, the count stays 16.
+  const rot = await relogin(cookies[0]);
+  assert.equal(rot.status, 200, rot.text);
+  assert.equal((await session(w, cookies[0])).j.authenticated, false, 'rotated cookie is dead');
+  assert.equal((await session(w, jar(rot.cookie))).j.authenticated, true);
+  assert.equal(ownerSessions(w).length, 16);
+  assert.equal((await relogin(cookies[0])).status, 409, 'the rotated-away cookie cannot rotate again');
+  // Recovery: an explicit logout frees one slot.
+  assert.equal((await logout(w, cookies[1])).status, 200);
+  assert.equal((await relogin(null)).status, 200, 'slot freed by logout');
+  assert.equal((await relogin(null)).status, 409);
+  assert.equal(ownerSessions(w).length, 16);
+  // Recovery: re-registering the key ends its sessions, which then no longer hold slots.
+  await w.enroll(w.key, Date.now() + 1);
+  assert.equal((await relogin(null)).status, 200, 'dead-key sessions do not count');
+  assert.equal(ownerSessions(w).length, 1);
 });
 
 await check('local http dev only: cb-owner-dev without Secure', async () => {

@@ -87,9 +87,10 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     : !!admin && !isCbFail(await state.adminList(admin));
   const owned = await ownerRoute(req, env, path, state, json);
   if (owned) return owned;
-  // An x-admin-token header always decides by itself (a wrong one never falls back to a cookie).
+  // A present x-admin-token header always decides by itself, even when empty (a wrong one never falls back to a cookie).
+  const hasAdmin = req.headers.has('x-admin-token');
   const admin = req.headers.get('x-admin-token') ?? '';
-  const ownerAuth = () => (admin ? isOwner(admin) : ownerCookieValid(req, env, state));
+  const ownerAuth = () => (hasAdmin ? isOwner(admin) : ownerCookieValid(req, env, state));
   const access = await accessRoute(req, env, path, ownerAuth, json);
   if (access) return access;
 
@@ -101,12 +102,12 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     if (!(req.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) return json({ error: 'content-type must be application/json' }, 415);
     const b = await readJson(req, CB_CREATE_BODY_MAX);
     if ('error' in b) return json({ error: b.error }, b.status);
-    // An x-admin-token header always takes the owner path (no fallback to a cookie when it is wrong).
+    // A present x-admin-token header (even empty) always takes the owner path (no fallback to a cookie when it is wrong).
     // Without one: a live owner-session cookie is the owner; otherwise an owner-approved visitor cookie may create its
     // own projects within the grant quota (docs/cloudbite/access-service.txt). A dead owner cookie grants nothing itself.
-    const ownerSession = !admin && await ownerCookieValid(req, env, state);
-    const visitor = admin || ownerSession ? null : await visitorGrant.check(req, env);
-    if (admin ? !await isOwner(admin) : !ownerSession && !visitor) return json({ error: 'admin session required' }, 401);
+    const ownerSession = !hasAdmin && await ownerCookieValid(req, env, state);
+    const visitor = hasAdmin || ownerSession ? null : await visitorGrant.check(req, env);
+    if (hasAdmin ? !await isOwner(admin) : !ownerSession && !visitor) return json({ error: 'admin session required' }, 401);
     const brief = validateBrief(b.ok, visitor ? CLOUDBITE_EXPERTS : undefined);
     if (isInvalid(brief)) return json({ error: brief.invalid }, 400);
     if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);

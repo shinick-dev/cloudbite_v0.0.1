@@ -196,7 +196,7 @@ interface CbOwnerSession { createdAt: number; credentialId: string; credCreatedA
 const CB_OWNER_PURPOSE = 'cloudbite-owner';
 const CB_OWNER_PREFIX = 'cbown:';
 const CB_OWNER_HASH = /^[0-9a-f]{64}$/;
-const CB_OWNER_MAX = 16; // 동시에 남는 소유자 세션 (브라우저) 수. 넘치면 가장 오래된 것부터 끝낸다
+const CB_OWNER_MAX = 16; // 동시에 남는 소유자 세션 (브라우저) 수. 다 차면 새 로그인은 409 — 기존 세션은 로그아웃 전까지 끝내지 않는다
 
 const REQ_TTL = 10 * 60e3;
 const CHAL_TTL = 3 * 60e3;
@@ -1022,18 +1022,28 @@ export class State extends DurableObject<Env> {
 
   async cloudbiteOwnerOptions(src: string) { return this.authOptions(CB_OWNER_PURPOSE, src); }
 
-  /** 탭 검증을 통과해야만 sessionHash 를 저장한다. replaces = 이 브라우저가 내던 예전 세션 (있으면 같이 끝낸다) */
+  /**
+   * 탭 검증을 통과해야만 sessionHash 를 저장한다. replaces = 이 브라우저가 내던 예전 세션 (실제로 남아 있으면 그 자리를 넘겨받아 끝낸다).
+   * 세션이 CB_OWNER_MAX 개 다 차 있으면 새 로그인은 409 — 어떤 기존 세션도 끝내지 않는다. 확인과 저장은 한 번에 (blockConcurrencyWhile)
+   */
   async cloudbiteOwnerLogin(resp: AuthenticationResponseJSON, sessionHash: string, replaces: string | null) {
     if (!CB_OWNER_HASH.test(sessionHash)) return fail(400, 'invalid session');
     const cred = await this.verifyTap(CB_OWNER_PURPOSE, resp);
     if (!cred) return fail(401, 'security key verification failed');
-    await this.ctx.blockConcurrencyWhile(async () => {
-      const all = [...(await this.s.list<CbOwnerSession>({ prefix: CB_OWNER_PREFIX }))].sort((a, b) => a[1].createdAt - b[1].createdAt);
-      const drop = all.slice(0, Math.max(0, all.length - CB_OWNER_MAX + 1)).map(([k]) => k);
-      if (replaces && CB_OWNER_HASH.test(replaces) && replaces !== sessionHash) drop.push(CB_OWNER_PREFIX + replaces);
-      if (drop.length) await this.deleteKeys(drop);
+    const stored = await this.ctx.blockConcurrencyWhile(async () => {
+      const all = await this.s.list<CbOwnerSession>({ prefix: CB_OWNER_PREFIX });
+      // 만든 키가 지워진 (cloudbiteOwnerCheck 가 어차피 거부할) 세션만 자리에서 뺀다. 나이로는 끝내지 않는다
+      const creds = await this.s.get<Cred>([...new Set([...all.values()].map((x) => `cred:${x.credentialId}`))]);
+      const dead = [...all].filter(([, x]) => creds.get(`cred:${x.credentialId}`)?.createdAt !== x.credCreatedAt).map(([k]) => k);
+      const k = replaces && CB_OWNER_HASH.test(replaces) && replaces !== sessionHash ? CB_OWNER_PREFIX + replaces : null;
+      const prior = k && all.has(k) && !dead.includes(k) ? k : null; // 실제로 살아 있는 이 브라우저의 세션만 자리를 넘겨준다
+      if (dead.length) await this.deleteKeys(dead);
+      if (!prior && all.size - dead.length >= CB_OWNER_MAX) return false;
+      if (prior) await this.s.delete(prior);
       await this.s.put(CB_OWNER_PREFIX + sessionHash, { createdAt: now(), credentialId: cred.id, credCreatedAt: cred.createdAt } satisfies CbOwnerSession);
+      return true;
     });
+    if (!stored) return fail(409, 'too many owner sessions; log out on another browser first');
     await this.audit('cloudbite-owner-login', null, null, cred.label);
     return { authenticated: true as const, hasCredentials: true as const };
   }

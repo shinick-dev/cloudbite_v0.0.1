@@ -14,7 +14,7 @@ API
   POST /api/cloudbite/owner/options  body {} -> raw PublicKeyCredentialRequestOptionsJSON
        (rpId = RP_ID, userVerification required, hints ['security-key'], allowCredentials = registered keys, usb/nfc).
   POST /api/cloudbite/owner/login    body {response: AuthenticationResponseJSON} -> {authenticated:true, hasCredentials:true}
-       + Set-Cookie. Any failure -> 401 {error} and no cookie.
+       + Set-Cookie. Verification failure -> 401 {error}; session capacity full -> 409 {error}. No cookie on any failure.
   POST /api/cloudbite/owner/logout   body {} -> {authenticated:false} + clearing Set-Cookie (Max-Age=0). Idempotent.
   POSTs: exact Origin == ORIGIN (403), content-type application/json (415), JSON object (400), body cap 256 B
   (options/logout, must be exactly {}) or 32 KiB (login, only the `response` field) (413). Errors are {error} only.
@@ -34,7 +34,13 @@ Session storage and cookie
     cbown:<sha256hex("cloudbite-owner-session-v1|" + credential)> = {createdAt, credentialId, credCreatedAt}.
   - No server-side expiry (not an alarm prefix). It ends on logout, on deletion of the security key that created it
     (checked on every use; re-registering the same credential id gets a new createdAt and does not revive it),
-    on re-login from the same browser (rotation), or when more than 16 owner sessions exist (oldest evicted).
+    or on re-login from the same browser (rotation). Sessions are never ended by age or by other logins.
+  - Capacity: at most 16 owner sessions (browsers). When 16 live sessions exist, a NEW login is refused with 409 and
+    no cookie, and no existing session is touched. A re-login whose browser still presents one of those live sessions
+    rotates it (the old cookie dies) and succeeds at capacity; a missing, unknown or already-dead prior hash frees no
+    slot. Sessions of a deleted security key no longer count (they are pruned at login). The check and the write are
+    one atomic step in State. Recovery when full: log out on a browser you no longer need, or delete (and re-register)
+    the security key, which ends every session it created.
   - Cookie: __Host-cb-owner=<credential>; Path=/; Max-Age=34560000 (400 days); HttpOnly; SameSite=Strict; Secure.
     Local http dev only (CLOUDBITE_ALLOW_HTTP=1 AND http ORIGIN): cb-owner-dev without Secure.
     Nothing is kept in localStorage/sessionStorage or anything JS-readable. The browser may still clear or cap it.
@@ -44,8 +50,8 @@ Session storage and cookie
 Authority (Cloudbite only)
   - Owner cookie authorizes: GET /api/cloudbite/access/requests, POST .../<id>/approve|deny|revoke,
     POST /api/cloudbite/projects (owner rules, no visitor slot). Nothing else reads it (not /api/admin/*, vault, lab).
-  - A non-empty x-admin-token header decides alone, as before: an invalid header never falls back to an owner or
-    visitor cookie. Without it, the owner cookie is checked before a visitor cookie. A dead/malformed owner cookie
+  - A present x-admin-token header decides alone, even when empty: an invalid or empty header is 401 and never falls
+    back to an owner or visitor cookie. Without it, the owner cookie is checked before a visitor cookie. A dead/malformed owner cookie
     grants nothing by itself; a visitor cookie beside it is still only a visitor (quotas 10 / 1h / 5 experts / refund
     unchanged). Project bearer tokens are unchanged.
   - State.cloudbiteOwner* is called only on /api/cloudbite/owner/* or when a well-formed owner cookie is presented.
