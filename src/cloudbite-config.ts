@@ -16,7 +16,7 @@ export const CB_RETENTION = 24 * 3600_000;   // project record + access token li
 export const CB_MAX_TOKENS = 4;              // access tokens per project (idempotent create retries)
 
 export const CB_CREATE_BODY_MAX = 128 * 1024; // optional user documents (24000 characters, multi-byte, JSON-escaped)
-export const CB_INFERENCE_BODY_MAX = 48 * 1024;
+export const CB_INFERENCE_BODY_MAX = 256 * 1024; // bounded complete decision/evidence context plus prior tool turns
 export const CB_ACTIVITY_BODY_MAX = 4 * 1024;
 export const CB_COMPLETE_BODY_MAX = 1024;
 export const CB_INFERENCE_MAX_CALLS = 8;

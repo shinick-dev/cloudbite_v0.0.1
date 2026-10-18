@@ -120,4 +120,20 @@ await test('a catalogue above 200 fails explicitly before any provider call inst
  assert.equal(r.status,503);assert.equal(calls,0);assert.equal(r.expertIds,undefined);
  assert.equal((await m.askJev(q(),grown(200),'TEST-KEY',5,'h',0,fake({'cb-role-200':0.9}))).expertIds[0],'cb-role-200');
 });
+await test('decision fields and full document contents reach Jev, and any evidence change invalidates the cached decision', async()=>{
+ const decision={options:['Pilot','Postpone'],constraints:['Two weeks'],successCriteria:['Reproducible review'],knownFacts:['No private data'],assumptions:['Teams will return'],unknowns:['Willingness to pay']};
+ const documents=[{id:'doc-1',name:'scope.md',content:'Synthetic source: pilot two weeks.'}];
+ const query=q({decision,documents});
+ assert.deepEqual(m.routingQuery(query),query);
+ const request=m.jevRoutingRequest(query,experts);assert.deepEqual(request.state.request.decision,decision);assert.deepEqual(request.state.request.documents,documents);
+ const base=await m.routingQueryHash(query,experts,5);
+ assert.notEqual(base,await m.routingQueryHash(q(),experts,5));
+ assert.notEqual(base,await m.routingQueryHash({...query,documents:[{...documents[0],content:'Changed budget'}]},experts,5));
+ assert.notEqual(base,await m.routingQueryHash({...query,decision:{...decision,assumptions:['Different premise']}},experts,5));
+ const router=new m.RoutingSession(storage(),experts,'TEST-KEY',()=>10000,fake());
+ assert.ok((await router.plan(query,5)).expertIds.length);
+ assert.equal((await router.read({...query,documents:[{...documents[0],content:'Changed'}]},5)).status,409);
+ assert.equal(m.routingQuery({...query,documents:[{...documents[0],id:'doc-99'}]}).status,400);
+ assert.equal(m.routingQuery({...query,decision:{...decision,secret:'instruction'}}).status,400);
+});
 console.log(`cloudbite-routing: ${passed} checks passed`);

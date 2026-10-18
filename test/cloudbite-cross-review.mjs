@@ -228,7 +228,7 @@ await test('untrusted opinions stay data; a malformed reviewer marks the review 
   };
   const r = await review(w, x);
   for (const c of N.calls) system.push(c.req.messages[0].content);
-  assert.equal(new Set(system).size, 1, 'fixed system instructions');
+  assert.equal(new Set(system.map(s => s.split('\nAssigned reviewer lens')[0])).size, 1, 'fixed system instructions plus the application-owned role lens');
   assert.ok(!system[0].includes(injection));
   assert.ok(N.calls.some((c) => c.req.messages[1].content.includes(injection)), 'source output passed only as user data');
   assert.equal(r.status, 200, r.text);
@@ -345,4 +345,26 @@ await test('expiry or purge during inference writes nothing', async () => {
   assert.equal(w.store(y.id).m.size, 0, 'purged project is not recreated');
 });
 
+await test('reviewers see their actual domain lens and complete supplied source text; deletion removes that source and decision data', async () => {
+  const w=world(), x=await finished(w);
+  const s=w.store(x.id), p=s.m.get('project');
+  p.brief.documents=[{id:'doc-1',name:'pilot.md',content:'Synthetic evidence: budget is two weeks. SOURCE-END'}];
+  p.brief.decision={options:['Pilot','Wait'],constraints:['Two weeks'],successCriteria:[],knownFacts:[],assumptions:['Demand exists'],unknowns:['Repeat usage']};
+  const originalSnapshot=M.reviewSnapshot(p.brief,[]);
+  assert.notEqual(originalSnapshot,M.reviewSnapshot({...p.brief,documents:[{...p.brief.documents[0],content:'Changed'}]},[]));
+  for (const id of p.runs) s.m.get('expert:'+id).run.opinion.evidence=['[doc:doc-1] Two-week budget'];
+  s.m.set('project',p);
+  const r=await review(w,x);assert.equal(r.status,200,r.text);assert.equal(r.data.crossReview.status,'completed');
+  assert.ok(r.data.evidenceClaims.every(c=>c.status==='linked'));
+  for(const c of N.calls){
+    assert.equal(c.data.project.documents[0].content,p.brief.documents[0].content);
+    const def=EXPERTS.find(e=>e.id===c.data.reviewerExpertId);
+    assert.ok(c.req.messages[0].content.includes(def.domain));
+    assert.ok(c.req.messages[0].content.includes(def.summary));
+    assert.match(c.req.messages[0].content,/source label alone is not source text/);
+  }
+  const deleted=await call(w,'DELETE','/api/cloudbite/history/'+x.id,{headers:OWNER});assert.equal(deleted.status,200);
+  const stored=s.m.get('project');assert.equal(stored.brief.documents,undefined);assert.equal(stored.brief.decision,undefined);
+  const gone=await read(w,x);assert.equal(gone.data.crossReview,undefined);assert.deepEqual(gone.data.evidenceClaims,[]);
+});
 console.log(`cloudbite cross-review: ${passed} passed`);

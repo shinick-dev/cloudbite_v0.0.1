@@ -30,6 +30,7 @@ import {
 import { artifactPath, extraArtifactPath, isInvalid, PROJECT_ID, validateBrief, validateResult, validateWorkspace } from './cloudbite-validate';
 import { CbDaytonaError, CB_LABEL_CLAIM, CB_LABEL_PROJECT, CB_LABEL_RUN, cbCreateSandbox, cbDeleteSandbox, cbDownload, cbExec, cbFindByLabels, cbGetSandbox, cbStartRunner, cbUpload, type CbSandbox } from './cloudbite-daytona';
 import { chatMessages, nosanaChat, type ChatMessage, type InferenceResult } from './cloudbite-inference';
+import { evidenceClaims } from './cloudbite-evidence';
 import { CB_CROSS_REVIEW_STALE, parseReviewReply, peersFor, reviewMessages, reviewSnapshot, selectReviewers, type CompletedOpinion } from './cloudbite-cross-review';
 import { CB_RUNNER_PY, RUNNER_DIAGNOSTIC_MAX, runnerCapability, runnerFailureMessage } from './cloudbite-runner';
 import { historyIndex, historyRow } from './cloudbite-history';
@@ -137,6 +138,7 @@ export class CloudbiteProject extends DurableObject<Env> {
   /** Public projection. Optional views (routing, crossReview, …) are appended here and only when present. */
   private view(p: ProjectRecord, experts: ExpertRecord[], cr?: CrossReviewRecord): ProjectRun {
     return { id: p.id, brief: p.brief, status: p.status, experts: experts.map((e) => e.run), createdAt: p.createdAt, updatedAt: p.updatedAt, ...(p.routing ? { routing: p.routing } : {}),
+      ...(p.brief.mode === 'live' ? { evidenceClaims: evidenceClaims(p.brief, experts.map(e => e.run)) } : {}),
       ...(cr ? { crossReview: cr.review } : {}) };
   }
   private log(e: ExpertRecord, kind: ExpertActivity['kind'], message: string) {
@@ -238,7 +240,11 @@ export class CloudbiteProject extends DurableObject<Env> {
 
   async read(token: unknown): Promise<ProjectRun | CbFail> {
     const s = await this.authorize(token);
-    return isCbFail(s) ? s : this.view(s.p, s.experts, s.cr);
+    if (isCbFail(s)) return s;
+    if (s.cr?.review.status === 'running' && s.cr.review.startedAt + CB_CROSS_REVIEW_STALE <= this.clock()) {
+      return this.existingReview(s.cr, await cbHash(token as string));
+    }
+    return this.view(s.p, s.experts, s.cr);
   }
 
   /** Internal history reads: the HTTP adapter derives actor from an HttpOnly cookie, never a query parameter. */
@@ -285,6 +291,7 @@ export class CloudbiteProject extends DurableObject<Env> {
       if (!p.history.deleted) {
         p.history.deleted = true; p.history.revision++; p.history.nextAt = 0;
         p.brief.title = '[deleted]'; p.brief.objective = '[deleted]'; p.brief.context = ''; p.feedback = [];
+        delete p.brief.decision; delete p.brief.documents;
         const records = await tx.get<ExpertRecord>(p.runs.map(run => 'expert:' + run));
         const experts = [...records.values()];
         for (const e of experts) { delete e.run.opinion; if (e.run.error) e.run.error = '[deleted]'; e.run.activity = []; e.run.artifacts = []; }
@@ -388,7 +395,7 @@ export class CloudbiteProject extends DurableObject<Env> {
     const reports: CrossReviewReport[] = [], failures: string[] = [];
     await Promise.all(reviewers.map(async (r) => {
       const peers = peersFor(r, completed);
-      const reply = await this.reviewInference(cfg, reviewMessages(r, peers, s.p.brief)).catch((): InferenceResult => ({ error: 'inference upstream unavailable', status: 504 }));
+      const reply = await this.reviewInference(cfg, reviewMessages(r, peers, s.p.brief, this.catalogue().find(e => e.id === r.expertId))).catch((): InferenceResult => ({ error: 'inference upstream unavailable', status: 504 }));
       const report = 'error' in reply ? { invalid: reply.error } : parseReviewReply(reply.content, r, peers);
       if ('invalid' in report) failures.push(`${r.expertId}: ${report.invalid}`);
       else reports.push(report);

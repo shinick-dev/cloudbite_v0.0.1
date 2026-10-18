@@ -140,7 +140,8 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     if (input && typeof input === 'object' && !Array.isArray(input) && 'routing' in input) {
       const { routing: kind, ...raw } = input as Record<string, unknown>;
       if (kind !== 'jev') return json({ error: 'unknown routing mode' }, 400);
-      const query = routingQuery({ title: raw.title, objective: raw.objective, context: raw.context, requestId: raw.requestId });
+      const query = routingQuery({ title: raw.title, objective: raw.objective, context: raw.context, requestId: raw.requestId,
+        ...('decision' in raw ? { decision: raw.decision } : {}), ...('documents' in raw ? { documents: raw.documents } : {}) });
       if (isRoutingFailure(query)) return json({ error: query.error }, query.status);
       if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);
       const session = visitor ? await accessSession(req, env) : null;

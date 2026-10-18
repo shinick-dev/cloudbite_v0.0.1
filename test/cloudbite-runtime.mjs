@@ -295,7 +295,7 @@ await check('create requires admin session, exact Origin, JSON, body limit and b
   assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: brief(), headers: { 'x-admin-token': SECRETS[2] } })).status, 403);
   assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: brief(), headers: { ...admin, origin: 'https://evil.test' } })).status, 403);
   assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: brief(), headers: { ...admin, 'content-type': 'text/plain' } })).status, 415);
-  assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: brief(), raw: JSON.stringify({ ...brief(), context: 'x'.repeat(20000) }), headers: admin })).status, 413);
+  assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: brief(), raw: JSON.stringify({ ...brief(), context: 'x'.repeat(140000) }), headers: admin })).status, 413);
   assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: Array(101).fill('market') }), headers: admin })).status, 400);
   assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['nobody'] }), headers: admin })).status, 400);
   assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: { ...brief(), extra: 1 }, headers: admin })).status, 400);
@@ -409,7 +409,7 @@ await check('worker capability: scoped to one expert, bounded calls, one in flig
   assert.equal((await wcall(w, a, 'inference', msgs, { token: 'cbw_' + 'B'.repeat(43) })).status, 401);
   assert.equal((await wcall(w, a, 'inference', msgs, { headers: { origin: 'https://cb.test' } })).status, 403, 'browser-origin calls refused');
   assert.equal((await wcall(w, a, 'inference', { messages: [{ role: 'tool', content: 'x' }] })).status, 400);
-  assert.equal((await call(w, 'POST', `/p/_cloudbite/worker/${a.project}/${a.run}/inference`, { raw: 'x'.repeat(60 * 1024), body: 1, headers: { authorization: 'Bearer ' + a.token } })).status, 413);
+  assert.equal((await call(w, 'POST', `/p/_cloudbite/worker/${a.project}/${a.run}/inference`, { raw: 'x'.repeat(270 * 1024), body: 1, headers: { authorization: 'Bearer ' + a.token } })).status, 413);
   // one at a time
   w.nosanaHold = gate();
   const pending = wcall(w, a, 'inference', msgs); await sleep(5);
