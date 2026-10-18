@@ -20,7 +20,13 @@ for (const s of ['', 'a', 'x'.repeat(55), 'x'.repeat(56), 'x'.repeat(64), 'x'.re
 
 // --- every pack passes the structural gate; malformed packs are refused
 ok(m.PHASE_ONE_PACKS.length === 20, '20 phase-one packs');
-for (const p of m.PHASE_ONE_PACKS) { m.checkKnowledgePack(p); checks++; }
+for (const p of m.PHASE_ONE_PACKS) {
+  m.checkKnowledgePack(p); checks++;
+  const digest = m.knowledgeDigest(p);
+  ok(m.findExpert(p.expertId).prompt.includes(`pack sha256 ${digest.packSha256}`), `${p.expertId} history promptHash covers the full pack including source metadata`);
+  const changed = { ...p, sources: p.sources.map((s, i) => i ? s : { ...s, checkNote: s.checkNote + ' changed' }) };
+  ok(m.sha256Hex(JSON.stringify(changed)) !== digest.packSha256, `${p.expertId} source-only change alters the pack pin`);
+}
 const base = JSON.parse(JSON.stringify(m.PHASE_ONE_PACKS[0]));
 const broken = [
   ['dangling card source', p => { p.cards[0].source_ids = ['not-a-source']; }],

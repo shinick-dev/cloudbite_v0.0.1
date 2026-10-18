@@ -13,7 +13,7 @@ Phase one of [`expert-pool-100.md`](expert-pool-100.md). It adds a catalogue of 
 | STA pilot (1) | `probably-primetime-sta` | `curated-knowledge`, unchanged legacy path (50 cards / 120 sources exact-count check) |
 | New phase-one roles (12) | `cb-customer-discovery`, `cb-ux-researcher`, `cb-human-ai-interaction`, `cb-knowledge-engineer`, `cb-model-evaluation`, `cb-sandbox-engineer`, `cb-finops`, `cb-evidence-auditor`, `cb-quantitative-reviewer`, `cb-assumption-auditor`, `cb-adversarial-reviewer`, `cb-synthesis-editor` | `curated-knowledge`; source path `src/cloudbite-phase-one-data.ts`, revision = first 40 hex of the pack's SHA-256 |
 
-Pack content (role definition, cards, sources) is owned by `src/cloudbite-phase-one-data.ts`. The persona prompt embeds the pack version and the cards SHA-256, so the existing history `promptHash` changes whenever knowledge changes; history also records `basis` and `revision`.
+Pack content (role definition, cards, sources) is owned by `src/cloudbite-phase-one-data.ts`. The persona prompt embeds the pack version, the full pack SHA-256 and the cards SHA-256, so the existing history `promptHash` also changes for source-only metadata updates; history also records `basis` and `revision`.
 
 ## Optional bootstrap pool
 
