@@ -747,7 +747,7 @@ except Exception as e:
 body = json.dumps({'exitCode': int(code), 'timedOut': timed, 'output': buf.decode('utf-8', 'replace'), 'truncated': cut}, ensure_ascii=False).encode()
 if not job.get('callback'):
     sys.stdout.write('CLOUDBITE_RESULT ' + body.decode() + '\n'); sys.stdout.flush(); sys.exit(0)
-req = urllib.request.Request(job['callback'], data=body, method='POST', headers={'authorization': 'Bearer ' + token, 'content-type': 'application/json'})
+req = urllib.request.Request(job['callback'], data=body, method='POST', headers={'authorization': 'Bearer ' + token, 'content-type': 'application/json', 'user-agent': 'CloudBiteCompute/1.0'})
 for i in range(4):
     try:
         urllib.request.urlopen(req, timeout=30).read(); break
@@ -813,7 +813,7 @@ def load():
 def call(c, method, sub, body=None):
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(c['gateway'] + c['prefix'] + '/' + sub, data=data, method=method,
-                                 headers={'authorization': 'Bearer ' + c['token'], 'content-type': 'application/json'})
+                                 headers={'authorization': 'Bearer ' + c['token'], 'content-type': 'application/json', 'user-agent': 'CloudBiteCompute/1.0'})
     try:
         with urllib.request.urlopen(req, timeout=60) as r: return json.loads(r.read() or b'{}')
     except urllib.error.HTTPError as e:
