@@ -28,7 +28,7 @@
   "scripts": {
     "dev": "wrangler dev --config wrangler.cloudbite.jsonc --env dev --port 8808",
     "dev:legacy": "wrangler dev --config wrangler.jsonc --env dev",
-    "deploy": "wrangler deploy --config wrangler.cloudbite.jsonc",
+    "deploy": "node tools/deploy-cloudbite.mjs",
     "check": "node tools/build-lab-renderer.mjs --check && node tools/build-lab-dom-capture.mjs --check && node tools/build-lab-demo-broadcast.mjs --check && node tools/build-cloudbite-console.mjs --check && node tools/build-cloudbite-access.mjs --check && node tools/build-cloudbite-computer.mjs --check && tsc --noEmit && tsc -p tsconfig.client.json",
     "build:cloudbite-access": "node tools/build-cloudbite-access.mjs",
     "build:cloudbite-console": "node tools/build-cloudbite-console.mjs",
