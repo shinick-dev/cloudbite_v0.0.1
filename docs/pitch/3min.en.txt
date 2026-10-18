@@ -1,0 +1,98 @@
+CLOUDBITE - THREE-MINUTE PITCH (ENGLISH)
+==========================================
+
+Format
+- Lines inside >>> ... <<< are stage directions. NOT SPOKEN.
+- Everything else is spoken.
+- Segment headers [m:ss-m:ss] are NOT SPOKEN.
+- Planned cadence: about 130 spoken words per minute, plus about 18 seconds of
+  silent click pauses. Timing is estimated from word counts, not from a recorded
+  audio run. See rehearsal-notes.txt.
+
+
+[0:00-0:22] THE PROBLEM
+
+>>> NOT SPOKEN: Cloudbite open on the project screen. Do not click yet. <<<
+
+Every product team hits the same question: should we launch this?
+You need product, finance, security, engineering and design views.
+Ask one chatbot to play all five, and you get five confident paragraphs
+you can't check. Where did that number come from? What was assumed?
+
+
+[0:22-0:42] WHAT CLOUDBITE IS
+
+Cloudbite gives one shared project to a team of expert AI personas.
+Each expert gets its own Daytona workspace, an isolated computer to run Python and write files,
+with reasoning from Nosana inference through our server.
+Each one returns artifacts, evidence, assumptions and a structured opinion.
+
+
+[0:42-1:56] DEMO
+
+Our example project: should we launch a hundred-expert AI advisory service?
+This is the shared brief.
+
+>>> NOT SPOKEN: open the expert list. Pause 2 s. <<<
+
+We picked five roles from a twelve-role catalogue.
+Each has its own persona and work order. Finance doesn't get security's question.
+
+>>> NOT SPOKEN: start the replay / show the execution stream. Pause 4 s while it moves. <<<
+
+Each expert works in its own workspace, up to three at a time.
+
+>>> NOT SPOKEN: select the finance expert, open the cost-model artifact. Pause 3 s. <<<
+
+Here's the point. Finance didn't just say "it's expensive."
+It left a cost model: under the same assumptions, a hundred experts need twenty times the inference of five.
+Prices stay variables, because nobody has measured them, and the file says so.
+
+>>> NOT SPOKEN: go to the decision view / opinion distribution. Pause 2 s. <<<
+
+Now the decision: two support, two conditional, one concern.
+Confidence is each model's own estimate. A signal, not accuracy.
+
+>>> NOT SPOKEN: switch the option from full launch to paid pilot. Pause 3 s. <<<
+
+Switch to a paid pilot: three support, two conditional.
+The disagreement becomes the next test: run one real project and measure its cost.
+
+
+[1:56-2:20] WHERE WE ARE TODAY
+
+>>> NOT SPOKEN: stay on the decision view. Pause 2 s, then speak to the judges. <<<
+
+That was our scripted walkthrough, labeled as one.
+The real console talks to our live API, with cancellation and real artifact files.
+Local checks pass end to end with stand-in providers,
+and a recorded run used real Daytona sandboxes.
+Next: the first full run with live Nosana inference.
+
+
+[2:20-2:48] WHY IT MATTERS
+
+>>> NOT SPOKEN: hands off the mouse. Pause 2 s. <<<
+
+Without Daytona, an expert can only talk. With a workspace, it calculates and leaves a file you can open.
+Without Nosana, nothing in that workspace can reason.
+Together, opinions become work you can inspect.
+We start small on purpose: five experts, three at once.
+A hundred is the direction, as each expert earns its seat with evidence.
+
+
+[2:48-3:00] CLOSE
+
+Not a hundred chatbots voting.
+A team of experts that shows its work.
+That's Cloudbite. Thank you.
+
+
+----------------------------------------------------------------------
+FALLBACK (only if the network or a provider fails). NOT PART OF THE TIMED SCRIPT.
+Say this once, then continue the demo segment with the offline walkthrough:
+
+The live connection isn't answering, so I'll use our scripted walkthrough,
+which is clearly labeled as a simulation, plus a recorded Daytona run from earlier.
+Nothing I show now is a live call.
+----------------------------------------------------------------------
