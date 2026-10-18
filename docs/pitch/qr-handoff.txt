@@ -1,0 +1,44 @@
+CLOUDBITE — QR DEMO HANDOFF
+==========================
+
+Attendee request: https://k.shinick.dev/lab/request
+Host approval:    https://k.shinick.dev/lab/requests
+The final s distinguishes the host's inbox from the attendee's form.
+
+ON STAGE
+Show demo/access-qr.html or demo/cloudbite-sandbox-request.png.
+English: "Scan the QR to request your own sandbox. I'll approve it with my security key."
+Korean:  "QR로 체험실을 신청하세요. 보안키로 승인해 드리겠습니다."
+This closing is already included in both three-minute scripts.
+
+HOST PROCEDURE
+1. Open the host approval URL and sign in as the configured owner through
+   Cloudflare Access. Have the already registered physical security key ready.
+2. Review the pending request. For this demo, choose personal practice and
+   check its duration, AI budget and resource limits.
+3. Press "보안 키로 승인하고 열기". Select the security key, enter the key's
+   PIN if requested, and touch the key. The key must be enrolled for shinick.dev.
+4. Approval starts resource creation. If the page stays in the approved /
+   creating state, press "같은 요청으로 생성 결과 확인" on the SAME request.
+   Creation does not retry automatically. Do not submit a second request.
+5. The attendee keeps the original request page open in the same browser.
+   Its status checks run every 10 seconds while visible. Once ready, the
+   attendee sees their personal entry link. The host inbox does not expose it.
+6. Continue the pitch while the sandbox is being prepared. Provisioning
+   speed and capacity are not guaranteed.
+
+VERIFICATION — 2026-10-18
+- Independent Claude Code worker traced request, owner login, per-request
+  WebAuthn challenge, approval, provisioning and same-request resume paths.
+- Focused API (21), request-service (16) and State (51) checks passed: 88 total.
+  These include signed test assertions and stand-in compute, not physical-key proof.
+- The deployed participant script and WebAuthn helper matched local source.
+- The deployed host URL redirected to Cloudflare Access login in the inspected
+  browser. Its authenticated inbox, physical-key touch and real provisioning
+  have not yet been verified in this task. Complete these before a live pitch.
+- An old request record on a previously used device may hide the new form.
+  The existing page offers "이 기기의 요청 기록 지우기" to start again; only
+  clear it when intentionally discarding that device's old request tracking.
+
+This real participant access service is separate from the scripted expert
+preview in demo/cloudbite-pitch.html. Scanning the QR alone grants no access.

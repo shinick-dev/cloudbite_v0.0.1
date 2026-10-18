@@ -109,6 +109,8 @@ QR handoff checklist (stage directions, not additional spoken script):
   Do not wait for resource creation during the three-minute pitch.
 - A real physical-key approval and paid sandbox provisioning still require
   an on-site run; local cryptographic fixtures do not prove that live flow.
+- See qr-handoff.txt for the exact live button labels, same-request resume
+  procedure, prerequisites and current verification boundary.
 
 5. FALLBACK (network or provider failure)
 
