@@ -1,7 +1,8 @@
 // Cloudbite 프로젝트 콘솔 (브라우저). tools/build-cloudbite-console.mjs 가 이 파일을 묶지 않고 변환해 src/cloudbite-page.ts 의
 // CLOUDBITE_JS 로 고정한다. 같은 출처 외부 스크립트로 내려가며, 화면은 전부 textContent·createElement 로만 그린다.
 // 데모는 브라우저 안 시뮬레이션이다 — 실제 Daytona 샌드박스나 Nosana 추론을 만들지 않으며 화면에서 그렇게 밝힌다.
-// 실제 실행은 서버 준비 상태와 기존 관리자 토큰(메모리에만)을 요구하고, 실패해도 데모로 몰래 바꾸지 않는다.
+// 실제 실행은 서버 준비 상태와 기존 관리자 토큰(메모리에만) 또는 승인된 방문자 세션(서버 HttpOnly 쿠키, JS 는 읽지 않음)을
+// 요구하고, 실패해도 데모로 몰래 바꾸지 않는다.
 // 화면 문구는 영어다 (2026-10-18 사용자 요청). 서버·모델이 돌려준 내용은 받은 그대로 보여 주고 번역하지 않는다.
 import type {
   CloudbiteBootstrap, ExpertActivity, ExpertArtifact, ExpertDefinition, ExpertOpinion, ExpertRun, ExpertStatus,
@@ -636,6 +637,19 @@ function boot(): void {
   const visitorLeft = () => { const v = visitor(); return v ? Math.max(0, v.maxProjects - v.usedProjects) : 0; };
   const visitorCanRun = () => !!visitor() && !!S.boot.data?.access?.canCreate && visitorLeft() > 0;
   const viaVisitor = () => S.mode === 'live' && !S.adminToken.trim() && !!visitor();
+  const liveCredential = () => !!S.adminToken.trim() || visitorCanRun();
+  const hhmm = (at: number) => clock(at).slice(0, 5);
+  const REQUEST_PATH = '/cloudbite/request';
+  /** 쓸 수 없는 방문자 접근 상태의 설명. 쓸 수 있거나 요청이 없으면 '' */
+  const accessProblem = (): string => {
+    const r = S.boot.data?.access?.request;
+    if (!r) return '';
+    if (visitor()) return visitorCanRun() ? '' : 'Your visitor session has no projects left. Ask the host for a new session.';
+    return r.status === 'pending' ? 'Your access request is still waiting for the host.'
+      : r.status === 'denied' ? 'The host declined your access request.'
+        : r.status === 'revoked' ? 'The host ended your visitor session.'
+          : 'Your visitor session has expired.';
+  };
   const limits = (): Limits => {
     const server = S.mode === 'live' ? S.boot.data?.configuration.maxExperts ?? 5 : 5;
     const session = viaVisitor() ? visitor()!.maxExperts : 5;
@@ -777,7 +791,7 @@ function boot(): void {
       faq('Why is Live run disabled?', 'Live run needs the server to be configured and either an existing admin session token or an approved, unexpired visitor session with a project left. Visitors can request access at /cloudbite/request. If the server is not ready, Settings lists the missing setting names. API keys are never entered in this console.'),
       faq('How many experts can run?', 'Up to five experts per project, with up to three working at once. The catalogue currently has twelve roles. A hundred-expert room is a future concept, not a verified capacity.'),
       faq('What do Clear view and Full screen do?', 'Clear view only empties the visible stream window; new activity keeps arriving and the project history and files stay intact. Restore history brings the hidden rows back. Full screen expands the workspace; press Escape or Exit full screen to return.'),
-      faq('Where is my data kept?', 'Tokens live only in this tab\'s memory. Exports are generated in the browser as downloads and state whether they come from a demo or a live run.')));
+      faq('Where is my data kept?', 'Admin and operator tokens live only in this tab\'s memory. An approved visitor session is kept by the server in an HttpOnly cookie that this page cannot read. Exports are generated in the browser as downloads and state whether they come from a demo or a live run.')));
 
   const settingsView = h('section', { class: 'cb-view cb-page', id: 'cb-view-settings', 'aria-labelledby': 'cb-settings-h' },
     h('div', { class: 'cb-page-head' }, h('h2', { id: 'cb-settings-h' }, 'Settings'), h('p', null, 'Execution mode and session. Project details and expert selection are under Home → Edit project.')),
@@ -835,13 +849,17 @@ function boot(): void {
     modeBadge.textContent = runMode === 'demo' ? 'Browser demo' : 'Live run';
     modeBadge.className = `cb-badge ${runMode === 'demo' ? 'is-demo' : 'is-live'}`;
     const operator = isOperatorToken(S.adminToken);
-    profileState.textContent = operator ? 'Temporary Cloudbite operator token in memory' : S.adminToken.trim() ? 'Admin token held in memory' : 'No admin token';
+    const v = visitor();
+    profileName.textContent = !S.adminToken.trim() && v ? v.name || 'Visitor' : 'Operator';
+    profileState.textContent = operator ? 'Temporary Cloudbite operator token in memory' : S.adminToken.trim() ? 'Admin token held in memory'
+      : v ? `Visitor session · ends ${hhmm(v.expiresAt)}` : 'No admin token';
     tokenLabel.textContent = operator ? 'Temporary Cloudbite operator token (Cloudbite runs only)' : 'Admin token';
     banner.textContent = runMode === 'demo'
       ? 'Browser demo — simulated activity and files; no Daytona or Nosana calls.'
       : 'Live run — server-reported activity. Confidence is self-assessed.';
     banner.className = `cb-banner ${runMode === 'demo' ? 'is-demo' : 'is-live'}`;
-    modeLine.textContent = demo ? 'Next run: Browser demo (simulated in this tab).' : 'Next run: Live run (server sandboxes).';
+    modeLine.textContent = demo ? 'Next run: Browser demo (simulated in this tab).'
+      : `Next run: Live run (server sandboxes${viaVisitor() ? ', using your approved visitor session' : ''}).`;
     demoBox.hidden = !demo; liveBox.hidden = demo;
     const cfg = S.boot.data?.configuration;
     const liveKids: Kid[] = [];
@@ -852,11 +870,14 @@ function boot(): void {
       h('p', null, cfg.missing.length ? 'The server operator must add these settings on the server (values are never entered here):' : 'The server reported that live runs are not ready.'),
       cfg.missing.length ? h('ul', null, ...cfg.missing.map(m => h('li', null, h('code', null, m)))) : null));
     else if (cfg) liveKids.push(h('p', { class: 'cb-ok' }, `Server ready · up to ${plural(cfg.maxExperts, 'expert')}`));
+    if (v) liveKids.push(h('p', { class: 'cb-help' }, `Visitor session for ${v.name || 'you'} · ends at ${hhmm(v.expiresAt)} · ${visitorLeft()} of ${plural(v.maxProjects, 'project')} left · up to ${plural(v.maxExperts, 'expert')} per project${S.adminToken.trim() ? ' · the admin token is used instead while entered' : ''}`));
+    const problem = accessProblem();
+    if (problem) liveKids.push(h('p', { class: 'cb-warn' }, problem, ' ', h('a', { href: REQUEST_PATH }, 'Request visitor access')));
     liveStatus.replaceChildren(...liveKids.filter((k): k is Node => !!k));
     clearTokenBtn.hidden = !S.adminToken;
     const busy = active();
     for (const n of [titleIn, objectiveIn, contextIn, failIn, tokenIn, filterIn]) n.disabled = busy;
-    const liveBlocked = !demo && (S.boot.status !== 'ready' || !cfg?.liveReady || !S.adminToken.trim());
+    const liveBlocked = !demo && (S.boot.status !== 'ready' || !cfg?.liveReady || !liveCredential());
     startBtn.disabled = busy || liveBlocked;
     startLabel.textContent = S.run?.phase === 'starting' ? 'Starting…' : busy ? 'Running…' : S.run ? 'Run again' : 'Run experts';
     cancelBtn.disabled = !busy || S.run?.phase === 'cancelling' || S.run?.phase === 'starting';
@@ -885,6 +906,7 @@ function boot(): void {
         h('span', null, h('strong', null, String(valid)), ' valid ', valid === 1 ? 'opinion' : 'opinions'));
     } else meta.push(h('span', null, h('strong', null, plural(S.selected.size, 'expert')), ' selected'));
     meta.push(h('span', null, 'Mode: ', h('strong', null, runMode === 'demo' ? 'Browser demo' : 'Live run')));
+    if (v && !S.adminToken.trim()) meta.push(h('span', null, 'Visitor session: ', h('strong', null, `${visitorLeft()} of ${plural(v.maxProjects, 'project')} left`), ` · ends ${hhmm(v.expiresAt)}`));
     if (p && S.run?.mode === 'live') meta.push(h('span', null, 'Project ', h('code', null, clip(p.id, 24))));
     fill(projMeta, ...meta);
   }
@@ -1070,7 +1092,8 @@ function boot(): void {
     const go = (label: string, v: View) => h('button', { type: 'button', class: 'cb-ghost', onclick: () => setView(v) }, label);
     if (!run) {
       tips.push(h('p', null, 'Check the brief with Edit project, choose up to five experts, then select Run experts.'));
-      if (S.mode === 'live' && (!cfg?.liveReady || !S.adminToken.trim())) tips.push(h('p', null, 'Live run is blocked until the server is ready and an admin token is entered.'), go('Open Settings', 'settings'));
+      if (S.mode === 'live' && viaVisitor() && visitorCanRun()) tips.push(h('p', null, 'Your visitor session is approved. Nothing runs until you choose experts and select Run experts.'));
+      if (S.mode === 'live' && (!cfg?.liveReady || !liveCredential())) tips.push(h('p', null, accessProblem() || 'Live run is blocked until the server is ready and an admin token is entered or visitor access is approved.'), go('Open Settings', 'settings'));
     } else if (run.phase === 'starting') tips.push(h('p', null, run.mode === 'demo' ? 'Starting the browser simulation…' : 'Asking the server to create one sandbox per expert…'));
     else if (run.phase === 'error' && !p) tips.push(h('p', null, 'The project could not start. Read the error on the project card, fix it and run again. Nothing was switched to demo mode.'));
     else if (p && active()) {
@@ -1167,14 +1190,16 @@ function boot(): void {
 
   function clearTimers(): void { for (const t of timers) clearTimeout(t); timers = []; clearTimeout(pollTimer); pollTimer = 0; }
 
-  function startRun(): void {
+  /** auto = 첫 화면이 스스로 시작한 데모 (visitorIntro 가 이것만 멈출 수 있다) */
+  function startRun(auto = false): void {
     if (active()) return;
     const f: FormInput = { title: titleIn.value.trim(), objective: objectiveIn.value.trim(), context: contextIn.value.trim(), expertIds: [...S.selected] };
     S.formErrors = validateForm(f, limits());
     if (S.mode === 'live') {
       if (!S.boot.data?.configuration.liveReady) S.formErrors.push('The server is not ready for live runs.');
-      if (!S.adminToken.trim()) S.formErrors.push('Enter the admin token in Settings.');
-      else if (isOperatorToken(S.adminToken) && !OPERATOR_TOKEN.test(S.adminToken.trim())) S.formErrors.push('The temporary Cloudbite operator token is malformed. Clear it and use a new link.');
+      if (S.adminToken.trim()) {
+        if (isOperatorToken(S.adminToken) && !OPERATOR_TOKEN.test(S.adminToken.trim())) S.formErrors.push('The temporary Cloudbite operator token is malformed. Clear it and use a new link.');
+      } else if (!visitorCanRun()) S.formErrors.push(accessProblem() || 'Enter the admin token in Settings, or request visitor access at /cloudbite/request.');
     }
     if (S.formErrors.length) { renderControls(); return; }
     clearTimers();
@@ -1182,6 +1207,7 @@ function boot(): void {
     const brief: ProjectBrief = { ...f, mode: S.mode, requestId: crypto.randomUUID() };
     S.artifactCache.clear(); S.hiddenRows.clear(); S.focusExpert = ''; S.artifactPath = ''; S.artifactPicked = false; lastAnnounce = '';
     S.run = { mode: S.mode, phase: 'starting', project: null, accessToken: '', error: '', startedAt: Date.now(), pollErrors: 0 };
+    S.autoDemoGen = auto && S.mode === 'demo' ? gen : 0;
     if (S.mode === 'demo') startDemo(gen, brief); else void startLive(gen, brief);
     renderAll();
   }
@@ -1216,19 +1242,27 @@ function boot(): void {
 
   async function startLive(gen: number, brief: ProjectBrief): Promise<void> {
     const operator = isOperatorToken(S.adminToken);
+    // 관리자·운영자 토큰이 있으면 헤더로, 없으면 승인된 방문자 쿠키(same-origin)만으로 요청한다. 권한 판단은 서버가 한다
+    const adminToken = S.adminToken.trim();
+    const v = adminToken ? null : visitor();
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (adminToken) headers['x-admin-token'] = adminToken;
     let res: Response;
     try {
-      res = await fetch('/api/cloudbite/projects', { method: 'POST', credentials: 'same-origin', cache: 'no-store',
-        headers: { 'content-type': 'application/json', 'x-admin-token': S.adminToken.trim() }, body: JSON.stringify(brief) });
+      res = await fetch('/api/cloudbite/projects', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers, body: JSON.stringify(brief) });
     } catch {
       if (gen !== S.gen) return;
       S.run!.phase = 'error'; S.run!.error = 'Could not reach the server. Check the network and run again. (Not switched to demo.)'; renderAll(); return;
     }
     if (gen !== S.gen) return;
     if (!res.ok) {
-      const msg = operator && res.status === 401 ? 'The temporary Cloudbite operator token was rejected or has expired. Ask the owner for a new link.' : await errorText(res);
+      const msg = operator && res.status === 401 ? 'The temporary Cloudbite operator token was rejected or has expired. Ask the owner for a new link.'
+        : v && (res.status === 401 || res.status === 403) ? `Your visitor session was not accepted — it may have expired, been revoked or used its project. Request access again at ${REQUEST_PATH}. (Not switched to demo.)`
+          : await errorText(res);
       if (gen !== S.gen) return;
-      S.run!.phase = 'error'; S.run!.error = msg; renderAll(); return;
+      S.run!.phase = 'error'; S.run!.error = msg; renderAll();
+      if (v) void loadBootstrap(); // 서버가 아는 지금 방문자 상태로 다시 그린다 (자동 데모·재시도 없음)
+      return;
     }
     let body: unknown = null;
     try { body = await res.json(); } catch { /* 아래에서 형식 오류 */ }
@@ -1237,6 +1271,7 @@ function boot(): void {
     const token = isObj(body) ? str(body.accessToken, 2000) : '';
     if (!project || !token) { S.run!.phase = 'error'; S.run!.error = 'The server response has an invalid format.'; renderAll(); return; }
     S.run!.project = project; S.run!.accessToken = token;
+    if (v) v.usedProjects = Math.min(v.maxProjects, v.usedProjects + 1); // 서버가 센 사용량을 화면에도 반영한다
     S.run!.phase = TERMINAL_PROJECT.includes(project.status) ? 'done' : 'running';
     if (S.run!.phase === 'running') schedulePoll(gen, 1200);
     renderAll();
@@ -1361,12 +1396,27 @@ function boot(): void {
     } catch (e) {
       S.boot = { status: 'error', data: null, error: e instanceof Error ? clip(e.message, 200) : 'Unknown error' };
     }
+    const intro = visitorIntro();
     // 실행 중인 프로젝트는 그대로 둔다. 선택만 지금 카탈로그에 있는 역할로 맞추고, 아직 시작 전이면 기본 선택을 다시 잡는다
     if (!S.run) S.selected.clear();
     const ids = new Set(catalogue().map(e => e.id));
     for (const id of [...S.selected]) if (!ids.has(id)) S.selected.delete(id);
-    if (!S.selected.size && (S.mode === 'demo' || link.present)) defaultSelection();
+    if (!S.selected.size && !intro && (S.mode === 'demo' || link.present)) defaultSelection();
     renderAll();
+  }
+
+  /** 승인된 방문자를 처음 알아챘을 때 한 번: 자동으로 시작된 데모만 멈추고 실제 실행·프로젝트 설정을 연다.
+   *  역할은 방문자가 직접 고르고, 유료 실행·데모는 자동으로 시작하지 않는다. 사용자가 직접 시작한 실행은 건드리지 않는다 */
+  function visitorIntro(): boolean {
+    if (S.visitorIntro || link.present || S.adminToken.trim() || !visitor()) return false;
+    if (S.run && S.run.mode === 'demo' && S.autoDemoGen !== 0) { // 직접 시작한 실행은 startRun 이 autoDemoGen 을 0 으로 둔다
+      S.gen++; clearTimers();
+      S.run = null; S.hiddenRows.clear(); S.focusExpert = ''; S.artifactPath = ''; S.artifactPicked = false; lastAnnounce = '';
+    }
+    if (active()) return false;
+    S.visitorIntro = true; S.autoDemoGen = 0;
+    S.mode = 'live'; S.setupOpen = true; S.formErrors = []; S.selected.clear();
+    return true;
   }
 
   // 첫 화면부터 전문가가 각자 작업공간에서 일하는 모습을 보인다: 내장 예시 브리프로 데모를 바로 시작한다 (명시적 데모 표시)
@@ -1374,7 +1424,10 @@ function boot(): void {
   defaultSelection();
   renderAll();
   // 카탈로그를 잠깐(최대 1.5초) 기다렸다가 시작한다. 늦으면 내장 데모 역할로 먼저 시작한다
-  void Promise.race([loadBootstrap(), new Promise(r => setTimeout(r, 1500))]).then(() => { if (!S.run && S.mode === 'demo' && !link.present) startRun(); });
+  // 승인된 방문자는 데모를 자동으로 보지 않는다. bootstrap 이 늦어 데모가 먼저 돌았다면 visitorIntro 가 그 자동 데모만 멈춘다
+  void Promise.race([loadBootstrap(), new Promise(r => setTimeout(r, 1500))]).then(() => {
+    if (!S.run && S.mode === 'demo' && !link.present && !visitor()) startRun(true);
+  });
 }
 
 const CloudbiteCore = { normalizeBootstrap, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, DEMO_EXPERTS };

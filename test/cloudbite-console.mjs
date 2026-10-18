@@ -571,4 +571,135 @@ await test('location·history 가 없는 환경과 조각 없는 공개 데모�
   assert.equal(env2.all().find(n => n.id === 'cb-token').value, OP_TOKEN, 'no history/replace: still consumed, nothing thrown');
 });
 
+// ───────── 승인된 방문자 세션 (bootstrap.access, 자격 증명은 서버 HttpOnly 쿠키 — JS 는 상태만 본다)
+const HOUR = 3600_000;
+const accessOf = (over = {}, canCreate = true) => ({ request: { id: 'req-1', name: 'Mina', purpose: 'Try a launch review', status: 'approved', createdAt: Date.now() - 1000,
+  expiresAt: Date.now() + HOUR, maxExperts: 3, maxProjects: 1, usedProjects: 0, ...over }, canCreate });
+function visitorEnv(access, handlers = () => json(404, {}), { bootstrap } = {}) {
+  let boots = 0;
+  const env = fakeEnv({ fetchImpl: (url, init, n) => {
+    if (url === '/api/cloudbite/bootstrap') { boots++; return bootstrap ? bootstrap(boots) : json(200, { ...CATALOGUE, access }); }
+    return handlers(url, init, n);
+  } });
+  env.boots = () => boots;
+  return env;
+}
+const startBtnOf = (env) => env.byText('BUTTON', 'Run experts') || env.byText('BUTTON', 'Run again');
+const pick = (env, id) => { const x = env.fk(`x:${id}`); x.checked = true; x.dispatch('change'); };
+const cards = (env) => env.all().filter(n => n.className.startsWith('cb-card ')).length;
+
+await test('승인된 방문자: 실제 실행·설정이 열리고 자동 데모·자동 실행 없이 직접 고른 역할로 쿠키만으로 만든다', async () => {
+  const env = visitorEnv(accessOf(), (url, init) => {
+    if (url === '/api/cloudbite/projects' && init.method === 'POST') return json(201, { project: liveProject('running', 'running'), accessToken: 'proj-scope-tok' });
+    if (url === '/api/cloudbite/projects/proj-1') return json(200, liveProject('completed', 'completed', { updatedAt: 5 }));
+    return json(404, {});
+  });
+  await env.flush(); await env.advance(30000);
+  assert.deepEqual(env.requests.map(r => r.url), ['/api/cloudbite/bootstrap'], 'no automatic demo or paid run');
+  assert.equal(cards(env), 0);
+  assert.equal(env.byText('BUTTON', 'Live run').getAttribute('aria-pressed'), 'true');
+  assert.equal(env.all().find(n => n.id === 'cb-setup').hidden, false, 'project setup open');
+  assert.match(env.root.textContent, /0 of max 3 selected/, 'min(5, server, session) experts');
+  assert.equal(env.all().find(n => n.className === 'cb-profile-name').textContent, 'Mina');
+  assert.match(env.root.textContent, /Visitor session: 1 of 1 project left/);
+  assert.match(env.root.textContent, /Visitor session · ends \d\d:\d\d/);
+  assert.equal(env.doc.cookie, undefined);
+  startBtnOf(env).click(); await env.flush();
+  assert.match(env.root.textContent, /Select at least 1 expert/);
+  assert.equal(env.requests.length, 1);
+  pick(env, 'strategy'); pick(env, 'biz');
+  const start = startBtnOf(env);
+  assert.equal(start.disabled, false, 'visitor can run without an admin token');
+  start.click(); await env.flush();
+  const post = env.requests.find(r => r.init.method === 'POST');
+  assert.equal(post.init.headers['x-admin-token'], undefined, 'no admin header for a visitor');
+  assert.equal(post.init.credentials, 'same-origin');
+  assert.deepEqual(JSON.parse(post.init.body).expertIds, ['strategy', 'biz']);
+  await env.advance(1500);
+  const get = env.requests.find(r => r.url === '/api/cloudbite/projects/proj-1');
+  assert.equal(get.init.headers.authorization, 'Bearer proj-scope-tok');
+  assert.match(env.root.textContent, /1 \/ 1 valid opinions/);
+  assert.match(env.root.textContent, /0 of 1 project left/);
+  assert.equal(startBtnOf(env).disabled, true, 'quota used: no second run');
+});
+
+await test('만료·취소·거절·대기·소진된 방문자 접근은 쓰지 않고 요청 링크를 보인다, 소진된 승인은 자동 데모 없이 막힌 실제 실행', async () => {
+  for (const [over, re] of [[{ expiresAt: Date.now() - 1000 }, /has expired/], [{ status: 'revoked' }, /ended your visitor session/], [{ status: 'denied' }, /declined/], [{ status: 'pending' }, /still waiting/]]) {
+    const env = visitorEnv(accessOf(over, false));
+    await env.flush();
+    assert.ok(cards(env) > 0, 'not treated as a visitor: public demo stays');
+    env.byText('BUTTON', 'Stop').click(); await env.flush();
+    env.byText('BUTTON', 'Live run').click(); await env.flush();
+    assert.match(env.root.textContent, re);
+    assert.ok(env.all().some(n => n.tagName === 'A' && n.attrs.href === '/cloudbite/request' && n.textContent === 'Request visitor access' && n.parent.className === 'cb-warn'));
+    assert.equal(startBtnOf(env).disabled, true);
+    assert.equal(env.all().find(n => n.className === 'cb-profile-name').textContent, 'Operator');
+  }
+  const env = visitorEnv(accessOf({ usedProjects: 1 }, false));
+  await env.flush(); await env.advance(30000);
+  assert.deepEqual(env.requests.map(r => r.url), ['/api/cloudbite/bootstrap'], 'zero quota: no automatic demo');
+  assert.equal(env.byText('BUTTON', 'Live run').getAttribute('aria-pressed'), 'true');
+  assert.match(env.root.textContent, /no projects left/);
+  assert.equal(startBtnOf(env).disabled, true);
+});
+
+await test('방문자 생성이 401 이면 오류와 요청 안내, 데모·재시도 없음, 서버 상태를 다시 읽는다', async () => {
+  const env = visitorEnv(null, () => json(401, { error: 'visitor session required' }), {
+    bootstrap: (n) => json(200, { ...CATALOGUE, access: n === 1 ? accessOf() : accessOf({ status: 'revoked' }, false) }),
+  });
+  await env.flush();
+  pick(env, 'strategy');
+  startBtnOf(env).click(); await env.flush();
+  assert.match(env.root.textContent, /Your visitor session was not accepted/);
+  assert.match(env.root.textContent, /\/cloudbite\/request/);
+  assert.equal(env.boots(), 2, 'bootstrap re-read after rejection');
+  assert.match(env.root.textContent, /ended your visitor session/);
+  await env.advance(60000);
+  assert.equal(env.requests.filter(r => r.url === '/api/cloudbite/projects').length, 1, 'no retry');
+  assert.equal(cards(env), 0, 'no demo substituted');
+  assert.match(env.root.textContent, /Live run — server-reported activity/);
+});
+
+await test('bootstrap 이 늦으면 먼저 돈 자동 데모만 멈추고 방문자 설정을 연다, 직접 시작한 데모는 그대로 둔다', async () => {
+  let release;
+  const env = visitorEnv(null, undefined, { bootstrap: () => new Promise(r => { release = () => r({ ok: true, status: 200, json: async () => ({ ...CATALOGUE, access: accessOf() }) }); }) });
+  await env.flush(); await env.advance(2500);
+  assert.ok(cards(env) > 0, 'automatic demo started while bootstrap was slow');
+  release(); await env.flush();
+  assert.equal(cards(env), 0, 'automatic demo reset');
+  assert.equal(env.pendingTimers(), 0, 'demo timers cleared');
+  assert.equal(env.byText('BUTTON', 'Live run').getAttribute('aria-pressed'), 'true');
+  assert.match(env.root.textContent, /0 of max 3 selected/);
+  await env.advance(30000);
+  assert.deepEqual(env.requests.map(r => r.url), ['/api/cloudbite/bootstrap']);
+
+  let release2;
+  const env2 = visitorEnv(null, undefined, { bootstrap: () => new Promise(r => { release2 = () => r({ ok: true, status: 200, json: async () => ({ ...CATALOGUE, access: accessOf() }) }); }) });
+  await env2.flush(); await env2.advance(2500);
+  env2.byText('BUTTON', 'Stop').click(); await env2.flush();
+  env2.byText('BUTTON', 'Run again').click(); await env2.flush(); // 사용자가 직접 시작
+  release2(); await env2.flush();
+  assert.ok(cards(env2) > 0, 'manual demo kept');
+  assert.equal(env2.byText('BUTTON', 'Browser demo').getAttribute('aria-pressed'), 'true');
+  await env2.advance(30000);
+  assert.match(env2.root.textContent, /4 \/ 4 valid opinions/);
+});
+
+await test('관리자 토큰이 있으면 방문자 쿠키보다 우선해 헤더로 보낸다, 접근 없는 bootstrap 은 공개 데모 그대로', async () => {
+  const env = visitorEnv(accessOf(), (url, init) => init.method === 'POST' ? json(201, { project: liveProject('running', 'running'), accessToken: 't' }) : json(200, liveProject('completed', 'completed', { updatedAt: 5 })));
+  await env.flush();
+  const tok = env.all().find(n => n.id === 'cb-token');
+  tok.value = 'adm-secret-123'; tok.dispatch('input'); await env.flush();
+  assert.match(env.root.textContent, /of max 5 selected/, 'admin path uses the server limit');
+  assert.equal(env.all().find(n => n.className === 'cb-profile-name').textContent, 'Operator');
+  for (const id of ['strategy', 'biz', 'trust', 'ux']) pick(env, id);
+  startBtnOf(env).click(); await env.flush();
+  assert.equal(env.requests.find(r => r.init.method === 'POST').init.headers['x-admin-token'], 'adm-secret-123');
+
+  const pub = visitorEnv({ request: null, canCreate: false });
+  await pub.flush(); await pub.advance(30000);
+  assert.match(pub.root.textContent, /4 \/ 4 valid opinions/, 'public browser demo still auto-starts');
+  assert.ok(!/Request visitor access.*has expired|no projects left/.test(pub.root.textContent));
+});
+
 console.log(`cloudbite-console: ${pass} passed`);
