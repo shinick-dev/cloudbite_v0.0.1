@@ -40,3 +40,11 @@ Project/history retention remains the existing policy (30 days with history, oth
 ## Validation record
 
 See the release evidence in `.artifacts/decision-workflow/` (ignored local artifacts). Contract and state-machine checks use synthetic input/fake providers; they are not a scientific-quality evaluation. Live/browser acceptance results are recorded separately after integration.
+
+## Integration acceptance
+
+The coordinator ran all 19 Cloudbite suites plus `npm run check` on the isolated integration checkout. New coverage includes real Python runner execution with actual curated, generic and STA workspaces, documented ASCII maxima and accepted multi-byte inputs, complete document tails and decision fields, history deletion during cross-review, and route/create payload parity. The old 46 KiB runner cap was independently rejected and repaired to the gateway-derived byte bound (252 KiB, with 4 KiB headroom under the 256 KiB gateway).
+
+Browser checks used Aside for actual input/file/language actions. Because Aside did not expose viewport resizing and its screenshot command timed out, an isolated headless Chrome checked 1536x1024 and 390x844: file text and inputs survived KO/EN switching, no page errors or horizontal overflow. This did not use the user's Chrome profile.
+
+Real-provider probes used only synthetic planning text. Jev evaluated all 120 roles with the full optional input; a Nosana evidence reviewer supported the explicitly supplied two-week budget and challenged an invented claim of measured 99% accuracy. These are smoke checks, not a scored scientific evaluation or calibrated quality guarantee.
