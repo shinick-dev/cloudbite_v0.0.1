@@ -8,3 +8,5 @@ node_modules/
 dev.log
 *.log
 _trash/
+.artifacts/
+.worktrees/
