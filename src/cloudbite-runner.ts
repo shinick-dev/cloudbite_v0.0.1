@@ -2,13 +2,17 @@
 // The runner holds only an expiring per-expert capability for /p/_cloudbite/worker/<project>/<run>/…;
 // Daytona and Nosana credentials never enter the sandbox. Model output can only run bounded Python in ./work
 // and write flat files under ./out — it gains no new authority.
-import { CB_CAPABILITY_TTL, CB_INFERENCE_MAX_CALLS, CB_INFERENCE_MAX_TOKENS } from './cloudbite-config';
+import { CB_CAPABILITY_TTL, CB_INFERENCE_BODY_MAX, CB_INFERENCE_MAX_CALLS, CB_INFERENCE_MAX_TOKENS } from './cloudbite-config';
 import { CLOUDBITE_OPINION_LIMITS as OPINION } from './cloudbite-personas';
 import { KNOWLEDGE_LIMITS, KNOWLEDGE_SCHEMA, PEER_REVIEW_STATEMENT } from './cloudbite-knowledge';
 
 export const CB_RUNNER_ROUNDS = 6;
 // After a final rejected on the last turn: at most this many final-only repair replies, still inside maxCalls.
 export const CB_RUNNER_REPAIRS = 2;
+// The runner's own cap on each encoded inference request body: the gateway bound minus a small fixed headroom, so a
+// request the runner sends always fits what the gateway accepts (the runner measures the exact bytes it posts).
+export const CB_RUNNER_INFERENCE_HEADROOM = 4 * 1024;
+export const CB_RUNNER_INFERENCE_MAX = CB_INFERENCE_BODY_MAX - CB_RUNNER_INFERENCE_HEADROOM;
 
 // out/diagnostic.json says why a run ended with out/done = error, as allowlisted codes only (never model or provider text).
 // The sandbox is untrusted (model-written Python could forge the file), so the server accepts only the exact shape and
@@ -77,6 +81,7 @@ TOOL_SECONDS = 20
 TOOL_OUTPUT = 4000
 MAX_EXTRA = 4
 MAX_FILE = 32 * 1024
+INFERENCE_MAX = ${CB_RUNNER_INFERENCE_MAX}
 KNOWLEDGE_SCHEMA = '${KNOWLEDGE_SCHEMA}'
 KNOWLEDGE_MAX_CARDS = ${KNOWLEDGE_LIMITS.cards}
 KNOWLEDGE_MAX_SOURCES = ${KNOWLEDGE_LIMITS.sources}
@@ -138,9 +143,11 @@ def infer(messages):
         raise RuntimeError('inference budget exhausted')
     calls += 1
     # Keep complete authority/brief files and the newest tool exchanges. Never cut JSON or a persona mid-file.
-    while len(json.dumps({'messages': messages}, ensure_ascii=False).encode('utf-8')) > 46 * 1024 and len(messages) > 3:
+    # Size is the exact UTF-8 body post() sends, so it can never exceed the gateway's inference bound.
+    def size(): return len(json.dumps({'messages': messages}, ensure_ascii=False).encode('utf-8'))
+    while size() > INFERENCE_MAX and len(messages) > 3:
         del messages[2:min(4, len(messages) - 1)]
-    if len(json.dumps({'messages': messages}, ensure_ascii=False).encode('utf-8')) > 46 * 1024:
+    if size() > INFERENCE_MAX:
         raise RuntimeError('initial workspace exceeds inference budget')
     return str(post('inference', {'messages': messages}, timeout=90).get('content', ''))
 
