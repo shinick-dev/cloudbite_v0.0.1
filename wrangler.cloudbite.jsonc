@@ -4,7 +4,8 @@
   //   npx wrangler dev -c wrangler.cloudbite.jsonc --env dev     (local; no external resources unless you set secrets)
   //   npx wrangler deploy -c wrangler.cloudbite.jsonc            (coordinator/operator decision, not done by workers)
   // Secrets (wrangler secret put … -c wrangler.cloudbite.jsonc): MASTER_KEY, SETUP_TOKEN (first admin key registration),
-  //   CLOUDBITE_DAYTONA_API_KEY, CLOUDBITE_NOSANA_API_KEY. Missing settings are reported by name in /api/cloudbite/bootstrap.
+  //   CLOUDBITE_DAYTONA_API_KEY, CLOUDBITE_NOSANA_API_KEY; optional second-account CLOUDBITE_DAYTONA_SECONDARY_API_KEY.
+  //   Local onboarding: docs/daytona-secondary-setup.md. Missing settings are reported by name in /api/cloudbite/bootstrap.
   "name": "cloudbite-v001",
   "account_id": "96aee9d5fb56f2efc3d90e147a67f558",
   "assets": { "directory": "./deliverables" },
