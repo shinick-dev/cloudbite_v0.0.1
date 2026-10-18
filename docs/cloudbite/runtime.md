@@ -53,7 +53,9 @@ readiness: while `CLOUDBITE_EXPERTS` is empty, live (and demo) creation is refus
   60 s timeout, `max_tokens` 1200, reply reduced to `{content}` ≤ 16 KiB. Upstream errors become a fixed message.
   For the exact model `qwen/qwen3.8-27b` the request adds `chat_template_kwargs: {enable_thinking: false}` (documented
   on the Qwen model card): with thinking on, a realistic persona+workspace prompt spent all 1200 tokens on hidden
-  reasoning and returned `content: null`. Other models keep the plain request shape. An empty/whitespace/null answer
+  reasoning and returned `content: null`. It also adds `response_format: {type: "json_object"}`: with thinking off the
+  model still emitted unparseable JSON on the visitor sample. JSON mode constrains syntax only; the runner's semantic
+  checks and round limits are unchanged. Other models keep the plain request shape. An empty/whitespace/null answer
   fails as `inference upstream returned no content`, or `… used its output budget before any content
   (finish_reason=length)`; reasoning fields are never read, returned or substituted.
 - **Global bound**: the `registry` instance allows 2 live projects at once; per project 3 experts provisioned/running at once.

@@ -41,13 +41,19 @@ export type InferenceResult = { content: string } | { error: string; status: num
 
 // Qwen3-family chat templates think by default; on a realistic persona+workspace prompt the hidden reasoning used the
 // whole max_tokens budget and left content null. The model card documents chat_template_kwargs.enable_thinking=false
-// to turn it off. Only these exact model ids get the flag; every other OpenAI-compatible model keeps the plain shape.
+// to turn it off. With thinking off the same model still emitted syntactically invalid JSON (~2200 chars, not truncated)
+// on the visitor sample, so it also requests response_format json_object. That only constrains syntax: the runner's
+// semantic validation and round limits stay as they are. Only these exact model ids get either flag; every other
+// OpenAI-compatible model keeps the plain shape.
 const THINKING_OFF_MODELS = new Set(['qwen/qwen3.8-27b']);
 
-/** The upstream request body: same budgets for every model, plus the thinking switch for the models above. */
+/** The upstream request body: same budgets for every model, plus thinking-off and JSON mode for the models above. */
 export function chatRequestBody(model: string, messages: ChatMessage[]): Record<string, unknown> {
   const body: Record<string, unknown> = { model, messages, max_tokens: CB_INFERENCE_MAX_TOKENS, temperature: 0.3, stream: false };
-  if (THINKING_OFF_MODELS.has(model)) body.chat_template_kwargs = { enable_thinking: false };
+  if (THINKING_OFF_MODELS.has(model)) {
+    body.chat_template_kwargs = { enable_thinking: false };
+    body.response_format = { type: 'json_object' };
+  }
   return body;
 }
 

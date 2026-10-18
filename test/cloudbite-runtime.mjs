@@ -120,6 +120,8 @@ globalThis.fetch = async (u, init = {}) => {
     if (w.nosanaEmpty) return jr({ choices: [{ message: { content: w.nosanaEmpty.content, reasoning_content: HIDDEN + ' ' + SECRETS[1] }, finish_reason: w.nosanaEmpty.finish }] });
     // Like qwen/qwen3.8-27b on a realistic prompt: with thinking on, reasoning eats max_tokens and content stays null.
     if (req.model === QWEN && req.chat_template_kwargs?.enable_thinking !== false) return jr({ choices: [{ message: { content: null, reasoning_content: HIDDEN }, finish_reason: 'length' }] });
+    // Like qwen/qwen3.8-27b with thinking off but no JSON mode on the visitor sample: a long, unparseable JSON-ish answer.
+    if (req.model === QWEN && req.response_format?.type !== 'json_object') return jr({ choices: [{ message: { content: '{"action": "finish", "summary": "unescaped "quote" and' + ' x'.repeat(1000) }, finish_reason: 'stop' }] });
     return jr({ choices: [{ message: { content: script(req) } }] });
   }
   assert.equal(url.host, 'dt.fake', 'unknown network forbidden: ' + url.host);
@@ -619,7 +621,7 @@ await check('real python runner: upstream inference failure is visible as a boun
   assert.deepEqual([...new Set(w.uas)], [RUNNER_UA]);
 });
 
-await check('real python runner: qwen/qwen3.8-27b is sent enable_thinking=false and completes; the fake answers only then', async () => {
+await check('real python runner: qwen/qwen3.8-27b is sent enable_thinking=false and json_object mode and completes; the fake answers only then', async () => {
   const w = freshWorld({ env: { CLOUDBITE_NOSANA_MODEL: QWEN } });
   const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['market'] }), headers: admin });
   const obj = await project(w, created);
@@ -630,8 +632,9 @@ await check('real python runner: qwen/qwen3.8-27b is sent enable_thinking=false 
   assert.equal(e.run.status, 'completed'); assert.equal(e.run.opinion.direction, 'support');
   assert.ok(w.nosana.length >= 3);
   for (const req of w.nosana) {
-    assert.deepEqual(Object.keys(req).sort(), [...PLAIN_KEYS, 'chat_template_kwargs'].sort());
+    assert.deepEqual(Object.keys(req).sort(), [...PLAIN_KEYS, 'chat_template_kwargs', 'response_format'].sort());
     assert.deepEqual(req.chat_template_kwargs, { enable_thinking: false });
+    assert.deepEqual(req.response_format, { type: 'json_object' });
     assert.equal(req.model, QWEN); assert.equal(req.max_tokens, 1200); assert.equal(req.temperature, 0.3); assert.equal(req.stream, false);
   }
 });
