@@ -1529,4 +1529,244 @@ await test('실제 100종 bootstrap: 전 역할 유지, 새 산업·반도체·�
   }
 });
 
+// ───────── Jev 경로 (configuration.routing, 선택 필드) — 공유 계약이 들어오기 전까지 조정자 계약 모양의 명시적 고정값으로
+const ROUTING = { provider: 'typesafe', model: 'jev-1.13.0', ready: true, maxExperts: 5 };
+const jevBoot = (routing = ROUTING, extra = {}) => ({ ...CATALOGUE, configuration: { ...CATALOGUE.configuration, routing }, ...extra });
+const routeOk = (ids, over = {}) => ({ provider: 'typesafe', model: 'jev-1.13.0', policyVersion: 'jev-routing/v1', evaluatedCount: 4, threshold: 0.5, expertIds: ids,
+  matches: ids.map((id, i) => ({ expertId: id, relevance: 0.9 - i * 0.1 })), queryHash: 'qh-1', expiresAt: Date.now() + 600_000, ...over });
+const routeReqs = (env) => env.requests.filter(r => r.url === '/api/cloudbite/route');
+const projectPosts = (env) => env.requests.filter(r => r.url === '/api/cloudbite/projects' && r.init.method === 'POST');
+const jevBoxOf = (env) => env.all().find(n => n.className === 'cb-suggest cb-jev');
+const manualOf = (env) => env.all().find(n => n.className === 'cb-manual');
+/** 경로 응답을 붙잡아 두었다가 release(응답) 로 보낸다 */
+function heldRoute() { const h = { release: null }; h.promise = new Promise(r => { h.release = (status, body) => r({ ok: status >= 200 && status < 300, status, json: async () => body }); }); return h; }
+function jevEnv(handlers, { boot = jevBoot(), owner = OWNER_OUT, access } = {}) {
+  return fakeEnv({ owner, fetchImpl: (url, init, n) => url === '/api/cloudbite/bootstrap' ? json(200, access ? { ...boot, access } : boot) : handlers(url, init, n) });
+}
+/** 경로 → 프로젝트 만들기 → 조회까지 성공하는 서버 */
+const jevServer = (ids, { route } = {}) => (url, init) => {
+  if (url === '/api/cloudbite/route') return route ? route(init) : json(200, routeOk(ids));
+  if (url === '/api/cloudbite/projects' && init.method === 'POST') return json(201, { project: liveProject('running', 'running'), accessToken: 'proj-scope-tok' });
+  if (url === '/api/cloudbite/projects/proj-1') return json(200, liveProject('completed', 'completed', { updatedAt: 5 }));
+  return json(404, {});
+};
+const setToken = async (env, token) => { const tok = env.all().find(n => n.id === 'cb-token'); tok.value = token; tok.dispatch('input'); await env.flush(); };
+
+await test('Jev 정리: routing 은 TypeSafe·ready 참거짓일 때만, 경로 응답은 실제 역할 1..max·중복 없음·정책 버전이 맞을 때만', () => {
+  const boot = core.normalizeBootstrap(jevBoot({ ...ROUTING, maxExperts: 9, model: 42 }));
+  assert.deepEqual(boot.configuration.routing, { provider: 'typesafe', model: 'jev', ready: true, maxExperts: 5 });
+  assert.equal(core.normalizeBootstrap(CATALOGUE).configuration.routing, undefined, 'old bootstrap: no capability');
+  assert.equal(core.normalizeBootstrap(jevBoot({ provider: 'other', ready: true })).configuration.routing, undefined);
+  assert.equal(core.normalizeBootstrap(jevBoot({ provider: 'typesafe', ready: 'yes' })).configuration.routing, undefined);
+  const allowed = ['strategy', 'biz', 'trust', 'ux'];
+  const ok = core.normalizeRoute({ ...routeOk(['biz', 'ux']), matches: [{ expertId: 'biz', relevance: 0.9 }, { expertId: 'trust', relevance: 0.2 }, { expertId: 'ghost', relevance: 0.1 }] }, allowed, 5);
+  assert.deepEqual(ok.expertIds, ['biz', 'ux']);
+  assert.deepEqual(ok.matches, [{ expertId: 'biz', relevance: 0.9 }], 'only chosen roles keep their suitability');
+  for (const bad of [routeOk([]), routeOk(['biz', 'biz']), routeOk(['biz', 'nope']), routeOk(['biz', 7]), routeOk(['biz'], { provider: 'openai' }), routeOk(['biz'], { policyVersion: 'v2' }),
+    routeOk(['biz'], { queryHash: '' }), routeOk(['biz'], { expiresAt: 'soon' }), routeOk(['biz'], { matches: [{ expertId: 'biz', relevance: 'high' }] }), { ...routeOk(['biz']), expertIds: 'biz' }, null])
+    assert.equal(core.normalizeRoute(bad, allowed, 5), null, JSON.stringify(bad));
+  assert.equal(core.normalizeRoute(routeOk(['strategy', 'biz', 'trust', 'ux']), allowed, 3), null, 'more than the visitor/server limit');
+  assert.ok(core.normalizeRoute(routeOk(['strategy', 'biz', 'trust']), allowed, 3));
+});
+
+await test('Jev 자동 (소유자·실제 실행): 첫 화면에 경로 요청 없음, 한 번 누르면 경로 → 같은 브리프·requestId 로 만들기, 고른 팀만 보내고 적합도로 표시', async () => {
+  const env = jevEnv(jevServer(['biz', 'ux']), { owner: OWNER_IN });
+  await env.flush(); await env.advance(30000);
+  assert.deepEqual(env.requests.map(r => r.url), ['/api/cloudbite/bootstrap'], 'no Jev call on initial render');
+  assert.equal(jevBoxOf(env).hidden, false, 'Jev panel shown');
+  assert.equal(manualOf(env).hidden, true, 'manual picking is not the initial UI');
+  assert.ok(jevBoxOf(env).textContent.includes(EN.jevTitle) && jevBoxOf(env).textContent.includes(EN.jevManualBtn));
+  assert.ok(!jevBoxOf(env).textContent.includes(EN.jevDemoNote), 'live mode: no demo note');
+  const start = startBtnOf(env);
+  assert.equal(start.disabled, false, 'no selection required');
+  start.click(); await env.flush();
+  const urls = env.requests.map(r => r.url);
+  assert.ok(urls.indexOf('/api/cloudbite/route') < urls.indexOf('/api/cloudbite/projects'), 'route before create');
+  const [rq] = routeReqs(env), [pp] = projectPosts(env);
+  assert.equal(routeReqs(env).length, 1); assert.equal(projectPosts(env).length, 1);
+  const rb = JSON.parse(rq.init.body), pb = JSON.parse(pp.init.body);
+  assert.deepEqual(Object.keys(rb), ['title', 'objective', 'context', 'requestId'], 'exact route JSON');
+  assert.deepEqual(Object.keys(pb), ['title', 'objective', 'context', 'requestId', 'mode', 'expertIds', 'routing'], 'no extra route metadata');
+  assert.deepEqual({ title: pb.title, objective: pb.objective, context: pb.context, requestId: pb.requestId }, rb, 'same brief and requestId');
+  assert.equal(pb.mode, 'live'); assert.equal(pb.routing, 'jev');
+  assert.deepEqual(pb.expertIds, ['biz', 'ux'], 'Jev team, not the default manual selection');
+  assert.equal(rq.init.method, 'POST'); assert.equal(rq.init.credentials, 'same-origin'); assert.equal(rq.init.cache, 'no-store');
+  assert.ok(!('x-admin-token' in rq.init.headers) && !('x-admin-token' in pp.init.headers), 'owner cookie only');
+  await env.advance(1500);
+  assert.match(env.root.textContent, /1 \/ 1 valid opinions/);
+  const box = jevBoxOf(env).textContent;
+  assert.ok(box.includes(EN.jevChosen(2)) && box.includes(EN.jevSuitability('90%')) && box.includes(EN.jevSuitability('80%')));
+  assert.ok(!/confidence|accuracy/i.test(box), 'suitability is never labelled confidence or accuracy');
+  assert.ok(env.root.textContent.includes(EN.stepRouted), 'progress starts with the Jev step');
+});
+
+await test('Jev 자동 (승인된 방문자): 빈 선택에서 시작, 쿠키만, 세션 한도(3)보다 큰 팀은 만들지 않는다', async () => {
+  const access = accessOf({ maxProjects: 10 });
+  const env = jevEnv(jevServer(['strategy', 'ux']), { access });
+  await env.flush();
+  assert.deepEqual(selectedIds(env), [], 'visitor starts with no selection');
+  assert.equal(startBtnOf(env).disabled, false, 'auto path does not need a manual selection');
+  assert.ok(jevBoxOf(env).textContent.includes(EN.jevHelp(3, 'jev-1.13.0')), 'Jev limited to the visitor cap');
+  assert.ok(!env.root.textContent.includes(EN.needExpert));
+  startBtnOf(env).click(); await env.flush();
+  const [rq] = routeReqs(env), [pp] = projectPosts(env);
+  assert.ok(!('x-admin-token' in rq.init.headers));
+  assert.deepEqual(JSON.parse(pp.init.body).expertIds, ['strategy', 'ux']);
+
+  const env2 = jevEnv(jevServer(['strategy', 'biz', 'trust', 'ux']), { access });
+  await env2.flush();
+  startBtnOf(env2).click(); await env2.flush();
+  assert.equal(projectPosts(env2).length, 0, 'over-cap team is not created');
+  assert.ok(formMsgOf(env2).includes(EN.routeInvalid));
+  assert.equal(setupOf(env2).hidden, false);
+});
+
+await test('Jev 자동 (관리자 토큰): 경로·만들기 모두 같은 x-admin-token, 실패·깨진 팀·422·503 이면 만들지 않고 재시도·대체도 없다', async () => {
+  const env = jevEnv(jevServer(['trust']));
+  await goLive(env);
+  startBtnOf(env).click(); await env.flush();
+  assert.equal(routeReqs(env)[0].init.headers['x-admin-token'], 'adm-secret-123');
+  assert.equal(projectPosts(env)[0].init.headers['x-admin-token'], 'adm-secret-123');
+
+  for (const [route, text] of [[() => json(422, { error: 'no relevant experts' }), EN.routeNone], [() => json(503, { error: 'TYPESAFE_API_KEY missing' }), EN.routeUnavailable],
+    [() => json(429, {}), EN.http429], [() => json(409, {}), EN.routeConflict], [() => json(200, routeOk(['nope'])), EN.routeInvalid],
+    [() => json(200, { ...routeOk(['biz']), policyVersion: 'x' }), EN.routeInvalid], [() => Promise.reject(new Error('down')), EN.routeNetwork]]) {
+    const e = jevEnv(jevServer([], { route }));
+    await goLive(e);
+    startBtnOf(e).click(); await e.flush();
+    await e.advance(60000);
+    assert.equal(projectPosts(e).length, 0, `no creation: ${text}`);
+    assert.equal(routeReqs(e).length, 1, 'no automatic retry');
+    assert.ok(formMsgOf(e).includes(text), text);
+    assert.equal(cards(e), 0, 'no demo or rule team substituted');
+    assert.equal(manualOf(e).hidden, true, 'not silently switched to manual');
+    assert.ok(!jevBoxOf(e).textContent.includes(EN.jevChosen(1)), 'no team shown after a failed route');
+  }
+  const e503 = jevEnv(jevServer([], { route: () => json(503, { error: 'TYPESAFE_API_KEY missing' }) }));
+  await goLive(e503); startBtnOf(e503).click(); await e503.flush();
+  assert.ok(formMsgOf(e503).includes('TYPESAFE_API_KEY missing'), 'sanitized server error kept verbatim');
+});
+
+await test('Jev 고르는 중: 진행 표시·Stop, 취소 뒤 늦은 팀으로 만들지 않는다, 늦은 응답도 버린다', async () => {
+  const held = heldRoute();
+  const env = jevEnv(jevServer([], { route: () => held.promise }), { owner: OWNER_IN });
+  await env.flush();
+  startBtnOf(env).click(); await env.flush();
+  assert.equal(startBtnOf(env).textContent, EN.routingLabel);
+  assert.equal(startBtnOf(env).disabled, true);
+  assert.ok(env.all().some(n => n.className.startsWith('cb-pill') && n.textContent === EN.routingPill));
+  assert.ok(jevBoxOf(env).textContent.includes(EN.jevRouting));
+  assert.equal(env.all().find(n => n.id === 'cb-objective').disabled, true, 'brief locked while routing');
+  assert.equal(env.byText('BUTTON', 'Browser demo').disabled, true, 'mode locked while routing');
+  assert.equal(env.fk('jev-toggle').disabled, true, 'auto/manual locked while routing');
+  const stop = env.fk('stop');
+  assert.equal(stop.hidden, false); assert.equal(stop.disabled, false);
+  stop.click(); await env.flush();
+  held.release(200, routeOk(['biz'])); await env.flush(); await env.advance(30000);
+  assert.equal(projectPosts(env).length, 0, 'cancelled route never creates');
+  assert.ok(formMsgOf(env).includes(EN.routeCancelled));
+  assert.equal(startBtnOf(env).disabled, false, 'can run again');
+});
+
+await test('Jev KO/EN: 고르는 중 언어를 바꿔도 같은 질문·같은 requestId·같은 실행 방식으로 만들고, 자동/직접 선택이 남는다', async () => {
+  const held = heldRoute();
+  const env = jevEnv(jevServer([], { route: () => held.promise }), { owner: OWNER_IN });
+  await env.flush();
+  startBtnOf(env).click(); await env.flush();
+  langBtn(env, 'ko').click(); await env.flush();
+  assert.equal(env.all().find(n => n.id === 'cb-title').value, EN.sampleTitle, 'brief not rewritten while routing');
+  assert.ok(jevBoxOf(env).textContent.includes(KO.jevRouting));
+  assert.equal(startBtnOf(env).textContent, KO.routingLabel);
+  held.release(200, routeOk(['biz'])); await env.flush();
+  const rb = JSON.parse(routeReqs(env)[0].init.body), pb = JSON.parse(projectPosts(env)[0].init.body);
+  assert.equal(pb.title, EN.sampleTitle); assert.equal(pb.objective, rb.objective); assert.equal(pb.requestId, rb.requestId);
+  assert.equal(pb.mode, 'live');
+  assert.ok(jevBoxOf(env).textContent.includes(KO.jevChosen(1)) && jevBoxOf(env).textContent.includes(KO.jevSuitability('90%')));
+  assert.equal(routeReqs(env).length, 1, 'language switch never re-routes');
+
+  const env2 = jevEnv(jevServer(['biz']), { owner: OWNER_IN });
+  await env2.flush();
+  env2.fk('jev-toggle').click(); await env2.flush();
+  assert.equal(manualOf(env2).hidden, false);
+  langBtn(env2, 'ko').click(); await env2.flush();
+  assert.equal(manualOf(env2).hidden, false, 'manual preference survives KO/EN');
+  assert.equal(env2.fk('jev-toggle').textContent, KO.jevAutoBtn);
+  langBtn(env2, 'en').click(); await env2.flush();
+  env2.fk('jev-toggle').click(); await env2.flush();
+  assert.equal(manualOf(env2).hidden, true, 'back to Jev');
+});
+
+await test('Jev + 브라우저 데모: 경로는 실제 서버 호출, 실행은 이 탭의 시뮬레이션 (프로젝트 API 없음, 데모 표시 유지)', async () => {
+  const env = jevEnv(jevServer(['strategy', 'biz']));
+  await env.flush();
+  await setToken(env, 'adm-secret-123');
+  assert.equal(env.byText('BUTTON', 'Browser demo').getAttribute('aria-pressed'), 'true');
+  assert.ok(jevBoxOf(env).textContent.includes(EN.jevDemoNote));
+  startBtnOf(env).click(); await env.flush();
+  assert.equal(routeReqs(env).length, 1);
+  assert.equal(routeReqs(env)[0].init.headers['x-admin-token'], 'adm-secret-123');
+  assert.equal(projectPosts(env).length, 0, 'demo mode stays a browser simulation');
+  assert.match(env.root.textContent, /Browser demo — simulated activity and files; no Daytona or Nosana calls/);
+  await env.advance(30000);
+  assert.match(env.root.textContent, /2 \/ 2 valid opinions/);
+  assert.equal(env.byText('BUTTON', 'Browser demo').getAttribute('aria-pressed'), 'true', 'mode preserved');
+});
+
+await test('Jev 공개 사용자·준비 안 됨: 유료 경로를 부르지 않고 이유를 보이며, 직접 고르기는 명시적으로만', async () => {
+  const env = jevEnv(jevServer(['biz']));
+  await env.flush();
+  assert.equal(startBtnOf(env).disabled, true, 'no anonymous Jev call');
+  assert.ok(jevBoxOf(env).textContent.includes(EN.jevNeedAccess));
+  startBtnOf(env).click(); await env.flush();
+  assert.equal(routeReqs(env).length, 0);
+  env.fk('jev-toggle').click(); await env.flush();
+  assert.equal(manualOf(env).hidden, false, 'explicit manual browser demo');
+  assert.ok(jevBoxOf(env).textContent.includes(EN.jevManualNote));
+  assert.equal(startBtnOf(env).disabled, false);
+  startBtnOf(env).click(); await env.flush(); await env.advance(30000);
+  assert.equal(routeReqs(env).length, 0, 'manual run never calls Jev');
+  assert.match(env.root.textContent, /4 \/ 4 valid opinions/);
+
+  const off = jevEnv(jevServer(['biz']), { owner: OWNER_IN, boot: jevBoot({ ...ROUTING, ready: false }) });
+  await off.flush();
+  assert.ok(jevBoxOf(off).textContent.includes(EN.jevUnavailable));
+  assert.equal(startBtnOf(off).disabled, true, 'not ready: no silent manual/rule fallback');
+  assert.equal(manualOf(off).hidden, true);
+  startBtnOf(off).click(); await off.flush();
+  assert.equal(routeReqs(off).length + projectPosts(off).length, 0);
+  off.fk('jev-toggle').click(); await off.flush();
+  startBtnOf(off).click(); await off.flush();
+  assert.equal(routeReqs(off).length, 0); assert.equal(projectPosts(off).length, 1, 'explicit manual live run uses the legacy payload');
+  assert.ok(!('routing' in JSON.parse(projectPosts(off)[0].init.body)));
+});
+
+await test('Jev 다시 실행: 브리프를 고치면 오래됐다고 알리고, 새 requestId 로 다시 고르며, 실패하면 옛 팀을 쓰지 않는다', async () => {
+  let n = 0;
+  const env = jevEnv(jevServer([], { route: () => ++n === 1 ? json(200, routeOk(['biz'])) : json(422, { error: 'no relevant experts' }) }), { owner: OWNER_IN });
+  await env.flush();
+  startBtnOf(env).click(); await env.flush(); await env.advance(1500);
+  assert.match(env.root.textContent, /1 \/ 1 valid opinions/);
+  env.fk('setup').click(); await env.flush();
+  setObjective(env, 'A different question about hiring');
+  assert.ok(jevBoxOf(env).textContent.includes(EN.jevStale));
+  startBtnOf(env).click(); await env.flush();
+  const [r1, r2] = routeReqs(env).map(r => JSON.parse(r.init.body));
+  assert.notEqual(r1.requestId, r2.requestId);
+  assert.equal(r2.objective, 'A different question about hiring');
+  assert.equal(projectPosts(env).length, 1, 'failed re-route creates nothing');
+  assert.ok(formMsgOf(env).includes(EN.routeNone));
+  assert.ok(!jevBoxOf(env).textContent.includes(EN.jevChosen(1)), 'old team not shown for the edited brief');
+});
+
+await test('옛 bootstrap (routing 없음): Jev 상자는 숨고 경로를 부르지 않으며 예전 직접 고르기·만들기 그대로', async () => {
+  const env = liveEnv((url, init) => okRun(url, init));
+  await goLive(env);
+  assert.equal(jevBoxOf(env).hidden, true);
+  assert.equal(manualOf(env).hidden, false);
+  startBtnOf(env).click(); await env.flush();
+  assert.equal(routeReqs(env).length, 0);
+  const body = JSON.parse(projectPosts(env)[0].init.body);
+  assert.ok(!('routing' in body)); assert.ok(body.expertIds.length >= 1);
+});
+
 console.log(`cloudbite-console: ${pass} passed`);

@@ -40,8 +40,16 @@ interface PoolEntry {
   priority: boolean; keywords: string[]; mappingNote?: string;
 }
 interface Pool { version: string; entries: PoolEntry[]; priorityNumbers: number[] }
-/** pool 은 선택 필드다 — 없는 옛 bootstrap 이면 화면은 예전 역할 고르기만 보인다 */
-type ConsoleBootstrap = CloudbiteBootstrap & { pool?: Pool };
+/** bootstrap.configuration.routing (선택): 서버가 TypeSafe Jev 로 브리프에 맞는 역할을 고를 수 있는지. 키는 서버에만 있다.
+ *  공유 계약에 들어오기 전까지 여기 둔다 (조정자의 계약과 같은 모양) */
+interface Routing { provider: 'typesafe'; model: string; ready: boolean; maxExperts: number }
+/** POST /api/cloudbite/route 응답. relevance 는 역할별 선택 적합도이지 전문가의 확신도·정확도가 아니다 */
+interface RouteResult {
+  provider: 'typesafe'; model: string; policyVersion: 'jev-routing/v1'; evaluatedCount: number; threshold: number;
+  expertIds: string[]; matches: Array<{ expertId: string; relevance: number }>; queryHash: string; expiresAt: number;
+}
+/** pool·routing 은 선택 필드다 — 없는 옛 bootstrap 이면 화면은 예전 역할 고르기만 보인다 */
+type ConsoleBootstrap = CloudbiteBootstrap & { pool?: Pool; configuration: CloudbiteBootstrap['configuration'] & { routing?: Routing } };
 /** 규칙 기반 팀 제안의 한 줄: 브리프에서 찾은 카탈로그 키워드가 근거다 (모델 판단·점수 아님) */
 interface PoolPick { entryId: string; expertId: string; matched: string[] }
 
@@ -195,6 +203,29 @@ const EN = {
   suggestDismiss: 'Dismiss',
   suggestApplied: (n: number) => `Selection replaced with ${plural(n, 'suggested role')}. Nothing has started.`,
   suggestCurrent: 'This is already your selection.',
+  // Jev 경로 (bootstrap.configuration.routing 이 있을 때만)
+  jevTitle: 'Jev selects your experts',
+  jevHelp: (max: number, model: string) => `When you run, the server asks TypeSafe Jev (${model}) which catalogue roles fit this brief and starts that team of up to ${plural(max, 'expert')} — no manual picking. Jev scores each role's selection suitability; it writes no explanation and does not rate answer quality.`,
+  jevDemoNote: 'Choosing the team is a real Jev call on the server even in browser demo mode; the demo run itself stays simulated, with no Daytona or Nosana calls.',
+  jevRouting: 'Jev is choosing experts for this brief…',
+  jevChosen: (n: number) => `Jev chose ${plural(n, 'expert')} for this brief`,
+  jevListAria: 'Experts chosen by Jev',
+  jevSuitability: (v: string) => `selection suitability ${v}`,
+  jevStale: 'The brief changed after this choice. Jev will choose again when you run.',
+  jevUnavailable: 'Jev routing is not available on the server right now, so experts cannot be chosen automatically. No rule-based team is substituted — you can choose experts manually instead.',
+  jevNeedAccess: 'Jev runs on the server and needs the owner sign-in, an admin token or approved visitor access. You can still choose experts manually for a browser demo.',
+  jevManualBtn: 'Choose experts manually instead',
+  jevAutoBtn: 'Let Jev choose the experts',
+  jevManualNote: 'Manual selection — Jev is not used for the next run.',
+  nextJev: (max: number) => ` Jev chooses up to ${plural(max, 'expert')} first.`,
+  routingLabel: 'Choosing experts…', routingPill: 'Routing',
+  routeNone: 'Jev found no role relevant enough to this brief. Nothing was started. Describe the objective in more detail, or choose experts manually.',
+  routeUnavailable: 'Jev routing is unavailable right now. Nothing was started.',
+  routeConflict: 'A routing request for this brief is already in progress or conflicts with an earlier one. Wait a moment and run again.',
+  routeInvalid: 'Jev returned a team this console cannot use (unknown roles, duplicates or more than the allowed number). Nothing was started.',
+  routeCancelled: 'Routing stopped. Nothing was started.',
+  routeNetwork: 'Could not reach the server to choose experts. Nothing was started. (Not switched to manual selection or demo.)',
+  stepRouted: 'Experts chosen by Jev',
   needExpert: 'Choose at least one expert to run.',
   nextDemo: 'Next run: browser demo, simulated in this tab.',
   nextLive: 'Next run: live run on server sandboxes.',
@@ -487,7 +518,29 @@ const KO: Messages = {
   suggestDismiss: '닫기',
   suggestApplied: (n) => `선택을 제안된 역할 ${n}명으로 바꿨습니다. 아무것도 시작하지 않았습니다.`,
   suggestCurrent: '이미 지금 선택과 같습니다.',
-  needExpert: '실행하려면 전문가를 한 명 이상 고르세요.',
+  jevTitle: 'Jev가 전문가를 고릅니다',
+  jevHelp: (max, model) => `실행하면 서버가 TypeSafe Jev(${model})에 이 브리프에 맞는 카탈로그 역할을 묻고, 그 팀(최대 ${max}명)을 바로 시작합니다 — 직접 고를 필요가 없습니다. Jev는 역할별 선택 적합도만 매기며, 설명을 쓰거나 답변 품질을 평가하지 않습니다.`,
+  jevDemoNote: '브라우저 데모에서도 팀 고르기는 서버의 실제 Jev 호출입니다. 데모 실행 자체는 시뮬레이션이며 Daytona·Nosana를 호출하지 않습니다.',
+  jevRouting: 'Jev가 이 브리프에 맞는 전문가를 고르는 중…',
+  jevChosen: (n) => `Jev가 이 브리프에 전문가 ${n}명을 골랐습니다`,
+  jevListAria: 'Jev가 고른 전문가',
+  jevSuitability: (v) => `선택 적합도 ${v}`,
+  jevStale: '이 선택 뒤에 브리프가 바뀌었습니다. 실행하면 Jev가 다시 고릅니다.',
+  jevUnavailable: '지금 서버에서 Jev 경로를 쓸 수 없어 전문가를 자동으로 고를 수 없습니다. 규칙 기반 팀으로 대신하지 않습니다 — 대신 전문가를 직접 고를 수 있습니다.',
+  jevNeedAccess: 'Jev는 서버에서 돌며 소유자 로그인, 관리자 토큰 또는 승인된 방문자 접근이 필요합니다. 브라우저 데모는 전문가를 직접 골라 실행할 수 있습니다.',
+  jevManualBtn: '대신 전문가 직접 고르기',
+  jevAutoBtn: 'Jev가 전문가 고르기',
+  jevManualNote: '직접 선택 — 다음 실행에는 Jev를 쓰지 않습니다.',
+  nextJev: (max) => ` 먼저 Jev가 전문가를 최대 ${max}명 고릅니다.`,
+  routingLabel: '전문가를 고르는 중…', routingPill: '전문가 고르는 중',
+  routeNone: 'Jev가 이 브리프에 충분히 맞는 역할을 찾지 못했습니다. 아무것도 시작하지 않았습니다. 목표를 더 자세히 적거나 전문가를 직접 고르세요.',
+  routeUnavailable: '지금 Jev 경로를 쓸 수 없습니다. 아무것도 시작하지 않았습니다.',
+  routeConflict: '이 브리프의 경로 요청이 이미 처리 중이거나 이전 요청과 충돌합니다. 잠시 뒤 다시 실행하세요.',
+  routeInvalid: 'Jev가 이 콘솔에서 쓸 수 없는 팀을 돌려주었습니다 (모르는 역할, 중복 또는 허용 인원 초과). 아무것도 시작하지 않았습니다.',
+  routeCancelled: '전문가 고르기를 멈췄습니다. 아무것도 시작하지 않았습니다.',
+  routeNetwork: '전문가를 고르려고 서버에 연결하지 못했습니다. 아무것도 시작하지 않았습니다. (직접 선택이나 데모로 바꾸지 않았습니다.)',
+  stepRouted: 'Jev가 전문가 선택',
+  needExpert:'실행하려면 전문가를 한 명 이상 고르세요.',
   nextDemo: '다음 실행: 브라우저 데모, 이 탭 안에서 시뮬레이션합니다.',
   nextLive: '다음 실행: 서버 샌드박스에서 실제 실행합니다.',
   nextLiveOwner: '다음 실행: 소유자 로그인으로 서버 샌드박스에서 실제 실행합니다.',
@@ -877,6 +930,35 @@ function suggestTeam(brief: string, entries: PoolEntry[], runnable: string[], ma
   return out;
 }
 
+/** configuration.routing 정리. TypeSafe 가 아니거나 ready 가 참·거짓이 아니면 없는 것으로 본다 (예전 고르기 화면) */
+function normalizeRouting(raw: unknown): Routing | undefined {
+  if (!isObj(raw) || raw.provider !== 'typesafe' || typeof raw.ready !== 'boolean') return undefined;
+  const max = num(raw.maxExperts);
+  return { provider: 'typesafe', model: str(raw.model, 80).trim() || 'jev', ready: raw.ready, maxExperts: max !== null && max >= 1 ? Math.min(Math.floor(max), 5) : 5 };
+}
+
+/** Jev 경로 응답 정리. 고른 역할은 지금 카탈로그의 실제 id 이고, 겹치지 않고, 1명 이상 max 명 이하여야 한다 — 아니면 null 이며
+ *  화면은 그 팀으로 아무것도 만들지 않는다. matches 는 고른 역할의 적합도만 남긴다 (카탈로그 밖 id 는 버린다) */
+function normalizeRoute(raw: unknown, allowed: string[], max: number): RouteResult | null {
+  if (!isObj(raw) || raw.provider !== 'typesafe' || raw.policyVersion !== 'jev-routing/v1' || !Array.isArray(raw.expertIds) || !Array.isArray(raw.matches)) return null;
+  const ok = new Set(allowed), ids: string[] = [];
+  for (const id of raw.expertIds) {
+    if (typeof id !== 'string' || !ok.has(id) || ids.includes(id)) return null;
+    ids.push(id);
+  }
+  if (ids.length < 1 || ids.length > Math.min(5, max)) return null;
+  const matches: RouteResult['matches'] = [];
+  for (const x of raw.matches.slice(0, 200)) {
+    if (!isObj(x) || typeof x.expertId !== 'string') return null;
+    const r = num(x.relevance);
+    if (r === null) return null;
+    if (ids.includes(x.expertId) && !matches.some(y => y.expertId === x.expertId)) matches.push({ expertId: x.expertId, relevance: r });
+  }
+  const evaluatedCount = num(raw.evaluatedCount), threshold = num(raw.threshold), expiresAt = num(raw.expiresAt), queryHash = str(raw.queryHash, 200);
+  if (evaluatedCount === null || threshold === null || expiresAt === null || !queryHash) return null;
+  return { provider: 'typesafe', model: str(raw.model, 80), policyVersion: 'jev-routing/v1', evaluatedCount, threshold, expertIds: ids, matches, queryHash, expiresAt };
+}
+
 function normalizeBootstrap(raw: unknown): ConsoleBootstrap {
   if (!isObj(raw) || !Array.isArray(raw.experts) || !isObj(raw.configuration)) throw new Error('The catalogue response has an invalid format');
   const seen = new Set<string>();
@@ -890,12 +972,14 @@ function normalizeBootstrap(raw: unknown): ConsoleBootstrap {
   const access = normalizeAccess(raw.access);
   // 깨진 pool 은 bootstrap 전체를 실패시키지 않는다 — 없는 것으로 보고 예전 역할 고르기를 쓴다
   const pool = raw.pool === undefined ? null : normalizePool(raw.pool, experts);
+  const routing = normalizeRouting(c.routing);
   return {
     experts,
     configuration: {
       liveReady: c.liveReady === true, missing: strList(c.missing, 80, 20),
       maxExperts: max !== null && max >= 1 ? Math.min(Math.floor(max), 100) : 5,
       ...(c.historyRetentionDays === 30 ? { historyRetentionDays: 30 } : {}),
+      ...(routing ? { routing } : {}),
     },
     ...(access ? { access } : {}),
     ...(pool ? { pool } : {}),
@@ -1449,9 +1533,15 @@ function boot(): void {
     poolLimit: POOL_PAGE,
     suggest: null as null | { brief: string; picks: PoolPick[]; empty: 'none' | 'brief' | null },
     failSim: false,
+    /** routing 이 있을 때 팀을 고르는 방식. 기본은 Jev(auto). 직접 고르기(manual)는 사용자가 눌렀을 때만이며 언어를 바꿔도 남는다 */
+    routeMode: 'auto' as 'auto' | 'manual',
+    /** 마지막 Jev 선택과 그때의 브리프 열쇠. 화면 표시용일 뿐 — 다음 실행은 늘 새로 고르고, 이 팀을 선택(S.selected)에 넣지 않는다 */
+    route: null as null | { key: string; result: RouteResult | null },
     run: null as null | {
-      mode: Mode; phase: 'starting' | 'running' | 'cancelling' | 'done' | 'error'; project: ConsoleProject | null;
+      mode: Mode; phase: 'routing' | 'starting' | 'running' | 'cancelling' | 'done' | 'error'; project: ConsoleProject | null;
       accessToken: string; error: Text | null; startedAt: number; pollErrors: number;
+      /** Jev 가 고른 팀으로 만든 실행 */
+      routed: boolean;
       /** 승인된 방문자 쿠키로 만든 실제 실행: 끝나면 서버 접근 상태를 다시 읽는다 */
       viaVisitor: boolean;
       /** 소유자 로그인 쿠키로 만든 실제 실행 */
@@ -1517,12 +1607,20 @@ function boot(): void {
     }
     return r.status === 'pending' ? m => m.accessWaiting : r.status === 'denied' ? m => m.accessDenied : r.status === 'revoked' ? m => m.accessRevoked : m => m.accessExpired;
   };
+  const routing = (): Routing | null => S.boot.data?.configuration.routing ?? null;
+  /** 다음 실행에서 Jev 가 팀을 고르는가 (서버가 기능을 알렸고 사용자가 직접 고르기를 누르지 않았다) */
+  const autoRoute = () => !!routing() && S.routeMode === 'auto';
+  /** Jev 경로를 부를 자격: 직접 넣은 토큰 → 소유자 쿠키 → 승인된 방문자 쿠키. 공개 사용자는 유료 API 를 부르지 않는다 */
+  const routeCredential = () => !!S.adminToken.trim() || ownerAuthed() || !!visitor();
   const limits = (): Limits => {
     const server = S.mode === 'live' ? S.boot.data?.configuration.maxExperts ?? 5 : 5;
     const session = viaVisitor() ? visitor()!.maxExperts : 5;
-    return { min: 1, max: Math.max(1, Math.min(5, server, session)) };
+    const jev = autoRoute() ? routing()!.maxExperts : 5;
+    return { min: 1, max: Math.max(1, Math.min(5, server, session, jev)) };
   };
-  const active = () => !!S.run && (S.run.phase === 'starting' || S.run.phase === 'running' || S.run.phase === 'cancelling'
+  /** Jev 선택이 어떤 브리프·인원 한도의 것인지 (바뀌면 화면에 오래됐다고 알린다) */
+  const routeKey = (q: { title: string; objective: string; context: string }) => [q.title, q.objective, q.context, limits().max].join('\n');
+  const active = () => !!S.run && (S.run.phase === 'routing' || S.run.phase === 'starting' || S.run.phase === 'running' || S.run.phase === 'cancelling'
     || (S.run.phase === 'error' && !!S.run.project && !TERMINAL_PROJECT.includes(S.run.project.status)));
   /** 실패한 실행의 정리를 아직 확인하지 못한 방문자: Check again 으로 서버 상태를 다시 읽을 수 있다 */
   const recheckable = () => { const r = S.boot.data?.access?.recovery; return !!visitor() && !visitorCanRun() && (r === 'pending' || r === 'unavailable'); };
@@ -1563,7 +1661,7 @@ function boot(): void {
   };
   for (const inp of [titleIn, objectiveIn]) inp.addEventListener('input', () => { if (!active()) renderControls(); });
   // 제안 뒤에 브리프를 고치면 제안이 오래됐다고 알린다 (선택은 그대로)
-  for (const inp of [titleIn, objectiveIn, contextIn]) inp.addEventListener('input', () => { if (S.suggest) renderSuggest(); });
+  for (const inp of [titleIn, objectiveIn, contextIn]) inp.addEventListener('input', () => { if (S.suggest) renderSuggest(); if (S.route?.result) renderJev(); });
   const tokenIn = attr(h('input', { id: 'cb-token', type: 'password', autocomplete: 'off', spellcheck: 'false' }), 'placeholder', m => m.tokenPlaceholder);
   tokenIn.value = S.adminToken;
   tokenIn.addEventListener('input', () => { S.adminToken = tokenIn.value; clearHistoryAuthority(); renderControls(); renderProgress(); });
@@ -1614,6 +1712,15 @@ function boot(): void {
   const alsoSel = h('p', { class: 'cb-alsosel' });
   const catalogueNote = h('p', { class: 'cb-help' });
   const selCount = h('span', { class: 'cb-selcount' });
+  const catLabelRow = h('div', { class: 'cb-label-row' }, tx('span', { id: 'cb-cat-label', class: 'cb-label' }, m => m.chooseExperts), selCount);
+  // 직접 고르기 (routing 이 없으면 늘, 있으면 사용자가 직접 고르기를 눌렀을 때만 보인다)
+  const manualBox = h('div', { class: 'cb-manual', role: 'group', 'aria-labelledby': 'cb-cat-label' }, catLabelRow, coreBox, alsoSel, suggestBox, moreDetails);
+  // Jev 가 고르는 팀: 읽기 전용 표시와 진행·오류 상태, 직접 고르기로 바꾸는 버튼
+  const jevHelp = h('p', { class: 'cb-help' });
+  const jevBody = h('div', { class: 'cb-jev-body', 'aria-live': 'polite' });
+  const jevToggle = h('button', { type: 'button', class: 'cb-link', 'data-fk': 'jev-toggle', onclick: () => toggleRouteMode() });
+  const jevBox = h('div', { class: 'cb-suggest cb-jev', role: 'group', 'aria-labelledby': 'cb-jev-h' },
+    h('div', { class: 'cb-label-row' }, tx('span', { id: 'cb-jev-h', class: 'cb-label' }, m => m.jevTitle)), jevHelp, jevBody, jevToggle);
   const liveStatus = h('div', { class: 'cb-live-status' });
   const clearTokenBtn = tx('button', { type: 'button', class: 'cb-ghost', onclick: () => { S.adminToken = ''; tokenIn.value = ''; clearHistoryAuthority(); renderControls(); tokenIn.focus(); } }, m => m.clearToken);
   const tokenLabel = h('label', { for: 'cb-token', class: 'cb-label' });
@@ -1634,9 +1741,7 @@ function boot(): void {
   const form = attr(h('form', { class: 'cb-form', novalidate: true },
     h('div', { class: 'cb-field cb-objective' }, tx('label', { for: 'cb-objective', class: 'cb-label' }, m => m.objectiveLabel), objectiveIn, counter(objectiveIn, LIMIT.objective)),
     staExampleBtn, projDetails,
-    h('div', { class: 'cb-team', role: 'group', 'aria-labelledby': 'cb-cat-label' },
-      h('div', { class: 'cb-label-row' }, tx('span', { id: 'cb-cat-label', class: 'cb-label' }, m => m.chooseExperts), selCount),
-      coreBox, alsoSel, suggestBox, moreDetails, poolDetails, catalogueNote),
+    h('div', { class: 'cb-team' }, jevBox, manualBox, poolDetails, catalogueNote),
     h('div', { class: 'cb-form-foot' }, formMsg, startNote,
       historyNotice,
       h('div', { class: 'cb-start-row' }, startBtn,
@@ -1842,11 +1947,14 @@ function boot(): void {
     staExampleBtn.disabled = busy;
     for (const n of [titleIn, objectiveIn, contextIn, failIn, tokenIn, filterIn]) n.disabled = busy;
     const liveReady = S.boot.status === 'ready' && !!cfg?.liveReady && liveCredential();
-    const none = S.selected.size === 0;
-    // 시작 버튼은 편집 영역 끝의 하나뿐이다. 전문가를 고르지 않았으면 이유를 보이고 잠근다
-    startBtn.disabled = busy || (!demo && !liveReady) || none;
-    startLabel.textContent = S.run?.phase === 'starting' ? m.starting : busy ? m.running
+    const auto = autoRoute(), rt = routing();
+    const none = !auto && S.selected.size === 0;
+    // 시작 버튼은 편집 영역 끝의 하나뿐이다. 전문가를 고르지 않았거나 Jev 를 쓸 수 없으면 이유를 보이고 잠근다
+    startBtn.disabled = busy || (!demo && !liveReady) || none || (auto && (!rt!.ready || !routeCredential()));
+    startLabel.textContent = S.run?.phase === 'routing' ? m.routingLabel : S.run?.phase === 'starting' ? m.starting : busy ? m.running
       : S.run ? (demo ? m.runAgainDemo : m.runAgain) : (demo ? m.runExpertsDemo : m.runExperts);
+    if (auto && !busy) modeLine.textContent += m.nextJev(limits().max);
+    renderJev();
     cancelBtn.hidden = !busy;
     cancelBtn.disabled = S.run?.phase === 'cancelling' || S.run?.phase === 'starting';
     cancelLabel.textContent = S.run?.phase === 'cancelling' ? m.stopping : m.stop;
@@ -1888,8 +1996,8 @@ function boot(): void {
     // 접힌 카드는 실행한 프로젝트의 브리프를 보인다 (편집 중에는 같은 제목·목표를 되풀이하지 않는다)
     projTitle.textContent = S.setupOpen ? m.projectBrief : clip(p?.brief.title || titleIn.value.trim() || m.untitled, 120);
     projStatus.hidden = !S.run;
-    const pst = p ? p.status : S.run?.phase === 'starting' ? 'running' : S.run?.phase === 'error' ? 'failed' : 'draft';
-    projStatus.textContent = S.run?.phase === 'starting' ? m.startingPill : m.projectStatus[pst];
+    const pst = p ? p.status : S.run?.phase === 'starting' || S.run?.phase === 'routing' ? 'running' : S.run?.phase === 'error' ? 'failed' : 'draft';
+    projStatus.textContent = S.run?.phase === 'routing' ? m.routingPill : S.run?.phase === 'starting' ? m.startingPill : m.projectStatus[pst];
     projStatus.className = `cb-pill p-${pst}`;
     projBody.hidden = S.setupOpen || !S.run;
     projObjective.textContent = p?.brief.objective || objectiveIn.value.trim();
@@ -1940,7 +2048,47 @@ function boot(): void {
     alsoSel.textContent = hiddenSel.length ? m.alsoSelected(hiddenSel.join(', ')) : '';
     alsoSel.hidden = !hiddenSel.length;
     catalogueNote.textContent = catalogueIsBuiltin() ? m.builtinRoles : full ? m.maxReached(limits().max) : m.recommended;
+    catalogueNote.hidden = autoRoute();
     renderPool();
+  }
+
+  /** Jev 상자: routing 이 있을 때만. 자동이면 직접 고르기를 숨기고 고른 팀은 읽기 전용으로, 쓸 수 없으면 이유만 보인다 (규칙 대체 없음) */
+  function renderJev(): void {
+    const m = M, rt = routing(), auto = autoRoute(), busy = active();
+    jevBox.hidden = !rt;
+    manualBox.hidden = auto;
+    jevToggle.disabled = busy;
+    if (!rt) return;
+    jevToggle.textContent = auto ? m.jevManualBtn : m.jevAutoBtn;
+    jevHelp.hidden = !auto;
+    jevHelp.textContent = `${m.jevHelp(limits().max, rt.model)}${S.mode === 'demo' ? ` ${m.jevDemoNote}` : ''}`;
+    if (!auto) { fill(jevBody, h('p', { class: 'cb-help' }, m.jevManualNote)); return; }
+    const kids: Kid[] = [];
+    if (!rt.ready) kids.push(h('p', { class: 'cb-warn' }, m.jevUnavailable));
+    else if (!routeCredential()) kids.push(h('p', { class: 'cb-warn' }, m.jevNeedAccess, ' ', h('a', { href: href(REQUEST_PATH) }, m.requestAccess)));
+    const r = S.route?.result;
+    if (S.run?.phase === 'routing') kids.push(h('p', { class: 'cb-jev-status' }, m.jevRouting));
+    else if (r) {
+      // 적합도는 0–1 이면 백분율로, 다른 척도면 숫자 그대로 (전문가 확신도·정확도로 적지 않는다)
+      const fit = (v: number) => v >= 0 && v <= 1 ? `${Math.round(v * 100)}%` : String(Math.round(v * 100) / 100);
+      kids.push(h('p', { class: 'cb-label' }, m.jevChosen(r.expertIds.length)),
+        h('ol', { class: 'cb-suggest-list', 'aria-label': m.jevListAria }, ...r.expertIds.map(id => {
+          const match = r.matches.find(x => x.expertId === id);
+          return h('li', null, h('span', { class: 'cb-opt-name' }, findDef(id)?.name ?? id),
+            match ? h('span', { class: 'cb-opt-desc' }, m.jevSuitability(fit(match.relevance))) : null);
+        })));
+      if (!busy && S.route!.key !== routeKey({ title: titleIn.value.trim(), objective: objectiveIn.value.trim(), context: contextIn.value.trim() })) kids.push(h('p', { class: 'cb-help' }, m.jevStale));
+    }
+    fill(jevBody, ...kids);
+  }
+
+  /** 자동(Jev) ↔ 직접 고르기. 실행 중에는 바꾸지 않는다. 직접 고른 선택은 그대로 두고 Jev 팀을 선택에 넣지 않는다 */
+  function toggleRouteMode(): void {
+    if (active() || !routing()) return;
+    S.routeMode = S.routeMode === 'auto' ? 'manual' : 'auto';
+    S.formErrors = [];
+    pruneSelection();
+    keepFocus(() => { renderCatalogue(); renderControls(); renderProgress(); });
   }
 
   /** 역할 하나를 고르거나 뺀다. 한도를 넘는 선택은 받지 않는다 (상자도 잠겨 있다) */
@@ -1973,7 +2121,9 @@ function boot(): void {
     const q = poolText(poolSearch.value).trim();
     const hay = (e: PoolEntry) => poolText([`${e.catalogNumber}`, `#${e.catalogNumber}`, e.name, e.domain, e.mission, e.categoryLabel.en, e.categoryLabel.ko,
       e.mappingNote ?? '', ...e.keywords, e.expertId ? findDef(e.expertId)?.name ?? '' : ''].join(' '));
-    const isSel = (e: PoolEntry) => poolRunnable(e) && S.selected.has(e.expertId);
+    // Jev 가 고르는 동안 카탈로그는 둘러보기만 한다 (상자는 잠기고 직접 고른 선택도 표시하지 않는다)
+    const auto = autoRoute();
+    const isSel = (e: PoolEntry) => !auto && poolRunnable(e) && S.selected.has(e.expertId);
     const match = (e: PoolEntry) => (!S.poolCat || e.category === S.poolCat)
       && (S.poolShow === 'all' || (S.poolShow === 'available') === poolRunnable(e)) && (!q || hay(e).includes(q));
     // 고른 역할은 필터와 관계없이 맨 위에 남는다
@@ -1982,7 +2132,7 @@ function boot(): void {
     const row = (e: PoolEntry) => {
       const ok = poolRunnable(e), on = isSel(e), id = `cb-xp-${e.id}`;
       // 계획 중인 역할은 늘 잠긴 상자다 — 고를 수도, 제출될 수도 없다
-      const cb = h('input', { type: 'checkbox', id, 'data-fk': `xp:${e.id}`, checked: on, disabled: !ok || busy || (!on && full) });
+      const cb = h('input', { type: 'checkbox', id, 'data-fk': `xp:${e.id}`, checked: on, disabled: !ok || busy || auto || (!on && full) });
       if (ok) cb.addEventListener('change', () => toggleExpert(e.expertId!, cb.checked));
       const def = ok ? findDef(e.expertId!) : undefined;
       const meta = [e.categoryLabel[lang], def && def.name !== e.name ? m.poolRunsAs(def.name) : ''].filter(Boolean).join(' · ');
@@ -2197,6 +2347,7 @@ function boot(): void {
       h('p', { class: 'cb-progress-num' }, h('strong', null, m.progressNum(done, n)), m.progressTail(m.projectStatus[p.status].toLowerCase(), working)),
       bar);
     fill(stepsBody,
+      run.routed ? step(m.stepRouted, 'done', String(n)) : null,
       step(m.stepBrief, 'done'),
       step(m.stepWorkspaces, started === n ? 'done' : stopped ? 'blocked' : 'active', `${started}/${n}`),
       step(m.stepWorking, done === n ? 'done' : stopped ? 'blocked' : working ? 'active' : 'pending', working ? m.nActive(working) : ''),
@@ -2424,7 +2575,8 @@ function boot(): void {
     lang = l; M = DICT[l];
     // 예시 브리프는 사용자가 고치지 않은 칸만 새 언어로 바꾼다. 사용자가 쓴 글은 건드리지 않는다
     const fresh = !!S.suggest && S.suggest.brief === briefText();
-    for (const [inp, k] of [[titleIn, 'sampleTitle'], [objectiveIn, 'sampleObjective'], [contextIn, 'sampleContext']] as const) if (inp.value === prev[k]) inp.value = M[k];
+    // Jev 가 고르는 동안에는 바꾸지 않는다: 화면의 브리프가 지금 고르고 있는 질문과 같게 남는다
+    if (S.run?.phase !== 'routing') for (const [inp, k] of [[titleIn, 'sampleTitle'], [objectiveIn, 'sampleObjective'], [contextIn, 'sampleContext']] as const) if (inp.value === prev[k]) inp.value = M[k];
     // 예시가 번역되어 바뀐 것은 사용자가 고친 것이 아니다: 그 전에 최신이던 제안은 그대로 최신으로 둔다
     if (fresh && S.suggest) S.suggest = { ...S.suggest, brief: briefText() };
     for (const f of recount) f();
@@ -2531,7 +2683,13 @@ function boot(): void {
   function startRun(): void {
     if (active()) return;
     const f: FormInput = { title: titleIn.value.trim(), objective: objectiveIn.value.trim(), context: contextIn.value.trim(), expertIds: [...S.selected] };
-    S.formErrors = validateForm(f, limits());
+    // Jev 가 고를 때는 직접 고른 선택을 보지도 보내지도 않는다. Jev 를 쓸 수 없으면 직접 고르기로 몰래 바꾸지 않고 막는다
+    const auto = autoRoute();
+    S.formErrors = validateForm(f, limits()).filter(e => !auto || e.field !== 'experts');
+    if (auto) {
+      if (!routing()!.ready) S.formErrors.push({ field: 'run', text: m => m.jevUnavailable });
+      else if (!routeCredential()) S.formErrors.push({ field: 'run', text: m => m.jevNeedAccess });
+    }
     if (S.mode === 'live') {
       if (!S.boot.data?.configuration.liveReady) S.formErrors.push({ field: 'run', text: m => m.serverNotReady });
       if (S.adminToken.trim()) {
@@ -2547,10 +2705,58 @@ function boot(): void {
     const gen = ++S.gen;
     const brief: ProjectBrief = { ...f, mode: S.mode, requestId: crypto.randomUUID() };
     S.artifactCache.clear(); S.hiddenRows.clear(); S.focusExpert = ''; S.artifactPath = ''; S.artifactPicked = false; lastAnnounce = '';
-    S.run = { mode: S.mode, phase: 'starting', project: null, accessToken: '', error: null, startedAt: Date.now(), pollErrors: 0, viaVisitor: viaVisitor(), viaOwner: viaOwner() };
-    if (S.mode === 'demo') { startDemo(gen, brief); S.setupOpen = false; } else void startLive(gen, brief);
+    S.run = { mode: S.mode, phase: auto ? 'routing' : 'starting', project: null, accessToken: '', error: null, startedAt: Date.now(), pollErrors: 0,
+      routed: auto, viaVisitor: viaVisitor(), viaOwner: viaOwner() };
+    if (auto) void routeThenStart(gen, { ...brief, expertIds: [] });
+    else if (S.mode === 'demo') { startDemo(gen, brief); S.setupOpen = false; } else void startLive(gen, brief);
     renderAll();
     settleFocus();
+  }
+
+  /** 누른 순간의 브리프·실행 방식·requestId 로 Jev 경로를 묻고, 맞는 팀이 오면 같은 브리프·같은 requestId 로 바로 시작한다.
+   *  늦은 응답·취소·실패·깨진 팀이면 아무것도 만들지 않는다 (직접 고르기·규칙·데모로 바꾸지 않음). 자격 헤더는 프로젝트 만들기와 같다 */
+  async function routeThenStart(gen: number, brief: ProjectBrief): Promise<void> {
+    const adminToken = S.adminToken.trim();
+    const operator = isOperatorToken(S.adminToken);
+    const owner = !adminToken && ownerAuthed();
+    const v = adminToken || owner ? null : visitor();
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (adminToken) headers['x-admin-token'] = adminToken;
+    const key = routeKey(brief), max = limits().max, allowed = catalogue().map(e => e.id);
+    S.route = { key, result: null };
+    const fail = (msg: Text) => { S.run!.phase = 'error'; S.run!.error = msg; renderAll(); };
+    let res: Response;
+    try {
+      res = await fetch('/api/cloudbite/route', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers,
+        body: JSON.stringify({ title: brief.title, objective: brief.objective, context: brief.context, requestId: brief.requestId }) });
+    } catch {
+      if (gen !== S.gen) return;
+      return fail(m => m.routeNetwork);
+    }
+    if (gen !== S.gen) return;
+    if (!res.ok) {
+      const denied = res.status === 401 || res.status === 403;
+      const msg: Text = operator && res.status === 401 ? m => m.operatorRejected
+        : owner && denied ? m => m.ownerRejected
+          : v && denied ? m => m.visitorRejected(REQUEST_PATH)
+            : await errorText(res, true);
+      if (gen !== S.gen) return;
+      if (owner && denied) { S.owner.authenticated = false; void loadOwner(); }
+      fail(msg);
+      if (v && denied) void loadBootstrap();
+      return;
+    }
+    let body: unknown = null;
+    try { body = await res.json(); } catch { /* 아래에서 형식 오류 */ }
+    if (gen !== S.gen) return;
+    const route = normalizeRoute(body, allowed, max);
+    if (!route) return fail(m => m.routeInvalid);
+    S.route = { key, result: route };
+    const team: ProjectBrief = { ...brief, expertIds: route.expertIds };
+    S.run!.phase = 'starting';
+    if (team.mode === 'demo') { startDemo(gen, team); S.setupOpen = false; renderAll(); settleFocus(); return; }
+    renderAll();
+    void startLive(gen, team, true);
   }
 
   /** 편집 영역이 접혀 시작 버튼이 사라졌으면 포커스를 프로젝트 제목으로 옮긴다 */
@@ -2574,16 +2780,19 @@ function boot(): void {
   }
 
   /** 상태별 안내 + 서버가 보낸 {error} 원문. 그릴 때의 언어로 바뀐다 */
-  async function errorText(res: Response): Promise<Text> {
+  async function errorText(res: Response, route = false): Promise<Text> {
     let server = '';
     try { const j = await res.json(); if (isObj(j)) server = str(j.error, 200); } catch { /* 본문 없음 */ }
     const s = res.status;
-    const base: Text = s === 401 || s === 403 ? m => m.http401 : s === 404 ? m => m.http404 : s === 409 ? m => m.http409
+    // Jev 경로: 422 맞는 역할 없음 · 503 설정·공급자 실패 · 409 같은 requestId/브리프 충돌 또는 진행 중
+    const base: Text = route && s === 422 ? m => m.routeNone : route && s === 503 ? m => m.routeUnavailable : route && s === 409 ? m => m.routeConflict
+      : s === 401 || s === 403 ? m => m.http401 : s === 404 ? m => m.http404 : s === 409 ? m => m.http409
       : s === 413 ? m => m.http413 : s === 429 ? m => m.http429 : s === 503 ? m => m.http503 : m => m.httpOther(s);
     return server ? m => m.withServer(base(m), server) : base;
   }
 
-  async function startLive(gen: number, brief: ProjectBrief): Promise<void> {
+  /** routed: Jev 가 고른 팀. 서버가 같은 requestId 의 경로 기록으로 행위자·브리프·한도를 확인하고 역할을 정하므로 routing:'jev' 만 더한다 */
+  async function startLive(gen: number, brief: ProjectBrief, routed = false): Promise<void> {
     const operator = isOperatorToken(S.adminToken);
     // 토큰을 넣었으면 그 헤더만 쓴다 (거부돼도 쿠키로 넘어가지 않는다). 없으면 헤더 없이 same-origin 쿠키(소유자 → 방문자)로 요청한다.
     // 빈 x-admin-token 도 서버는 명시한 토큰으로 보므로 아예 넣지 않는다. 권한 판단은 서버가 한다
@@ -2592,9 +2801,12 @@ function boot(): void {
     const v = adminToken || owner ? null : visitor();
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (adminToken) headers['x-admin-token'] = adminToken;
+    const payload = routed
+      ? { title: brief.title, objective: brief.objective, context: brief.context, requestId: brief.requestId, mode: brief.mode, expertIds: brief.expertIds, routing: 'jev' }
+      : brief;
     let res: Response;
     try {
-      res = await fetch('/api/cloudbite/projects', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers, body: JSON.stringify(brief) });
+      res = await fetch('/api/cloudbite/projects', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers, body: JSON.stringify(payload) });
     } catch {
       if (gen !== S.gen) return;
       S.run!.phase = 'error'; S.run!.error = m => m.networkCreate; renderAll(); return;
@@ -2677,6 +2889,8 @@ function boot(): void {
     if (!run || !active() || run.phase === 'cancelling' || run.phase === 'starting') return;
     const gen = ++S.gen; // 진행 중이던 타이머·조회 응답은 이제 전부 무시된다
     clearTimers();
+    // Jev 가 고르는 중이면 늦게 온 팀으로 아무것도 만들지 않는다 (서버 경로는 할당량·샌드박스를 쓰지 않는다)
+    if (run.phase === 'routing') { run.phase = 'error'; run.error = m => m.routeCancelled; renderAll(); return; }
     if (run.mode === 'demo') {
       if (run.project) run.project = cancelProject(run.project, Date.now());
       run.phase = 'done'; renderAll(); return;
@@ -2843,7 +3057,7 @@ function boot(): void {
   void first.then(() => { if (!S.run && recheckable() && !accessTimer) accessTimer = setTimeout(() => refreshAccess(true), ACCESS_RECHECK_MS) as unknown as number; });
 }
 
-const CloudbiteCore = { normalizeBootstrap, normalizePool, suggestTeam, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, artifactContent, domainLabel, DEMO_EXPERTS,
+const CloudbiteCore = { normalizeBootstrap, normalizePool, normalizeRouting, normalizeRoute, suggestTeam, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, artifactContent, domainLabel, DEMO_EXPERTS,
   pickLang, withLang, normalizeOwnerSession, DICT, ROLE_KO };
 const hook = (globalThis as { __cloudbiteTestHook?: (core: typeof CloudbiteCore) => void }).__cloudbiteTestHook;
 if (typeof hook === 'function') hook(CloudbiteCore);
