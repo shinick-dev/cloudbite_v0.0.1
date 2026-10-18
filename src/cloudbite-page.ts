@@ -1,6 +1,6 @@
 // 만든 파일 — 직접 고치지 말 것. 소스: client/cloudbite-console.ts · client/cloudbite-console.css
 // 다시 만들기: node tools/build-cloudbite-console.mjs (--check 로 최신인지 확인)
-// esbuild 0.28.1 transform (ES2022, 묶지 않음) · ts sha256 d86de623d1aca06238f425416d499c348f82855e4bba0f3e5a074b883a32445c · css sha256 c521905ebaf4078352becd7061a261bb57dc080744ed206320bd2c1fdaf2b100
+// esbuild 0.28.1 transform (ES2022, 묶지 않음) · ts sha256 4814ff60f757475a9b2c84e9c648d37f370d899102aaa88feae07063e3f2e1c7 · css sha256 c521905ebaf4078352becd7061a261bb57dc080744ed206320bd2c1fdaf2b100
 // 라우팅(런타임 담당): GET / 와 /cloudbite → CLOUDBITE_HTML, CLOUDBITE_JS_PATH → CLOUDBITE_JS (text/javascript),
 // CLOUDBITE_CSS_PATH → CLOUDBITE_CSS (text/css). CSP 는 script-src 'self'; style-src 'self' 면 충분하다 (인라인 없음).
 export const CLOUDBITE_JS_PATH = "/cloudbite/console.js";
@@ -677,7 +677,7 @@ export const CLOUDBITE_JS = [
   "  suggestCurrent: \"This is already your selection.\",",
   "  // Jev 경로 (bootstrap.configuration.routing 이 있을 때만)",
   "  jevTitle: \"Jev selects your experts\",",
-  "  jevHelp: (max, model) => `When you run, the server asks TypeSafe Jev (${model}) which catalogue roles fit this brief and starts that team of up to ${plural(max, \"expert\")} — no manual picking. Jev scores each role's selection suitability; it writes no explanation and does not rate answer quality.`,",
+  "  jevHelp: (max, model) => `When you run, the server uses TypeSafe Jev (${model}) to assess roles, assign needed perspectives and review overlapping contributions, then starts up to ${plural(max, \"expert\")}. You can see assignments and gaps. Suitability is not answer quality; experts do not review each other's outputs.`,",
   "  jevDemoNote: \"Choosing the team is a real Jev call on the server even in browser demo mode; the demo run itself stays simulated, with no Daytona or Nosana calls.\",",
   "  jevRouting: \"Jev is choosing experts for this brief…\",",
   "  jevChosen: (n) => `Jev chose ${plural(n, \"expert\")} for this brief`,",
@@ -1061,7 +1061,7 @@ export const CLOUDBITE_JS = [
   "  suggestApplied: (n) => `선택을 제안된 역할 ${n}명으로 바꿨습니다. 아무것도 시작하지 않았습니다.`,",
   "  suggestCurrent: \"이미 지금 선택과 같습니다.\",",
   "  jevTitle: \"Jev가 전문가를 고릅니다\",",
-  "  jevHelp: (max, model) => `실행하면 서버가 TypeSafe Jev(${model})에 이 브리프에 맞는 카탈로그 역할을 묻고, 그 팀(최대 ${max}명)을 바로 시작합니다 — 직접 고를 필요가 없습니다. Jev는 역할별 선택 적합도만 매기며, 설명을 쓰거나 답변 품질을 평가하지 않습니다.`,",
+  "  jevHelp: (max, model) => `실행하면 서버가 TypeSafe Jev(${model})로 역할 적합도·필요한 관점·기여 중복을 검토해 최대 ${max}명의 팀을 시작합니다. 담당 관점과 빈 곳도 확인할 수 있습니다. 선택 적합도는 답변 품질이 아니며, 전문가끼리 결과를 검증하지는 않습니다.`,",
   "  jevDemoNote: \"브라우저 데모에서도 팀 고르기는 서버의 실제 Jev 호출입니다. 데모 실행 자체는 시뮬레이션이며 Daytona·Nosana를 호출하지 않습니다.\",",
   "  jevRouting: \"Jev가 이 브리프에 맞는 전문가를 고르는 중…\",",
   "  jevChosen: (n) => `Jev가 이 브리프에 전문가 ${n}명을 골랐습니다`,",

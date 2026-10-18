@@ -214,7 +214,7 @@ const EN = {
   suggestCurrent: 'This is already your selection.',
   // Jev 경로 (bootstrap.configuration.routing 이 있을 때만)
   jevTitle: 'Jev selects your experts',
-  jevHelp: (max: number, model: string) => `When you run, the server asks TypeSafe Jev (${model}) which catalogue roles fit this brief and starts that team of up to ${plural(max, 'expert')} — no manual picking. Jev scores each role's selection suitability; it writes no explanation and does not rate answer quality.`,
+  jevHelp: (max: number, model: string) => `When you run, the server uses TypeSafe Jev (${model}) to assess roles, assign needed perspectives and review overlapping contributions, then starts up to ${plural(max, 'expert')}. You can see assignments and gaps. Suitability is not answer quality; experts do not review each other's outputs.`,
   jevDemoNote: 'Choosing the team is a real Jev call on the server even in browser demo mode; the demo run itself stays simulated, with no Daytona or Nosana calls.',
   jevRouting: 'Jev is choosing experts for this brief…',
   jevChosen: (n: number) => `Jev chose ${plural(n, 'expert')} for this brief`,
@@ -555,7 +555,7 @@ const KO: Messages = {
   suggestApplied: (n) => `선택을 제안된 역할 ${n}명으로 바꿨습니다. 아무것도 시작하지 않았습니다.`,
   suggestCurrent: '이미 지금 선택과 같습니다.',
   jevTitle: 'Jev가 전문가를 고릅니다',
-  jevHelp: (max, model) => `실행하면 서버가 TypeSafe Jev(${model})에 이 브리프에 맞는 카탈로그 역할을 묻고, 그 팀(최대 ${max}명)을 바로 시작합니다 — 직접 고를 필요가 없습니다. Jev는 역할별 선택 적합도만 매기며, 설명을 쓰거나 답변 품질을 평가하지 않습니다.`,
+  jevHelp: (max, model) => `실행하면 서버가 TypeSafe Jev(${model})로 역할 적합도·필요한 관점·기여 중복을 검토해 최대 ${max}명의 팀을 시작합니다. 담당 관점과 빈 곳도 확인할 수 있습니다. 선택 적합도는 답변 품질이 아니며, 전문가끼리 결과를 검증하지는 않습니다.`,
   jevDemoNote: '브라우저 데모에서도 팀 고르기는 서버의 실제 Jev 호출입니다. 데모 실행 자체는 시뮬레이션이며 Daytona·Nosana를 호출하지 않습니다.',
   jevRouting: 'Jev가 이 브리프에 맞는 전문가를 고르는 중…',
   jevChosen: (n) => `Jev가 이 브리프에 전문가 ${n}명을 골랐습니다`,
