@@ -59,5 +59,7 @@ export interface CloudbiteBootstrap {
   experts: ExpertDefinition[];
   configuration: { liveReady: boolean; missing: string[]; maxExperts: number; historyRetentionDays?: number };
   access?: import('./cloudbite-access-contract').CloudbiteAccessSession;
+  /** Optional 100-role planning catalogue. Only `available` entries map to runnable `experts`; all are unvalidated. */
+  pool?: import('./cloudbite-pool').ExpertPool;
 }
 export interface CloudbiteProjectCreated { project: ProjectRun; accessToken: string }

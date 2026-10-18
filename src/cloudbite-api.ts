@@ -2,6 +2,7 @@
 // public-get.ts calls cloudbitePage for the console. Errors are {error} only — never upstream bodies or secrets.
 import type { CloudbiteBootstrap } from './cloudbite-contract';
 import { CLOUDBITE_EXPERTS } from './cloudbite-personas';
+import { CLOUDBITE_POOL } from './cloudbite-pool';
 import { CLOUDBITE_CSS, CLOUDBITE_CSS_PATH, CLOUDBITE_HTML, CLOUDBITE_JS, CLOUDBITE_JS_PATH } from './cloudbite-page';
 import { CLOUDBITE_ACCESS_HTML, CLOUDBITE_ACCESS_CSS, CLOUDBITE_ACCESS_QR, CLOUDBITE_REQUEST_HTML, CLOUDBITE_REQUESTS_HTML, CLOUDBITE_ACCESS_JS } from './cloudbite-access-page';
 import { CB_ACTIVITY_BODY_MAX, CB_COMPLETE_BODY_MAX, CB_CREATE_BODY_MAX, CB_INFERENCE_BODY_MAX, CB_MAX_EXPERTS, cloudbiteMissing } from './cloudbite-config';
@@ -36,7 +37,7 @@ export function cloudbitePage(path: string, sec: Record<string, string>): Respon
 
 export function cloudbiteBootstrap(env: Env): CloudbiteBootstrap {
   const missing = cloudbiteMissing(env, CLOUDBITE_EXPERTS.length);
-  return { experts: [...CLOUDBITE_EXPERTS], configuration: { liveReady: missing.length === 0, missing, maxExperts: CB_MAX_EXPERTS, ...(env.CLOUDBITE_HISTORY ? { historyRetentionDays: 30 } : {}) } };
+  return { experts: [...CLOUDBITE_EXPERTS], configuration: { liveReady: missing.length === 0, missing, maxExperts: CB_MAX_EXPERTS, ...(env.CLOUDBITE_HISTORY ? { historyRetentionDays: 30 } : {}) }, pool: CLOUDBITE_POOL };
 }
 
 function bearer(req: Request) {

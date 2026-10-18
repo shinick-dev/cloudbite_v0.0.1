@@ -4,6 +4,7 @@
 // and write flat files under ./out — it gains no new authority.
 import { CB_CAPABILITY_TTL, CB_INFERENCE_MAX_CALLS, CB_INFERENCE_MAX_TOKENS } from './cloudbite-config';
 import { CLOUDBITE_OPINION_LIMITS as OPINION } from './cloudbite-personas';
+import { KNOWLEDGE_LIMITS, KNOWLEDGE_SCHEMA, PEER_REVIEW_STATEMENT } from './cloudbite-knowledge';
 
 export const CB_RUNNER_ROUNDS = 6;
 
@@ -36,6 +37,10 @@ TOOL_SECONDS = 20
 TOOL_OUTPUT = 4000
 MAX_EXTRA = 4
 MAX_FILE = 32 * 1024
+KNOWLEDGE_SCHEMA = '${KNOWLEDGE_SCHEMA}'
+KNOWLEDGE_MAX_CARDS = ${KNOWLEDGE_LIMITS.cards}
+KNOWLEDGE_MAX_SOURCES = ${KNOWLEDGE_LIMITS.sources}
+PEER_STATEMENT = '${PEER_REVIEW_STATEMENT}'
 # The gateway caps every model reply at ${CB_INFERENCE_MAX_TOKENS} tokens; a longer reply is cut off mid-JSON and rejected.
 # These are prompt guidelines only: a valid final within the schema limits is accepted and saved unchanged.
 BUDGET_RULES = ('Each reply is limited to about ${CB_INFERENCE_MAX_TOKENS} tokens; a longer reply is cut off and rejected as invalid JSON.\n'
@@ -243,17 +248,28 @@ def load_knowledge():
     path = os.path.join(ROOT, 'knowledge', 'manifest.json')
     if not os.path.isfile(path): return
     with open(path, encoding='utf-8') as f: manifest = json.loads(f.read(8000))
+    generic = manifest.get('schema') == KNOWLEDGE_SCHEMA
+    # A generic pack is bound to this run's expert; the legacy STA manifest predates that field.
+    if generic and manifest.get('expertId') != cap['expertId']: raise RuntimeError('knowledge pack belongs to another expert')
     docs = {}
     for name, key in (('cards', 'cardsSha256'), ('sources', 'sourcesSha256')):
         with open(os.path.join(ROOT, 'knowledge', name + '.json'), 'rb') as f: raw = f.read(64 * 1024 + 1)
         if len(raw) > 64 * 1024 or hashlib.sha256(raw).hexdigest() != manifest['provenance'][key]:
             raise RuntimeError('knowledge pack integrity check failed')
         docs[name] = json.loads(raw)
-    if len(docs['cards']) != 50 or len(docs['sources']) != 120: raise RuntimeError('knowledge pack incomplete')
-    knowledge = {**docs, 'manifest': manifest}
+    if generic:
+        counts = (manifest.get('cards'), manifest.get('sources'))
+        if not all(isinstance(n, int) and not isinstance(n, bool) for n in counts) or not 1 <= counts[0] <= KNOWLEDGE_MAX_CARDS \
+                or not 1 <= counts[1] <= KNOWLEDGE_MAX_SOURCES or (len(docs['cards']), len(docs['sources'])) != counts:
+            raise RuntimeError('knowledge pack incomplete')
+    elif len(docs['cards']) != 50 or len(docs['sources']) != 120: raise RuntimeError('knowledge pack incomplete')
+    knowledge = {**docs, 'manifest': manifest, 'generic': generic}
     initial = set(manifest['initialCardIds'])
     record_knowledge([c for c in docs['cards'] if c['id'] in initial], 'initial selection')
-    activity('status', 'curated STA knowledge loaded: 50 cards, 120 source records; original corpus and evaluation answers excluded')
+    if generic:
+        activity('status', 'curated role knowledge loaded: %d cards, %d source records; unvalidated, no evaluation answers' % counts)
+    else:
+        activity('status', 'curated STA knowledge loaded: 50 cards, 120 source records; original corpus and evaluation answers excluded')
 
 
 def record_knowledge(cards, reason):
@@ -286,11 +302,25 @@ def knowledge_search(query):
     return json.dumps(result, ensure_ascii=False)
 
 
-def check_citations(opinion):
+def check_citations(opinion, report=''):
     if knowledge is None: return None
-    citations = [i for item in opinion['evidence'] for i in re.findall(r'\[source:([a-zA-Z0-9_-]+)\]', item)]
-    if not citations: return 'STA evidence must cite at least one retrieved source as [source:ID]'
-    if any(i not in retrieved_sources for i in citations): return 'STA evidence cites a source not retrieved; search it or remove the unsupported citation'
+    if not knowledge['generic']:
+        citations = [i for item in opinion['evidence'] for i in re.findall(r'\[source:([a-zA-Z0-9_-]+)\]', item)]
+        if not citations: return 'STA evidence must cite at least one retrieved source as [source:ID]'
+        if any(i not in retrieved_sources for i in citations): return 'STA evidence cites a source not retrieved; search it or remove the unsupported citation'
+        return None
+    texts = [opinion['summary']] + [x for k in OPINION_KEYS[3:] for x in opinion[k]] + [report if isinstance(report, str) else '']
+    cited = [i for t in texts for i in re.findall(r'\[source:([^\]\s]{0,80})\]', t)]
+    if any(i not in retrieved_sources for i in cited):
+        return 'a cited source was not retrieved for this role (unknown or not searched); search it or remove the unsupported [source:ID]'
+    return None
+
+
+def check_peer_statement(report):
+    review = knowledge and knowledge['manifest'].get('peerReview')
+    if not review or review.get('peerInputsProvided'): return None
+    if not isinstance(report, str) or PEER_STATEMENT.lower() not in report.lower():
+        return 'review role without peer inputs: the report must state "%s"' % PEER_STATEMENT
     return None
 
 
@@ -323,7 +353,13 @@ def finish(status, opinion=None, report='', error=''):
             audit = {'version': knowledge['manifest']['version'], 'validation': 'curated-unvalidated',
                      'provenance': knowledge['manifest']['provenance'], 'retrievals': knowledge_trace,
                      'sources': [s for s in knowledge['sources'] if s['id'] in used],
-                     'citationIdsValidated': True, 'sourcePagesFetched': False, 'commercialStaExecuted': False}
+                     'citationIdsValidated': True, 'sourcePagesFetched': False}
+            if knowledge['generic']:
+                review = knowledge['manifest'].get('peerReview')
+                audit.update({'schema': KNOWLEDGE_SCHEMA, 'expertId': knowledge['manifest']['expertId'], 'evaluation': 'unvalidated',
+                              'peerResultsVerified': False, 'peerInputsProvided': bool(review and review.get('peerInputsProvided'))})
+            else:
+                audit['commercialStaExecuted'] = False
             with open(os.path.join(OUT, 'knowledge.json'), 'w', encoding='utf-8') as f:
                 json.dump(audit, f, ensure_ascii=False, indent=2)
     else:
@@ -389,10 +425,11 @@ def main():
             messages.append({'role': 'user', 'content': result})
         else:
             problem = check_opinion(act.get('opinion'))
-            if not problem: problem = check_citations(act['opinion'])
             report = act.get('report')
+            if not problem: problem = check_citations(act['opinion'], report)
             if not problem and (not isinstance(report, str) or not report.strip()):
                 problem = 'report must be non-empty markdown'
+            if not problem: problem = check_peer_statement(report)
             if problem:
                 activity('error', 'turn %d: final rejected: %s' % (step, problem))
                 messages.append({'role': 'user', 'content': 'Final rejected: ' + retry_hint(problem)})

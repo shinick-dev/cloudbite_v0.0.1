@@ -12,6 +12,7 @@ import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
 
 const PY = process.env.PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
@@ -538,7 +539,9 @@ await check('validators: workspace paths and opinion schema', async () => {
 await check('real catalogue: actual persona workspace -> python runner -> flat out/result.json -> server validation and artifact', async () => {
   const w = freshWorld({ M: REAL });
   const boot = await call(w, 'GET', '/api/cloudbite/bootstrap');
-  assert.ok(boot.j.experts.length === 13 && boot.j.experts.some((e) => e.id === 'probably-primetime-sta'), 'actual catalogue, including the curated STA role');
+  assert.ok(boot.j.experts.length === 25 && boot.j.experts.some((e) => e.id === 'probably-primetime-sta'), 'actual catalogue, including the curated STA role');
+  assert.equal(boot.j.pool.entries.length, 100); assert.equal(boot.j.configuration.maxExperts, 5);
+  assert.deepEqual(new Set(boot.j.pool.entries.filter((e) => e.availability === 'available').map((e) => e.expertId)), new Set(boot.j.experts.map((e) => e.id)));
   const ids = boot.j.experts.slice(0, 3).map((e) => e.id);
   // the console sends crypto.randomUUID() request ids
   const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ids, requestId: crypto.randomUUID() }), headers: admin });
@@ -819,6 +822,57 @@ await check('curated STA: full persona, question-specific references, follow-up 
   assert.equal(audit.commercialStaExecuted, false); assert.ok(audit.retrievals.length >= 2);
   assert.ok(audit.sources.some(s => s.id === 'education-005' || s.aliases.includes('education-005')));
   assert.ok(w.nosana.every(r => !JSON.stringify(r).includes('DAYTONA-SECRET-VALUE')));
+});
+
+await check('phase-one knowledge: role-bound packs, unknown citation and missing peer statement rejected, planned id refused, audit and history pins kept', async () => {
+  const w = freshWorld({ M: REAL, model: (req, turn) => {
+    const id = req.messages[1].content.match(/^Expert id: `([a-z0-9-]+)`/m)[1];
+    const known = JSON.parse(req.messages[1].content.match(/"sources":(\[.*?\])\}\s*$/m)[1])[0].id;
+    if (turn === 0) return JSON.stringify({ action: 'knowledge', query: 'evidence pricing' });
+    const reviewer = id === 'cb-evidence-auditor';
+    const cite = turn === 1 ? 'made-up-source' : known;
+    const report = reviewer && turn < 3 ? '# Review\nI verified the pricing analyst result.' : '# Review\nNo peer result verification occurred. Only the brief was reviewed.';
+    return JSON.stringify({ action: 'final', opinion: { direction: 'conditional', confidence: 58, summary: `${id} conditional view`, evidence: [`[source:${cite}] reference card`], assumptions: ['brief is complete'], nextActions: ['collect evidence'] }, report });
+  } });
+  const ids = ['agency-specialized-pricing-analyst', 'cb-evidence-auditor'], rows = [];
+  w.env.CLOUDBITE_HISTORY = { getByName: () => ({ upsert: async (row) => { rows.push(structuredClone(row)); } }) };
+  const planned = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['pool-003'] }), headers: admin });
+  assert.equal(planned.status, 400, 'a planned catalogue entry cannot launch');
+  const six = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['cb-evidence-auditor', 'cb-quantitative-reviewer', 'cb-assumption-auditor', 'cb-adversarial-reviewer', 'cb-synthesis-editor', 'cb-finops'] }), headers: admin });
+  assert.equal(six.status, 400, 'max 5 experts unchanged');
+  const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ids, objective: 'Check the pricing evidence for launch.' }), headers: admin });
+  assert.equal(created.status, 201, created.text);
+  const obj = await project(w, created);
+  await drive(w, obj, (p) => p.status !== 'running', 2000); await Promise.all(w.procs);
+  const ex = await experts(obj);
+  assert.deepEqual(ex.map((e) => e.run.status), ['completed', 'completed'], JSON.stringify(ex.map((e) => e.run.activity.slice(-4))));
+  const [analyst, auditor] = ex;
+  assert.ok(analyst.run.activity.some((a) => /curated role knowledge loaded/.test(a.message)));
+  assert.ok(analyst.run.activity.some((a) => /not retrieved for this role/.test(a.message)), 'invented source rejected');
+  assert.ok(auditor.run.activity.some((a) => /must state "No peer result verification occurred\."/.test(a.message)), 'claimed cross-review without peer input rejected');
+  for (const e of ex) {
+    const dir = sbDir(w, e.int.sandboxId);
+    const manifest = JSON.parse(readFileSync(join(dir, 'knowledge', 'manifest.json'), 'utf8'));
+    assert.equal(manifest.expertId, e.run.expertId, 'each sandbox holds only its own role pack');
+    const a = await call(w, 'GET', `/api/cloudbite/projects/${created.j.project.id}/artifact?expert=${e.run.id}&path=out/knowledge.json`, { headers: { authorization: 'Bearer ' + created.j.accessToken } });
+    assert.equal(a.status, 200, a.text); const audit = JSON.parse(a.j.content);
+    assert.equal(audit.schema, 'cloudbite.knowledge/v1'); assert.equal(audit.expertId, e.run.expertId); assert.equal(audit.evaluation, 'unvalidated');
+    assert.equal(audit.peerResultsVerified, false); assert.equal(audit.peerInputsProvided, false); assert.equal(audit.sourcePagesFetched, false);
+    assert.equal(audit.provenance.cardsSha256, manifest.provenance.cardsSha256); assert.ok(audit.retrievals.length >= 2);
+    assert.ok(!('commercialStaExecuted' in audit));
+  }
+  const report = readFileSync(join(sbDir(w, auditor.int.sandboxId), 'out', 'report.md'), 'utf8');
+  assert.match(report, /No peer result verification occurred\./);
+  // audit history records the knowledge basis and a prompt hash that changes with the pack version
+  const final = rows.findLast((r) => r.status === 'completed');
+  assert.deepEqual(final.roles.map((r) => [r.id, r.basis]), ids.map((id) => [id, 'curated-knowledge']));
+  const boot = await call(w, 'GET', '/api/cloudbite/bootstrap');
+  for (const role of final.roles) {
+    const def = boot.j.experts.find((e) => e.id === role.id);
+    assert.equal(role.revision, def.source.revision); assert.match(role.revision, /^[0-9a-f]{40}$/);
+    assert.equal(role.promptHash, createHash('sha256').update(def.prompt).digest('hex'));
+    assert.match(def.prompt, /Knowledge pack \S+ \(\d+ cards, \d+ source records; cards sha256 [0-9a-f]{64}\)/);
+  }
 });
 
 await check('live history: real runner results publish without browser polling, keep model/persona identity and cleanup unchanged', async () => {
