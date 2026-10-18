@@ -358,6 +358,8 @@ await test('reviewers see their actual domain lens and complete supplied source 
   assert.ok(r.data.evidenceClaims.every(c=>c.status==='linked'));
   for(const c of N.calls){
     assert.equal(c.data.project.documents[0].content,p.brief.documents[0].content);
+    assert.deepEqual(c.data.project.workspaceSources['PROJECT.md'],{title:p.brief.title,objective:p.brief.objective,context:p.brief.context});
+    assert.deepEqual(c.data.project.workspaceSources['DECISION.md'],p.brief.decision);
     const def=EXPERTS.find(e=>e.id===c.data.reviewerExpertId);
     assert.ok(c.req.messages[0].content.includes(def.domain));
     assert.ok(c.req.messages[0].content.includes(def.summary));
