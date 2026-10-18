@@ -121,7 +121,7 @@ const rowsShown = (e) => e.all().filter(n => n.tagName === 'LI' && n.className.s
 
 // ───────── 공개 표면
 await test('공개 QR: 두 언어 블록, 같은 공개 요청 URL, 비밀·보안 키 주장 없음, 스크립트는 같은 출처 하나', () => {
-  assert.equal(CLOUDBITE_ACCESS_URL, 'https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/request');
+  assert.equal(CLOUDBITE_ACCESS_URL, 'https://cloudbite.shinick.dev/cloudbite/request');
   for (const html of [CLOUDBITE_ACCESS_HTML, readFileSync(new URL('../demo/access-qr.html', import.meta.url), 'utf8')]) {
     assert.ok(html.includes('lang="ko"') && html.includes('lang="en"'), 'both languages');
     assert.ok(html.includes('Cloudbite를 직접 써 보세요.') && html.includes('Try Cloudbite yourself.'));

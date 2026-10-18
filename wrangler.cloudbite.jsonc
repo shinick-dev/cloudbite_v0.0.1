@@ -1,6 +1,6 @@
 {
   // Cloudbite v0.0.1 — independent Worker. Never deploy gw-shinick's wrangler.jsonc for Cloudbite, and never point
-  // this config at k.shinick.dev, lab.shinick.dev or *.shinick.dev. No routes: workers.dev only.
+  // this config at k.shinick.dev or lab.shinick.dev. Only cloudbite.shinick.dev is authorized as its custom hostname.
   //   npx wrangler dev -c wrangler.cloudbite.jsonc --env dev     (local; no external resources unless you set secrets)
   //   npx wrangler deploy -c wrangler.cloudbite.jsonc            (coordinator/operator decision, not done by workers)
   // Secrets (wrangler secret put … -c wrangler.cloudbite.jsonc): MASTER_KEY, SETUP_TOKEN (first admin key registration),
@@ -14,12 +14,13 @@
   "compatibility_flags": ["nodejs_compat"],
   "rules": [{ "type": "Text", "globs": ["**/*.ps1"], "fallthrough": true }],
   "workers_dev": true,
-  "routes": [],
+  "routes": [{ "pattern": "cloudbite.shinick.dev", "custom_domain": true, "zone_id": "d2a16d55e1b69b18f6cba1105b32cc6c" }],
   "vars": {
     // Production workers.dev origin, verified against the authenticated account subdomain.
     // WebAuthn RP is this workers.dev host; admin keys are registered against this Worker's own State (not gw-shinick's).
     "RP_ID": "cloudbite-v001.ai-gongbu.workers.dev",
     "ORIGIN": "https://cloudbite-v001.ai-gongbu.workers.dev",
+    "CLOUDBITE_PUBLIC_ORIGIN": "https://cloudbite.shinick.dev",
     // Legacy lab hosts are disabled here: a non-routable placeholder origin and no seat domain.
     "LAB_ORIGIN": "https://lab.cloudbite.invalid",
     // Gateway the sandbox runner calls (/p/_cloudbite/worker/…). Same workers.dev host.

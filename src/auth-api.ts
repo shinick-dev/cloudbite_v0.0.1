@@ -81,7 +81,7 @@ async function register(c: ApiContext) {
   const adm = req.headers.get('x-admin-token') ?? '';
   if (!want && !adm) return json({ error: '등록이 닫혀 있습니다. /admin 에 키로 로그인해서 추가하거나 deploy.ps1 -SetupOnly 로 여세요.' }, 403);
   const setupHash = await setupGrantHash(want, b);
-  if (path === '/api/register/options') return out(await state.registerOptions(setupHash, adm, src));
+  if (path === '/api/register/options') return out(await state.registerOptions(setupHash, adm, src, env.ORIGIN));
   return out(await state.registerVerify(setupHash, b.response, String(b.label ?? ''), adm));
 }
 

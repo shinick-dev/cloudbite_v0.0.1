@@ -22,6 +22,7 @@ import { vaultApi } from './vault-api';
 import { providerProxy } from './provider-proxy';
 import { publicGet } from './public-get';
 import { cloudbiteRoute } from './cloudbite-api';
+import { cloudbiteAliasPath, cloudbiteIdentity } from './cloudbite-origin';
 import { isFail, sha, type Env, type State } from './state';
 
 export { State } from './state';
@@ -133,6 +134,12 @@ export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
     const path = url.pathname;
+    // Preserve the existing workers.dev origin, data and gateway. Only this configured alias receives a
+    // request-local origin; Durable Objects retain their original environment and namespaces.
+    if (url.origin !== env.ORIGIN && !path.startsWith('/p/')) {
+      const identity = cloudbiteIdentity(env, url.origin);
+      if (identity && cloudbiteAliasPath(path)) env = { ...env, ORIGIN: identity.origin, RP_ID: identity.rpId };
+    }
     const state = env.STATE.get(env.STATE.idFromName('main'));
 
     // 자리 호스트 s-<label>.<LAB_SEAT_DOMAIN>: 경로와 상관없이 전부 그 자리 (형식이 틀린 이름은 /p/ 까지 404)
@@ -140,6 +147,13 @@ export default {
     if (seatLabel !== null) return seatLabel ? (await labDemoHost(req, env, state, url, seatLabel)) ?? (await classroomMaterialsHost(req, state, url, seatLabel)) ?? labSeatHost(req, env, state, url, seatLabel) : json({ error: 'not found' }, 404);
     if (url.host === new URL(env.LAB_ORIGIN).host && !path.startsWith('/p/')) return labHost(req, env, state, url);
     if (url.host !== new URL(env.ORIGIN).host && !path.startsWith('/p/')) return json({ error: 'not found' }, 404);
+
+    // A browser validates the custom origin against the original RP before using an existing security key.
+    // No wildcard, request-derived hostname, credentials or cookies are included in this public document.
+    if (path === '/.well-known/webauthn' && req.method === 'GET') {
+      const alias = env.CLOUDBITE_PUBLIC_ORIGIN && cloudbiteIdentity(env, env.CLOUDBITE_PUBLIC_ORIGIN);
+      return alias ? json({ origins: [env.ORIGIN, alias.origin] }) : json({ error: 'not found' }, 404);
+    }
 
     // 샌드박스 lab-status·lab-doctor: 이 자리 가짜 토큰으로 쓸 수 있는 공유 키·남은 호출 수 (upstream 안 부름)
     if (path === '/p/_lab/share' && req.method === 'GET') {

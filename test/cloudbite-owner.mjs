@@ -446,4 +446,66 @@ await check('local http dev only: cb-owner-dev without Secure', async () => {
   assert.match(p.res.cookie, /^__Host-cb-owner=.*; Secure$/, 'the dev flag alone does not drop Secure on https');
 });
 
+await check('custom hostname: exact Cloudbite alias, public RP document, no classroom/vault expansion', async () => {
+  const alias = 'https://cloudbite.example';
+  const w = world({ CLOUDBITE_PUBLIC_ORIGIN: alias });
+  const wellKnown = await call(w, 'GET', '/.well-known/webauthn');
+  assert.equal(wellKnown.status, 200);
+  assert.deepEqual(wellKnown.j, { origins: [ORIGIN_URL, alias] });
+  for (const path of ['/', '/cloudbite', '/cloudbite/requests', '/cloudbite/request', '/cloudbite/console.js', '/cloudbite/console.css', '/cloudbite/access.js', '/register', '/webauthn.js'])
+    assert.equal((await call(w, 'GET', path, { base: alias })).status, 200, path);
+  for (const path of ['/admin', '/vault', '/lab', '/borrow', '/api/admin/options'])
+    assert.equal((await call(w, 'GET', path, { base: alias })).status, 404, path);
+  assert.equal((await call(w, 'GET', '/', { base: 'https://cloudbite.example.evil.test' })).status, 404);
+  for (const bad of ['http://cloudbite.example', 'https://cloudbite.example/path', 'https://name:password@cloudbite.example']) {
+    const x = world({ CLOUDBITE_PUBLIC_ORIGIN: bad });
+    assert.equal((await call(x, 'GET', '/.well-known/webauthn')).status, 404);
+  }
+});
+
+await check('custom hostname: existing key + original RP signs the related origin; same DO, approval and logout work', async () => {
+  const alias = 'https://cloudbite.example';
+  const w = world({ CLOUDBITE_PUBLIC_ORIGIN: alias }); await w.enroll();
+  const old = await signIn(w);
+  const at = (method, path, body, cookie, origin = alias) => call(w, method, path, {
+    base: alias, body, headers: { origin, ...(cookie ? { cookie } : {}) },
+  });
+  assert.equal((await at('GET', '/api/cloudbite/owner/session')).j.hasCredentials, true);
+  const o = await at('POST', '/api/cloudbite/owner/options', {});
+  assert.equal(o.status, 200); assert.equal(o.j.rpId, RP);
+  const response = w.key.get(o.j, { origin: alias });
+  const l = await at('POST', '/api/cloudbite/owner/login', { response });
+  assert.equal(l.status, 200, l.text);
+  assert.match(l.cookie, /^__Host-cb-owner=.*; Secure$/);
+  const cookie = jar(l.cookie);
+  assert.equal((await at('GET', '/api/cloudbite/owner/session', undefined, cookie)).j.authenticated, true);
+  assert.equal((await session(w, old.cookie)).j.authenticated, true, 'old host session survives');
+  const v = await at('POST', '/api/cloudbite/access/requests', { name: 'Domain QA', purpose: 'Test' });
+  assert.equal(v.status, 201, v.text);
+  assert.equal((await at('POST', `/api/cloudbite/access/requests/${v.j.request.id}/approve`, {}, cookie)).status, 200);
+  assert.equal((await at('GET', '/api/cloudbite/access/status', undefined, jar(v.cookie))).j.canCreate, true);
+  assert.equal((await at('POST', '/api/cloudbite/projects', brief(), cookie)).status, 201);
+  assert.equal((await at('POST', '/api/cloudbite/owner/logout', {}, cookie)).status, 200);
+  assert.equal((await at('GET', '/api/cloudbite/owner/session', undefined, cookie)).j.authenticated, false);
+  assert.equal((await session(w, old.cookie)).j.authenticated, true);
+});
+
+await check('custom hostname: reject mismatched HTTP Origin, forged RP/origin and replay; registration retains original RP', async () => {
+  const alias = 'https://cloudbite.example';
+  const w = world({ CLOUDBITE_PUBLIC_ORIGIN: alias, SETUP_TOKEN: 'test-only-setup' }); await w.enroll();
+  const at = (path, body, origin = alias) => call(w, 'POST', path, { base: alias, body, headers: { origin } });
+  assert.equal((await at('/api/cloudbite/owner/options', {}, ORIGIN_URL)).status, 403);
+  assert.equal((await at('/api/cloudbite/access/requests', { name: 'x', purpose: 'x' }, 'https://evil.test')).status, 403);
+  for (const over of [{ origin: 'https://evil.test' }, { origin: alias, rpId: 'cloudbite.example' }]) {
+    const o = await at('/api/cloudbite/owner/options', {});
+    assert.equal((await at('/api/cloudbite/owner/login', { response: w.key.get(o.j, over) })).status, 401);
+  }
+  const o = await at('/api/cloudbite/owner/options', {}), response = w.key.get(o.j, { origin: alias });
+  assert.equal((await at('/api/cloudbite/owner/login', { response })).status, 200);
+  assert.equal((await at('/api/cloudbite/owner/login', { response })).status, 401);
+  const reg = await at('/api/register/options', { setup: 'test-only-setup' });
+  assert.equal(reg.status, 200, reg.text); assert.equal(reg.j.rp.id, RP);
+  assert.equal((await at('/api/register/options', { setup: 'test-only-setup' }, ORIGIN_URL)).status, 403);
+});
+
 console.log(`\n${count} checks passed`);

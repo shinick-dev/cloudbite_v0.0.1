@@ -99,7 +99,7 @@ export async function ownerRoute(req: Request, env: Env, path: string, state: Ow
 
   if (action === 'options') {
     if (Object.keys(b.ok).length) return json({ error: 'request body must be {}' }, 400);
-    const r = await state.cloudbiteOwnerOptions(await sourceOf(req, env));
+    const r = await state.cloudbiteOwnerOptions(await sourceOf(req, env), env.ORIGIN);
     return isCbFail(r) ? json({ error: r.error }, r.status) : json(r);
   }
 

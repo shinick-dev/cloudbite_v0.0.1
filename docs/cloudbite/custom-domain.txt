@@ -1,0 +1,35 @@
+Cloudbite custom hostname — 2026-10-18
+
+Application: https://cloudbite.shinick.dev/
+Visitor QR: https://cloudbite.shinick.dev/cloudbite/access
+Visitor request: https://cloudbite.shinick.dev/cloudbite/request
+Owner inbox: https://cloudbite.shinick.dev/cloudbite/requests
+
+The custom domain attaches to the existing cloudbite-v001 Worker. State, CloudbiteProject,
+CloudbiteAccess namespaces, stored projects, approval policy, credentials and sandbox gateway
+remain unchanged. No gw-shinick, k.shinick.dev, lab.shinick.dev or account-wide workers.dev
+subdomain changes. Only Cloudbite and its registration assets/APIs are exposed on the new host.
+The original workers.dev application and all its existing links remain available.
+
+Security keys keep RP ID cloudbite-v001.ai-gongbu.workers.dev. The original RP serves
+/.well-known/webauthn with the exact two permitted origins. Related Origin Requests let
+compatible browsers use the existing key at the custom origin; no credential is copied or
+re-registered. The server verifies the exact allowed origin/RP pair, signed challenge and UV.
+This is not a wildcard domain allowance and does not authorize legacy admin/vault ceremonies
+from the custom origin. HTTP POST Origin must still match the receiving origin exactly.
+
+Chrome supports Related Origin Requests from version 128:
+https://developer.chrome.com/blog/passkeys-updates-chrome-129
+Browsers without this feature can use the original owner inbox:
+https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/requests
+
+Cookies and browser-local project history are origin-specific. An existing logged-in browser
+must sign in once at the new host; its old login and original project links remain valid.
+Logging out revokes the specific owner session, as before; it does not log out other browsers
+or a separately authenticated origin. Visitor approval records share the same inbox but a
+visitor must keep using the origin where they requested access (cookies do not migrate).
+
+Checks: npm run check; cloudbite-owner (software-key signed alias assertions, original RP,
+approval/create/logout, old-session preservation, invalid origins/RPs, replay, registration,
+public RP document and legacy-path isolation); cloudbite-access; cloudbite-access-ui;
+wrangler deploy --dry-run. Hardware key use requires the owner's physical interaction.

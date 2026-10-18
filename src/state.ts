@@ -61,6 +61,7 @@ import {
   type RegistrationResponseJSON,
 } from '@simplewebauthn/server';
 import { isoBase64URL } from '@simplewebauthn/server/helpers';
+import { cloudbiteIdentity } from './cloudbite-origin';
 import { canonUpstream, daytonaManagementPath, isDaytona, isOpenRouterUpstream, labShareable, normalizeDef, OPENROUTER_ORIGIN, sameDestination, type ProviderDef } from './providers';
 import { dt, DtError, download, exec, EXPORT_LIMITS, exportZipMax, LAB_PORT, materials, packWork, putMaterials, quota, readCapped, spawn, WORK, type Dt, type Sandbox } from './lab';
 import { labIsPreset, labResourcesOf, labSnapshotName } from './lab-resources';
@@ -102,6 +103,7 @@ export interface Env {
   STATE: DurableObjectNamespace<State>;
   RP_ID: string;
   ORIGIN: string;
+  CLOUDBITE_PUBLIC_ORIGIN?: string; // Exact HTTPS Cloudbite alias; does not change legacy hosts or DO identities.
   SETUP_TOKEN?: string;
   MASTER_KEY?: string;      // 32바이트 base64url. 저장된 공급자 키를 암호화한다
   ALLOW_SHORT_TTL?: string; // dev 전용: 만료 테스트용 초단기 TTL 허용
@@ -831,7 +833,9 @@ export class State extends DurableObject<Env> {
     return null;
   }
 
-  async registerOptions(setupHash: string, adminToken: string, src: string) {
+  async registerOptions(setupHash: string, adminToken: string, src: string, origin = this.env.ORIGIN) {
+    const identity = cloudbiteIdentity(this.env, origin);
+    if (!identity) return fail(403, 'bad origin');
     if (setupHash) {
       const bad = await this.setupCheck(setupHash, true);
       if (bad) return bad;
@@ -839,7 +843,7 @@ export class State extends DurableObject<Env> {
       return fail(403, adminToken ? '관리 로그인 후 3분이 지났습니다. 다시 로그인하세요.' : 'setup token이 틀렸습니다.');
     const creds = await this.creds();
     const opts = await generateRegistrationOptions({
-      rpName: 'shinick gw', rpID: this.env.RP_ID,
+      rpName: 'shinick gw', rpID: identity.rpId,
       userName: 'owner', userID: new Uint8Array(new TextEncoder().encode('owner')),
       attestationType: 'none',
       // PRF 없는 예전 등록은 제외하지 않는다 — 같은 키를 PRF 로 다시 등록할 수 있게
@@ -863,7 +867,7 @@ export class State extends DurableObject<Env> {
       try {
         const r = await verifyRegistrationResponse({
           response: resp, expectedChallenge: challenge,
-          expectedOrigin: this.env.ORIGIN, expectedRPID: this.env.RP_ID, requireUserVerification: true,
+          ...this.webAuthnExpected(resp, true), requireUserVerification: true,
         });
         return r.verified ? r : null;
       } catch (e) {
@@ -1020,7 +1024,10 @@ export class State extends DurableObject<Env> {
     return { authenticated, hasCredentials };
   }
 
-  async cloudbiteOwnerOptions(src: string) { return this.authOptions(CB_OWNER_PURPOSE, src); }
+  async cloudbiteOwnerOptions(src: string, origin = this.env.ORIGIN) {
+    const identity = cloudbiteIdentity(this.env, origin);
+    return identity ? this.authOptions(CB_OWNER_PURPOSE, src, () => true, identity.rpId) : fail(403, 'bad origin');
+  }
 
   /**
    * 탭 검증을 통과해야만 sessionHash 를 저장한다. replaces = 이 브라우저가 내던 예전 세션 (실제로 남아 있으면 그 자리를 넘겨받아 끝낸다).
@@ -3365,11 +3372,20 @@ export class State extends DurableObject<Env> {
 
   private async creds() { return [...(await this.s.list<Cred>({ prefix: 'cred:' })).values()]; }
 
-  private async authOptions(purpose: string, src: string, only: (c: Cred) => boolean = () => true) {
+  private webAuthnExpected(resp: { response: { clientDataJSON: string } }, allowAlias = false) {
+    const data = JSON.parse(new TextDecoder().decode(isoBase64URL.toBuffer(resp.response.clientDataJSON)));
+    const identity = cloudbiteIdentity(this.env, typeof data.origin === 'string' ? data.origin : '');
+    if (!identity || (!allowAlias && identity.origin !== this.env.ORIGIN)) throw new Error('bad WebAuthn origin');
+    // clientData is untrusted here: it only selects an explicit allowlisted origin/RP pair. The WebAuthn library
+    // still verifies this exact origin, RP hash, challenge, UV flag and signature below.
+    return { expectedOrigin: identity.origin, expectedRPID: identity.rpId };
+  }
+
+  private async authOptions(purpose: string, src: string, only: (c: Cred) => boolean = () => true, rpId = this.env.RP_ID) {
     const creds = (await this.creds()).filter(only);
     if (!creds.length) return fail(409, purpose === 'vault' ? 'PRF 로 등록된 보안 키가 없습니다. /admin 에서 키를 PRF 로 다시 등록하세요.' : '등록된 보안 키가 없습니다. /register 부터 하세요.');
     const opts = await generateAuthenticationOptions({
-      rpID: this.env.RP_ID,
+      rpID: rpId,
       // transports 를 명시해야 한다. 비워 두면 Android 는 폰 안의 패스키만 찾고
       // "사용 가능한 패스키 없음"으로 끝낸다 — NFC 태깅 화면을 띄우지 않는다.
       allowCredentials: creds.map((c) => ({ id: c.id, transports: ['nfc', 'usb'] })),
@@ -3437,7 +3453,7 @@ export class State extends DurableObject<Env> {
       try {
         const r = await verifyAuthenticationResponse({
           response: resp, expectedChallenge: challenge,
-          expectedOrigin: this.env.ORIGIN, expectedRPID: this.env.RP_ID,
+          ...this.webAuthnExpected(resp, purpose === CB_OWNER_PURPOSE),
           credential: { id: cred.id, publicKey: new Uint8Array(isoBase64URL.toBuffer(cred.publicKey)), counter: cred.counter },
           requireUserVerification: true,
         });

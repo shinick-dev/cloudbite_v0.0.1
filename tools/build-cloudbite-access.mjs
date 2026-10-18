@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { transformSync, version } from 'esbuild';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const ORIGIN = 'https://cloudbite-v001.ai-gongbu.workers.dev';
+const ORIGIN = 'https://cloudbite.shinick.dev';
 const REQUEST_URL = `${ORIGIN}/cloudbite/request`;
 const OWNER_URL = `${ORIGIN}/cloudbite/requests`;
 const JS_PATH = '/cloudbite/access.js';
