@@ -25,13 +25,18 @@ Format and secrets
   /api/cloudbite/bootstrap does not reveal whether an operator token is configured.
 
 Issuance (owner, 8 hours)
-  1. Generate locally, never in chat or logs, e.g.
-       node -e "const c=require('node:crypto');const t='cbo_'+c.randomBytes(32).toString('base64url');console.error(c.createHash('sha256').update(t).digest('hex'));console.error(String(Date.now()+8*3600e3));process.stdout.write(t)"
-     (prints hash and expiry to stderr, the token to stdout; keep the token out of shell history and files).
-  2. Set both values as Worker secrets of the Cloudbite worker only (wrangler.cloudbite.jsonc), never in gw-shinick:
-       wrangler secret put CLOUDBITE_OPERATOR_TOKEN_HASH --config wrangler.cloudbite.jsonc
-       wrangler secret put CLOUDBITE_OPERATOR_EXPIRES_AT --config wrangler.cloudbite.jsonc
-  3. Hand over the link  https://<cloudbite host>/cloudbite#operator=<token>  over a private channel.
+  1. Use an owner-only filesystem ACL on ignored .artifacts/production and retain its existing production secrets.json.
+     From that intended deployment worktree, run:
+       node tools/issue-cloudbite-operator.mjs --issue
+     The tool generates a random credential, stores only its SHA-256 hash and expiry in secrets.json, and creates
+     private operator-access.html / operator-access.png files for the owner. It prints paths and expiry only.
+     The plaintext credential is confined to those protected handoff files and operator-token.txt; never publish them.
+  2. Deploy the code and updated protected secrets file atomically to the independent Cloudbite worker:
+       node node_modules/wrangler/bin/wrangler.js deploy --config wrangler.cloudbite.jsonc --env= --secrets-file .artifacts/production/secrets.json --strict
+     Keep MASTER_KEY and all other existing credentials. Follow production.txt for checks and target verification.
+  3. Open the private HTML file on the PC; its button opens Cloudbite. Scan its QR to open the same credential on a
+     phone. This is bearer access, not phone biometric verification. No physical security key is needed for this scope.
+     These files must stay outside deliverables/, demo/, public QR material, Git, chat logs and public hosting.
 
 Browser handoff (client/cloudbite-console.ts)
   On load, before any request, the console reads #operator=, keeps the token only in memory and in the password input,
@@ -43,7 +48,7 @@ Browser handoff (client/cloudbite-console.ts)
 
 Expiry, rotation, revocation
   Expiry  : automatic at CLOUDBITE_OPERATOR_EXPIRES_AT.
-  Rotate  : issue a new token and overwrite both secrets; the old token stops working at once.
+  Rotate  : run the issuance tool with --issue --rotate and redeploy both secrets; the old token stops working on deploy.
   Revoke  : wrangler secret delete CLOUDBITE_OPERATOR_TOKEN_HASH --config wrangler.cloudbite.jsonc (removing the hash
             alone fails closed). Revoking the operator does NOT invalidate per-project cbt_ access tokens already issued
             (valid up to 24h); cancel those projects with their own token if needed.
