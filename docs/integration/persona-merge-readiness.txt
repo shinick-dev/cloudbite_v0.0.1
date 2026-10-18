@@ -1,8 +1,12 @@
 Cloudbite — collaborator persona branch: merge readiness
 =======================================================
 
-Status: READY FOR BRANCH. No collaborator branch identified yet; nothing merged.
-Prepared: 2026-10-18T16:08+09:00 (git fetch origin + ls-remote at that time).
+Status: WAITING FOR NEW COMMIT on confirmed target branch agent_chatbot. Nothing merged.
+  - 2026-10-18T16:08+09:00  prepared; branch identity not yet given (READY FOR BRANCH).
+  - 2026-10-18T16:11+09:00  user confirmed target branch: agent_chatbot. Re-fetch: origin/agent_chatbot
+                            still f8d380012aa8187e358ae14e0c4337c1d9de7a61 (initial import, ancestor of
+                            main) — no persona payload yet. Start section 4 when agent_chatbot moves past
+                            f8d3800; the new tip is the candidate SHA.
 
 1. Ref baseline (origin = github.com/shinick-dev/cloudbite_v0.0.1)
 -------------------------------------------------------------------
@@ -17,7 +21,11 @@ Prepared: 2026-10-18T16:08+09:00 (git fetch origin + ls-remote at that time).
   (fc0c917..593d680). A persona branch cut from origin/main is therefore an OLD-BASE branch.
 
   New branch vs coordinator baseline: NONE. The three refs above are exactly the baseline.
-  agent_chatbot is not a persona candidate: it is the root import already contained in main.
+  At 16:08 agent_chatbot was not treated as a persona candidate (root import already in main).
+  At 16:11 the user confirmed agent_chatbot IS the target branch; its current tip f8d3800 carries no
+  persona payload, so the candidate is the first new commit(s) the collaborator pushes on top of it.
+  Note: agent_chatbot's base f8d3800 is OLDER than main (22859ed) and far older than 593d680, so the
+  incoming commits will be an old-base branch — follow section 4 step 3-6, never fast-forward main.
 
 2. Integration map: where incoming persona content must land
 -------------------------------------------------------------
@@ -71,11 +79,11 @@ Prepared: 2026-10-18T16:08+09:00 (git fetch origin + ls-remote at that time).
     basis 'metadata-derived', prompt phrases. Changing those assertions is part of the integration
     and must be visible in review, not a side effect.
 
-4. Merge sequence once the user names the branch
-------------------------------------------------
-  1. Get exact branch name + SHA from the user. git fetch origin; record the SHA; work only from that
+4. Merge sequence once agent_chatbot has new commits
+----------------------------------------------------
+  1. Branch is agent_chatbot (confirmed). git fetch origin; record the new tip SHA; work only from that
      immutable SHA (re-check before final merge that the branch did not move).
-  2. Inspect read-only: git log --format='%H %an %ad %s' 22859ed..<sha>; git diff --stat 22859ed <sha>;
+  2. Inspect read-only: git log --format='%H %an %ad %s' f8d3800..<sha>; git diff --stat f8d3800 <sha>;
      merge-base vs main and vs 593d680. Check: changed paths (anything outside persona data?),
      binary/oversized files, secrets/.dev.vars/tokens, path names that would fail validateWorkspace,
      licences of any copied third-party prompt text.
