@@ -95,7 +95,7 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     if ('error' in b) return json({ error: b.error }, b.status);
     const admin = req.headers.get('x-admin-token') ?? '';
     // An x-admin-token header always takes the owner path (no fallback to a visitor cookie when it is wrong).
-    // Without one, an owner-approved visitor cookie may create exactly one project of its own (docs/cloudbite/access-service.txt).
+    // Without one, an owner-approved visitor cookie may create its own projects within the grant quota (docs/cloudbite/access-service.txt).
     const visitor = admin ? null : await visitorGrant.check(req, env);
     if (admin ? !await isOwner(admin) : !visitor) return json({ error: 'admin session required' }, 401);
     const brief = validateBrief(b.ok, visitor ? CLOUDBITE_EXPERTS : undefined);
@@ -105,7 +105,7 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
       const missing = cloudbiteMissing(env, CLOUDBITE_EXPERTS.length);
       if (missing.length) return json({ error: `live execution is not configured; missing: ${missing.join(', ')}` }, 503);
     }
-    // Visitor: namespace the requestId by the grant, then atomically bind the grant's single project to it.
+    // Visitor: namespace the requestId by the grant, then atomically reserve one of its project slots.
     let hold: { id: string; scoped: string } | null = null;
     if (visitor) {
       brief.requestId = await visitorRequestId(visitor.id, brief.requestId);
