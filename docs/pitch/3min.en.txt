@@ -84,6 +84,7 @@ A hundred is our direction, with each new role earning its place through evidenc
 [2:48-3:00] CLOSE
 
 >>> NOT SPOKEN: show demo/access-qr.html or the QR PNG. Pause 2 s. <<<
+>>> NOT SPOKEN: QR opens https://k.shinick.dev/lab/request. Keep the host inbox at https://k.shinick.dev/lab/requests ready in another tab; approve the individual request with the registered physical security key. Provisioning may take time; do not wait on stage. <<<
 
 Scan the QR to request your own sandbox.
 I'll approve it with my security key.

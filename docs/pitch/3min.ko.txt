@@ -84,6 +84,7 @@ Nosana는 그 작업을 이어가는 추론 엔진입니다.
 [2:48-3:00] 마무리
 
 >>> NOT SPOKEN: demo/access-qr.html 또는 QR PNG를 보여 준다. 2초 멈춤. <<<
+>>> NOT SPOKEN: QR의 신청 주소는 https://k.shinick.dev/lab/request. 진행자 요청함 https://k.shinick.dev/lab/requests 를 다른 탭에 열어 두고, 개별 신청을 등록된 물리 보안키로 승인한다. 환경 생성에는 시간이 걸릴 수 있으므로 무대에서 기다리지 않는다. <<<
 
 QR로 체험실을 신청하세요.
 보안키로 승인해 드리겠습니다.

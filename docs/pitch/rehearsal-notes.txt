@@ -96,6 +96,20 @@ the exact request/limits with the security key in /lab/requests. This is
 separate from the scripted expert preview. Show demo/access-qr.html or
 demo/cloudbite-sandbox-request.png. Do not promise instant provisioning.
 
+QR handoff checklist (stage directions, not additional spoken script):
+- Attendee request: https://k.shinick.dev/lab/request (singular request).
+- Host approval inbox: https://k.shinick.dev/lab/requests (plural requests).
+- Before the pitch, sign in as the owner and have the registered physical
+  security key available. Review each request and its limits before approving.
+- The host's approval invokes the browser's security-key prompt. Touch the
+  registered key and enter its PIN if the browser requests one.
+- The attendee keeps their original request page/browser open. It polls for
+  status and shows their personal join link when provisioning reaches ready.
+- Approval starts provisioning; it is not a guarantee of immediate access.
+  Do not wait for resource creation during the three-minute pitch.
+- A real physical-key approval and paid sandbox provisioning still require
+  an on-site run; local cryptographic fixtures do not prove that live flow.
+
 5. FALLBACK (network or provider failure)
 
 Say the fallback line at the end of the script once, switch to the offline

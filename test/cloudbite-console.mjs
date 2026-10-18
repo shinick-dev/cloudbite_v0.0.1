@@ -232,7 +232,7 @@ await test('첫 화면: 카탈로그를 읽고 명시적 데모를 바로 시작
   const env = fakeEnv({ fetchImpl: (url) => url === '/api/cloudbite/bootstrap' ? json(200, CATALOGUE) : json(404, { error: 'x' }) });
   await env.flush();
   const text = env.root.textContent;
-  assert.match(text, /Browser demo/); assert.match(text, /No real Daytona sandbox or Nosana inference is created/);
+  assert.match(text, /Browser demo/); assert.match(text, /simulated activity and files; no Daytona or Nosana calls/);
   assert.ok(env.all().some(n => n.className.startsWith('cb-card ')), 'expert workspace cards visible immediately');
   await env.advance(30000);
   assert.ok(env.root.textContent.includes(EVIL), 'hostile name rendered as literal text');
@@ -310,7 +310,7 @@ await test('실제 실행: 관리자 토큰 헤더로 만들고 범위 토큰으
   const sent = JSON.parse(post.init.body);
   assert.equal(sent.mode, 'live'); assert.ok(sent.requestId); assert.ok(sent.expertIds.length >= 1);
   assert.ok(!/Daytona.*key|apiKey/i.test(post.init.body));
-  assert.match(env.root.textContent, /Live run — the server creates/);
+  assert.match(env.root.textContent, /Live run — server-reported activity/);
   await env.advance(1500);
   const get = env.requests.find(r => r.url === '/api/cloudbite/projects/proj-1');
   assert.equal(get.init.headers.authorization, 'Bearer proj-scope-tok');
@@ -333,7 +333,7 @@ await test('실제 실행 실패는 오류로 보여 주고 데모로 몰래 바
   assert.match(env.root.textContent, /The server run configuration is not ready\. — DAYTONA_API_KEY missing/);
   assert.equal(env.all().filter(n => n.className.startsWith('cb-card ')).length, 0, 'no demo cards substituted');
   assert.ok(cardsBefore > 0);
-  assert.match(env.root.textContent, /Live run — the server creates/);
+  assert.match(env.root.textContent, /Live run — server-reported activity/);
   await env.advance(60000);
   assert.equal(env.requests.filter(r => r.url === '/api/cloudbite/projects').length, 1, 'no automatic retry/fallback');
 });
