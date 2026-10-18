@@ -20,5 +20,7 @@ The user requests an HTML preview of the finished pitch experience while impleme
 ## Brand Commitments
 Cloudbite v0.0.1. The user subsequently requested English and confirmed a blue-and-white layout adapted from the AI Coding Lab specification: navy header, approximately224px navigation sidebar, central expert workspace and right-hand progress/decision panel, with1536×1024 as primary viewport. Preserve the expert-sandbox product, rather than copying classroom terminology or claiming unsupported CLI features.
 
+The later 2026-10-18 request adds KO / EN on the console, visitor request, owner inbox and QR surfaces. Switching language preserves inputs and live work. The owner signs in with a security key registered on Cloudbite's own domain; the Cloudbite-only session persists until explicit logout or credential/browser-data removal. First-key enrollment requires the owner's private setup credential. Legacy studyroom/admin session limits remain unchanged.
+
 ## Evidence on Hand
 Local source, persona catalogue, workspace contract, and mocked-provider implementation checks. No verified paid-provider end-to-end execution or calibrated reliability evidence yet.
