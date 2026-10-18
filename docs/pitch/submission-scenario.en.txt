@@ -75,7 +75,7 @@ The list above is a proposed five-role live selection from the actual catalogue.
 
 - Scene 6 [2:48-3:00] Close & Live Audience QR Handoff | 2 s pause
   - Screen / Action: Display `demo/access-qr.html` or `demo/cloudbite-sandbox-request.png` (pause 2 s). Keep the host inbox `https://k.shinick.dev/lab/requests` open in another tab.
-  - Spoken Narrative Summary: Invite the audience to scan the QR to request their own personal sandbox, which the host approves with a registered physical security key. Finish within the 3-minute mark; resource provisioning continues afterward without waiting on stage.
+  - Spoken Narrative Summary: Invite the audience to scan the public QR to request their own personal sandbox. Their entry link appears after approval. Physical-key approval is currently unavailable, so collect requests now and approve/provision once the host can authenticate; do not promise immediate entry. Never show the private Cloudbite operator QR.
 
 
 4. Sponsor Evidence & Technical Story (Daytona & Nosana)
@@ -134,3 +134,6 @@ Cloudbite is a multi-expert decision workbench where a single shared project bri
 - Never fake a live call or present recorded/scripted outputs as live execution. If the venue network or an external provider fails, state once clearly on stage:
   "The live connection isn't answering, so I'll use our scripted walkthrough (`demo/cloudbite-pitch.html`), which is clearly labeled as a simulation, plus our recorded Daytona sandbox run (`demo/evidence.json`) from earlier. Nothing I show now is a live call."
 - Continue seamlessly from Cue A in the offline walkthrough and keep the Scene 5 implementation/verification boundary statement unchanged.
+
+
+Production update — 18 October 2026: https://cloudbite-v001.ai-gongbu.workers.dev is deployed. Production access controls and a persisted server-demo project are verified; no live Daytona + Nosana end-to-end run is claimed. Audience requests wait for physical-key approval; the private operator QR is not presentation material.

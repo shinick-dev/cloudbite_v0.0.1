@@ -7,9 +7,16 @@ The final s distinguishes the host's inbox from the attendee's form.
 
 ON STAGE
 Show demo/access-qr.html or demo/cloudbite-sandbox-request.png.
-English: "Scan the QR to request your own sandbox. I'll approve it with my security key."
-Korean:  "QR로 체험실을 신청하세요. 보안키로 승인해 드리겠습니다."
+English: "Scan the QR to request your own sandbox. Your entry link appears after approval."
+Korean:  "QR로 체험실을 신청하세요. 승인되면 개별 입장 링크가 나옵니다."
 This closing is already included in both three-minute scripts.
+
+CURRENT PRESENTATION MODE — 2026-10-18
+Physical-key approval is currently unavailable. Collect requests during the pitch;
+approval and provisioning wait until the host can authenticate. Do not promise
+instant entry. The temporary Cloudbite operator credential is private and only
+creates expert projects; it cannot approve these participant requests. Never
+show its private operator QR in the presentation.
 
 HOST PROCEDURE
 1. Open the host approval URL and sign in as the configured owner through

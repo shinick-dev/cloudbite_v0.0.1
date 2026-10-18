@@ -64,7 +64,7 @@ The disagreement becomes the next test: run one real project and measure its cos
 >>> NOT SPOKEN: stay on the decision view. Pause 2 s, then speak to the judges. <<<
 
 That was our scripted walkthrough, labeled as one.
-The real console talks to our live API, with cancellation and real artifact files.
+The console is deployed, with cancellation and artifact retrieval.
 Local checks pass end to end with stand-in providers,
 and a recorded run used real Daytona sandboxes.
 Next: the first full run with live Nosana inference.
@@ -84,10 +84,10 @@ A hundred is our direction, with each new role earning its place through evidenc
 [2:48-3:00] CLOSE
 
 >>> NOT SPOKEN: show demo/access-qr.html or the QR PNG. Pause 2 s. <<<
->>> NOT SPOKEN: QR opens https://k.shinick.dev/lab/request. Keep the host inbox at https://k.shinick.dev/lab/requests ready in another tab; approve the individual request with the registered physical security key. Provisioning may take time; do not wait on stage. <<<
+>>> NOT SPOKEN: Show only the public request QR at https://k.shinick.dev/lab/request. Physical-key approval is currently unavailable: collect requests, then approve and provision after authentication becomes available. Do not promise immediate entry. Never show the private Cloudbite operator QR to the audience. <<<
 
 Scan the QR to request your own sandbox.
-I'll approve it with my security key.
+Your entry link appears after approval.
 That's Cloudbite. Thank you.
 
 
