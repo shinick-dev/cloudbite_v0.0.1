@@ -25,7 +25,8 @@ the target is always `wrangler.cloudbite.jsonc` (Worker `cloudbite-v001`). The l
    there is no fallback to a stale local `origin/main`.
 5. `origin/main` must be an ancestor of HEAD. A candidate that lacks released work on `main` is refused: merge or
    rebase onto the latest `main` first.
-6. `npm run check` and `npm run test:cloudbite` (which includes the decision, evidence and cross-review suites) must
+6. `npm run check` and `npm run test:cloudbite` (which includes the decision, evidence, cross-review, deployment guard,
+   and personal computer suites) must
    pass. npm is invoked as `node <npm_execpath> run …`, so the guard must be started through `npm run deploy`.
 7. HEAD and the worktree are re-checked: a commit or file change during the checks is refused.
 8. Project-local Wrangler (`node_modules/wrangler`, never a global one) runs
@@ -43,6 +44,10 @@ changes namespaces; any refusal exits non-zero with the reason and nothing deplo
 - Ancestry is checked against `origin/main` at fetch time. Work pushed to `main` after the fetch, or released work
   that never reached `main`, is not detected.
 - Environment variables that Wrangler itself reads are passed through as-is.
+
+`npm run test:cloudbite:computer` runs the eleven Computer JavaScript suites plus the Python display and installer
+checks. Python uses `-B` so testing does not leave bytecode files that would dirty the release worktree. The display
+test reports skipped Selkies checks when that package is absent; the installer reports platform-specific skips.
 
 ## Tests
 
