@@ -1,5 +1,8 @@
 # Cloudbite — optional additional Daytona accounts
 
+> Updated 2026-10-19: selection now supports 100 roles and the old concurrency-3 pilot is removed. See [current parallel execution policy](cloudbite/parallel-execution.md). Earlier acceptance records below describe their original release.
+
+
 Cloudbite can place expert sandboxes in up to three different Daytona organizations so that the organizations'
 capacity pools are used. This is placement only: it does **not** raise Cloudbite's own limits (3 experts
 provisioning/running at once per project, 5 experts per project, 2 live projects), and it makes no claim about

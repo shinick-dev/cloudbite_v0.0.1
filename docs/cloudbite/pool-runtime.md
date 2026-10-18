@@ -1,5 +1,7 @@
 # 100-role pool and knowledge runtime
 
+> Current limits and release verification: [parallel execution](parallel-execution.md). The earlier 5-role / 3-concurrent descriptions below are historical.
+
 Implementation of [`expert-pool-100.md`](expert-pool-100.md), including the [75-role extension](pool-expansion.md). All100 entries now resolve to runtime roles: 95 source-linked starter packs, the separate STA pilot and four metadata-derived roles. It does not add 100 validated specialists, cross-review, or new execution capacity: the per-project selection limit stays at 5, live concurrency and visitor quotas are unchanged, and every role remains an unvalidated T0 AI role.
 
 ## Runnable catalogue (100 roles)

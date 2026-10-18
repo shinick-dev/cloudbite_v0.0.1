@@ -1,5 +1,8 @@
 # Third Daytona account
 
+> Updated 2026-10-19: selection now supports 100 roles and the old concurrency-3 pilot is removed. See [current parallel execution policy](cloudbite/parallel-execution.md). Earlier acceptance records below describe their original release.
+
+
 The tertiary slot extends the existing account-pinned runtime. The stable account ids are `primary`, `secondary`,
 and `tertiary`; an omitted slot is not renumbered. Every expert's existing assignment and credential binding remain
 unchanged when another account is added. Placement uses the available account array when admitting new experts.

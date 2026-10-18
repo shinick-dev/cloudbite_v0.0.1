@@ -3,6 +3,7 @@
 import type { ExpertDefinition, CloudbiteRoutingDecision, CloudbiteRoutingQuery } from './cloudbite-contract';
 import { CLOUDBITE_POOL } from './cloudbite-pool';
 import { boundedText } from './cloudbite-inference';
+import { CB_MAX_EXPERTS } from './cloudbite-config';
 
 export const JEV_MODEL = 'jev-1.13.0';
 export const ROUTING_POLICY = 'jev-routing/v1';
@@ -87,7 +88,7 @@ export async function askJev(query: CloudbiteRoutingQuery, experts: readonly Exp
     if (a.noul >= ROUTING_THRESHOLD) matches.push({ expertId, relevance: a.noul });
   }
   matches.sort((a, b) => b.relevance - a.relevance || ids.indexOf(a.expertId) - ids.indexOf(b.expertId));
-  const chosen = matches.slice(0, Math.max(1, Math.min(5, Math.floor(max))));
+  const chosen = matches.slice(0, Math.max(1, Math.min(CB_MAX_EXPERTS, Math.floor(max))));
   if (!chosen.length) return fail(422, 'No relevant expert matched; add a specific question and context');
   return { provider: 'typesafe', model: data.model, policyVersion: ROUTING_POLICY, evaluatedCount: ids.length,
     threshold: ROUTING_THRESHOLD, expertIds: chosen.map(m => m.expertId), matches: chosen, queryHash, expiresAt: now + ROUTING_TTL };
@@ -102,7 +103,7 @@ export class RoutingSession {
   async plan(raw: CloudbiteRoutingQuery, max: number): Promise<CloudbiteRoutingDecision | RoutingFailure> {
     const query = routingQuery(raw); if (isRoutingFailure(query)) return query;
     if (!routingReady(this.key)) return fail(503, 'Jev routing is not configured');
-    if (!Number.isInteger(max) || max < 1 || max > 5) return fail(400, 'invalid routing selection limit');
+    if (!Number.isInteger(max) || max < 1 || max > CB_MAX_EXPERTS) return fail(400, 'invalid routing selection limit');
     const queryHash = await routingQueryHash(query, this.experts, max), now = this.clock(), claim = crypto.randomUUID();
     const recordId = 'r:' + query.requestId; // never use attacker-chosen __proto__/constructor as object keys
     const reserved = await this.storage.transaction(async tx => {

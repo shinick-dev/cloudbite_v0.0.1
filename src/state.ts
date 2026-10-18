@@ -121,6 +121,7 @@ export interface Env {
   CLOUDBITE_HISTORY?: DurableObjectNamespace<import('./cloudbite-history').CloudbiteHistory>;
   CLOUDBITE_ACCESS?: DurableObjectNamespace<import('./cloudbite-access-service').CloudbiteAccess>; // 없으면 청응 접근 요청을 막는다 — src/cloudbite-access-service.ts
   CLOUDBITE_DAYTONA_API_URL?: string;
+  CLOUDBITE_MAX_CONCURRENT?: string; // optional project sandbox admission budget, 1..100; default whole selected team
   CLOUDBITE_DAYTONA_API_KEY?: string;   // Worker secret
   CLOUDBITE_DAYTONA_SNAPSHOT?: string;
   CLOUDBITE_DAYTONA_SECONDARY_API_KEY?: string;  // Worker secret: 선택. 다른 Daytona 조직의 키 — docs/daytona-multi-account.md

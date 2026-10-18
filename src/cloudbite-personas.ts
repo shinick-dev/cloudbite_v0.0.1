@@ -36,7 +36,7 @@ export const CLOUDBITE_BRIEF_LIMITS = Object.freeze({
   requestIdMin: 8,
   requestId: 64,
   minExperts: 1,
-  maxExperts: 5,
+  maxExperts: 100,
 });
 
 export const CLOUDBITE_OPINION_LIMITS = Object.freeze({

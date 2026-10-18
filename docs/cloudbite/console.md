@@ -1,5 +1,7 @@
 # Cloudbite 프로젝트 콘솔
 
+> Current limits and release verification: [parallel execution](parallel-execution.md). The earlier 5-role / 3-concurrent descriptions below are historical.
+
 공통 프로젝트 → 선택한 전문가 역할 → 전문가별 작업공간 → 활동·파일 → 종합을 한 화면에서 보여 주는 콘솔이다.
 
 ## 파일

@@ -112,7 +112,7 @@ await check('submit: exact Origin, JSON, 8 KiB, plain-text bounds; fresh __Host-
   const q = r.j.request;
   assert.deepEqual(Object.keys(q).sort(), ['createdAt', 'expiresAt', 'id', 'maxExperts', 'maxProjects', 'name', 'purpose', 'status', 'usedProjects']);
   assert.equal(q.name, 'Ada <b>', 'stored as trimmed plain text'); assert.equal(q.status, 'pending');
-  assert.equal(q.expiresAt - q.createdAt, 30 * MIN); assert.equal(q.maxExperts, 5); assert.equal(q.maxProjects, 10); assert.equal(q.usedProjects, 0);
+  assert.equal(q.expiresAt - q.createdAt, 30 * MIN); assert.equal(q.maxExperts, 100); assert.equal(q.maxProjects, 10); assert.equal(q.usedProjects, 0);
   noCredentialIn(r, jar(r.cookie));
   const stored = JSON.stringify(records(w));
   assert.ok(!stored.includes(credOf(jar(r.cookie))), 'plaintext credential is not stored');
@@ -310,7 +310,7 @@ await check('atomic quota: eleven concurrent creates yield ten projects; same-id
   assert.equal((await create(w, brief({ mode: 'live' }), { cookie: y.cookie })).status, 503);
   assert.equal((await call(w, 'GET', '/api/cloudbite/access/status', { headers: { cookie: y.cookie } })).j.request.usedProjects, 0);
   // Expert limit stays 5 (validateBrief) for visitors too.
-  assert.equal((await create(w, brief({ expertIds: ids.slice(0, 6) }), { cookie: y.cookie })).status, 400);
+  assert.equal((await create(w, brief({ expertIds: Array(101).fill(ids[0]) }), { cookie: y.cookie })).status, 400);
 });
 
 await check('rate: 120 new requests per hashed source per hour, so many attendees behind one venue NAT address get in', async () => {
@@ -686,7 +686,7 @@ await check('auto-approval: persists across DO reconstruction; new requests only
   const fresh = await visitor(w, '203.0.113.2', 'Auto approved');
   assert.equal(fresh.res.j.request.status, 'approved'); assert.equal(fresh.res.j.canCreate, true);
   assert.equal(fresh.res.j.request.expiresAt - fresh.res.j.request.createdAt, HOUR);
-  assert.equal(fresh.res.j.request.maxProjects, 10); assert.equal(fresh.res.j.request.maxExperts, 5);
+  assert.equal(fresh.res.j.request.maxProjects, 10); assert.equal(fresh.res.j.request.maxExperts, 100);
   noCredentialIn(fresh.res, fresh.cookie);
   assert.equal((await status(w, old.cookie)).j.request.status, 'pending', 'old requests unchanged');
   const repeat = await call(w, 'POST', '/api/cloudbite/access/requests', { body: { name: 'repeat', purpose: 'repeat' }, headers: { ...ORIGIN, cookie: old.cookie } });
@@ -709,7 +709,7 @@ await check('auto-approval and submit share a serial order; rate, quota and expe
   ]);
   assert.equal(on.autoApprove, true); assert.equal(a.session.request.status, 'approved');
   assert.equal(off.autoApprove, false); assert.equal(b.session.request.status, 'pending');
-  assert.equal((await box.reserve(sha('a'), sha('invalid'), 6)).status, 403);
+  assert.equal((await box.reserve(sha('a'), sha('invalid'), 101)).status, 403);
   const slots = await Promise.all(Array.from({ length: 11 }, (_, i) => box.reserve(sha('a'), sha('slot-' + i), 1)));
   assert.equal(slots.filter(x => !x.status).length, 10); assert.equal(slots.at(-1).status, 409);
   await box.setPolicy(true);

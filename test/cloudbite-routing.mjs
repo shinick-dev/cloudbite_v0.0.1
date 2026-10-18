@@ -34,6 +34,17 @@ await test('sort relevance and enforce max5/lower session cap without inventing 
 await test('no match returns clarification error and never a fabricated fallback team', async () => {
  const r = await ask(answer()); assert.equal(r.status, 422); assert.equal(r.expertIds, undefined);
 });
+await test('a broad question can select the entire catalogue; narrower actor limits still win', async () => {
+ const data = answer(Object.fromEntries(experts.map(e => [e.id, 0.9])));
+ assert.equal((await ask(data, 100)).expertIds.length, 100);
+ assert.equal((await ask(data, 12)).expertIds.length, 12);
+ const router = new m.RoutingSession(storage(), experts, 'TEST-KEY', () => 10000, async () => response(data));
+ const decision = await router.plan(q(), 100);
+ assert.equal(decision.expertIds.length, 100);
+ assert.deepEqual(await router.read(q(), 100), decision);
+ assert.equal((await router.read(q(), 5)).status, 409);
+ for (const limit of [0, 101, 1.5]) assert.equal((await router.plan(q(), limit)).status, 400);
+});
 await test('missing/extra/malformed decisions fail closed', async () => {
  const variants = [];
  const missing = good(); delete missing.answers[experts[0].id]; variants.push(missing);

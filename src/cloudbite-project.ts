@@ -22,7 +22,7 @@ import type { ExpertActivity, ExpertArtifact, ExpertDefinition, ExpertRun, Proje
 import { CLOUDBITE_EXPERTS, buildExpertWorkspace } from './cloudbite-personas';
 import {
   CB_ACTIVITY_MAX, CB_ACTIVITY_POSTS, CB_ARTIFACT_FILES, CB_ARTIFACT_MAX, CB_CAPABILITY_TTL, CB_CLAIM_STALE, CB_CLEANUP_MAX_TRIES,
-  CB_EXPERT_DEADLINE, CB_INFERENCE_MAX_CALLS, CB_INFERENCE_TIMEOUT, CB_MAX_ACTIVE_PROJECTS, CB_MAX_CONCURRENT, CB_MAX_TOKENS, CB_POLL,
+  CB_EXPERT_DEADLINE, CB_INFERENCE_MAX_CALLS, CB_INFERENCE_TIMEOUT, CB_MAX_ACTIVE_PROJECTS, cbMaxConcurrent, CB_MAX_TOKENS, CB_POLL,
   CB_PROVISION_DEADLINE, CB_RETENTION, CB_WORKDIR, cbAccountBinding, cloudbiteConfig, type CbAccountId, type CbDaytonaAccount, type CloudbiteConfig,
 } from './cloudbite-config';
 import { artifactPath, extraArtifactPath, isInvalid, PROJECT_ID, validateBrief, validateResult, validateWorkspace } from './cloudbite-validate';
@@ -445,7 +445,7 @@ export class CloudbiteProject extends DurableObject<Env> {
     const offset = parseInt(proj.id.slice(2, 10), 16) || 0;
     let active = fresh.filter((x) => x.int.phase !== 'queued' && x.int.phase !== 'final').length;
     for (const e of fresh.filter((x) => x.int.phase === 'queued')) {
-      if (active >= CB_MAX_CONCURRENT) break;
+      if (active >= cbMaxConcurrent(this.env)) break;
       active++;
       const a = accounts[(offset + Math.max(0, proj.runs.indexOf(e.run.id))) % accounts.length];
       await this.commit(e.run.id, null, (x) => {
@@ -613,7 +613,7 @@ export class CloudbiteProject extends DurableObject<Env> {
     let active = experts.filter((x) => x.run.status === 'provisioning' || x.run.status === 'running').length;
     for (const [i, e] of experts.entries()) {
       if (e.int.phase === 'final') continue;
-      if (e.int.phase === 'queued' && active >= CB_MAX_CONCURRENT) continue;
+      if (e.int.phase === 'queued' && active >= (cbMaxConcurrent(this.env) || 100)) continue;
       if (e.int.phase === 'queued') active++;
       let artifacts: Array<[string, string]> = [];
       await this.commit(e.run.id, null, (x, p) => {

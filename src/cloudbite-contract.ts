@@ -64,7 +64,7 @@ export interface ProjectRun {
 }
 export interface CloudbiteBootstrap {
   experts: ExpertDefinition[];
-  configuration: { liveReady: boolean; missing: string[]; maxExperts: number; historyRetentionDays?: number;
+  configuration: { liveReady: boolean; missing: string[]; maxExperts: number; maxConcurrent?: number; historyRetentionDays?: number;
     routing?: { provider: 'typesafe'; model: string; ready: boolean; maxExperts: number } };
   access?: import('./cloudbite-access-contract').CloudbiteAccessSession;
   /** Optional 100-role planning catalogue. Only `available` entries map to runnable `experts`; all are unvalidated. */

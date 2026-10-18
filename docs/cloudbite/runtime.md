@@ -1,5 +1,7 @@
 # Cloudbite runtime (v0.0.1 first slice)
 
+> Current limits and release verification: [parallel execution](parallel-execution.md). The earlier 5-role / 3-concurrent descriptions below are historical.
+
 Owner: runtime worker. Implements `docs/cloudbite/api-contract.md` on top of the shared types in `src/cloudbite-contract.ts`.
 
 ## Modules

@@ -54,7 +54,8 @@ for (const e of pool.entries.slice(0, 10)) {
   assert.throws(() => m.validateProjectBrief(brief([e.id])), /unknown expert/); checks++;
   ok(m.isInvalid(m.validateBrief(brief([e.id]), CLOUDBITE_EXPERTS)), `${e.id} rejected by the runtime gate`);
 }
-ok(m.isInvalid(m.validateBrief(brief(available.slice(0, 6).map(e => e.expertId)), CLOUDBITE_EXPERTS)) && !m.isInvalid(m.validateBrief(brief(available.slice(0, 5).map(e => e.expertId)), CLOUDBITE_EXPERTS)), 'max 5 selected experts unchanged');
+ok(!m.isInvalid(m.validateBrief(brief(available.map(e => e.expertId)), CLOUDBITE_EXPERTS)), 'entire available catalogue can be selected');
+ok(m.isInvalid(m.validateBrief(brief(Array(101).fill(available[0].expertId)), CLOUDBITE_EXPERTS)), '101 selections rejected');
 ok(!JSON.stringify(pool).match(/v_[a-f0-9]{64}|cbt_|@/), 'catalogue contains no user, token or account data');
 
 console.log(`cloudbite-pool: ${checks} checks passed`);

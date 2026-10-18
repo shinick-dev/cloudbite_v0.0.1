@@ -10,7 +10,7 @@ const text = (v: unknown, min: number, max: number) => typeof v === 'string' && 
 const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 
 export const PROJECT_ID = /^cb[0-9a-f]{32}$/;
-export const RUN_ID = /^e[0-4]$/;
+export const RUN_ID = /^e(?:[0-9]|[1-9][0-9])$/;
 const LIMITS = CLOUDBITE_BRIEF_LIMITS;
 export const REQUEST_ID = new RegExp(`^[A-Za-z0-9_-]{${LIMITS.requestIdMin},${LIMITS.requestId}}$`);
 export const EXPERT_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;

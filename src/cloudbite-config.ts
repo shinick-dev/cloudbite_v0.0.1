@@ -2,8 +2,8 @@
 // Cloudbite uses its own CLOUDBITE_* secrets; it never reads gw-shinick's stored Daytona/OpenRouter providers.
 import type { Env } from './state';
 
-export const CB_MAX_EXPERTS = 5;            // experts per project (first real slice)
-export const CB_MAX_CONCURRENT = 3;         // experts provisioned/running at once per project
+export const CB_MAX_EXPERTS = 100;          // bounded by the runnable catalogue, not the old five-role pilot
+export const CB_MAX_CONCURRENT = CB_MAX_EXPERTS; // start the selected team independently by default
 export const CB_MAX_ACTIVE_PROJECTS = 2;    // live projects holding sandboxes at once (registry)
 export const CB_EXPERT_DEADLINE = 15 * 60_000;
 export const CB_PROVISION_DEADLINE = 4 * 60_000;
@@ -30,6 +30,13 @@ export const CB_DAYTONA_TIMEOUT = 45_000;
 export const CB_CLEANUP_MAX_TRIES = 8;
 
 export const CB_WORKDIR = '/home/daytona/cloudbite';
+
+/** Operator override for provider capacity; never controlled by the browser or a model decision. */
+export function cbMaxConcurrent(env: Pick<Env, 'CLOUDBITE_MAX_CONCURRENT'>): number {
+  const raw = env.CLOUDBITE_MAX_CONCURRENT;
+  if (raw === undefined) return CB_MAX_CONCURRENT;
+  return /^(?:[1-9]|[1-9][0-9]|100)$/.test(raw) ? Number(raw) : 0;
+}
 
 /** Stable internal Daytona account ids. Never derived from or exposing a key. */
 export type CbAccountId = 'primary' | 'secondary' | 'tertiary';
@@ -58,6 +65,7 @@ const httpsUrl = (v: string | undefined, allowLocal: boolean) => {
 export function cloudbiteMissing(env: Env, catalogueSize: number): string[] {
   const local = env.CLOUDBITE_ALLOW_HTTP === '1';
   const missing: string[] = [];
+  if (!cbMaxConcurrent(env)) missing.push('CLOUDBITE_MAX_CONCURRENT (must be an integer from 1 to 100)');
   if (!env.CLOUDBITE) missing.push('CLOUDBITE (Durable Object binding)');
   if (!httpsUrl(env.CLOUDBITE_DAYTONA_API_URL, local)) missing.push('CLOUDBITE_DAYTONA_API_URL');
   if (!env.CLOUDBITE_DAYTONA_API_KEY) missing.push('CLOUDBITE_DAYTONA_API_KEY');

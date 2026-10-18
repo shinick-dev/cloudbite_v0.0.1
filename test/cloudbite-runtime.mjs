@@ -93,6 +93,7 @@ function makeWorld(opts = {}) {
     ORIGIN: 'https://cb.test', LAB_ORIGIN: 'https://lab.cloudbite.invalid', RP_ID: 'cb.test', MASTER_KEY: 'k',
     STATE: { idFromName: () => 'main', get: () => w.state },
     CLOUDBITE: w.ns,
+    CLOUDBITE_MAX_CONCURRENT: '3', // explicit constrained-provider regression mode; default-all is tested separately
     CLOUDBITE_DAYTONA_API_URL: 'https://dt.fake', CLOUDBITE_DAYTONA_API_KEY: SECRETS[0],
     CLOUDBITE_NOSANA_BASE_URL: 'https://nosana.fake/v1', CLOUDBITE_NOSANA_API_KEY: SECRETS[1], CLOUDBITE_NOSANA_MODEL: 'fake-model',
     CLOUDBITE_GATEWAY_URL: w.gateway ?? 'http://127.0.0.1:9', CLOUDBITE_ALLOW_HTTP: '1',
@@ -255,7 +256,7 @@ const freshWorld = (opts) => { const dirs = mkdtempSync(join(tmp, 'w-')); W = ma
 await check('bootstrap reports configuration names only, never values', async () => {
   const w = freshWorld();
   const r = await call(w, 'GET', '/api/cloudbite/bootstrap');
-  assert.equal(r.status, 200); assert.equal(r.j.configuration.liveReady, true); assert.equal(r.j.configuration.maxExperts, 5); assert.equal(r.j.experts.length, 6);
+  assert.equal(r.status, 200); assert.equal(r.j.configuration.liveReady, true); assert.equal(r.j.configuration.maxExperts, 100); assert.equal(r.j.experts.length, 6);
   for (const s of SECRETS) assert.ok(!r.text.includes(s));
   w.env.CLOUDBITE_NOSANA_API_KEY = ''; w.env.CLOUDBITE_DAYTONA_API_URL = 'http://evil.example';
   const r2 = await call(w, 'GET', '/api/cloudbite/bootstrap');
@@ -294,7 +295,7 @@ await check('create requires admin session, exact Origin, JSON, body limit and b
   assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: brief(), headers: { ...admin, origin: 'https://evil.test' } })).status, 403);
   assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: brief(), headers: { ...admin, 'content-type': 'text/plain' } })).status, 415);
   assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: brief(), raw: JSON.stringify({ ...brief(), context: 'x'.repeat(20000) }), headers: admin })).status, 413);
-  assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['market', 'risk', 'ops', 'legal', 'finance', 'ux'] }), headers: admin })).status, 400);
+  assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: Array(101).fill('market') }), headers: admin })).status, 400);
   assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['nobody'] }), headers: admin })).status, 400);
   assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: { ...brief(), extra: 1 }, headers: admin })).status, 400);
   assert.equal(w.posts, 0); assert.equal(w.fetches.length, 0);
@@ -631,7 +632,7 @@ await check('real catalogue: actual persona workspace -> python runner -> flat o
   const w = freshWorld({ M: REAL });
   const boot = await call(w, 'GET', '/api/cloudbite/bootstrap');
   assert.ok(boot.j.experts.length === 100 && boot.j.experts.some((e) => e.id === 'probably-primetime-sta'), 'actual 100-role catalogue, including the curated STA role');
-  assert.equal(boot.j.pool.entries.length, 100); assert.equal(boot.j.configuration.maxExperts, 5);
+  assert.equal(boot.j.pool.entries.length, 100); assert.equal(boot.j.configuration.maxExperts, 100);
   assert.deepEqual(new Set(boot.j.pool.entries.filter((e) => e.availability === 'available').map((e) => e.expertId)), new Set(boot.j.experts.map((e) => e.id)));
   const ids = boot.j.experts.slice(0, 3).map((e) => e.id);
   // the console sends crypto.randomUUID() request ids
@@ -930,8 +931,7 @@ await check('phase-one knowledge: role-bound packs, unknown citation and missing
   w.env.CLOUDBITE_HISTORY = { getByName: () => ({ upsert: async (row) => { rows.push(structuredClone(row)); } }) };
   const planned = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['pool-003'] }), headers: admin });
   assert.equal(planned.status, 400, 'a catalogue display id cannot launch');
-  const six = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['cb-evidence-auditor', 'cb-quantitative-reviewer', 'cb-assumption-auditor', 'cb-adversarial-reviewer', 'cb-synthesis-editor', 'cb-finops'] }), headers: admin });
-  assert.equal(six.status, 400, 'max 5 experts unchanged');
+  assert.ok(!REAL.isInvalid(REAL.validateBrief(brief({ expertIds: ['cb-evidence-auditor', 'cb-quantitative-reviewer', 'cb-assumption-auditor', 'cb-adversarial-reviewer', 'cb-synthesis-editor', 'cb-finops'] }))), 'six experts allowed');
   const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ids, objective: 'Check the pricing evidence for launch.' }), headers: admin });
   assert.equal(created.status, 201, created.text);
   const obj = await project(w, created);
@@ -1211,6 +1211,50 @@ await check('tertiary lost create survives restart; removing or rotating its key
   assertOwned(w);
 });
 
+await check('whole catalogue: 100 independent creates start without a three-role pipeline, owner pinning and cancellation cleanup survive', async () => {
+  const w = freshWorld({ M: REAL, runner: 'none', env: { ...SECONDARY, ...TERTIARY } });
+  delete w.env.CLOUDBITE_MAX_CONCURRENT;
+  const boot = await call(w, 'GET', '/api/cloudbite/bootstrap');
+  assert.equal(boot.j.configuration.maxConcurrent, 100);
+  const ids = boot.j.experts.map(e => e.id);
+  assert.equal(ids.length, 100);
+  const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ids }), headers: admin });
+  assert.equal(created.status, 201, created.text);
+  const obj = await project(w, created);
+  w.createHold = gate();
+  const tick = obj.alarm();
+  for (let i = 0; i < 1000 && w.creating < 100; i++) await sleep(10);
+  assert.equal(w.creating, 100, 'all selected experts admitted before any create completes');
+  const rows = await experts(obj);
+  assert.equal(rows.length, 100);
+  for (const row of rows) {
+    assert.ok(OWNER[row.int.account]);
+    assert.match(row.int.binding, /^[0-9a-f]{32}$/);
+    assert.ok(REAL.RUN_ID.test(row.run.id));
+  }
+  w.createHold.resolve(); w.createHold = null; await tick;
+  assert.equal(w.posts, 100);
+  assert.equal(w.postsBy.A + w.postsBy.B + w.postsBy.C, 100);
+  assert.ok(Object.values(w.postsBy).every(n => n >= 33 && n <= 34));
+  const stopped = await call(w, 'POST', `/api/cloudbite/projects/${created.j.project.id}/cancel`, { body: {}, headers: { origin: 'https://cb.test', authorization: `Bearer ${created.j.accessToken}` } });
+  assert.equal(stopped.status, 200, stopped.text);
+  await drive(w, obj, async () => w.sandboxes.size === 0 && (await cleanups(obj)).every(c => c.done));
+  assert.equal(w.deletes.length, 100);
+  assert.equal(new Set(w.deletes).size, 100);
+  assertOwned(w);
+});
+await check('parallelism override validates and does not change selection or legacy run IDs', async () => {
+  assert.equal(M.cbMaxConcurrent({}), 100);
+  for (const raw of ['1', '7', '100']) assert.equal(M.cbMaxConcurrent({ CLOUDBITE_MAX_CONCURRENT: raw }), Number(raw));
+  for (const raw of ['', '0', '101', '-1', '3.5', '03', 'NaN', ' 3']) {
+    const w = freshWorld({ env: { CLOUDBITE_MAX_CONCURRENT: raw } });
+    const boot = await call(w, 'GET', '/api/cloudbite/bootstrap');
+    assert.equal(boot.j.configuration.liveReady, false);
+    assert.ok(boot.j.configuration.missing.some(n => n.includes('CLOUDBITE_MAX_CONCURRENT')));
+  }
+  for (const id of ['e0', 'e4', 'e5', 'e10', 'e99']) assert.ok(M.RUN_ID.test(id));
+  for (const id of ['e100', 'e01', 'e-1', 'e', 'e1/foo']) assert.ok(!M.RUN_ID.test(id));
+});
 server.close();
 rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${count} cloudbite runtime checks passed`);

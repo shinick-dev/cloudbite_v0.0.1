@@ -441,7 +441,7 @@ await test('왼쪽 탐색: Home 이 기본, Guide·Help·Settings 는 실제 내
   assert.equal(view(env, 'guide').hidden, false); assert.equal(view(env, 'home').hidden, true);
   assert.equal(env.fk('nav:guide').getAttribute('aria-current'), 'page');
   assert.equal(env.fk('nav:home').getAttribute('aria-current'), 'false');
-  assert.match(view(env, 'guide').textContent, /Choose up to five experts/);
+  assert.match(view(env, 'guide').textContent, /Let Jev choose your experts/);
   env.fk('nav:help').click();
   assert.match(view(env, 'help').textContent, /self-assessment, not calibrated accuracy/);
   env.fk('nav:settings').click();
@@ -1337,7 +1337,7 @@ await test('팀 제안 규칙: 브리프 키워드만, 실행 가능한 실제 �
   assert.deepEqual(picks.find(p => p.entryId === 'pool-057').matched, ['privacy', 'personal data']);
   assert.ok(!picks.some(p => p.entryId === 'pool-002'), 'planned roles never suggested even when keywords match');
   assert.deepEqual(core.suggestTeam(POOL_BRIEF, pool.entries, ids, 5), picks, 'deterministic');
-  assert.equal(core.suggestTeam(POOL_BRIEF, pool.entries, ids, 9).length, 5, 'never more than five');
+  assert.ok(core.suggestTeam(POOL_BRIEF, pool.entries, ids, 9).length > 5, 'larger configured teams are not truncated at five');
   assert.equal(core.suggestTeam(POOL_BRIEF, pool.entries, ids, 2).length, 2, 'respects a lower session limit');
   assert.deepEqual(core.suggestTeam(POOL_BRIEF, pool.entries, ['e0'], 5).map(p => p.expertId), ['e0'], 'only roles in the current catalogue');
   assert.deepEqual(core.suggestTeam('가격과 첫해 예산을 검토', pool.entries, ids, 5).map(p => p.entryId), ['pool-061', 'pool-062'], 'Korean keywords match with particles');
@@ -1552,9 +1552,19 @@ const jevServer = (ids, { route } = {}) => (url, init) => {
 };
 const setToken = async (env, token) => { const tok = env.all().find(n => n.id === 'cb-token'); tok.value = token; tok.dispatch('input'); await env.flush(); };
 
+await test('Jev accepts teams above five up to the server and visitor limit', () => {
+  const ids = Array.from({ length: 100 }, (_, i) => `role-${i}`);
+  const result = routeOk(ids);
+  result.matches = ids.map(expertId => ({ expertId, relevance: 0.9 }));
+  assert.equal(core.normalizeRoute(result, ids, 100).expertIds.length, 100);
+  assert.equal(core.normalizeRoute(result, ids, 99), null);
+  assert.equal(core.normalizeRoute(routeOk(ids.slice(0, 12)), ids, 12).expertIds.length, 12);
+  assert.equal(core.normalizeRoute(routeOk(ids.slice(0, 12)), ids, 5), null);
+});
+
 await test('Jev 정리: routing 은 TypeSafe·ready 참거짓일 때만, 경로 응답은 실제 역할 1..max·중복 없음·정책 버전이 맞을 때만', () => {
   const boot = core.normalizeBootstrap(jevBoot({ ...ROUTING, maxExperts: 9, model: 42 }));
-  assert.deepEqual(boot.configuration.routing, { provider: 'typesafe', model: 'jev', ready: true, maxExperts: 5 });
+  assert.deepEqual(boot.configuration.routing, { provider: 'typesafe', model: 'jev', ready: true, maxExperts: 9 });
   assert.equal(core.normalizeBootstrap(CATALOGUE).configuration.routing, undefined, 'old bootstrap: no capability');
   assert.equal(core.normalizeBootstrap(jevBoot({ provider: 'other', ready: true })).configuration.routing, undefined);
   assert.equal(core.normalizeBootstrap(jevBoot({ provider: 'typesafe', ready: 'yes' })).configuration.routing, undefined);
