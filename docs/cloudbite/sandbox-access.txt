@@ -1,4 +1,9 @@
-CLOUDBITE - PARTICIPANT SANDBOX ACCESS
+HISTORICAL REFERENCE — LEGACY STUDYROOM SANDBOX ACCESS
+
+This describes the earlier studyroom link, not the current Cloudbite access QR.
+Current Cloudbite request: https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/request
+Current owner inbox: https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/requests
+Use access-service.txt and ../pitch/qr-handoff.txt for the current product flow.
 
 Public request URL (encoded in the QR)
 https://k.shinick.dev/lab/request

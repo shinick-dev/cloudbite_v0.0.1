@@ -10,15 +10,15 @@ Segment          Slot   Pauses  EN words  KO chars*  Main screen
 0:42-1:56        74 s  14 s       133        316     demo clicks (5 cues)
 1:56-2:20        24 s   2 s        43        126     decision view, idle
 2:20-2:48        28 s   0 s        56        130     decision view, idle
-2:48-3:00        12 s   2 s        18         48     participant QR
-TOTAL           180 s  18 s       341        853
+2:48-3:00        12 s   2 s        15         52     Cloudbite access QR
+TOTAL           180 s  18 s       338        857
 * Korean characters counted without spaces.
 
 Assumed cadence: English about 130 words/min, Korean about 320 chars/min,
 over 162 s of speech plus 18 s of silent click pauses. The close is
 deliberately slow. Counts come from a local script over the spoken lines
 (stage directions, headers and the fallback block excluded). No recording
-was made; the updated text leaves about 5 s EN / 2 s KO of slack at that cadence.
+was made; the updated text leaves about 6 s EN / 1 s KO of slack at that cadence.
 Time one full read-through aloud before the event and trim
 the demo segment first if it runs long.
 

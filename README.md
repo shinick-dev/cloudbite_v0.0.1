@@ -16,7 +16,7 @@
 
 ## 피치용 완성 경험 미리보기
 
-[제출용 단일 HTML](deliverables/cloudbite-hacksprint-submission.html)은 약255KB이며, 영문 제품 설명·한영 시나리오·발표 원고·인터랙티브 프리뷰·QR을 모두 내장합니다. 파일 하나로 오프라인 열람·체험할 수 있고, 실제 신청 링크에는 인터넷이 필요합니다. `node tools/build-cloudbite-submission.mjs`로 다시 만듭니다.
+[제출용 단일 HTML](deliverables/cloudbite-hacksprint-submission.html)은 약261KB이며, 영문 제품 설명·한영 시나리오·발표 원고·인터랙티브 프리뷰·QR을 모두 내장합니다. 파일 하나로 오프라인 열람·체험할 수 있고, 실제 신청 링크에는 인터넷이 필요합니다. `node tools/build-cloudbite-submission.mjs`로 다시 만듭니다.
 
 [demo/cloudbite-pitch.html](demo/cloudbite-pitch.html)을 브라우저에서 열면 됩니다. 파일 하나로 오프라인에서 동작합니다.
 
