@@ -73,6 +73,16 @@ code, pre { font-family: var(--mono); }
 .cb-profile-text { display: flex; flex-direction: column; line-height: 1.2; min-width: 0; }
 .cb-profile-name { font-size: 13px; font-weight: 600; color: #fff; }
 .cb-profile-state { font-size: 11px; color: #9fb4dc; white-space: nowrap; }
+/* KO / EN: pressed = current language. lang attribute on each button gives screen readers the right voice */
+.cb-lang { display: inline-flex; padding: 3px; gap: 2px; border-radius: 999px; background: var(--navy-2); flex: none; }
+.cb-lang-btn { min-width: 36px; min-height: 30px; padding: 0 10px; border: 0; border-radius: 999px; background: transparent; color: #a9bbdf; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; cursor: pointer; }
+.cb-lang-btn:hover { color: #fff; }
+.cb-lang-btn[aria-pressed="true"] { background: #fff; color: var(--navy); }
+.cb-lang-btn:focus-visible { outline: 2px solid #8fb8ff; outline-offset: 1px; }
+.cb-owner { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.cb-owner .cb-ok { flex: 1 1 260px; }
+/* Korean wraps at word boundaries, not mid-syllable-block */
+.cb-root:lang(ko) { word-break: keep-all; overflow-wrap: break-word; }
 
 /* shell: 224px nav + main */
 .cb-shell { display: grid; grid-template-columns: 224px minmax(0, 1fr); min-height: calc(100vh - 70px); }
@@ -396,6 +406,8 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 @media (max-width: 480px) {
   .cb-word small { display: none; }
   .cb-badge { font-size: 11px; padding: 3px 8px; }
+  .cb-top-right { gap: 8px; }
+  .cb-lang-btn { min-width: 32px; padding: 0 8px; }
   .cb-start { width: 100%; }
   .cb-project-top .cb-spacer { display: none; }
 }

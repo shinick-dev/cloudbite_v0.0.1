@@ -30,7 +30,7 @@ function loadCore() {
   assert.ok(core, 'test hook received core');
   // vm 영역의 배열·객체를 이 영역 값으로 바꿔 deepEqual 이 영역 차이로 실패하지 않게 한다
   const out = {};
-  for (const [k, v] of Object.entries(core)) out[k] = typeof v === 'function' ? (...a) => { const r = v(...a); return r === undefined || r === null ? r : plain(r); } : plain(v);
+  for (const [k, v] of Object.entries(core)) out[k] = typeof v === 'function' ? (...a) => { const r = v(...a); return r === undefined || r === null ? r : plain(r); } : k === 'DICT' ? v : plain(v); // 사전은 문구 함수째로 쓴다
   return out;
 }
 const plain = (v) => JSON.parse(JSON.stringify(v));
@@ -188,18 +188,25 @@ class Node_ {
     return null;
   }
 }
-function fakeEnv({ fetchImpl, globals = {} }) {
+/** 소유자 세션 기본값: 로그인하지 않음 (서버의 200 {authenticated:false}) */
+const OWNER_OUT = () => json(200, { authenticated: false, hasCredentials: false });
+/** 소유자 세션·로그아웃 요청은 env.ownerCalls 에 따로 모은다 (requests 에는 Cloudbite 프로젝트·bootstrap 요청만) */
+function fakeEnv({ fetchImpl, owner = OWNER_OUT, globals = {} }) {
   const timers = new Map(); let seq = 0, now = 0;
   const doc = { readyState: 'complete', activeElement: null, createElement: (t) => new Node_(doc, t), getElementById: (id) => id === 'cloudbite' ? root : null,
     listeners: {}, addEventListener(t, f) { (this.listeners[t] ||= []).push(f); },
     key(k) { const e = { key: k, preventDefault() {} }; for (const f of this.listeners.keydown || []) f(e); } };
+  doc.documentElement = new Node_(doc, 'html');
   const root = new Node_(doc, 'div'); root.id = 'cloudbite'; doc.body = new Node_(doc, 'body'); doc.body.append(root);
-  const requests = [];
+  const requests = [], ownerCalls = [];
   const ctx = vm.createContext({
     document: doc, crypto: globalThis.crypto, CSS: { escape: (s) => s }, URL, Blob,
     setTimeout: (fn, ms) => { const id = ++seq; timers.set(id, { at: now + (ms || 0), fn }); return id; },
     clearTimeout: (id) => { timers.delete(id); }, setInterval: () => 0,
-    fetch: (url, init = {}) => { requests.push({ url, init }); return fetchImpl(url, init, requests.length); },
+    fetch: (url, init = {}) => {
+      if (String(url).startsWith('/api/cloudbite/owner/')) { ownerCalls.push({ url, init }); return owner(url, init, ownerCalls.length); }
+      requests.push({ url, init }); return fetchImpl(url, init, requests.length);
+    },
     ...globals,
   });
   vm.runInContext(CLOUDBITE_JS, ctx);
@@ -216,7 +223,7 @@ function fakeEnv({ fetchImpl, globals = {} }) {
   const all = () => [...root.walk()];
   const byText = (tag, text) => all().find(n => n.tagName === tag && n.textContent.trim() === text);
   const fk = (k) => all().find(n => n.getAttribute('data-fk') === k);
-  return { root, doc, requests, flush, advance, all, byText, fk, ctx, pendingTimers: () => timers.size };
+  return { root, doc, requests, ownerCalls, flush, advance, all, byText, fk, ctx, pendingTimers: () => timers.size };
 }
 const json = (status, body) => Promise.resolve({ ok: status >= 200 && status < 300, status, json: async () => body, text: async () => JSON.stringify(body) });
 const CATALOGUE = {
@@ -713,7 +720,7 @@ await test('만료·취소·거절·대기·소진된 방문자 접근은 쓰지
     assert.equal(cards(env), 0, 'and nothing starts by itself');
     env.byText('BUTTON', 'Live run').click(); await env.flush();
     assert.match(env.root.textContent, re);
-    assert.ok(env.all().some(n => n.tagName === 'A' && n.attrs.href === '/cloudbite/request' && n.textContent === 'Request visitor access' && n.parent.className === 'cb-warn'));
+    assert.ok(env.all().some(n => n.tagName === 'A' && n.attrs.href === '/cloudbite/request?lang=en' && n.textContent === 'Request visitor access' && n.parent.className === 'cb-warn'));
     assert.equal(startBtnOf(env).disabled, true);
     assert.equal(env.all().find(n => n.className === 'cb-profile-name').textContent, 'Operator');
   }
@@ -965,6 +972,228 @@ await test('Project details: 이름·맥락은 접기 안에 있고, 그 칸이 
   assert.equal(cards(env), 0, 'nothing started');
   assert.match(formMsgOf(env), /project name/i);
   assert.equal(setupOf(env).hidden, false);
+});
+
+// ───────── 언어 (KO / EN) — 사전은 코어에서 꺼내 쓴다 (문구를 시험에 베끼지 않는다)
+const EN = core.DICT.en, KO = core.DICT.ko;
+const langBtn = (env, l) => env.fk(`lang:${l}`);
+const hrefs = (env) => env.all().filter(n => n.tagName === 'A' && n.attrs.href && n.attrs.href.startsWith('/cloudbite/')).map(n => n.attrs.href);
+
+await test('언어 고르기: 올바른 ?lang= → 브라우저 언어 → en, 다른 질의는 그대로 두고 lang 만 바꾼다', () => {
+  assert.equal(core.pickLang('?lang=ko', ['en-US']), 'ko');
+  assert.equal(core.pickLang('?lang=en', ['ko-KR']), 'en');
+  assert.equal(core.pickLang('?lang=xx', ['ko-KR', 'en']), 'ko', 'invalid ?lang ignored');
+  assert.equal(core.pickLang('?lang=KO', []), 'en', 'only exact ko|en accepted');
+  assert.equal(core.pickLang('', ['fr-FR', 'ko', 'en']), 'ko', 'first supported navigator language');
+  assert.equal(core.pickLang('', ['fr-FR', 'de']), 'en');
+  assert.equal(core.pickLang('', [undefined, 42, null]), 'en', 'garbage navigator values → en');
+  assert.equal(core.withLang('?x=1&lang=en', 'ko'), '?x=1&lang=ko');
+  assert.equal(core.withLang('', 'en'), '?lang=en');
+  for (const l of ['en', 'ko']) for (const k of Object.keys(EN)) assert.ok(k in core.DICT[l], `${l}.${k}`);
+});
+
+await test('첫 화면 언어: ?lang=ko 나 브라우저 ko 면 한국어로 열고, 주소는 열 때 바꾸지 않는다', async () => {
+  for (const [search, languages, want] of [['?lang=ko', ['en-US'], 'ko'], ['', ['ko-KR'], 'ko'], ['?lang=xx', ['fr'], 'en'], ['?lang=en', ['ko'], 'en']]) {
+    const log = [];
+    const env = fakeEnv({ fetchImpl: () => json(200, CATALOGUE), globals: {
+      location: { pathname: '/cloudbite', search, hash: '' }, navigator: { languages, language: languages[0] },
+      history: { state: null, replaceState: (s, t, u) => log.push(u) } } });
+    await env.flush();
+    assert.equal(langBtn(env, want).getAttribute('aria-pressed'), 'true', `${search} ${languages}`);
+    assert.equal(langBtn(env, want === 'ko' ? 'en' : 'ko').getAttribute('aria-pressed'), 'false');
+    assert.equal(env.doc.documentElement.getAttribute('lang'), want);
+    assert.equal(env.all().find(n => n.id === 'cb-title').value, core.DICT[want].sampleTitle);
+    assert.ok(hrefs(env).length >= 3 && hrefs(env).every(u => u.endsWith(`?lang=${want}`)));
+    assert.deepEqual(log, [], 'no address rewrite on boot');
+  }
+});
+
+await test('KO / EN 전환은 그 자리에서: 입력·선택·실행·타이머·탭·접기·포커스를 지키고, 고치지 않은 예시만 바꾸며 주소는 replaceState 로만', async () => {
+  const log = [];
+  const location = { pathname: '/cloudbite', search: '?x=1', hash: '#top' };
+  const env = fakeEnv({ fetchImpl: () => json(200, CATALOGUE), globals: { location,
+    history: { state: { keep: 1 }, replaceState: (s, t, u) => { log.push([s, u]); location.search = u.slice(u.indexOf('?'), u.indexOf('#')); } } } });
+  await env.flush();
+  const objective = env.all().find(n => n.id === 'cb-objective');
+  objective.value = 'My own objective, typed by me'; objective.dispatch('input');
+  const selected = () => env.all().filter(n => (n.getAttribute('data-fk') || '').startsWith('x:') && n.checked).map(n => n.getAttribute('data-fk'));
+  const before = selected();
+  assert.ok(before.length > 0);
+  await startDemo(env);
+  await env.advance(1500);
+  env.fk('tab:activity').click(); await env.flush();
+  const details = env.all().find(n => n.id === 'cb-log'); details.open = true;
+  const timersBefore = env.pendingTimers();
+  const cardsBefore = cards(env);
+  const fetches = env.requests.length;
+  langBtn(env, 'ko').focus();
+  langBtn(env, 'ko').click(); await env.flush();
+  assert.equal(env.requests.length, fetches, 'no refetch, no rerun');
+  assert.equal(env.pendingTimers(), timersBefore, 'demo timers untouched');
+  assert.equal(cards(env), cardsBefore);
+  assert.equal(objective.value, 'My own objective, typed by me', 'user text not rewritten');
+  assert.equal(env.all().find(n => n.id === 'cb-title').value, KO.sampleTitle, 'untouched sample follows the language');
+  assert.deepEqual(selected(), before);
+  assert.equal(env.fk('tab:activity').getAttribute('aria-selected'), 'true', 'tab kept');
+  assert.equal(details.open, true, 'expanded section kept');
+  assert.equal(env.doc.activeElement, langBtn(env, 'ko'), 'focus kept on the switch');
+  assert.equal(langBtn(env, 'ko').getAttribute('aria-pressed'), 'true');
+  assert.equal(langBtn(env, 'en').getAttribute('aria-pressed'), 'false');
+  assert.equal(env.doc.documentElement.getAttribute('lang'), 'ko');
+  assert.equal(env.doc.title, KO.docTitle);
+  assert.ok(env.all().some(n => n.className.startsWith('cb-card ') && n.textContent.includes(KO.status.running)));
+  assert.equal(env.fk('stop').textContent, KO.stop);
+  assert.deepEqual(log, [[{ keep: 1 }, '/cloudbite?x=1&lang=ko#top']], 'history state kept, only the query changes');
+  assert.ok(hrefs(env).length >= 3 && hrefs(env).every(u => u.endsWith('?lang=ko')), 'request, QR and owner inbox links carry the language');
+  assert.equal(env.all().find(n => n.getAttribute('aria-live') === 'polite').textContent, KO.langChanged);
+  await env.advance(30000);
+  assert.ok(env.root.textContent.includes(KO.projectStatus.completed), 'the same run finishes in place');
+  assert.equal(env.requests.length, fetches);
+  langBtn(env, 'ko').click(); await env.flush();
+  assert.equal(log.length, 1, 'same language is a no-op');
+  langBtn(env, 'en').click(); await env.flush();
+  assert.equal(env.all().find(n => n.id === 'cb-title').value, EN.sampleTitle);
+  assert.equal(objective.value, 'My own objective, typed by me');
+  assert.equal(log.at(-1)[1], '/cloudbite?x=1&lang=en#top');
+  for (const k of ['localStorage', 'sessionStorage', 'indexedDB']) assert.equal(env.ctx[k], undefined);
+  assert.equal(env.doc.cookie, undefined);
+});
+
+await test('언어를 바꾸면 저장된 오류도 그 언어로 다시 그리고, 서버 오류 원문은 그대로 둔다', async () => {
+  const env = liveEnv((url, init) => url === '/api/cloudbite/projects' && init.method === 'POST' ? json(500, { error: 'raw server error text' }) : json(404, {}));
+  await goLive(env);
+  startBtnOf(env).click(); await env.flush();
+  const before = formMsgOf(env);
+  assert.ok(before.includes(EN.httpOther(500)) && before.includes('raw server error text'));
+  langBtn(env, 'ko').click(); await env.flush();
+  const after = formMsgOf(env);
+  assert.ok(after.includes(KO.httpOther(500)) && after.includes('raw server error text'));
+  assert.equal(env.all().find(n => n.id === 'cb-token').value, 'adm-secret-123', 'token memory kept');
+  assert.equal(env.requests.filter(r => r.init.method === 'POST').length, 1, 'no retry on switch');
+});
+
+// ───────── 소유자 로그인 (HttpOnly 쿠키 — JS 는 서버 /owner/session 응답만 믿는다)
+const OWNER_IN = () => json(200, { authenticated: true, hasCredentials: true });
+function ownerEnv(owner, handlers = () => json(404, {}), globals = {}) {
+  return fakeEnv({ owner, globals, fetchImpl: (url, init, n) => url === '/api/cloudbite/bootstrap' ? json(200, CATALOGUE) : handlers(url, init, n) });
+}
+const okRun = (url, init) => {
+  if (url === '/api/cloudbite/projects' && init.method === 'POST') return json(201, { project: liveProject('running', 'running'), accessToken: 'proj-scope-tok' });
+  if (url === '/api/cloudbite/projects/proj-1') return json(200, liveProject('completed', 'completed', { updatedAt: 5 }));
+  return json(404, {});
+};
+const profileName = (env) => env.all().find(n => n.className === 'cb-profile-name').textContent;
+
+await test('소유자 로그인: 세션이 true 면 토큰·방문자 한도 없이 실제 실행을 열고, 헤더 없이 쿠키로만 만든다 (자동 실행 없음)', async () => {
+  const env = ownerEnv(OWNER_IN, okRun);
+  await env.flush(); await env.advance(30000);
+  assert.deepEqual(env.ownerCalls.map(c => [c.url, c.init.credentials, c.init.cache]), [['/api/cloudbite/owner/session', 'same-origin', 'no-store']]);
+  assert.deepEqual(env.requests.map(r => r.url), ['/api/cloudbite/bootstrap'], 'no automatic run');
+  assert.equal(env.byText('BUTTON', 'Live run').getAttribute('aria-pressed'), 'true');
+  assert.equal(profileName(env), EN.profileOwner);
+  assert.ok(env.root.textContent.includes(EN.ownerSignedIn));
+  const start = startBtnOf(env);
+  assert.equal(start.disabled, false, 'owner can run with no token');
+  start.click(); await env.flush();
+  const post = env.requests.find(r => r.init.method === 'POST');
+  assert.ok(!('x-admin-token' in post.init.headers), 'header omitted entirely (an empty header counts as explicit)');
+  assert.equal(post.init.credentials, 'same-origin');
+  await env.advance(1500);
+  assert.match(env.root.textContent, /1 \/ 1 valid opinions/);
+});
+
+await test('소유자 아님 (200 false): 실제 실행은 잠기고 소유자 요청함 링크를 보이며 아무것도 보내지 않는다', async () => {
+  const env = ownerEnv(() => json(200, { authenticated: false, hasCredentials: true }), okRun);
+  await env.flush();
+  assert.equal(env.byText('BUTTON', EN.modeDemo).getAttribute('aria-pressed'), 'true', 'public demo stays default');
+  env.byText('BUTTON', 'Live run').click(); await env.flush();
+  assert.equal(startBtnOf(env).disabled, true);
+  assert.ok(env.all().some(n => n.tagName === 'A' && n.attrs.href === '/cloudbite/requests?lang=en' && n.parent.textContent.includes(EN.ownerSignedOut)));
+  startBtnOf(env).click(); await env.flush();
+  assert.equal(env.requests.filter(r => r.init.method === 'POST').length, 0);
+});
+
+await test('세션을 못 읽으면 (500·네트워크·형식 오류) 로그인으로 보지 않는다', async () => {
+  for (const owner of [() => json(500, {}), () => Promise.reject(new Error('offline')), () => json(200, { authenticated: 'true', hasCredentials: true }), () => json(200, null)]) {
+    const env = ownerEnv(owner, okRun);
+    await env.flush();
+    env.byText('BUTTON', 'Live run').click(); await env.flush();
+    assert.equal(startBtnOf(env).disabled, true);
+    assert.notEqual(profileName(env), EN.profileOwner);
+    assert.ok(env.fk('owner-recheck'), 'retry offered');
+    startBtnOf(env).click(); await env.flush();
+    assert.equal(env.requests.filter(r => r.init.method === 'POST').length, 0);
+  }
+  assert.equal(core.normalizeOwnerSession({ authenticated: true }).hasCredentials, false);
+  assert.equal(core.normalizeOwnerSession('yes'), null);
+});
+
+await test('소유자 실행이 401 이면 로그인 필요를 알리고 데모·재시도 없이 세션을 다시 읽어 잠근다', async () => {
+  let n = 0;
+  const env = ownerEnv(() => ++n === 1 ? OWNER_IN() : json(200, { authenticated: false, hasCredentials: true }),
+    (url, init) => url === '/api/cloudbite/projects' && init.method === 'POST' ? json(401, { error: 'owner session required' }) : json(404, {}));
+  await env.flush();
+  startBtnOf(env).click(); await env.flush();
+  await env.advance(30000);
+  assert.equal(formMsgOf(env), EN.ownerRejected);
+  assert.equal(env.requests.filter(r => r.init.method === 'POST').length, 1, 'no retry');
+  assert.equal(cards(env), 0, 'no demo fallback');
+  assert.equal(env.byText('BUTTON', 'Live run').getAttribute('aria-pressed'), 'true');
+  assert.equal(env.ownerCalls.length, 2, 'session re-read once');
+  assert.equal(startBtnOf(env).disabled, true, 'locked until signed in again');
+});
+
+await test('직접 넣은 토큰이 있으면 소유자 쿠키보다 앞서 그 헤더만 쓰고, 거부돼도 쿠키로 넘어가지 않는다', async () => {
+  const env = ownerEnv(OWNER_IN, (url, init) => url === '/api/cloudbite/projects' && init.method === 'POST' ? json(401, {}) : json(404, {}));
+  await env.flush();
+  const tok = env.all().find(n => n.id === 'cb-token');
+  tok.value = 'wrong-admin'; tok.dispatch('input'); await env.flush();
+  assert.equal(profileName(env), EN.profileOperator);
+  startBtnOf(env).click(); await env.flush(); await env.advance(30000);
+  const posts = env.requests.filter(r => r.init.method === 'POST');
+  assert.equal(posts.length, 1, 'no cookie fallback');
+  assert.equal(posts[0].init.headers['x-admin-token'], 'wrong-admin');
+  assert.equal(env.ownerCalls.length, 1, 'owner state not touched by a token rejection');
+});
+
+await test('로그아웃은 서버에 POST {} 를 보내고 다시 읽은 세션으로만 화면을 바꾼다, 실패하면 알린다', async () => {
+  let signedIn = true, fail = false;
+  const env = ownerEnv((url) => {
+    if (url === '/api/cloudbite/owner/logout') { if (fail) return json(500, {}); signedIn = false; return json(200, { ok: true }); }
+    return json(200, { authenticated: signedIn, hasCredentials: true });
+  }, okRun);
+  await env.flush();
+  fail = true;
+  env.fk('owner-signout').click(); await env.flush();
+  assert.equal(profileName(env), EN.profileOwner, 'still signed in per server');
+  assert.ok(env.root.textContent.includes(EN.signOutFailed(EN.httpOther(500))));
+  fail = false;
+  env.fk('owner-signout').click(); await env.flush();
+  const out = env.ownerCalls.filter(c => c.url === '/api/cloudbite/owner/logout');
+  assert.equal(out.length, 2);
+  assert.equal(out[1].init.method, 'POST'); assert.equal(out[1].init.body, '{}'); assert.equal(out[1].init.credentials, 'same-origin');
+  assert.equal(env.ownerCalls.at(-1).url, '/api/cloudbite/owner/session', 'session re-read after logout');
+  assert.notEqual(profileName(env), EN.profileOwner);
+  assert.equal(startBtnOf(env).disabled, true);
+});
+
+await test('포커스·탭 복귀·Settings 로 세션을 다시 읽되 30초에 한 번으로 묶는다', async () => {
+  let clock = 1_000_000;
+  const RealDate = Date;
+  class FakeDate extends RealDate { static now() { return clock; } }
+  const winListeners = {};
+  const env = ownerEnv(OWNER_IN, okRun, { Date: FakeDate, addEventListener: (t, f) => { (winListeners[t] ||= []).push(f); } });
+  await env.flush();
+  assert.equal(env.ownerCalls.length, 1);
+  const focus = async () => { for (const f of winListeners.focus || []) f(); for (const f of env.doc.listeners.visibilitychange || []) f(); await env.flush(); };
+  for (let i = 0; i < 5; i++) await focus();
+  env.byText('BUTTON', 'Settings').click(); await env.flush();
+  assert.equal(env.ownerCalls.length, 1, 'bounded within the window');
+  clock += 31_000;
+  await focus();
+  assert.equal(env.ownerCalls.length, 2, 'refreshed once after the window');
+  await focus();
+  assert.equal(env.ownerCalls.length, 2);
 });
 
 console.log(`cloudbite-console: ${pass} passed`);
