@@ -1,0 +1,548 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-18T00:00:00Z",
+  "title": "Design System: Cloudbite Pitch Preview & Access Guide",
+  "extensions": {
+    "colorMeta": {
+      "navy": {
+        "role": "primary",
+        "displayName": "Pitch Navy",
+        "canonical": "#0f1e3a",
+        "tonalRamp": [
+          "#101f3d",
+          "#1c376b",
+          "#284f99",
+          "#3467c8",
+          "#6089d6",
+          "#8eabe2",
+          "#bcceee",
+          "#ebf0fa"
+        ]
+      },
+      "navy-2": {
+        "role": "primary",
+        "displayName": "Pitch Navy Hover",
+        "canonical": "#1a2d52",
+        "tonalRamp": [
+          "#12203a",
+          "#203866",
+          "#2e5093",
+          "#3d69bf",
+          "#678acf",
+          "#93acdd",
+          "#bfceeb",
+          "#ecf0f9"
+        ]
+      },
+      "blue": {
+        "role": "primary",
+        "displayName": "Signal Blue",
+        "canonical": "#1f6feb",
+        "tonalRamp": [
+          "#061f46",
+          "#0b377c",
+          "#104fb1",
+          "#1567e7",
+          "#4789ef",
+          "#7dabf3",
+          "#b2cef8",
+          "#e8f0fd"
+        ]
+      },
+      "blue-dark": {
+        "role": "primary",
+        "displayName": "Signal Blue Deep",
+        "canonical": "#1758c4",
+        "tonalRamp": [
+          "#081f44",
+          "#0e3679",
+          "#144ead",
+          "#1a65e1",
+          "#4c87ea",
+          "#80aaf0",
+          "#b4cdf6",
+          "#e8f0fc"
+        ]
+      },
+      "blue-50": {
+        "role": "primary",
+        "displayName": "Blue Wash",
+        "canonical": "#eef4ff",
+        "tonalRamp": [
+          "#001b4c",
+          "#003087",
+          "#0044c1",
+          "#0059fb",
+          "#377dff",
+          "#71a3ff",
+          "#abc9ff",
+          "#e6efff"
+        ]
+      },
+      "blue-100": {
+        "role": "primary",
+        "displayName": "Blue Tint",
+        "canonical": "#dde9fc",
+        "tonalRamp": [
+          "#061f46",
+          "#0b377c",
+          "#104eb1",
+          "#1466e7",
+          "#4788ef",
+          "#7cabf3",
+          "#b2cdf8",
+          "#e8f0fd"
+        ]
+      },
+      "canvas": {
+        "role": "neutral",
+        "displayName": "Pitch Canvas",
+        "canonical": "#f3f7fd",
+        "tonalRamp": [
+          "#0b2142",
+          "#133a74",
+          "#1c53a5",
+          "#246cd7",
+          "#538de2",
+          "#85aeeb",
+          "#b7cff3",
+          "#e9f0fb"
+        ]
+      },
+      "paper": {
+        "role": "neutral",
+        "displayName": "Paper",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "#262626",
+          "#434343",
+          "#616161",
+          "#7e7e7e",
+          "#9b9b9b",
+          "#b8b8b8",
+          "#d5d5d5",
+          "#f2f2f2"
+        ]
+      },
+      "sidebar": {
+        "role": "neutral",
+        "displayName": "Sidebar White",
+        "canonical": "#f9fbff",
+        "tonalRamp": [
+          "#00194c",
+          "#002d87",
+          "#0040c1",
+          "#0054fb",
+          "#3779ff",
+          "#71a0ff",
+          "#abc7ff",
+          "#e6eeff"
+        ]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Pale Blue Line",
+        "canonical": "#d8e4f4",
+        "tonalRamp": [
+          "#11233c",
+          "#1e3e69",
+          "#2a5997",
+          "#3774c4",
+          "#6393d3",
+          "#90b2e0",
+          "#bed2ed",
+          "#ebf1f9"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Navy Ink",
+        "canonical": "#12223d",
+        "tonalRamp": [
+          "#11213b",
+          "#1f3a68",
+          "#2c5395",
+          "#396cc2",
+          "#648dd1",
+          "#91aedf",
+          "#becfec",
+          "#ebf0f9"
+        ]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "Body Text",
+        "canonical": "#26364f",
+        "tonalRamp": [
+          "#192334",
+          "#2c3e5b",
+          "#3f5982",
+          "#5274aa",
+          "#7893be",
+          "#9fb3d1",
+          "#c6d2e4",
+          "#eef1f7"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Slate Muted",
+        "canonical": "#5a6982",
+        "tonalRamp": [
+          "#1f252d",
+          "#374050",
+          "#4f5c72",
+          "#677895",
+          "#8996ad",
+          "#abb5c5",
+          "#cdd3dd",
+          "#f0f2f5"
+        ]
+      },
+      "stream": {
+        "role": "neutral",
+        "displayName": "Stream Night",
+        "canonical": "#0b1528",
+        "tonalRamp": [
+          "#10203c",
+          "#1d386a",
+          "#2a5097",
+          "#3668c5",
+          "#6289d4",
+          "#90abe0",
+          "#bdceed",
+          "#ebf0fa"
+        ]
+      },
+      "stream-line": {
+        "role": "neutral",
+        "displayName": "Stream Rule",
+        "canonical": "#1d2c47",
+        "tonalRamp": [
+          "#162236",
+          "#273b60",
+          "#385589",
+          "#496fb2",
+          "#718fc5",
+          "#9aafd6",
+          "#c4d0e7",
+          "#edf1f8"
+        ]
+      },
+      "stream-text": {
+        "role": "neutral",
+        "displayName": "Stream Text",
+        "canonical": "#c9d6ea",
+        "tonalRamp": [
+          "#152337",
+          "#263d61",
+          "#36588b",
+          "#4672b5",
+          "#6f91c7",
+          "#99b1d7",
+          "#c3d1e8",
+          "#edf1f8"
+        ]
+      },
+      "sim-amber": {
+        "role": "tertiary",
+        "displayName": "Simulation Amber",
+        "canonical": "#ffd58a",
+        "tonalRamp": [
+          "#4c3100",
+          "#875600",
+          "#c17c00",
+          "#fba100",
+          "#ffb737",
+          "#ffcc71",
+          "#ffe1ab",
+          "#fff6e6"
+        ]
+      },
+      "amber": {
+        "role": "secondary",
+        "displayName": "Conditional Amber",
+        "canonical": "#8a5a12",
+        "tonalRamp": [
+          "#442c09",
+          "#774e10",
+          "#ab6f16",
+          "#de911d",
+          "#e8aa4e",
+          "#efc381",
+          "#f5dcb5",
+          "#fcf4e8"
+        ]
+      },
+      "amber-bg": {
+        "role": "secondary",
+        "displayName": "Conditional Tint",
+        "canonical": "#fbf1dc",
+        "tonalRamp": [
+          "#453108",
+          "#79560e",
+          "#ad7c14",
+          "#e2a11a",
+          "#eab74b",
+          "#f0cc80",
+          "#f6e1b4",
+          "#fcf6e8"
+        ]
+      },
+      "red": {
+        "role": "secondary",
+        "displayName": "Concern Red",
+        "canonical": "#a1412f",
+        "tonalRamp": [
+          "#3b1811",
+          "#682a1e",
+          "#953c2c",
+          "#c34f39",
+          "#d27564",
+          "#df9d91",
+          "#ecc5be",
+          "#f9edeb"
+        ]
+      },
+      "red-bg": {
+        "role": "secondary",
+        "displayName": "Concern Tint",
+        "canonical": "#fbe9e4",
+        "tonalRamp": [
+          "#43160a",
+          "#752711",
+          "#a83819",
+          "#db4920",
+          "#e57150",
+          "#ed9a83",
+          "#f4c4b6",
+          "#fcede9"
+        ]
+      },
+      "access-navy": {
+        "role": "primary",
+        "displayName": "Access Navy",
+        "canonical": "#142440",
+        "tonalRamp": [
+          "#12213a",
+          "#203a67",
+          "#2e5393",
+          "#3c6cc0",
+          "#668dcf",
+          "#93aedd",
+          "#bfcfeb",
+          "#ecf0f9"
+        ]
+      },
+      "access-blue": {
+        "role": "primary",
+        "displayName": "Access Blue",
+        "canonical": "#2563eb",
+        "tonalRamp": [
+          "#061a46",
+          "#0b2e7b",
+          "#1043b1",
+          "#1557e6",
+          "#477cee",
+          "#7da2f3",
+          "#b2c8f8",
+          "#e8eefd"
+        ]
+      },
+      "access-bg": {
+        "role": "neutral",
+        "displayName": "Access Canvas",
+        "canonical": "#f4f7fc",
+        "tonalRamp": [
+          "#10213c",
+          "#1d3a6a",
+          "#295398",
+          "#366cc5",
+          "#628dd4",
+          "#8faee1",
+          "#bdcfed",
+          "#ebf0fa"
+        ]
+      },
+      "qr-dark": {
+        "role": "neutral",
+        "displayName": "QR Module",
+        "canonical": "#0b1425",
+        "tonalRamp": [
+          "#12203b",
+          "#1f3868",
+          "#2c5095",
+          "#3a69c2",
+          "#658ad1",
+          "#91acde",
+          "#beceec",
+          "#ebf0f9"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "wordmark": {
+        "displayName": "Wordmark",
+        "purpose": "Lower-case \"cloudbite\" in the pitch header."
+      },
+      "decision": {
+        "displayName": "Decision",
+        "purpose": "Decision-card headline."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Project question title."
+      },
+      "access-display": {
+        "displayName": "Access Display",
+        "purpose": "Access guide H1."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Pitch copy; most panel text is 12px."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "Stream times, file names, version tag."
+      }
+    },
+    "shadows": [
+      {
+        "name": "selected-soft",
+        "value": "0 1px 3px #12223d12",
+        "purpose": "Selected sidebar expert / view tab."
+      },
+      {
+        "name": "segment-pressed",
+        "value": "0 1px 3px #12223d18",
+        "purpose": "Pressed stream-scope segment."
+      },
+      {
+        "name": "toast",
+        "value": "0 8px 28px #00000030",
+        "purpose": "Transient toast only."
+      },
+      {
+        "name": "focus-outline",
+        "value": "outline: 3px solid #1f6feb; outline-offset: 3px",
+        "purpose": "Pitch :focus-visible (access guide links: 3px #3b82f6, offset 5px)."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-color",
+        "value": "background .15s, color .15s, border-color .15s",
+        "purpose": "Buttons; all motion disabled under prefers-reduced-motion: reduce."
+      },
+      {
+        "name": "focus-section",
+        "value": "1s ease-out box-shadow pulse 0 0 0 4px #9cc1fb",
+        "purpose": "Marks a section the replay jumps to."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "files-3col",
+        "value": "1279px",
+        "purpose": "max-width: file cards 5 → 3 columns."
+      },
+      {
+        "name": "rail-stack",
+        "value": "1199px",
+        "purpose": "max-width: right rail becomes a static 2-column grid below main."
+      },
+      {
+        "name": "tablet",
+        "value": "860px",
+        "purpose": "max-width: sidebar becomes a top row, expert list scrolls horizontally."
+      },
+      {
+        "name": "phone",
+        "value": "760px",
+        "purpose": "max-width: 62px header, short 'Simulation' badge, mobile provider note and steps, 380px stream, 2-column file cards."
+      },
+      {
+        "name": "access-mobile",
+        "value": "800px",
+        "purpose": "Access guide: QR panel and steps stack."
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Replay pitch / Stop playback; 36px min height, 8px radius, 12px text.",
+      "html": "<button class=\"ds-primary\" type=\"button\"><svg class='ds-icon' viewBox='0 0 24 24' aria-hidden='true'><path d='m9 5 10 7-10 7Z'/></svg><span>Replay pitch</span></button>",
+      "css": ":host,:root{--navy:#0f1e3a;--navy-2:#1a2d52;--blue:#1f6feb;--blue-dark:#1758c4;--blue-50:#eef4ff;--blue-100:#dde9fc;--line:#d8e4f4;--canvas:#f3f7fd;--paper:#fff;--ink:#12223d;--text:#26364f;--muted:#5a6982;--stream:#0b1528;--stream-line:#1d2c47;--stream-text:#c9d6ea;--amber:#8a5a12;--amber-bg:#fbf1dc;--radius:13px;--focus:#1f6feb;font:14px/1.6 'Segoe UI',system-ui,-apple-system,Arial,sans-serif;color:var(--text)} .ds-icon{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}.ds-primary{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;padding:7px 13px;border-radius:8px;font-size:12px;font-weight:600;font-family:inherit;background:var(--blue);color:#fff;border:1px solid var(--blue);cursor:pointer;transition:background .15s}.ds-primary:hover{background:var(--blue-dark)}.ds-primary:focus-visible{outline:3px solid var(--focus);outline-offset:3px}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Clear view / Full screen beside the stream; white with a pale-blue border.",
+      "html": "<button class=\"ds-secondary\" type=\"button\" aria-pressed=\"false\"><svg class='ds-icon' viewBox='0 0 24 24' aria-hidden='true'><path d='M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5'/></svg><span>Full screen</span></button>",
+      "css": ":host,:root{--navy:#0f1e3a;--navy-2:#1a2d52;--blue:#1f6feb;--blue-dark:#1758c4;--blue-50:#eef4ff;--blue-100:#dde9fc;--line:#d8e4f4;--canvas:#f3f7fd;--paper:#fff;--ink:#12223d;--text:#26364f;--muted:#5a6982;--stream:#0b1528;--stream-line:#1d2c47;--stream-text:#c9d6ea;--amber:#8a5a12;--amber-bg:#fbf1dc;--radius:13px;--focus:#1f6feb;font:14px/1.6 'Segoe UI',system-ui,-apple-system,Arial,sans-serif;color:var(--text)} .ds-icon{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}.ds-secondary{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;padding:7px 13px;border-radius:8px;font-size:12px;font-weight:600;font-family:inherit;background:var(--paper);border:1px solid var(--line);color:var(--ink);cursor:pointer;transition:background .15s}.ds-secondary:hover{background:var(--blue-50)}.ds-secondary:focus-visible{outline:3px solid var(--focus);outline-offset:3px}"
+    },
+    {
+      "name": "Sidebar Navigation",
+      "kind": "nav",
+      "refersTo": "nav-item-selected",
+      "description": "224px sidebar; current page is solid bright blue.",
+      "html": "<nav class=\"ds-nav\" aria-label=\"Main\"><button class=\"ds-nav-item\" aria-current=\"page\" type=\"button\"><svg class='ds-icon' viewBox='0 0 24 24' aria-hidden='true'><path d='M3 11 12 4l9 7M5 10v10h5v-6h4v6h5V10'/></svg>Home</button><button class=\"ds-nav-item\" type=\"button\"><svg class='ds-icon' viewBox='0 0 24 24' aria-hidden='true'><path d='M4 5a2 2 0 0 1 2-2h14v16H6a2 2 0 0 0-2 2V5Zm0 16a2 2 0 0 1 2-2h14'/></svg>Guide</button></nav>",
+      "css": ":host,:root{--navy:#0f1e3a;--navy-2:#1a2d52;--blue:#1f6feb;--blue-dark:#1758c4;--blue-50:#eef4ff;--blue-100:#dde9fc;--line:#d8e4f4;--canvas:#f3f7fd;--paper:#fff;--ink:#12223d;--text:#26364f;--muted:#5a6982;--stream:#0b1528;--stream-line:#1d2c47;--stream-text:#c9d6ea;--amber:#8a5a12;--amber-bg:#fbf1dc;--radius:13px;--focus:#1f6feb;font:14px/1.6 'Segoe UI',system-ui,-apple-system,Arial,sans-serif;color:var(--text)} .ds-icon{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}.ds-nav{width:224px;background:#f9fbff;border-right:1px solid var(--line);padding:18px 14px;display:flex;flex-direction:column;gap:4px}.ds-nav-item{display:flex;align-items:center;gap:11px;width:100%;border:0;background:transparent;border-radius:9px;padding:10px 12px;font-size:13px;font-weight:600;font-family:inherit;color:var(--text);text-align:left;cursor:pointer}.ds-nav-item:hover{background:var(--blue-50)}.ds-nav-item[aria-current=\"page\"]{background:var(--blue);color:#fff}.ds-nav-item:focus-visible{outline:3px solid var(--focus);outline-offset:3px}"
+    },
+    {
+      "name": "Simulation Badge",
+      "kind": "chip",
+      "refersTo": "simulation-badge",
+      "description": "Header disclosure that the page is a scripted replay.",
+      "html": "<div class=\"ds-bar\"><span class=\"ds-sim\"><span class=\"ds-dot\"></span>Pitch simulation · scripted replay</span></div>",
+      "css": ":host,:root{--navy:#0f1e3a;--navy-2:#1a2d52;--blue:#1f6feb;--blue-dark:#1758c4;--blue-50:#eef4ff;--blue-100:#dde9fc;--line:#d8e4f4;--canvas:#f3f7fd;--paper:#fff;--ink:#12223d;--text:#26364f;--muted:#5a6982;--stream:#0b1528;--stream-line:#1d2c47;--stream-text:#c9d6ea;--amber:#8a5a12;--amber-bg:#fbf1dc;--radius:13px;--focus:#1f6feb;font:14px/1.6 'Segoe UI',system-ui,-apple-system,Arial,sans-serif;color:var(--text)} .ds-bar{background:var(--navy);padding:16px}.ds-sim{font-size:12px;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;color:#ffd58a;border:1px solid #3a5079;border-radius:999px;padding:4px 10px}.ds-dot{width:6px;height:6px;background:currentColor;border-radius:50%;display:inline-block}"
+    },
+    {
+      "name": "Execution Stream",
+      "kind": "custom",
+      "refersTo": "execution-stream",
+      "description": "394px scripted replay stream marked 'Simulation · not a terminal'.",
+      "html": "<div class=\"ds-stream\"><div class=\"ds-stream-top\"><strong>Execution stream</strong><span>Scripted replay of the example run · read-only</span><span class=\"ds-stream-badge\">Simulation · not a terminal</span></div><div class=\"ds-stream-body\"><ul class=\"ds-list\"><li><time>00:04</time><strong>Daytona</strong><span>Places PERSONA.md, PROJECT.md and WORKORDER.md in 5 independent workspaces [illustrative].</span></li><li><time>00:06</time><strong>Product Strategist</strong><span>Writes validation-plan.md around testable hypotheses and repeat use.</span></li></ul></div><div class=\"ds-stream-foot\">Each line is prepared example activity embedded in this page. No commands run and no provider is contacted.</div></div>",
+      "css": ":host,:root{--navy:#0f1e3a;--navy-2:#1a2d52;--blue:#1f6feb;--blue-dark:#1758c4;--blue-50:#eef4ff;--blue-100:#dde9fc;--line:#d8e4f4;--canvas:#f3f7fd;--paper:#fff;--ink:#12223d;--text:#26364f;--muted:#5a6982;--stream:#0b1528;--stream-line:#1d2c47;--stream-text:#c9d6ea;--amber:#8a5a12;--amber-bg:#fbf1dc;--radius:13px;--focus:#1f6feb;font:14px/1.6 'Segoe UI',system-ui,-apple-system,Arial,sans-serif;color:var(--text)} .ds-stream{background:var(--stream);border-radius:12px;height:394px;display:flex;flex-direction:column;overflow:hidden;color:var(--stream-text);border:1px solid #1b2a46}.ds-stream-top{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--stream-line);font-size:12px;color:#8ea2c4;flex-wrap:wrap}.ds-stream-top strong{color:#e8eefb}.ds-stream-badge{border:1px solid #344a72;border-radius:999px;padding:2px 9px;color:#ffd58a}.ds-stream-body{flex:1;overflow-y:auto;padding:6px 16px 10px}.ds-list{list-style:none;margin:0;padding:0}.ds-list li{display:grid;grid-template-columns:46px 132px minmax(0,1fr);gap:12px;padding:7px 0;border-bottom:1px solid #15223a;font-size:12px;line-height:1.55}.ds-list time{font:11px/1.9 Consolas,monospace;color:#6f84a8}.ds-list strong{color:#8fb9ff;font-weight:600}.ds-stream-foot{padding:8px 16px;border-top:1px solid var(--stream-line);font-size:12px;color:#6f84a8}"
+    },
+    {
+      "name": "Decision Card",
+      "kind": "card",
+      "refersTo": "decision-card",
+      "description": "Navy gradient decision summary on the Decision board.",
+      "html": "<div class=\"ds-decision\"><div class=\"ds-decision-top\"><span>Overall direction · authored sample</span><span class=\"ds-tag\">Reviewing: full launch</span></div><h2>Before a full launch,<br>start with a small paid pilot.</h2><div class=\"ds-decision-bottom\"><span><b>5 valid opinions</b> · 0 incomplete · illustrative data</span><span>Reliability status <b>awaiting external validation</b></span></div></div>",
+      "css": ":host,:root{--navy:#0f1e3a;--navy-2:#1a2d52;--blue:#1f6feb;--blue-dark:#1758c4;--blue-50:#eef4ff;--blue-100:#dde9fc;--line:#d8e4f4;--canvas:#f3f7fd;--paper:#fff;--ink:#12223d;--text:#26364f;--muted:#5a6982;--stream:#0b1528;--stream-line:#1d2c47;--stream-text:#c9d6ea;--amber:#8a5a12;--amber-bg:#fbf1dc;--radius:13px;--focus:#1f6feb;font:14px/1.6 'Segoe UI',system-ui,-apple-system,Arial,sans-serif;color:var(--text)} .ds-decision{background:linear-gradient(135deg,var(--navy),#1b3466);color:#f3f7ff;padding:24px 24px 20px;border-radius:12px}.ds-decision-top{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:12px;color:#b9c8e2}.ds-tag{padding:3px 8px;background:#2a4a85;border-radius:999px;font-size:12px;color:#e6efff}.ds-decision h2{font-size:26px;line-height:1.4;letter-spacing:-.02em;margin:16px 0 10px;max-width:24ch;font-weight:600}.ds-decision-bottom{border-top:1px solid #34507f;margin-top:18px;padding-top:12px;display:flex;justify-content:space-between;gap:12px;font-size:12px;color:#b9c8e2}.ds-decision-bottom b{color:#fff;font-weight:600}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The finished console, replayed",
+    "overview": "",
+    "keyCharacteristics": [
+      "Same frame as the console, with pitch-only data: decision board, expert list, replay controls.",
+      "Simulation is always disclosed: header badge, sidebar note, stream badge and footer, page footer.",
+      "12px is the working text size in panels; one bright blue (`#1f6feb`) on the pitch, Tailwind-style blue (`#2563eb`) on the access guide.",
+      "The QR is a deterministic encoding of the existing request URL, not an AI-generated visual."
+    ],
+    "rules": [
+      {
+        "name": "The Say-It's-Scripted Rule",
+        "body": "No surface shows simulated output without a nearby label: \"Simulation · not a terminal\", \"Each line is prepared example activity embedded in this page. No commands run and no provider is contacted.\", and a footer stating that reliability is not yet calibrated.",
+        "section": "colors"
+      }
+    ],
+    "dos": [
+      "**Do** keep the pinned console frame (70px navy header, 224px sidebar, 394px dark stream) when updating the pitch.",
+      "**Do** keep every simulated element labelled, and keep the page free of external `http(s)` requests.",
+      "**Do** regenerate both access outputs from `tools/build-cloudbite-access.mjs` and keep the QR pointing to the existing request URL."
+    ],
+    "donts": [
+      "**Don't** assume pitch tokens equal console tokens. Navy, canvas, line and radii differ slightly, and support is blue here but green in the console.",
+      "**Don't** present the pitch's numbers, files or provider rows as real execution, calibrated accuracy or demand evidence.",
+      "**Don't** add a command prompt to the stream or style the QR as a generated illustration."
+    ]
+  }
+}
