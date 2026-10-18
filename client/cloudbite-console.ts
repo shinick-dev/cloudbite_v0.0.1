@@ -53,7 +53,7 @@ interface RouteResult {
 type HarnessStatus = CloudbiteRoutingHarness['perspectives'][number]['status'];
 type HarnessReason = CloudbiteRoutingHarness['excluded'][number]['reason'];
 /** 팀 설명의 고정 코드. 여기 없는 경고·상태·이유가 오면 v2 팀 전체를 쓰지 않는다 (모르는 코드를 짐작해 그리지 않는다) */
-const HARNESS_WARNINGS = ['uncovered-perspectives', 'limited-perspectives', 'actor-limit'] as const;
+const HARNESS_WARNINGS = ['uncovered-perspectives', 'no-project-perspectives', 'actor-limit', 'coverage-rescue'] as const;
 type HarnessWarning = typeof HARNESS_WARNINGS[number];
 const HARNESS_STATUSES: HarnessStatus[] = ['covered', 'limited', 'uncovered'];
 const HARNESS_REASONS: HarnessReason[] = ['overlap', 'limit', 'below-threshold'];
@@ -236,12 +236,13 @@ const EN = {
   routeNetwork: 'Could not reach the server to choose experts. Nothing was started. (Not switched to manual selection or demo.)',
   stepRouted: 'Experts chosen by Jev',
   // Jev 팀 설명 (jev-routing/v2 의 project-team/v1). 고정 코드만 이 사전으로 옮기고, 모델이 쓴 글은 근거로 보이지 않는다
-  teamCoverage: (covered: number, limited: number, uncovered: number) => `Perspectives: ${covered} covered · ${limited} limited · ${uncovered} not covered`,
+  teamCoverage: (covered: number, limited: number, uncovered: number) => `Perspectives: ${covered} assigned · ${limited} excluded by limit · ${uncovered} unassigned`,
   teamGaps: (names: string) => `Not covered by this team: ${names}`,
-  teamLimitedList: (names: string) => `Only partly covered: ${names}`,
+  teamLimitedList: (names: string) => `Excluded by the expert limit: ${names}`,
   teamWarning: {
     'uncovered-perspectives': 'Some needed perspectives have no suitable role in the catalogue, so this team does not cover them.',
-    'limited-perspectives': 'Some needed perspectives are only partly covered by this team.',
+    'no-project-perspectives': 'No project decision perspectives were identified. Add goals, constraints or alternatives for project advice.',
+    'coverage-rescue': 'A needed perspective added a specialist missed by initial screening; initial suitability scores are unchanged.',
     'actor-limit': 'The expert limit was reached, so some suitable roles were left out.',
   } as Record<HarnessWarning, string>,
   teamCovers: (names: string) => `covers ${names}`,
@@ -252,7 +253,7 @@ const EN = {
   teamEligible: (eligible: number, evaluated: number) => `${eligible} of ${plural(evaluated, 'evaluated role')} were eligible.`,
   teamPerspectivesTitle: 'Perspectives',
   teamPerspective: (name: string, need: string, status: string) => `${name} — need ${need}, ${status}`,
-  teamStatus: { covered: 'covered', limited: 'limited', uncovered: 'not covered' } as Record<HarnessStatus, string>,
+  teamStatus: { covered: 'assigned', limited: 'excluded by limit', uncovered: 'unassigned' } as Record<HarnessStatus, string>,
   teamBy: (names: string) => ` by ${names}`,
   teamExcludedTitle: 'Left out',
   teamReason: { overlap: 'overlaps with', limit: 'expert limit reached', 'below-threshold': 'below the suitability threshold' } as Record<HarnessReason, string>,
@@ -575,13 +576,14 @@ const KO: Messages = {
   routeCancelled: '전문가 고르기를 멈췄습니다. 아무것도 시작하지 않았습니다.',
   routeNetwork: '전문가를 고르려고 서버에 연결하지 못했습니다. 아무것도 시작하지 않았습니다. (직접 선택이나 데모로 바꾸지 않았습니다.)',
   stepRouted: 'Jev가 전문가 선택',
-  teamCoverage: (covered, limited, uncovered) => `관점: 충족 ${covered} · 일부 ${limited} · 미충족 ${uncovered}`,
+  teamCoverage: (covered, limited, uncovered) => `관점: 담당 배정 ${covered} · 한도로 제외 ${limited} · 미배정 ${uncovered}`,
   teamGaps: (names) => `이 팀이 다루지 못하는 관점: ${names}`,
-  teamLimitedList: (names) => `일부만 다루는 관점: ${names}`,
+  teamLimitedList: (names) => `전문가 한도로 제외된 관점: ${names}`,
   teamWarning: {
     'uncovered-perspectives': '필요한 관점 가운데 카탈로그에 맞는 역할이 없는 것이 있어, 이 팀은 그 관점을 다루지 않습니다.',
-    'limited-perspectives': '필요한 관점 가운데 이 팀이 일부만 다루는 것이 있습니다.',
+    'no-project-perspectives': '프로젝트 판단 관점이 확인되지 않았습니다. 목표·제약·선택지를 보완하면 프로젝트 자문에 도움이 됩니다.',
     'actor-limit': '전문가 인원 한도에 닿아 맞는 역할 일부를 뺐습니다.',
+    'coverage-rescue': '초기 선별에서 빠진 전문가를 필요한 관점의 담당자로 추가했습니다. 초기 적합도 수치는 그대로 표시합니다.',
   },
   teamCovers: (names) => `담당: ${names}`,
   teamAdditional: '추가 분야',
@@ -591,7 +593,7 @@ const KO: Messages = {
   teamEligible: (eligible, evaluated) => `평가한 역할 ${evaluated}명 가운데 ${eligible}명이 후보였습니다.`,
   teamPerspectivesTitle: '관점',
   teamPerspective: (name, need, status) => `${name} — 필요도 ${need}, ${status}`,
-  teamStatus: { covered: '충족', limited: '일부', uncovered: '미충족' },
+  teamStatus: { covered: '담당 배정', limited: '한도로 제외', uncovered: '미배정' },
   teamBy: (names) => ` · ${names}`,
   teamExcludedTitle: '뺀 역할',
   teamReason: { overlap: '역할이 겹침:', limit: '인원 한도', 'below-threshold': '적합도 기준 미달' },
@@ -1051,7 +1053,7 @@ function normalizeHarness(raw: unknown, allowed: Set<string>, ids: string[], eva
     }
     const status = p.status as HarnessStatus;
     // 담당이 있는데 빈 관점이라 하거나, 담당 없이 채웠다고 하면 서로 어긋난다
-    if ((status === 'covered' && experts.length === 0) || (status === 'uncovered' && experts.length > 0)) return null;
+    if ((status === 'covered' && experts.length === 0) || (status !== 'covered' && experts.length > 0)) return null;
     perspectives.push({ id: p.id, name, need: p.need, status, expertIds: experts });
   }
   const selections: CloudbiteRoutingHarness['selections'] = [];
@@ -1064,7 +1066,7 @@ function normalizeHarness(raw: unknown, allowed: Set<string>, ids: string[], eva
       if (!p || pids.includes(p.id) || !p.expertIds.includes(x.expertId)) return null;
       pids.push(p.id);
     }
-    if (x.kind === 'coverage' && pids.length === 0) return null;
+    if ((x.kind === 'coverage' && pids.length === 0) || (x.kind === 'additional-domain' && pids.length > 0)) return null;
     selections.push({ expertId: x.expertId, perspectiveIds: pids, kind: x.kind });
   }
   // 고른 역할마다 기여 설명이 정확히 하나 있고, 관점에 적힌 담당자는 그 역할의 설명에도 그 관점이 있다

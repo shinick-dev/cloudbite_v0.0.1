@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
+import { jevFixtureResponse } from './helpers/cloudbite-jev-provider.mjs';
 
 const PY = process.env.PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
 const PERSONAS = `
@@ -126,7 +127,7 @@ globalThis.fetch = async (u, init = {}) => {
     assert.equal(url.pathname, '/v1/systemone'); assert.equal(auth, 'Bearer TYPESAFE-TEST-KEY');
     const req = JSON.parse(init.body); (w.jev ??= []).push(req);
     if (w.jevFail) return new Response('TYPESAFE-TEST-KEY private error', { status: 500 });
-    return jr({ model: 'jev-1.13.0', answers: Object.fromEntries(Object.keys(req.questions).map(id => [id, { type: 'noul', noul: id === 'cb-role-022' ? 0.97 : 0.02 }])) });
+    return jr(jevFixtureResponse(req, { relevance: { 'cb-role-022': 0.97 } }));
   }
   if (url.host === 'nosana.fake') {
     assert.equal(auth, 'Bearer ' + SECRETS[1]);

@@ -78,9 +78,9 @@ await test('review asks Choice coverage only for needed perspectives over eligib
   assert.deepEqual(covers, ['cover:architecture', 'cover:performance', 'cover:security', 'cover:delivery']);
   const c = body.questions['cover:architecture'];
   assert.equal(c.type, 'choice');
-  assert.deepEqual(Object.keys(c.criteria), ['role_1', 'role_2', 'role_3', 'role_4', 'role_5', 'role_6', 'none']);
+  assert.deepEqual(Object.keys(c.criteria), ['role_1', 'role_2', 'role_3', 'role_4', 'role_5', 'role_6', 'role_7', 'none']);
   assert.equal(c.criteria.role_1.name, 'Role pd'); assert.equal(typeof c.criteria.none, 'string');
-  assert.ok(!JSON.stringify(body).includes('Role ux'), 'below-threshold roles are not options');
+  assert.ok(JSON.stringify(body).includes('Role ux'), 'coverage rechecks specialists missed by first-pass fit');
   assert.ok(!Object.keys(c.criteria).some(k => team.some(t => t.id === k)), 'model sees symbols, not ids');
 });
 await test('overlap probes are same-category, directed to higher-ranked peers and keyed by stable indexes', () => {
@@ -181,8 +181,44 @@ await test('composition rejects invalid limits and forged reviews', () => {
   const a = assessed(fitAll, needSome), body = m.harnessReviewRequest(q, team, a);
   const r = m.parseHarnessReview(reviewAnswer(body, { architecture: 'pd' }), team, a);
   for (const max of [0, 101, 1.5, Number.NaN]) throwsFixed(() => m.composeHarnessTeam(team, a, r, max), m.HARNESS_ERRORS.limit);
-  throwsFixed(() => m.composeHarnessTeam(team, a, { ...r, coverage: { ...r.coverage, architecture: 'ux' } }, 5), m.HARNESS_ERRORS.review);
+  throwsFixed(() => m.composeHarnessTeam(team, a, { ...r, coverage: { ...r.coverage, architecture: 'ghost' } }, 5), m.HARNESS_ERRORS.review);
   throwsFixed(() => m.composeHarnessTeam(team, a, { ...r, overlaps: [...r.overlaps, { left: 'pd', right: 'sec', probability: 1 }] }, 5), m.HARNESS_ERRORS.review);
   throwsFixed(() => m.composeHarnessTeam(team, { ...a, needs: { ...a.needs, extra: 1 } }, r, 5), m.HARNESS_ERRORS.assessment);
+});
+await test('broad review profiles are shared once and every option points to a complete eligible profile',()=>{
+ const cs=Array.from({length:100},(_,i)=>cand('x'+i,'same',{summary:'unique-profile-'+i+' '+('x'.repeat(570))}));
+ const a=assessed(Object.fromEntries(cs.map(c=>[c.id,0.9])),Object.fromEntries(P.map(id=>[id,0.9])),cs);
+ const request=m.harnessReviewRequest(q,cs,a);assert.equal(Object.keys(request.state.roles).length,100);
+ const serialized=JSON.stringify(request);assert.equal(serialized.split('unique-profile-').length-1,100);
+ assert.ok(serialized.length<1200000,'bounded review request size');
+ for(const question of Object.values(request.questions))if(question.type==='choice')for(const [key,value]of Object.entries(question.criteria))if(key!=='none')assert.ok(request.state.roles[value.profile.replace('state.roles.','')]);
+});
+await test('needed coverage can recover a real specialist missed by initial fit without inventing suitability',()=>{
+ const cs=[cand('timing','semi'),cand('verification','semi')];
+ const a=assessed({timing:0.95,verification:0.4},{performance:0.95,validation:0.9},cs);
+ const request=m.harnessReviewRequest(q,cs,a);
+ const r=m.parseHarnessReview(reviewAnswer(request,{performance:'timing',validation:'verification'},{},cs),cs,a);
+ const result=m.composeHarnessTeam(cs,a,r,100);
+ assert.deepEqual(result.expertIds,['timing','verification']);assert.equal(result.matches[1].relevance,0.4);
+ assert.ok(result.harness.warnings.includes('coverage-rescue'));assert.equal(result.harness.eligibleCount,2);
+ assert.ok(result.harness.perspectives.every(p=>p.status==='covered'));
+ assert.ok(!result.harness.excluded.some(e=>e.expertId==='verification'));
+ const limited=m.composeHarnessTeam(cs,a,r,1);assert.equal(limited.expertIds.length,1);assert.ok(limited.harness.perspectives.some(p=>p.status==='limited'));
+});
+await test('Choice tolerates observed hundredth rounding without normalisation or accepting invalid winners/mass', () => {
+  const a = assessed(fitAll, { validation: 0.9 }), body = m.harnessReviewRequest(q, team, a);
+  const raw = reviewAnswer(body, { validation: 'rtl' });
+  const answer = raw.answers['cover:validation'], options = Object.keys(answer.probabilities);
+  for (const key of options) answer.probabilities[key] = 0;
+  answer.probabilities[answer.choice] = 0.52;
+  answer.probabilities[options.find(k => k !== answer.choice)] = 0.47;
+  const before = JSON.stringify(raw);
+  assert.equal(m.parseHarnessReview(raw, team, a).coverage.validation, 'rtl');
+  assert.equal(JSON.stringify(raw), before, 'never modifies provider scores');
+  for (const invalid of [0.43, 0.55, 0.53]) {
+    const bad = structuredClone(raw);
+    bad.answers['cover:validation'].probabilities[options.find(k => k !== answer.choice)] = invalid;
+    throwsFixed(() => m.parseHarnessReview(bad, team, a), m.HARNESS_ERRORS.review);
+  }
 });
 console.log(`${passed} harness tests passed`);

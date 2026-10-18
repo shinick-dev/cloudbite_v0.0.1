@@ -14,7 +14,7 @@ export const HARNESS_OVERLAP_THRESHOLD = 0.85;
 export const HARNESS_MAX_CANDIDATES = 100;
 /** Each eligible role is compared with at most this many higher-ranked peers of its own category (<= 600 probes). */
 export const HARNESS_PEERS = 6;
-export const HARNESS_WARNINGS = ['uncovered-perspectives', 'actor-limit', 'no-project-perspectives'] as const;
+export const HARNESS_WARNINGS = ['uncovered-perspectives', 'actor-limit', 'no-project-perspectives', 'coverage-rescue'] as const;
 export const HARNESS_ERRORS = Object.freeze({
   candidates: 'invalid harness candidates',
   limit: 'invalid harness selection limit',
@@ -120,8 +120,10 @@ function plan(candidates: readonly HarnessCandidate[], a: HarnessAssessment) {
   const eligible = candidates.filter(c => a.relevance[c.id] >= HARNESS_THRESHOLD)
     .sort((x, y) => a.relevance[y.id] - a.relevance[x.id] || index.get(x.id)! - index.get(y.id)!);
   const needed = PERSPECTIVES.filter(p => a.needs[p.id] >= HARNESS_THRESHOLD);
-  // Option symbols follow eligible rank; they never leave this module as ids.
-  const symbols = new Map(eligible.map((c, i) => ['role_' + (i + 1), c.id]));
+  // Coverage gets a second look at the entire catalogue. A specialist missed by first-pass fit must not
+  // become an artificial "missing specialist" just because of that threshold.
+  const ranked = [...candidates].sort((x, y) => a.relevance[y.id] - a.relevance[x.id] || index.get(x.id)! - index.get(y.id)!);
+  const symbols = new Map(ranked.map((c, i) => ['role_' + (i + 1), c.id]));
   const pairs: Array<{ key: string; left: HarnessCandidate; right: HarnessCandidate }> = [];
   const byGroup = new Map<string, HarnessCandidate[]>();
   for (const c of eligible) {
@@ -137,21 +139,25 @@ export function harnessReviewRequest(query: CloudbiteRoutingQuery, candidates: r
   const { eligible, needed, symbols, pairs } = plan(candidates, assessment);
   const questions: Record<string, Question> = {};
   if (!eligible.length) return { model: JEV_MODEL, state: requestState(query), questions };
+  // Send each profile once. Repeating full profiles in every Choice and pair inflates broad-project requests.
+  const roles = Object.fromEntries([...symbols].map(([symbol, id]) => [symbol, describe(candidates.find(c => c.id === id)!)]));
+  const symbolById = new Map([...symbols].map(([symbol, id]) => [id, symbol]));
+  const reference = (c: HarnessCandidate) => ({ name: text(c.name, 120), profile: 'state.roles.' + symbolById.get(c.id) });
   const options: Record<string, unknown> = {};
-  for (const [symbol, id] of symbols) options[symbol] = describe(eligible.find(c => c.id === id)!);
+  for (const [symbol, id] of symbols) options[symbol] = reference(candidates.find(c => c.id === id)!);
   options[NONE] = 'None of the listed roles is primarily responsible for this perspective: the needed specialist is missing from the team. The perspective itself is already established as needed, so do not pick this merely because need seems low.';
   for (const p of needed) questions['cover:' + p.id] = { type: 'choice',
     instructions: { question: 'Which listed role is best placed to own this needed perspective as its primary contribution to the project in `state.request`?',
       perspective: { name: p.name, meaning: p.description },
-      boundary: BOUNDARY + ' Choose a role only if the perspective sits within its stated scope, not because it could mention it in passing.' },
+      boundary: BOUNDARY + ' The full role descriptions are in `state.roles`, referenced by each option profile. Choose a role only if the perspective sits within its stated scope, not because it could mention it in passing.' },
     criteria: options };
   for (const { key, left, right } of pairs) questions[key] = { type: 'noul',
     instructions: { question: 'For the project in `state.request`, would role `left` already deliver substantially ALL of the contribution requested from role `right`, so that `right` adds nothing material?',
-      left: describe(left), right: describe(right),
-      boundary: BOUNDARY + ' Sharing a category or keywords is not redundancy. Distinct scopes such as physical design, static timing, RTL and synthesis are not interchangeable. Different useful deliverables mean not redundant.' },
+      left: reference(left), right: reference(right),
+      boundary: BOUNDARY + ' Read both complete profiles from `state.roles` using left.profile and right.profile. Sharing a category or keywords is not redundancy. Distinct scopes such as physical design, static timing, RTL and synthesis are not interchangeable. Different useful deliverables mean not redundant.' },
     criteria: { true: '`right` would duplicate `left` on this request: same analysis, same deliverable, no distinct material contribution.',
       false: '`right` contributes a distinct scope, deliverable, method or judgment that `left` would not cover.' } };
-  return { model: JEV_MODEL, state: requestState(query), questions };
+  return { model: JEV_MODEL, state: { ...requestState(query), roles }, questions };
 }
 
 export function parseHarnessReview(raw: unknown, candidates: readonly HarnessCandidate[], assessment: HarnessAssessment): HarnessReview {
@@ -166,7 +172,10 @@ export function parseHarnessReview(raw: unknown, candidates: readonly HarnessCan
       const probs = a.probabilities;
       if (Object.keys(probs).length !== optionKeys.length || optionKeys.some(k => !own(probs, k) || !probability(probs[k]))) throw new Error(HARNESS_ERRORS.review);
       const values = optionKeys.map(k => probs[k] as number), top = Math.max(...values);
-      if (Math.abs(values.reduce((s, v) => s + v, 0) - 1) > 1e-3 || (probs[a.choice] as number) < top - 1e-9) throw new Error(HARNESS_ERRORS.review);
+      // Live Jev Choice responses round probabilities to hundredths (observed total 0.99).
+      // Permit at most two percentage points of rounding loss/gain; do not normalise scores.
+      // Exact options, individual ranges and an actual maximum-probability winner remain mandatory.
+      if (Math.abs(values.reduce((s, v) => s + v, 0) - 1) > 0.02 + 1e-9 || (probs[a.choice] as number) < top - 1e-9) throw new Error(HARNESS_ERRORS.review);
       coverage[p.id] = a.choice === NONE ? null : symbols.get(a.choice)!;
     }
   }
@@ -174,13 +183,14 @@ export function parseHarnessReview(raw: unknown, candidates: readonly HarnessCan
   return { coverage, overlaps };
 }
 
-function checkReview(r: HarnessReview, needed: readonly { id: string }[], eligible: readonly HarnessCandidate[], pairs: readonly { left: HarnessCandidate; right: HarnessCandidate }[]): void {
+function checkReview(r: HarnessReview, needed: readonly { id: string }[], eligible: readonly HarnessCandidate[], pairs: readonly { left: HarnessCandidate; right: HarnessCandidate }[], candidates: readonly HarnessCandidate[]): void {
   if (!isRecord(r) || !isRecord(r.coverage) || !Array.isArray(r.overlaps)) throw new Error(HARNESS_ERRORS.review);
-  const ids = new Set(eligible.map(c => c.id));
+  const ids = new Set(candidates.map(c => c.id));
   if (!eligible.length) { if (Object.keys(r.coverage).length || r.overlaps.length) throw new Error(HARNESS_ERRORS.review); return; }
   if (Object.keys(r.coverage).length !== needed.length || needed.some(p => !own(r.coverage, p.id) || (r.coverage[p.id] !== null && !ids.has(r.coverage[p.id] as string)))) throw new Error(HARNESS_ERRORS.review);
   const expected = new Set(pairs.map(p => p.left.id + '\u0000' + p.right.id));
   if (r.overlaps.length !== pairs.length || r.overlaps.some(o => !isRecord(o) || !expected.has(o.left + '\u0000' + o.right) || !probability(o.probability))) throw new Error(HARNESS_ERRORS.review);
+  if (new Set(r.overlaps.map(o => o.left + '\u0000' + o.right)).size !== pairs.length) throw new Error(HARNESS_ERRORS.review);
 }
 
 /** Needed perspectives first, then direct-redundancy pruning, then the actor limit; never invents coverage. */
@@ -188,11 +198,15 @@ export function composeHarnessTeam(candidates: readonly HarnessCandidate[], asse
   { expertIds: string[]; matches: Array<{ expertId: string; relevance: number }>; harness: CloudbiteRoutingHarness } {
   if (!Number.isInteger(max) || max < 1 || max > HARNESS_MAX_CANDIDATES) throw new Error(HARNESS_ERRORS.limit);
   const { eligible, needed, pairs } = plan(candidates, assessment);
-  checkReview(review, needed, eligible, pairs);
-  const rank = new Map(eligible.map((c, i) => [c.id, i]));
+  checkReview(review, needed, eligible, pairs, candidates);
+  const rescued = new Set(Object.values(review.coverage).filter((id): id is string => id !== null && !eligible.some(c => c.id === id)));
+  const qualified = candidates.filter(c => eligible.some(e => e.id === c.id) || rescued.has(c.id))
+    .sort((x, y) => assessment.relevance[y.id] - assessment.relevance[x.id] || candidates.indexOf(x) - candidates.indexOf(y));
+  const rank = new Map(qualified.map((c, i) => [c.id, i]));
   const owned = new Map<string, string[]>(); // representative -> needed perspective ids it primarily covers
   for (const p of needed) { const id = review.coverage[p.id]; if (id) owned.set(id, [...owned.get(id) ?? [], p.id]); }
   const selected = new Set<string>(), warnings = new Set<string>();
+  if (rescued.size) warnings.add('coverage-rescue');
   const excluded: CloudbiteRoutingHarness['excluded'] = [];
   // Protect the most perspectives per actor slot; ties keep relevance rank.
   const reps = [...owned.keys()].sort((x, y) => owned.get(y)!.length - owned.get(x)!.length || rank.get(x)! - rank.get(y)!);
@@ -218,11 +232,11 @@ export function composeHarnessTeam(candidates: readonly HarnessCandidate[], asse
     return { id: p.id, name: p.name, need: assessment.needs[p.id], status, expertIds: status === 'covered' ? [id!] : [] };
   });
   if (!needed.length) warnings.add('no-project-perspectives');
-  const team = eligible.filter(c => selected.has(c.id));
+  const team = qualified.filter(c => selected.has(c.id));
   return {
     expertIds: team.map(c => c.id),
     matches: team.map(c => ({ expertId: c.id, relevance: assessment.relevance[c.id] })),
-    harness: { version: HARNESS_VERSION, stages: ['assessment', 'team-review'], eligibleCount: eligible.length, perspectives,
+    harness: { version: HARNESS_VERSION, stages: ['assessment', 'team-review'], eligibleCount: qualified.length, perspectives,
       selections: team.map(c => owned.has(c.id) ? { expertId: c.id, perspectiveIds: owned.get(c.id)!, kind: 'coverage' as const }
         : { expertId: c.id, perspectiveIds: [], kind: 'additional-domain' as const }),
       excluded, warnings: HARNESS_WARNINGS.filter(w => warnings.has(w)), peerReview: 'not-performed' },

@@ -1788,12 +1788,12 @@ const harnessOf = (ids = TEAM_IDS, over = {}) => ({
   perspectives: [
     { id: 'architecture', name: 'Architecture', need: 0.9, status: 'covered', expertIds: [ids[0], ids[1]] },
     { id: 'security', name: 'Security', need: 0.8, status: 'covered', expertIds: [ids[2]] },
-    { id: 'finance', name: 'Finance', need: 0.7, status: 'limited', expertIds: [ids[3]] },
+    { id: 'finance', name: 'Finance', need: 0.7, status: 'limited', expertIds: [] },
     { id: 'regulatory', name: EVIL, need: 0.75, status: 'uncovered', expertIds: [] },
     { id: 'custom-scope', name: 'Chip timing closure', need: 0.66, status: 'covered', expertIds: [ids[4]] },
   ],
   selections: ids.map((expertId, i) => i === 0 || i === 1 ? { expertId, perspectiveIds: ['architecture'], kind: 'coverage' } : i === 2 ? { expertId, perspectiveIds: ['security'], kind: 'coverage' }
-    : i === 3 ? { expertId, perspectiveIds: ['finance'], kind: 'coverage' } : i === 4 ? { expertId, perspectiveIds: ['custom-scope'], kind: 'coverage' } : { expertId, perspectiveIds: [], kind: 'additional-domain' }),
+     : i === 4 ? { expertId, perspectiveIds: ['custom-scope'], kind: 'coverage' } : { expertId, perspectiveIds: [], kind: 'additional-domain' }),
   excluded: [{ expertId: 't7', reason: 'overlap', coveredBy: ids[0] }, { expertId: 't8', reason: 'limit' }],
   warnings: ['uncovered-perspectives', 'actor-limit'], peerReview: 'not-performed', ...over });
 const routeV2 = (ids = TEAM_IDS, over = {}, harness = harnessOf(ids)) => routeOk(ids, { policyVersion: 'jev-routing/v2', evaluatedCount: 9, harness, ...over });
@@ -1808,6 +1808,7 @@ await test('Jev v1·v2 정리: 옛 v1 은 설명 없이 그대로, v2 는 7명 �
   assert.equal(v2.policyVersion, 'jev-routing/v2');
   assert.deepEqual(v2.expertIds, TEAM_IDS, 'selected expert ids and order preserved');
   assert.deepEqual(v2.harness, harnessOf(), 'valid explanation kept exactly');
+  assert.ok(core.normalizeRoute(routeV2(TEAM_IDS, {}, harnessOf(TEAM_IDS, {warnings:['no-project-perspectives']})), ALL_TEAM, 9), 'thin project warning accepted');
   const extra = core.normalizeRoute(routeV2(TEAM_IDS, {}, { ...harnessOf(), debug: 'raw model text' }), ALL_TEAM, 9);
   assert.ok(!('debug' in extra.harness), 'unknown fields dropped');
   // 100명 한도 유지

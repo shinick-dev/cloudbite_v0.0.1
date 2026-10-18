@@ -24,7 +24,7 @@ export interface CloudbiteRoutingQuery { title: string; objective: string; conte
 /** Team composition judgments, not answer correctness or a completed peer review. */
 export interface CloudbiteRoutingHarness {
   version: 'project-team/v1';
-  stages: ['assessment', 'team-review'];
+  stages: Array<'assessment' | 'team-review'>; // exact order checked at runtime; RPC serializes tuples as arrays
   eligibleCount: number;
   perspectives: Array<{ id: string; name: string; need: number; status: 'covered' | 'uncovered' | 'limited'; expertIds: string[] }>;
   selections: Array<{ expertId: string; perspectiveIds: string[]; kind: 'coverage' | 'additional-domain' }>;

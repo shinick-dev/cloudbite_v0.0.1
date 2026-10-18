@@ -520,6 +520,14 @@ def main():
     return 1
 
 
+def citation_hint():
+    ids = [i for i in sorted(retrieved_sources) if re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', i)][:32]
+    if not ids:
+        return '\nNo retrieved source IDs are available. Do not invent a citation or imply a source was verified.'
+    return ('\nRetrieved citation tokens: ' + ', '.join('[source:%s]' % i for i in ids) +
+            '. Use a token only if that retrieved source supports the claim; otherwise state the evidence gap. Card IDs are not source IDs.')
+
+
 def repair(messages, rounds, problem):
     """A final was rejected on the last turn: up to REPAIRS final-only replies inside the existing call budget.
     Only a final is ever accepted here, the runner never edits the opinion, and an inference failure stays explicit."""
@@ -527,7 +535,7 @@ def repair(messages, rounds, problem):
         if calls >= cap['maxCalls'] or time.time() * 1000 > cap['expiresAt']:
             break
         failure['repairs'] = attempt
-        messages.append({'role': 'user', 'content': REPAIR_TURN % (problem, attempt, REPAIRS)})
+        messages.append({'role': 'user', 'content': (REPAIR_TURN % (problem, attempt, REPAIRS)) + citation_hint()})
         try:
             reply = infer(messages)
         except Exception as e:

@@ -145,6 +145,16 @@ await check('repair accepts only a final: a tool requested during repair is neve
   assert.equal(JSON.parse(r.read('result.json')).confidence, 64);
 });
 
+await check('a last-turn unknown citation can be repaired using an actually retrieved source, without changing confidence',async()=>{
+ const r=await run(busy((messages)=>repairTurn(messages)?final(opinion({evidence:['[source:src-known] retrieved timing notes']})):final(opinion({evidence:['[source:unknown-1] unsupported']}))));
+ assert.equal(r.code,0);assert.equal(r.calls.length,7);
+ assert.match(lastUser(r.calls[6]),/Retrieved citation tokens:.*\[source:src-known\]/);
+ assert.match(lastUser(r.calls[6]),/Card IDs are not source IDs/);
+ assert.equal(JSON.parse(r.read('result.json')).confidence,58);
+ assert.deepEqual(JSON.parse(r.read('result.json')).evidence,['[source:src-known] retrieved timing notes']);
+ assert.equal(r.read('diagnostic.json'),null);assertNoLeak(r);
+});
+
 await check('format failure without a knowledge pack: two failed repairs end in a format diagnostic; model text never reaches error or diagnostic', async () => {
   const r = await run((messages) => final({ ...opinion({ evidence: ['computed'] }), [MARKER]: 'x' }), { knowledge: false });
   assert.equal(r.code, 1); assert.equal(r.calls.length, 8);
