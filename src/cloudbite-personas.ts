@@ -1,4 +1,5 @@
 import type { ExpertDefinition, ExpertOpinion, OpinionDirection, ProjectBrief } from './cloudbite-contract';
+import { PROJECT_MAX_EXPERTS } from './cloudbite-catalogue-limits';
 import { STA_EXPERT, staKnowledgeFiles } from './cloudbite-sta';
 import { PHASE_ONE_PACKS, type PhaseOneKnowledgePack } from './cloudbite-phase-one-data';
 import { KNOWLEDGE_PACKS, knowledgeSourcePath } from './cloudbite-knowledge-registry';
@@ -12,7 +13,7 @@ import { knowledgeDigest, knowledgeWorkspaceFiles, PEER_REVIEW_STATEMENT, REVIEW
 // Phase one of the 100-role plan (docs/cloudbite/expert-pool-100.md) attaches an authored, source-linked pack from
 // cloudbite-phase-one-data.ts to 20 roles: eight of the twelve above keep their ids and registry pins, twelve are new.
 // These are unvalidated T0 AI roles, not real people or certified experts.
-// The 75-role extension is assembled by cloudbite-knowledge-registry.ts; the four remaining original metadata roles
+// The 75-role extension and 20 Falsify research roles are assembled by cloudbite-knowledge-registry.ts; the four remaining original metadata roles
 // and the separate STA corpus keep their existing basis and ids. Extension packs have six starter cards each.
 //
 // Project briefs are untrusted task data. They are validated, bounded, stripped of
@@ -36,7 +37,7 @@ export const CLOUDBITE_BRIEF_LIMITS = Object.freeze({
   requestIdMin: 8,
   requestId: 64,
   minExperts: 1,
-  maxExperts: 100,
+  maxExperts: PROJECT_MAX_EXPERTS,
 });
 
 export const CLOUDBITE_OPINION_LIMITS = Object.freeze({
@@ -545,7 +546,7 @@ const PHASE_ONE_IDS = new Set(PHASE_ONE_PACKS.map(pack => pack.expertId));
 const NEW_PACKS = [...PACK_BY_ID.values()].filter(pack => !PROFILE_BY_ID.has(pack.expertId)).sort((a, b) =>
   Number(!PHASE_ONE_IDS.has(a.expertId)) - Number(!PHASE_ONE_IDS.has(b.expertId)) || a.catalogNumber - b.catalogNumber);
 
-// Preserve all 25 already released ids and their order, then append the 75 extension roles by plan number.
+// Preserve all released ids and their order, then append extension/research roles by plan number.
 export const CLOUDBITE_EXPERTS: readonly ExpertDefinition[] = deepFreeze([...PROFILES.map((profile): ExpertDefinition => {
   const pack = PACK_BY_ID.get(profile.registry.id);
   if (pack) return knowledgeExpert(pack, profile);

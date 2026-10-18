@@ -8,7 +8,8 @@ export const KNOWLEDGE_SCHEMA = 'cloudbite.knowledge/v1';
 export const KNOWLEDGE_LIMITS = Object.freeze({ cards: 64, sources: 128, fileBytes: 48 * 1024, initialCards: 4, searchCards: 3 });
 export const PEER_REVIEW_STATEMENT = 'No peer result verification occurred.';
 /** Review roles see no peer outputs; cross-review is a separate, future pipeline. */
-export const REVIEW_ROLE_IDS: ReadonlySet<string> = new Set(['cb-evidence-auditor', 'cb-quantitative-reviewer', 'cb-assumption-auditor', 'cb-adversarial-reviewer', 'cb-synthesis-editor', 'cb-role-095', 'cb-role-096', 'cb-role-097', 'cb-role-098']);
+export const REVIEW_ROLE_IDS: ReadonlySet<string> = new Set(['cb-evidence-auditor', 'cb-quantitative-reviewer', 'cb-assumption-auditor', 'cb-adversarial-reviewer', 'cb-synthesis-editor', 'cb-role-095', 'cb-role-096', 'cb-role-097', 'cb-role-098',
+  ...Array.from({ length: 20 }, (_, i) => `cb-role-${101 + i}`)]);
 const SOURCE_ID = /^[a-zA-Z0-9_-]{1,80}$/;
 /** Role deliverables: a stricter subset of the runtime's collectable extras (cloudbite-validate extraArtifactPath). */
 const ARTIFACT_PATH = /^out\/[a-z0-9][a-z0-9-]{0,47}\.(md|json|csv)$/;

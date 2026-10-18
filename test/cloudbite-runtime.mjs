@@ -567,7 +567,7 @@ await check('Jev routing API: authenticated, actor-bound, cached and authoritati
   assert.equal(w.jev?.length ?? 0, 0);
   const routed = await call(w, 'POST', '/api/cloudbite/route', { body: query, headers: admin });
   assert.equal(routed.status, 200, routed.text); assert.deepEqual(routed.j.expertIds, ['cb-role-022']);
-  assert.equal(routed.j.evaluatedCount, 100); assert.equal(w.jev.length, 1); assert.equal(w.posts, 0); assert.equal(w.nosana.length, 0);
+  assert.equal(routed.j.evaluatedCount, 120); assert.equal(w.jev.length, 1); assert.equal(w.posts, 0); assert.equal(w.nosana.length, 0);
   assert.equal((await call(w, 'POST', '/api/cloudbite/route', { body: query, headers: admin })).status, 200);
   assert.equal(w.jev.length, 1, 'same actor/query/request does not incur a second Jev call');
   const create = { ...query, mode: 'demo', routing: 'jev', expertIds: routed.j.expertIds };
@@ -632,8 +632,8 @@ await check('Jev visitor routing: approved actor isolation, exhausted-quota cach
 await check('real catalogue: actual persona workspace -> python runner -> flat out/result.json -> server validation and artifact', async () => {
   const w = freshWorld({ M: REAL });
   const boot = await call(w, 'GET', '/api/cloudbite/bootstrap');
-  assert.ok(boot.j.experts.length === 100 && boot.j.experts.some((e) => e.id === 'probably-primetime-sta'), 'actual 100-role catalogue, including the curated STA role');
-  assert.equal(boot.j.pool.entries.length, 100); assert.equal(boot.j.configuration.maxExperts, 100);
+  assert.ok(boot.j.experts.length === 120 && boot.j.experts.some((e) => e.id === 'probably-primetime-sta') && boot.j.experts.some((e) => e.id === 'cb-role-120'), 'expanded catalogue retains STA and includes the last research role');
+  assert.equal(boot.j.pool.entries.length, 120); assert.equal(boot.j.configuration.maxExperts, 100);
   assert.deepEqual(new Set(boot.j.pool.entries.filter((e) => e.availability === 'available').map((e) => e.expertId)), new Set(boot.j.experts.map((e) => e.id)));
   const ids = boot.j.experts.slice(0, 3).map((e) => e.id);
   // the console sends crypto.randomUUID() request ids
@@ -1212,12 +1212,12 @@ await check('tertiary lost create survives restart; removing or rotating its key
   assertOwned(w);
 });
 
-await check('whole catalogue: 100 independent creates start without a three-role pipeline, owner pinning and cancellation cleanup survive', async () => {
+await check('project cap: 100 independent creates from the expanded catalogue, including new roles, preserve owner pinning and cleanup', async () => {
   const w = freshWorld({ M: REAL, runner: 'none', env: { ...SECONDARY, ...TERTIARY } });
   delete w.env.CLOUDBITE_MAX_CONCURRENT;
   const boot = await call(w, 'GET', '/api/cloudbite/bootstrap');
   assert.equal(boot.j.configuration.maxConcurrent, 100);
-  const ids = boot.j.experts.map(e => e.id);
+  const ids = boot.j.experts.slice(-100).map(e => e.id);
   assert.equal(ids.length, 100);
   const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ids }), headers: admin });
   assert.equal(created.status, 201, created.text);

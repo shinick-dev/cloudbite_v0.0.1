@@ -4,7 +4,7 @@ The default flow is question → Jev chooses actual roles → execution. Users n
 
 ## Decision and policy
 
-The server calls `POST https://api.typesafe.ai/v1/systemone` with server-only `TYPESAFE_API_KEY` and pinned `jev-1.13.0`. `jev-routing/v2` uses the [project-team harness](project-team-harness.md): assessment of all 100 runtime roles plus 14 project perspectives, then primary-owner assignment and direct-overlap review. Full knowledge corpora and credentials are not routing context. Project inputs are untrusted data. Role metadata and catalogue growth are incorporated without a keyword shortlist or a hardcoded role-to-perspective table.
+The server calls `POST https://api.typesafe.ai/v1/systemone` with server-only `TYPESAFE_API_KEY` and pinned `jev-1.13.0`. `jev-routing/v2` uses the [project-team harness](project-team-harness.md): assessment of all registered runtime roles (120 currently, catalogue bound 200) plus 14 project perspectives, then primary-owner assignment and direct-overlap review. Full knowledge corpora and credentials are not routing context. Project inputs are untrusted data. Role metadata and catalogue growth are incorporated without a keyword shortlist or a hardcoded role-to-perspective table. The catalogue bound is separate from the maximum 100 selected experts per project.
 
 The router accepts bounded typed responses from the pinned model. Initial fit and perspective need thresholds are 0.65; direct-overlap pruning requires 0.85. Needed perspectives can recover a real specialist missed by initial fit, without changing its score. Representatives are protected before the actor limit (maximum 100). Gaps and exclusions are disclosed; no peer output is checked by this harness. No initial match yields 422. Failed team review never falls back to a partial first-stage team. Thresholds and small live samples are not calibrated accuracy claims.
 
@@ -32,7 +32,7 @@ Production: `TYPESAFE_API_KEY` is a Cloudbite Worker secret. Do not add it to Wr
 
 ## Verification
 
-- `test/cloudbite-routing.mjs`: real100-role request contract, caps, strict parsing, no-match, redacted failures, fixed endpoint/deadline, per-actor cache, concurrent claims, stale completion, rate limit and prototype-shaped request IDs.
+- `test/cloudbite-routing.mjs`: full-catalogue request contract including roles above number 100, project caps, strict parsing, no-match, redacted failures, fixed endpoint/deadline, per-actor cache, concurrent claims, stale completion, rate limit and prototype-shaped request IDs.
 - `test/cloudbite-runtime.mjs`: auth and invalid-header precedence, approved visitor isolation, quota-exhausted cache-only behavior, route-before-create, authoritative ids, unchanged request/limit binding, idempotent creation and routing metadata.
 - Console tests cover auto routing from empty selection, request ordering, auth headers, KO/EN, cancellation/stale responses, malformed results and legacy fallback.
 - v2 live smoke: synthetic EDA tapeout and B2B pilot queries completed both stages (~0.74s locally); a greeting returned no match. EDA recovered a functional-verification specialist missed by initial fit. Full details and limitations are in the harness document. Earlier v1 samples do not establish v2 quality. Representative scored evaluation remains future work.

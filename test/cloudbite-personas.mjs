@@ -28,7 +28,7 @@ const knowledgeBacked = id => !!phaseOnePack(id);
 
 // --- catalog shape and distinctness
 const experts = CLOUDBITE_EXPERTS;
-ok(experts.length === 100, 'catalog preserves the released 25 roles and adds 75 extension roles');
+ok(experts.length === 120, 'catalog preserves released 100 roles and adds 20 research roles');
 assert.deepEqual(experts.slice(0, 13).map(e => e.id), ORIGINAL_IDS); checks++;
 assert.deepEqual(experts.slice(13, 25).map(e => e.id), PHASE_ONE_IDS.filter(id => id.startsWith('cb-'))); checks++;
 ok(Object.isFrozen(experts) && Object.isFrozen(experts[0]) && Object.isFrozen(experts[0].source), 'catalog is deeply frozen');
@@ -202,10 +202,10 @@ for (const [number, id] of Object.entries(PHASE_ONE)) {
   const pack = phaseOnePack(id);
   ok(findExpert(id)?.source.basis === 'curated-knowledge' && pack?.catalogNumber === Number(number) && Object.isFrozen(pack), `phase-one ${number} ${id} is a runnable knowledge-backed role`);
 }
-ok(experts.filter(e => e.source.basis === 'curated-knowledge').length === 96 && experts.filter(e => e.source.basis === 'metadata-derived').length === 4, '95 starter knowledge roles + STA; four original roles stay metadata-derived');
+ok(experts.filter(e => e.source.basis === 'curated-knowledge').length === 116 && experts.filter(e => e.source.basis === 'metadata-derived').length === 4, '115 starter knowledge roles + STA; four original roles stay metadata-derived');
 ok(phaseOnePack('probably-primetime-sta') === undefined && phaseOnePack('agency-design-ux-architect') === undefined && phaseOnePack('__proto__') === undefined, 'STA keeps its own pack; other roles have none');
 for (const planned of ['pool-001', 'pool-003', '3', 'cb-market-research']) assert.throws(() => validateProjectBrief(brief([planned])), /unknown expert/, `planned ${planned} cannot launch`), checks++;
-ok(CLOUDBITE_BRIEF_LIMITS.maxExperts === 100, 'selection covers the 100-role catalogue');
+ok(CLOUDBITE_BRIEF_LIMITS.maxExperts === 100, 'per-project selection remains capped at 100 independently of catalogue growth');
 ok(validateProjectBrief(brief(PHASE_ONE_IDS.slice(0, 6))).expertIds.length === 6, 'six expert roles may be selected');
 ok(validateProjectBrief(brief(PHASE_ONE_IDS.slice(15))).expertIds.length === 5, 'five phase-one review roles can be selected together');
 

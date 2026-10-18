@@ -4,12 +4,16 @@ import { PHASE_ONE_PACKS, type PhaseOneKnowledgePack } from './cloudbite-phase-o
 import { EXTENSION_A_PACKS } from './cloudbite-expansion-a';
 import { EXTENSION_B_PACKS } from './cloudbite-expansion-b';
 import { EXTENSION_C_PACKS } from './cloudbite-expansion-c';
+import { RESEARCH_CLINICAL_PACKS } from './cloudbite-research-clinical';
+import { RESEARCH_BIOMEDICAL_PACKS } from './cloudbite-research-biomedical';
 
 const groups: Array<[string, PhaseOneKnowledgePack[]]> = [
   ['src/cloudbite-phase-one-data.ts', PHASE_ONE_PACKS],
   ['src/cloudbite-expansion-a.ts', EXTENSION_A_PACKS],
   ['src/cloudbite-expansion-b.ts', EXTENSION_B_PACKS],
   ['src/cloudbite-expansion-c.ts', EXTENSION_C_PACKS],
+  ['src/cloudbite-research-clinical.ts', RESEARCH_CLINICAL_PACKS],
+  ['src/cloudbite-research-biomedical.ts', RESEARCH_BIOMEDICAL_PACKS],
 ];
 export const KNOWLEDGE_PACKS: readonly PhaseOneKnowledgePack[] = Object.freeze(groups.flatMap(([, packs]) => packs));
 const paths = new Map<string, string>();

@@ -1,8 +1,9 @@
 // Cloudbite runtime configuration and limits. Only names of missing settings ever leave the server.
 // Cloudbite uses its own CLOUDBITE_* secrets; it never reads gw-shinick's stored Daytona/OpenRouter providers.
 import type { Env } from './state';
+import { PROJECT_MAX_EXPERTS } from './cloudbite-catalogue-limits';
 
-export const CB_MAX_EXPERTS = 100;          // bounded by the runnable catalogue, not the old five-role pilot
+export const CB_MAX_EXPERTS = PROJECT_MAX_EXPERTS; // per-project bound, independent of catalogue growth
 export const CB_MAX_CONCURRENT = CB_MAX_EXPERTS; // start the selected team independently by default
 export const CB_MAX_ACTIVE_PROJECTS = 2;    // live projects holding sandboxes at once (registry)
 export const CB_EXPERT_DEADLINE = 15 * 60_000;
