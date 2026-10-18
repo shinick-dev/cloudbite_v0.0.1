@@ -42,13 +42,13 @@ typography:
     letterSpacing: "-0.02em"
   display:
     fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
-    fontSize: "30px"
+    fontSize: "28px"
     fontWeight: 750
     lineHeight: 1
     letterSpacing: "-0.02em"
   headline:
     fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
-    fontSize: "19px"
+    fontSize: "20px"
     fontWeight: 700
   title:
     fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
@@ -132,7 +132,7 @@ components:
     textColor: "{colors.stream-ink}"
     typography: "{typography.mono}"
     rounded: "{rounded.md}"
-    height: "394px"
+    height: "300px"
   demo-banner:
     backgroundColor: "{colors.demo-bg}"
     textColor: "{colors.demo-ink}"
@@ -153,9 +153,9 @@ Scope: the Cloudbite operator console served at `/cloudbite` — `client/cloudbi
 
 **Creative North Star: "Expert workspaces on a blue-white console"** (a descriptive label for the user-pinned layout, not a separately approved metaphor).
 
-The user pinned the frame: a full-width navy header (70px), a light 224px navigation sidebar, a central expert workspace, a right progress/decision rail, white panels with pale-blue borders, and a dark read-only execution stream about 394px tall. The layout is adapted from an AI-coding-lab arrangement to Cloudbite's expert-sandbox product; it does not reuse classroom terminology. UI copy is English. Primary viewport is 1536×1024.
+The frame keeps a full-width navy header (70px), a light 224px navigation sidebar, a central expert workspace, a right progress/decision rail and white panels with pale-blue borders. The 2026-10-18 simplification makes the dark read-only execution stream an on-demand 300px panel. The layout is adapted to Cloudbite's expert-sandbox product; it does not reuse classroom terminology. UI copy is English. Primary viewport is 1536×1024.
 
-The console is dense and operational: 13–14px body text, small uppercase eyebrows, mono only for the stream, file paths and timestamps. Colour carries state, not decoration. Honesty is part of the visual system: the run mode is always visible, confidence is labelled as self-assessment, and counts derive from verified run data.
+The console is task-first: before a run, show the objective and team selection in one column. Project name and context live in Project details, and the full catalogue is behind All experts. Hide empty workspace and result panels. Mono is reserved for execution records, file paths and file contents. Colour carries state, not decoration. The run mode stays visible, confidence is labelled as self-assessment, and counts derive from verified run data.
 
 **Key Characteristics:**
 - Navy frame, blue-white work area, one bright blue accent for actions and selection.
@@ -194,19 +194,20 @@ A cool blue-white palette framed in navy, with one saturated blue and four seman
 **Character:** neutral system sans for density and zero font loading; mono marks machine output.
 
 ### Hierarchy
-- **Display** (750, 30px, line-height 1): the progress count ("4 / 4").
-- **Wordmark / Headline** (750 / 700, 19px): "Cloudbite" in the header, current project title.
+- **Display** (750, 28px): the valid-opinion count. Progress uses a compact 22px count rather than a separate hero metric.
+- **Wordmark** (750, 19px): "Cloudbite" in the header. **Project title** (700, 20px) anchors the brief or current run; decision headlines use 15px.
 - **Title** (700, 17px): panel headings (`h2`). Page heads in Guide/Help/Settings use 20px.
 - **Body** (400, 14px/1.5; 13–13.5px in panels): copy. Project paragraphs cap at 75ch.
-- **Label** (700, 11px, 0.06em, uppercase): "CURRENT PROJECT" eyebrow (blue) and "WORKSPACE" nav label (faint).
+- **Navigation label** (700, 11px, 0.06em, uppercase): "WORKSPACE" in the sidebar. Panel headings carry their own hierarchy without an extra eyebrow.
 - **Mono** (12.5px/1.6): stream rows, file paths (12px), timestamps.
 
 ## Layout
 
-- **Shell:** header 70px; below it a two-column grid `224px | 1fr` (nav | main). Main padding 18px 22px 28px, vertical gap 14px.
-- **Home:** `1fr | 340px` grid (workspace column | right rail), gap 16px. Right rail stacks Project progress → What to do now → Synthesis & confidence.
-- **Workspace panel:** head with title + tool buttons, a horizontally scrolling roster of expert cards (150–220px), the 394px stream, then an inspector with Files / Activity / Work order / Persona tabs and a `220px | 1fr` file list + viewer.
-- **Breakpoints:** ≤1280px the right rail drops below the workspace as an auto-fit grid (min 280px). ≤860px header shrinks to 60px, subtitle and profile text hide, nav becomes a horizontal row of four under the header, forms and artifact view go single-column, stream rows collapse to time + who with the message on its own line, stream height 340px. ≤480px the version tag hides and panel padding drops to 14px. No horizontal page overflow (`body { overflow-x: hidden }`; grids use `minmax(0, 1fr)`).
+- **Shell:** header 70px; below it a two-column grid `224px | 1fr` (nav | main). Main padding 20px 24px 32px, vertical gap 16px.
+- **Home before a run:** one brief column up to 1000px wide. Objective first; Project details and All experts are native disclosures. Six catalogue roles are immediately available. Additional selected roles remain named when the full list is closed. The single start action sits at the end of the brief; no automatic demo starts.
+- **Home after a run starts:** `1fr | 340px` grid (workspace | decision rail), gap 16px. Valid opinions move Synthesis to the top of the rail. Progress is concise, with its checklist behind Progress details. Confidence methodology and its histogram are behind Confidence details. Edit project opens the existing brief for the next explicit run.
+- **Workspace panel:** a horizontally scrolling expert roster, selected expert opinion and Files / Activity / Work order / Persona tabs. Execution activity follows inside a persistent native disclosure, closed initially; the dark 300px stream and Clear / Restore tools remain available there. Full screen opens the log and restores its previous disclosure state on exit.
+- **Breakpoints:** ≤1280px the rail becomes a grid below the workspace. ≤860px the header is 60px, navigation becomes a horizontal row, and the project summary is followed by the decision/progress rail before expert evidence. Forms and artifacts become one column; activity rows wrap the message below the time and expert. ≤480px the version hides and the start action spans the available width. Expert rosters and inspector tabs scroll within their own containers; the page does not scroll sideways.
 
 ## Elevation & Depth
 
@@ -228,7 +229,7 @@ Gently rounded rectangles: 14px for panels and the tip card, 12px for the stream
 - **Disabled:** opacity 0.45, `not-allowed`. Start is disabled while a run is in flight.
 
 ### Navigation
-Sidebar buttons Home / Guide / Help / Settings with 18px mask icons. Selected = solid bright blue with white text; hover = `blue-softer`. Footer shows capacity ("Up to 5 experts per project · 3 run at once") and links to "Try a sandbox" (`/cloudbite/access`) and "Legacy lab".
+Sidebar buttons Home / Guide / Help / Settings with 18px mask icons. Selected = solid bright blue with white text; hover = `blue-softer`. Footer shows capacity and links to Request visitor access and Access QR. The legacy lab remains available in Settings.
 
 ### Execution stream (signature)
 Dark navy panel, bar with pulse icon, "Execution stream" title, a "read-only" capsule and a mono state line (`simulated · completed · 0 active · 28 events`). Rows are a `70px 150px 64px 1fr` mono grid (time, expert, kind, message); kind colours: tool cyan, thought violet, artifact green, error pink. It is an `ol role="log"`, focusable for scrolling, with no input or terminal prompt. **Clear view** only hides current rows from this window; **Restore history** brings them back; project history and files are never changed. **Full screen** turns the workspace panel into a fixed overlay (stream fills ≥60vh); Escape or "Exit full screen" returns and refocuses the button.
@@ -239,7 +240,7 @@ Dark navy panel, bar with pulse icon, "Execution stream" title, a "read-only" ca
 - **Pills/chips:** soft tint + dark text per status/direction; `invalid` uses the concern tint.
 
 ### Inputs / Fields
-1px `line-strong` border, 10px radius, white fill, 8px 10px padding; character counters in 11px faint. Expert catalogue options are bordered tiles that turn `blue-softer` with a blue border when checked (`accent-color: blue`). The admin token field is a password input kept in memory only; no API keys are accepted.
+1px `line-strong` border, 10px radius, white fill; character counters are quiet until focus or near the limit. Expert choices show a role name and a short plain-language description, with a pale-blue selected state. Invalid name/context input opens Project details so the correction is visible. The admin token field is a password input kept in memory only; no API keys are accepted.
 
 ### Synthesis & confidence
 Counts "N / M valid opinions" with failed, queued/working, cancelled and invalid listed separately and the note "only completed, valid opinions are counted". A distribution bar and legend use the direction colours; the histogram (0–19 … 80–100) uses blue bars and states "each role's self-assessment, not calibrated accuracy".
@@ -250,7 +251,7 @@ Global `:focus-visible` is a 2px blue outline with 2px offset (stream log uses a
 ## Do's and Don'ts
 
 ### Do:
-- **Do** keep the pinned frame: 70px navy header, 224px light sidebar, central workspace, right progress/decision rail, 394px dark stream.
+- **Do** keep the navy/blue-white frame and reveal workspace, rail and execution detail only when useful to the current task.
 - **Do** label demo output as simulated in the header badge, the banner, the stream state and exported files.
 - **Do** describe confidence as self-assessment and aggregate only completed, valid opinions; show failed/pending/cancelled counts beside it.
 - **Do** use the system font stack and inline SVG mask icons; no external fonts or CDN assets (same-origin CSP).
