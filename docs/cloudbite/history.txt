@@ -77,3 +77,12 @@ reviews/deletion, stale revisions, outbox recovery and cursor ties. Console UI t
 cover safe text, drafts/focus across languages, saves, deletion and report semantics.
 Aside verified actual local reads/feedback writes. Aside lacks viewport resizing;
 isolated Edge captures cover 1536x1024 and 390x844, without page errors or overflow.
+
+Production acceptance: 2026-10-18 22:19 KST, runtime commit 6dde957, Worker version
+04540311-6030-4818-a9f4-5ad92449b428. Verified anonymous denial, owner and visitor
+server-simulation runs, alarm-captured final answers and full reports, visitor isolation,
+history-cookie permission limits, invalid explicit-token precedence, persisted feedback
+and owner report demo exclusion. Both QA histories were deleted and the QA visitor grant
+revoked. No paid provider jobs ran. npm run check, npm run test:cloudbite, owner (17),
+access (21), access UI (20), console (56) and history (10) checks passed; the runtime suite
+includes 30 checks with real Python runner/fake provider integration and history capture.
