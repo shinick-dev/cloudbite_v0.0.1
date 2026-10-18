@@ -16,8 +16,8 @@ const NOT_FETCHED = 'not fetched during authoring';
 const LINK_ONLY = 'link-only: cite by URL, do not mirror or copy text into workspaces';
 const TOOLS = ['workspace-artifact-write', 'knowledge-search', 'calculation'];
 
-// One bounded retrieval batch run 2026-10-18T18:52-18:57Z: HTTP GET with redirects (curl) for most documents; the NIH grants pages and the
-// two FDA guidance PDFs answered curl with a bot challenge and were read in a real browser session instead. Text was extracted and the
+// One bounded retrieval batch run 2026-10-18T18:52-18:57Z: HTTP GET with redirects (curl) for most documents; the NIH grants pages (HTTP 403 bot challenge) and the
+// two FDA guidance PDFs (HTTP 404 HTML to curl) were read in a real browser session instead. Text was extracted and the
 // passages each card relies on were read; see .artifacts/falsify-experts/clinical-receipt.md. Retrieval confirms the document was reachable
 // and is the named document; it does not confirm every card's reading of it.
 const ok = (checkedAt: string, checkNote: string): Check => ({ checkedAt, checkStatus: 'retrieved', checkNote });
@@ -48,7 +48,7 @@ const CHECKS: Record<string, Check> = {
   'ich-m12': ok('2026-10-18T18:55:50Z', 'HTTP 200 application/pdf (74 pages); first page "Drug Interaction Studies M12", adopted 21 May 2024'),
   'ich-q2-r2': ok('2026-10-18T18:52:37Z', 'HTTP 200 application/pdf (36 pages); first page "Validation of Analytical Procedures Q2(R2)", adopted 1 November 2023'),
   'ich-q14': ok('2026-10-18T18:52:43Z', 'HTTP 200 application/pdf (40 pages); first page "Analytical Procedure Development Q14", adopted 1 November 2023'),
-  'fda-poppk': ok('2026-10-18T18:56:58Z', 'browser download (curl got an abuse-detection page); application/pdf 27 pages; cover "Population Pharmacokinetics Guidance for Industry", February 2022'),
+  'fda-poppk': ok('2026-10-18T18:56:58Z', 'browser download (curl GET returned HTTP 404 text/html, no document); application/pdf 27 pages; cover "Population Pharmacokinetics Guidance for Industry", February 2022'),
   'fda-exposure-response': ok('2026-10-18T18:56:58Z', 'browser download; application/pdf 28 pages; cover "Exposure-Response Relationships - Study Design, Data Analysis, and Regulatory Applications", April 2003 (landing page lists May 2003)'),
   'ema-be': ok('2026-10-18T18:55:54Z', 'HTTP 200 application/pdf (27 pages); CHMP "Guideline on the Investigation of Bioequivalence", CPMP/EWP/QWP/1401/98 Rev. 1/Corr, 20 January 2010'),
   'eurachem-mv': ok('2026-10-18T18:53:33Z', 'HTTP 200 application/pdf (70 pages); "The Fitness for Purpose of Analytical Methods", Eurachem Guide second edition 2014'),
