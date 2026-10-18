@@ -1,11 +1,26 @@
-// Public, non-authorizing QR bridge to the existing request/owner-approval service.
+// Cloudbite audience access: public QR showcase + visitor request form + owner inbox → src/cloudbite-access-page.ts and demo/ assets.
+//   node tools/build-cloudbite-access.mjs          rebuild
+//   node tools/build-cloudbite-access.mjs --check  fail unless every generated file is byte-identical to a fresh build
+// The QR encodes Cloudbite's own request page; it grants nothing by itself (the owner approves each visitor on the server).
+// client/cloudbite-access.ts is transformed once by esbuild (no bundling, no minify) into CLOUDBITE_ACCESS_JS; pages load only
+// same-origin external script/style — no inline script, inline handlers, external fonts or CDN. No credential in any output.
 import { renderSVG, encode } from 'uqr';
 import { deflateSync } from 'node:zlib';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { transformSync, version } from 'esbuild';
+
 const root = fileURLToPath(new URL('../', import.meta.url));
-const REQUEST_URL = 'https://k.shinick.dev/lab/request';
-const OWNER_URL = 'https://k.shinick.dev/lab/requests';
+const ORIGIN = 'https://cloudbite-v001.ai-gongbu.workers.dev';
+const REQUEST_URL = `${ORIGIN}/cloudbite/request`;
+const OWNER_URL = `${ORIGIN}/cloudbite/requests`;
+const JS_PATH = '/cloudbite/access.js';
+const CSS_PATH = '/cloudbite/access.css';
+const ESBUILD = '0.28.1';
+const fail = (msg) => { console.error(`build-cloudbite-access: ${msg}`); process.exit(1); };
+if (version !== ESBUILD) fail(`esbuild ${version} — ${ESBUILD} required (npm ci)`);
+
+// ── QR (SVG + PNG)
 const svg = renderSVG(REQUEST_URL, { ecc: 'M', border: 4, pixelSize: 16, blackColor: '#0b1425', whiteColor: '#ffffff' });
 const qr = encode(REQUEST_URL, { ecc: 'M', border: 4 });
 const scale = 24, width = qr.size * scale;
@@ -20,14 +35,69 @@ const header=Buffer.alloc(13);header.writeUInt32BE(width);header.writeUInt32BE(w
 const png=Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),chunk('IHDR',header),chunk('IDAT',deflateSync(raw)),chunk('IEND',Buffer.alloc(0))]);
 const pngUrl='data:image/png;base64,'+png.toString('base64');
 const svgUrl='data:image/svg+xml;base64,'+Buffer.from(svg).toString('base64');
-const css=String.raw`
-:root{color-scheme:light;--navy:#142440;--blue:#2563eb;--text:#293c55;--muted:#5e718b;--line:#dbe6f5;--pale:#edf4ff;--bg:#f4f7fc}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.7 'Segoe UI',Arial,sans-serif}::selection{background:#bfdbfe;color:var(--navy)}a{color:var(--blue);text-underline-offset:4px}a:focus-visible{outline:3px solid #3b82f6;outline-offset:5px}header{height:70px;background:var(--navy);display:flex;align-items:center;justify-content:space-between;padding:0 32px;color:white;gap:20px}header strong{font-size:24px;letter-spacing:-.03em}header span{font-size:13px;color:#c9d8ed}main{max-width:1120px;margin:52px auto;padding:0 24px}h1{font-size:36px;line-height:1.25;letter-spacing:-.025em;color:var(--navy);margin:0 0 13px}h2{font-size:21px;line-height:1.4;color:var(--navy);margin:0 0 10px}p{margin:0 0 17px}.lead{color:var(--muted);max-width:72ch}.access-grid{display:grid;grid-template-columns:420px minmax(0,1fr);gap:28px;margin-top:30px}.qr-panel{background:white;border:1px solid var(--line);border-radius:14px;padding:28px;text-align:center}.qr-panel svg{display:block;width:100%;height:auto;max-width:330px;margin:0 auto}figcaption{font-size:13px;color:var(--muted);margin-top:18px;overflow-wrap:anywhere}figure{margin:0}.actions{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:22px}.button{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:10px 15px;border-radius:8px;text-decoration:none;border:1px solid var(--line);font-size:13px;font-weight:600}.primary{background:var(--blue);border-color:var(--blue);color:white}.primary:hover{background:#1d4ed8}.secondary:hover{background:var(--pale)}.instructions{padding:8px 0}.instructions ol{list-style:none;margin:24px 0;padding:0;counter-reset:steps}.instructions li{position:relative;padding:0 0 26px 46px;counter-increment:steps}.instructions li:before{content:counter(steps);position:absolute;left:0;top:0;width:29px;height:29px;border-radius:50%;display:grid;place-items:center;color:var(--blue);background:#e1ecff;font-size:13px;font-weight:700}.instructions li strong{display:block;color:var(--navy);font-size:15px;margin-bottom:4px}.instructions li span{color:var(--muted);font-size:14px}.note{padding:20px 22px;background:var(--pale);border:1px solid var(--line);border-radius:12px;margin-top:5px}.note h3{font-size:15px;color:var(--navy);margin:0 0 7px}.note p{font-size:13px;color:var(--muted);margin:0}.scope{margin-top:24px;font-size:12px;color:var(--muted);max-width:70ch}footer{margin-top:36px;border-top:1px solid var(--line);padding-top:18px;color:var(--muted);font-size:12px;display:flex;justify-content:space-between;gap:20px}.downloads{margin-top:12px;font-size:12px}.owner{white-space:nowrap}@media(max-width:800px){main{margin:30px auto}.access-grid{grid-template-columns:minmax(0,1fr);gap:22px}.qr-panel{max-width:440px;width:100%;margin:auto}h1{font-size:29px}header{padding:0 20px}header span{font-size:12px}.instructions{padding:0}footer{flex-direction:column;gap:10px}.instructions li{padding-bottom:22px}}@media print{body{background:white}header{print-color-adjust:exact;-webkit-print-color-adjust:exact}.actions,.downloads,.owner{display:none}main{margin:25px auto}.access-grid{grid-template-columns:420px 1fr}.qr-panel{break-inside:avoid}footer{margin-top:20px}}
+
+// ── CSS + JS from client/
+const css = readFileSync(root + 'client/cloudbite-access.css', 'utf8').replace(/\r\n/g, '\n');
+const src = readFileSync(root + 'client/cloudbite-access.ts', 'utf8');
+if (src.charCodeAt(0) === 0xfeff || css.charCodeAt(0) === 0xfeff) fail('source has a BOM');
+if (/@import|url\(\s*['"]?https?:/i.test(css)) fail('CSS references an external resource');
+const { code, warnings } = transformSync(src, { loader: 'ts', target: 'es2022', minify: false, charset: 'utf8', legalComments: 'none', sourcefile: 'client/cloudbite-access.ts', sourcemap: false });
+if (warnings.length) fail(`esbuild warnings: ${warnings.map((w) => w.text).join(' / ')}`);
+const UNSAFE = [
+  [/^\s*(?:import|export)\b/m, 'import/export'], [/\bimport\s*\(/, 'import()'], [/\beval\s*\(/, 'eval'], [/\bnew\s+Function\b|\bFunction\s*\(/, 'Function()'],
+  [/\b(?:innerHTML|outerHTML|insertAdjacentHTML|srcdoc)\b/, 'HTML string injection'], [/\bdocument\.write/, 'document.write'],
+  [/\b(?:localStorage|sessionStorage|indexedDB)\b|document\.cookie/, 'browser storage or cookie access'], [/setAttribute\(\s*['"](?:style|on\w+)['"]/, 'style/on* attribute'],
+  [/https?:\/\//, 'external URL'],
+];
+for (const [re, what] of UNSAFE) if (re.test(code)) fail(`generated JS contains ${what}`);
+const js = `(() => {\n'use strict';\n${code}})();\n`;
+
+// ── pages
+const head = (title, desc, style) => `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>${title}</title><meta name="description" content="${desc}">${style}`;
+function showcase(style) { return `${head('Cloudbite — Request access', 'Scan to request a short Cloudbite session. The host approves it, then you open Cloudbite and run one project with AI experts.', style)}</head>
+<body><header><strong>Cloudbite</strong><span>Expert sandboxes for one shared project</span></header><main><h1>Try Cloudbite yourself.</h1><p class="lead">Scan to request a short Cloudbite session. Once the host approves it, you open Cloudbite, write one project brief, choose AI experts and watch them work in separate sandboxes.</p><div class="access-grid"><section class="qr-panel" aria-label="Cloudbite access request QR code"><figure><div role="img" aria-label="QR code for ${REQUEST_URL}">${svg}</div><figcaption><a href="${REQUEST_URL}" target="_blank" rel="noopener noreferrer">${REQUEST_URL}</a></figcaption></figure><div class="actions"><a class="button primary" href="${REQUEST_URL}" target="_blank" rel="noopener noreferrer">Open request form</a><a class="button secondary" href="${pngUrl}" download="cloudbite-access-request.png">Save QR image</a></div><p class="downloads"><a href="${svgUrl}" download="cloudbite-access-request.svg">Download SVG</a> · Use your browser's Print command for a handout.</p></section><section class="instructions" aria-labelledby="how"><h2 id="how">From scan to running experts</h2><ol><li><strong>Scan and request Cloudbite access.</strong><span>Enter your name and what you would like to try. Keep the request page open — it checks for the host's answer every few seconds.</span></li><li><strong>The host approves.</strong><span>Your request waits in the host's Cloudbite inbox, where the owner or a temporary Cloudbite operator approves or declines it. Unanswered requests expire after 30 minutes.</span></li><li><strong>Open Cloudbite, choose experts, run your project.</strong><span>The approved session lasts one hour in the same browser: one project, up to five AI experts. Nothing runs until you press Run experts, then you inspect each expert's files and the synthesis.</span></li></ol><div class="note"><h3>The QR code itself grants no access.</h3><p>Every visitor is approved individually on the server, and an approved session is limited in time, projects and experts. The approval lives in a secure cookie in your browser; nothing is stored in the link.</p></div><p class="scope">This is Cloudbite's own visitor flow. It does not open a classroom or a terminal, and approval alone creates no sandbox or paid run.</p></section></div><footer><span>Cloudbite visitor access · Host-approved, time-limited sessions</span><a class="owner" href="${OWNER_URL}" target="_blank" rel="noopener noreferrer">Owner request inbox</a></footer></main></body></html>`; }
+const shell = (title, desc, view) => `${head(title, desc, `<link rel="stylesheet" href="${CSS_PATH}"><script src="${JS_PATH}" defer></script>`)}</head>
+<body><div id="cb-access" data-view="${view}"><p class="ax-help">Loading…</p><noscript><p>This page requires JavaScript.</p></noscript></div></body></html>
 `;
-function page(style) { return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>Cloudbite — Request your sandbox</title>${style}</head>
-<body><header><strong>Cloudbite</strong><span>A workspace for every participant</span></header><main><h1>Try it in your own sandbox.</h1><p class="lead">Scan to request a separate workspace. The host approves your request with a security key, then your personal entry link becomes available.</p><div class="access-grid"><section class="qr-panel" aria-label="Sandbox request QR code"><figure><div role="img" aria-label="QR code for ${REQUEST_URL}">${svg}</div><figcaption><a href="${REQUEST_URL}" target="_blank" rel="noopener noreferrer">${REQUEST_URL}</a></figcaption></figure><div class="actions"><a class="button primary" href="${REQUEST_URL}" target="_blank" rel="noopener noreferrer">Open request form</a><a class="button secondary" href="${pngUrl}" download="cloudbite-sandbox-request.png">Save QR image</a></div><p class="downloads"><a href="${svgUrl}" download="cloudbite-sandbox-request.svg">Download SVG</a> · Use your browser's Print command for a handout.</p></section><section class="instructions" aria-labelledby="how"><h2 id="how">From request to workspace</h2><ol><li><strong>Tell us what you want to try.</strong><span>Enter your name and a short task. The request form is currently in Korean: choose <b lang="ko">혼자 복습할 개인 실습실</b> (personal practice workspace).</span></li><li><strong>The host approves with a security key.</strong><span>Your request waits in the host's inbox. The host chooses the session limits and confirms this request with the key.</span></li><li><strong>Open your personal entry link.</strong><span>Keep the request page open. Once provisioning is ready, it shows the link to your assigned sandbox.</span></li></ol><div class="note"><h3>One participant, one workspace.</h3><p>This uses the existing sandbox request service. Approval is required, and provisioning can take a little time. The QR itself grants no access.</p></div><p class="scope">Use the same browser to check your request. The confirmation information stays in that browser. This participant flow is separate from the simulated expert workspaces in the pitch preview.</p></section></div><footer><span>Daytona workspace access · Host-approved session limits</span><a class="owner" href="${OWNER_URL}" target="_blank" rel="noopener noreferrer">Owner request inbox</a></footer></main></body></html>`; }
-const online=page('<link rel="stylesheet" href="/cloudbite/access.css">');
-const generated=`// Generated by tools/build-cloudbite-access.mjs. Public URLs only; no access token.\nexport const CLOUDBITE_ACCESS_URL = ${JSON.stringify(REQUEST_URL)};\nexport const CLOUDBITE_ACCESS_HTML = ${JSON.stringify(online)};\nexport const CLOUDBITE_ACCESS_CSS = ${JSON.stringify(css)};\nexport const CLOUDBITE_ACCESS_QR = ${JSON.stringify(svg)};\n`;
-const outputs=[['src/cloudbite-access-page.ts',generated],['demo/access-qr.html',page('<style>'+css+'</style>')],['demo/cloudbite-sandbox-request.svg',svg],['demo/cloudbite-sandbox-request.png',png]];
-if(process.argv.includes('--check')){for(const [path,data]of outputs){const expected=Buffer.isBuffer(data)?data:Buffer.from(data);let actual;try{actual=readFileSync(root+path)}catch{throw Error('missing generated file: '+path)}if(!actual.equals(expected))throw Error('stale generated file: '+path)}console.log('cloudbite-access: generated files current')}
-else{mkdirSync(root+'demo',{recursive:true});for(const[path,data]of outputs)writeFileSync(root+path,data);console.log('cloudbite-access: generated HTML, SVG and '+width+'px PNG for '+REQUEST_URL)}
+const online = showcase(`<link rel="stylesheet" href="${CSS_PATH}">`);
+const requestHtml = shell('Cloudbite — Request access', 'Ask the host for a short Cloudbite session.', 'request');
+const requestsHtml = shell('Cloudbite — Access requests', 'Owner inbox for Cloudbite visitor access requests.', 'owner');
+const standalone = showcase('<style>' + css + '</style>');
+
+const generated = `// Generated by tools/build-cloudbite-access.mjs — do not edit. Sources: client/cloudbite-access.ts · client/cloudbite-access.css.
+// Public URLs only; no credential. Routes (wired by the runtime): /cloudbite/access → CLOUDBITE_ACCESS_HTML, /cloudbite/request → CLOUDBITE_REQUEST_HTML,
+// /cloudbite/requests → CLOUDBITE_REQUESTS_HTML, ${CSS_PATH} → CLOUDBITE_ACCESS_CSS, ${JS_PATH} → CLOUDBITE_ACCESS_JS, /cloudbite/access-qr.svg → CLOUDBITE_ACCESS_QR.
+// CSP script-src 'self'; style-src 'self' is enough (no inline script or style).
+export const CLOUDBITE_ACCESS_URL = ${JSON.stringify(REQUEST_URL)};
+export const CLOUDBITE_ACCESS_OWNER_URL = ${JSON.stringify(OWNER_URL)};
+export const CLOUDBITE_ACCESS_JS_PATH = ${JSON.stringify(JS_PATH)};
+export const CLOUDBITE_ACCESS_CSS_PATH = ${JSON.stringify(CSS_PATH)};
+export const CLOUDBITE_ACCESS_HTML = ${JSON.stringify(online)};
+export const CLOUDBITE_REQUEST_HTML = ${JSON.stringify(requestHtml)};
+export const CLOUDBITE_REQUESTS_HTML = ${JSON.stringify(requestsHtml)};
+export const CLOUDBITE_ACCESS_CSS = ${JSON.stringify(css)};
+export const CLOUDBITE_ACCESS_JS = ${JSON.stringify(js)};
+export const CLOUDBITE_ACCESS_QR = ${JSON.stringify(svg)};
+`;
+// canonical names + old names kept as byte-identical compatibility copies of the same new QR
+const outputs = [['src/cloudbite-access-page.ts', generated], ['demo/access-qr.html', standalone],
+  ['demo/cloudbite-access-request.svg', svg], ['demo/cloudbite-access-request.png', png],
+  ['demo/cloudbite-sandbox-request.svg', svg], ['demo/cloudbite-sandbox-request.png', png]];
+for (const [path, data] of outputs) {
+  if (Buffer.isBuffer(data)) continue;
+  if (/k\.shinick\.dev|\/lab\/request|cbo_[A-Za-z0-9_-]{20}|security key/i.test(data)) fail(`${path} would contain a legacy URL, credential-like value or security-key claim`);
+}
+if (process.argv.includes('--check')) {
+  for (const [path, data] of outputs) {
+    const expected = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    let actual;
+    try { actual = readFileSync(root + path); } catch { fail('missing generated file: ' + path); }
+    if (!actual.equals(expected)) fail('stale generated file: ' + path + ' — node tools/build-cloudbite-access.mjs');
+  }
+  console.log('cloudbite-access: generated files current');
+} else {
+  mkdirSync(root + 'demo', { recursive: true });
+  for (const [path, data] of outputs) writeFileSync(root + path, data);
+  console.log('cloudbite-access: generated pages, JS, SVG and ' + width + 'px PNG for ' + REQUEST_URL);
+}
