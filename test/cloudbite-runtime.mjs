@@ -54,7 +54,11 @@ const check = async (name, f) => { await f(); count++; console.log('ok', name); 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const gate = () => { let resolve; const p = new Promise((r) => (resolve = r)); return { p, resolve }; };
 const jr = (v, status = 200) => new Response(JSON.stringify(v), { status, headers: { 'content-type': 'application/json' } });
-const SECRETS = ['DAYTONA-SECRET-VALUE', 'NOSANA-SECRET-VALUE', 'ADMIN-TOKEN-VALUE'];
+const SECRETS = ['DAYTONA-SECRET-VALUE', 'NOSANA-SECRET-VALUE', 'ADMIN-TOKEN-VALUE', 'DAYTONA-SECONDARY-SECRET-VALUE'];
+// Two Daytona organizations behind one fake host: the bearer selects the account, sandboxes belong to one account.
+const DT_ACCOUNTS = { [SECRETS[0]]: 'A', [SECRETS[3]]: 'B' };
+const SECONDARY = { CLOUDBITE_DAYTONA_SECONDARY_API_KEY: SECRETS[3] };
+const OWNER = { primary: 'A', secondary: 'B' };
 const QWEN = 'qwen/qwen3.8-27b';
 const HIDDEN = 'HIDDEN-REASONING-TRACE';
 const PLAIN_KEYS = ['max_tokens', 'messages', 'model', 'stream', 'temperature'];
@@ -77,11 +81,13 @@ function memStorage(w) {
 }
 
 function makeWorld(opts = {}) {
-  const w = { M, now: 1_800_000_000_000, sandboxes: new Map(), posts: 0, deletes: [], creating: 0, maxCreating: 0, nosana: [], fetches: [], uas: [], dirs: tmp, runner: opts.runner ?? 'python', procs: [], ...opts };
+  const w = { M, now: 1_800_000_000_000, sandboxes: new Map(), posts: 0, postsBy: { A: 0, B: 0 }, owners: new Map(), dt: [], unauth: [], deletes: [], creating: 0, maxCreating: 0, nosana: [], fetches: [], uas: [], dirs: tmp, runner: opts.runner ?? 'python', procs: [], ...opts };
   const objects = new Map();
   class TestProject extends w.M.CloudbiteProject { clock() { return w.now; } }
   w.ns = { getByName(name) { if (!objects.has(name)) { const storage = memStorage(w); objects.set(name, new TestProject({ storage, id: { name } }, w.env)); objects.get(name).storage = storage; } return objects.get(name); } };
   w.objects = objects;
+  // Durable Object restart: a new instance over the same storage.
+  w.restart = (name) => { const storage = objects.get(name).storage; const o = new TestProject({ storage, id: { name } }, w.env); o.storage = storage; objects.set(name, o); return o; };
   w.env = {
     ORIGIN: 'https://cb.test', LAB_ORIGIN: 'https://lab.cloudbite.invalid', RP_ID: 'cb.test', MASTER_KEY: 'k',
     STATE: { idFromName: () => 'main', get: () => w.state },
@@ -134,32 +140,38 @@ globalThis.fetch = async (u, init = {}) => {
     return jr({ choices: [{ message: { content: script(req) } }] });
   }
   assert.equal(url.host, 'dt.fake', 'unknown network forbidden: ' + url.host);
-  assert.equal(auth, 'Bearer ' + SECRETS[0]);
   const p = url.pathname;
+  const acct = DT_ACCOUNTS[auth?.replace(/^Bearer /, '')];
+  if (!acct) { w.unauth.push([method, p]); return jr({ message: 'unauthorized' }, 401); }
+  w.dt.push([acct, method, p]);
+  // Another organization's sandbox is invisible: 404, exactly like a deleted one.
+  const own = (s) => s && (s.owner ?? 'A') === acct ? s : undefined;
   if (p === '/sandbox' && method === 'POST') {
-    w.posts++; w.creating++; w.maxCreating = Math.max(w.maxCreating, w.creating);
+    w.posts++; w.postsBy[acct]++; w.creating++; w.maxCreating = Math.max(w.maxCreating, w.creating);
+    const id = 'SB-' + w.posts; // fixed before any hold, so concurrent creates get distinct ids
     try {
       if (w.createHold) await w.createHold.p;
-      const b = JSON.parse(init.body); const id = 'SB-' + w.posts;
-      w.sandboxes.set(id, { id, labels: b.labels, state: 'started', body: b });
+      const b = JSON.parse(init.body);
+      w.sandboxes.set(id, { id, labels: b.labels, state: 'started', body: b, owner: acct }); w.owners.set(id, acct); (w.createBodies ??= []).push([acct, b]);
       mkdirSync(sbDir(w, id), { recursive: true });
-      if (w.loseCreate) { w.loseCreate = false; throw new TypeError('fixture: response lost after provider effect'); }
+      if (w.loseCreate === true || w.loseCreate === acct) { w.loseCreate = false; throw new TypeError('fixture: response lost after provider effect'); }
       return jr({ id, state: 'creating', labels: b.labels, toolboxProxyUrl: 'https://dt.fake/toolbox' });
     } finally { w.creating--; }
   }
   if (p === '/sandbox' && method === 'GET') {
     const want = JSON.parse(url.searchParams.get('labels'));
-    return jr([...w.sandboxes.values()].filter((s) => Object.entries(want).every(([k, v]) => s.labels[k] === v)).map((s) => ({ id: s.id, state: s.state, labels: s.labels, toolboxProxyUrl: 'https://dt.fake/toolbox' })));
+    return jr([...w.sandboxes.values()].filter((s) => own(s) && Object.entries(want).every(([k, v]) => s.labels[k] === v)).map((s) => ({ id: s.id, state: s.state, labels: s.labels, toolboxProxyUrl: 'https://dt.fake/toolbox' })));
   }
   let m = p.match(/^\/sandbox\/(SB-\d+)$/);
-  if (m && method === 'GET') { const s = w.sandboxes.get(m[1]); return s ? jr({ id: s.id, state: s.state, labels: s.labels, toolboxProxyUrl: 'https://dt.fake/toolbox' }) : jr({ message: 'nf' }, 404); }
+  if (m && method === 'GET') { const s = own(w.sandboxes.get(m[1])); return s ? jr({ id: s.id, state: s.state, labels: s.labels, toolboxProxyUrl: 'https://dt.fake/toolbox' }) : jr({ message: 'nf' }, 404); }
   if (m && method === 'DELETE') {
     if (w.deleteFailures > 0) { w.deleteFailures--; return jr({ message: 'busy ' + SECRETS[0] }, 500); }
+    if (w.sandboxes.has(m[1]) && !own(w.sandboxes.get(m[1]))) return jr({ message: 'not found' }, 404);
     w.deletes.push(m[1]); const had = w.sandboxes.delete(m[1]); return had ? jr({}) : jr({ message: 'gone' }, 404);
   }
   m = p.match(/^\/toolbox\/(SB-\d+)\/(.*)$/);
   assert.ok(m, 'unexpected Daytona path ' + p);
-  const [, id, rest] = m; const sb = w.sandboxes.get(id);
+  const [, id, rest] = m; const sb = own(w.sandboxes.get(id));
   if (!sb) return jr({ message: 'no sandbox' }, 404);
   if (rest === 'files/upload') {
     const file = init.body.get('file'); const dest = local(w, id, url.searchParams.get('path'));
@@ -971,6 +983,157 @@ await check('live history: real runner results publish without browser polling, 
   assert.equal(detail.status, 200, detail.text); assert.ok(detail.j.project.experts[0].opinion);
   assert.ok(!SECRETS.some(s => JSON.stringify(rows).includes(s) || detail.text.includes(s)));
   assert.equal(w.deletes.length, 1);
+});
+
+// ── optional second Daytona account ──
+/** Every sandbox-scoped call (get/delete/toolbox) was made with the bearer of the account that created it. */
+const assertOwned = (w) => {
+  for (const [acct, method, path] of w.dt) { const id = path.match(/\/(SB-\d+)/)?.[1]; if (id && w.owners.has(id)) assert.equal(acct, w.owners.get(id), `${method} ${path} must use the owning account`); }
+  assert.deepEqual(w.unauth, [], 'no call with a missing, removed or rotated key');
+};
+const cancel = (w, created) => call(w, 'POST', `/api/cloudbite/projects/${created.j.project.id}/cancel`, { body: {}, headers: { origin: 'https://cb.test', authorization: 'Bearer ' + created.j.accessToken } });
+const cleanups = async (obj) => [...(await obj.storage.list({ prefix: 'cleanup:' })).values()];
+
+await check('secondary Daytona account: optional, URL defaults to primary, no inherited snapshot, partial/malformed settings fail closed by name only', async () => {
+  const env = { ...freshWorld().env, CLOUDBITE_DAYTONA_SNAPSHOT: 'snap-a' };
+  assert.deepEqual(M.cloudbiteConfig(env).daytonaAccounts.map((a) => a.id), ['primary'], 'no secondary settings = single primary account');
+  assert.deepEqual(M.cloudbiteConfig(env).daytona, { api: 'https://dt.fake', key: SECRETS[0], snapshot: 'snap-a' }, 'primary shape unchanged');
+  const two = M.cloudbiteConfig({ ...env, ...SECONDARY }).daytonaAccounts;
+  assert.deepEqual(two, [{ id: 'primary', api: 'https://dt.fake', key: SECRETS[0], snapshot: 'snap-a' }, { id: 'secondary', api: 'https://dt.fake', key: SECRETS[3], snapshot: undefined }]);
+  assert.equal(M.cloudbiteConfig({ ...env, ...SECONDARY, CLOUDBITE_DAYTONA_SECONDARY_API_URL: 'https://dt2.fake/api/', CLOUDBITE_DAYTONA_SECONDARY_SNAPSHOT: 'snap-b' }).daytonaAccounts[1].api, 'https://dt2.fake/api');
+  const bad = [
+    [{ CLOUDBITE_DAYTONA_SECONDARY_API_URL: 'https://dt2.fake' }, ['CLOUDBITE_DAYTONA_SECONDARY_API_KEY']],
+    [{ CLOUDBITE_DAYTONA_SECONDARY_SNAPSHOT: 'snap-b' }, ['CLOUDBITE_DAYTONA_SECONDARY_API_KEY']],
+    [{ CLOUDBITE_DAYTONA_SECONDARY_API_KEY: SECRETS[0] }, ['CLOUDBITE_DAYTONA_SECONDARY_API_KEY (must be a different account key)']],
+    [{ ...SECONDARY, CLOUDBITE_DAYTONA_SECONDARY_API_URL: 'http://evil.example' }, ['CLOUDBITE_DAYTONA_SECONDARY_API_URL']],
+    [{ ...SECONDARY, CLOUDBITE_DAYTONA_SECONDARY_SNAPSHOT: 'bad snapshot!' }, ['CLOUDBITE_DAYTONA_SECONDARY_SNAPSHOT (invalid)']],
+  ];
+  for (const [over, names] of bad) {
+    assert.deepEqual(M.cloudbiteMissing({ ...env, ...over }, 1), names);
+    assert.equal(M.cloudbiteConfig({ ...env, ...over }), null, 'malformed secondary never degrades to primary-only');
+  }
+  const w = freshWorld({ env: { CLOUDBITE_DAYTONA_SECONDARY_API_URL: 'http://evil.example' } });
+  const boot = await call(w, 'GET', '/api/cloudbite/bootstrap');
+  assert.equal(boot.j.configuration.liveReady, false);
+  assert.deepEqual(boot.j.configuration.missing, ['CLOUDBITE_DAYTONA_SECONDARY_API_KEY', 'CLOUDBITE_DAYTONA_SECONDARY_API_URL']);
+  assert.ok(!boot.text.includes('evil.example'));
+  const live = await call(w, 'POST', '/api/cloudbite/projects', { body: brief(), headers: admin });
+  assert.equal(live.status, 503); assert.equal(w.posts, 0);
+  w.env = { ...w.env, ...SECONDARY, CLOUDBITE_DAYTONA_SECONDARY_API_URL: '' };
+  const ok = await call(w, 'GET', '/api/cloudbite/bootstrap');
+  assert.equal(ok.j.configuration.liveReady, true);
+  for (const s of SECRETS) assert.ok(!ok.text.includes(s));
+});
+
+await check('two accounts: experts are pinned before create, spread over both organizations, and every lifecycle call uses the owning key', async () => {
+  const w = freshWorld({ env: { ...SECONDARY, CLOUDBITE_DAYTONA_SNAPSHOT: 'snap-a' } });
+  const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief(), headers: admin });
+  assert.equal(created.status, 201, created.text);
+  const obj = await project(w, created);
+  w.createHold = gate();
+  const first = obj.alarm(); await sleep(20);
+  const pinnedEx = await experts(obj);
+  assert.equal(w.creating, 3, 'three creates in flight (concurrency unchanged)');
+  for (const e of pinnedEx) { assert.ok(OWNER[e.int.account], 'account persisted before the create returned'); assert.match(e.int.binding, /^[0-9a-f]{32}$/); }
+  w.createHold.resolve(); w.createHold = null; await first;
+  await drive(w, obj, (p) => p.status !== 'running', 2000);
+  await Promise.all(w.procs);
+  const p = await obj.storage.get('project'); const ex = await experts(obj);
+  assert.equal(p.status, 'completed', JSON.stringify(ex.map((e) => [e.run.status, e.run.error])));
+  assert.equal(w.posts, 3); assert.ok(w.postsBy.A > 0 && w.postsBy.B > 0, JSON.stringify(w.postsBy));
+  for (const e of ex) assert.equal(w.owners.get(e.run.sandboxId), OWNER[e.int.account]);
+  // snapshots are organization-scoped: the primary's snapshot is never sent to the secondary
+  for (const [acct, body] of w.createBodies) assert.equal(body.snapshot, acct === 'A' ? 'snap-a' : undefined);
+  for (const acct of ['A', 'B']) {
+    const ops = w.dt.filter(([a]) => a === acct).map(([, m, path]) => m + ' ' + path.replace(/SB-\d+/, 'SB'));
+    for (const op of ['POST /sandbox', 'GET /sandbox/SB', 'POST /toolbox/SB/process/execute', 'POST /toolbox/SB/files/upload', 'GET /toolbox/SB/files/download', 'POST /toolbox/SB/process/session', 'DELETE /sandbox/SB'])
+      assert.ok(ops.includes(op), `${acct}: ${op}`);
+  }
+  assertOwned(w);
+  assert.deepEqual([...w.deletes].sort(), ex.map((e) => e.run.sandboxId).sort());
+  for (const c of await cleanups(obj)) { assert.ok(c.done); const e = ex.find((x) => x.run.id === c.run); assert.equal(c.account, e.int.account); assert.equal(c.binding, e.int.binding); }
+  const read = await call(w, 'GET', `/api/cloudbite/projects/${created.j.project.id}`, { headers: { authorization: 'Bearer ' + created.j.accessToken } });
+  assert.ok(!/binding|"account"|secondary/.test(read.text), 'account assignment stays internal');
+  for (const [, text] of [...allText(w), ['read', read.text]]) for (const s of SECRETS) assert.ok(!text.includes(s));
+  assert.deepEqual(await w.ns.getByName('registry').storage.get('reg'), {});
+});
+
+await check('two accounts: a lost secondary create response is adopted by label in the secondary only, never re-posted; cancel cleans each with its own key', async () => {
+  const w = freshWorld({ runner: 'none', env: SECONDARY, loseCreate: 'B' });
+  const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['market', 'risk'] }), headers: admin });
+  const obj = await project(w, created);
+  await drive(w, obj, async () => (await experts(obj)).every((e) => e.run.status === 'running'));
+  const ex = await experts(obj);
+  assert.deepEqual(ex.map((e) => e.int.account).sort(), ['primary', 'secondary'], 'two runs of one project use both accounts');
+  assert.deepEqual(w.postsBy, { A: 1, B: 1 }, 'no second POST after the unconfirmed create');
+  const sec = ex.find((e) => e.int.account === 'secondary');
+  assert.ok(sec.run.activity.some((a) => /adopted sandbox/.test(a.message)));
+  assert.equal(w.owners.get(sec.run.sandboxId), 'B');
+  const lists = w.dt.filter(([, m, path]) => m === 'GET' && path === '/sandbox');
+  assert.ok(lists.length >= 1 && lists.every(([a]) => a === 'B'), 'label lookup only in the original account');
+  const label = (await cleanups(obj)).find((c) => c.label && c.run === sec.run.id);
+  assert.equal(label.account, 'secondary', 'label cleanup of an uncertain create carries its account');
+  assert.equal((await cancel(w, created)).status, 200);
+  await drive(w, obj, () => w.deletes.length === 2 && w.sandboxes.size === 0, 400);
+  await drive(w, obj, async () => (await cleanups(obj)).every((c) => c.done), 400);
+  assertOwned(w);
+  assert.equal((await obj.storage.get('project')).released, true);
+});
+
+await check('secondary key removed or rotated: pinned expert fails, its cleanup stays pending (no primary 404), and resumes only with the original key', async () => {
+  const w = freshWorld({ runner: 'none', env: SECONDARY });
+  const { created, obj } = await manualRun(w, 2);
+  const ex = await experts(obj);
+  const a = ex.find((e) => e.int.account === 'primary'), b = ex.find((e) => e.int.account === 'secondary');
+  assert.ok(a && b);
+  delete w.env.CLOUDBITE_DAYTONA_SECONDARY_API_KEY; // now a valid single-account configuration
+  await drive(w, obj, async () => (await experts(obj)).find((e) => e.run.id === b.run.id).int.phase === 'final');
+  const mid = await experts(obj);
+  assert.match(mid.find((e) => e.run.id === b.run.id).run.error, /assigned Daytona account is no longer configured/);
+  assert.equal(mid.find((e) => e.run.id === a.run.id).run.status, 'running', 'primary expert continues on its own account');
+  assert.equal((await cancel(w, created)).status, 200);
+  await drive(w, obj, () => w.deletes.includes(a.run.sandboxId));
+  for (let i = 0; i < 5; i++) { w.now += 11 * 60_000; await obj.alarm(); }
+  assert.ok(w.sandboxes.has(b.run.sandboxId), 'secondary sandbox was not declared deleted');
+  assert.ok(!w.deletes.includes(b.run.sandboxId));
+  const pendingB = (await cleanups(obj)).filter((c) => c.run === b.run.id);
+  assert.ok(pendingB.length && pendingB.every((c) => !c.done && !c.stuck && c.tries === 0 && c.account === 'secondary'));
+  assert.notEqual((await obj.storage.get('project')).released, true, 'live slot held while cleanup is pending');
+  assert.ok(obj.storage.alarm - w.now >= 60_000, 'no tight alarm loop while waiting for credentials');
+  assert.equal(await obj.refundState((await obj.storage.get('project')).brief.requestId), 'none');
+  // a different key in the secondary slot (rotation without drain) is also refused, without sending it anywhere
+  w.env.CLOUDBITE_DAYTONA_SECONDARY_API_KEY = 'ROTATED-SECONDARY-KEY';
+  for (let i = 0; i < 3; i++) { w.now += 11 * 60_000; await obj.alarm(); }
+  assert.ok(w.sandboxes.has(b.run.sandboxId)); assert.deepEqual(w.unauth, []);
+  // the original key returns: cleanup completes in the secondary account
+  w.env.CLOUDBITE_DAYTONA_SECONDARY_API_KEY = SECRETS[3];
+  w.now += 11 * 60_000;
+  await drive(w, obj, async () => !w.sandboxes.has(b.run.sandboxId) && (await cleanups(obj)).every((c) => c.done), 400);
+  await drive(w, obj, (p) => p.released === true);
+  assertOwned(w);
+});
+
+await check('legacy records without an account resolve to primary across restart, even after a secondary is added; an unconfirmed create is adopted in primary', async () => {
+  const w = freshWorld({ runner: 'none', loseCreate: true });
+  const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['market'] }), headers: admin });
+  let obj = await project(w, created);
+  await drive(w, obj, async () => (await experts(obj))[0].run.activity.some((a) => /checking by label/.test(a.message)));
+  // rewrite the stored records into the pre multi-account shape
+  const [e0] = await experts(obj);
+  delete e0.int.account; delete e0.int.binding;
+  await obj.storage.put('expert:' + e0.run.id, e0);
+  for (const [k, c] of await obj.storage.list({ prefix: 'cleanup:' })) { delete c.account; delete c.binding; await obj.storage.put(k, c); }
+  w.env.CLOUDBITE_DAYTONA_SECONDARY_API_KEY = SECRETS[3];
+  obj = w.restart(created.j.project.id);
+  await drive(w, obj, async () => (await experts(obj))[0].run.status === 'running');
+  const [e] = await experts(obj);
+  assert.equal(e.int.account, 'primary'); assert.match(e.int.binding, /^[0-9a-f]{32}$/);
+  assert.equal(e.run.sandboxId, 'SB-1'); assert.deepEqual(w.postsBy, { A: 1, B: 0 });
+  assert.ok(w.dt.every(([acct]) => acct === 'A'), 'legacy run never touched the new secondary account');
+  assert.equal((await cancel(w, created)).status, 200);
+  await drive(w, obj, async () => w.deletes.includes('SB-1') && (await cleanups(obj)).every((c) => c.done));
+  for (const c of await cleanups(obj)) assert.equal(c.account, 'primary');
+  assertOwned(w);
 });
 
 server.close();

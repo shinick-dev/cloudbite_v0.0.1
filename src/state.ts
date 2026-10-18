@@ -123,6 +123,9 @@ export interface Env {
   CLOUDBITE_DAYTONA_API_URL?: string;
   CLOUDBITE_DAYTONA_API_KEY?: string;   // Worker secret
   CLOUDBITE_DAYTONA_SNAPSHOT?: string;
+  CLOUDBITE_DAYTONA_SECONDARY_API_KEY?: string;  // Worker secret: 선택. 다른 Daytona 조직의 키 — docs/daytona-multi-account.md
+  CLOUDBITE_DAYTONA_SECONDARY_API_URL?: string;  // 선택. 없으면 기본 계정 주소
+  CLOUDBITE_DAYTONA_SECONDARY_SNAPSHOT?: string; // 선택. 스냅샷은 조직 범위라 없으면 스냅샷 없이 만든다
   CLOUDBITE_NOSANA_BASE_URL?: string;   // OpenAI 호환 …/v1
   CLOUDBITE_NOSANA_API_KEY?: string;    // Worker secret
   CLOUDBITE_NOSANA_MODEL?: string;

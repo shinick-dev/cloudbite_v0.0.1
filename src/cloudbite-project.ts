@@ -5,6 +5,7 @@
 //   project                     ProjectRecord — brief, status, access-token hashes, retention deadline
 //   expert:<run>                ExpertRecord — public ExpertRun + internal execution state (phase, claim, sandbox, capability hash)
 //   cleanup:<run>:<kind>:<ref>  CleanupEntry — owned sandbox id or creation label to delete; one key each (no lost updates)
+//                               and the Daytona account (+ credential binding) that owns it
 //   artifact:<run>:<path>       collected text artifact (≤ 64 KiB)
 // Registry instance: reg → { [projectId]: expiresAt }
 //
@@ -13,6 +14,8 @@
 // A claim id is persisted before external I/O; results are applied only if the same claim is still current and
 // the project is still running, so cancellation and lost/duplicate ticks cannot resurrect or double-apply work.
 // Sandbox creation records a unique label first: a lost create response is resolved by label lookup, never by a blind retry.
+// Each expert is pinned to one Daytona account (primary/secondary) at admission, before its first create; every later
+// call and cleanup for it uses that account only. Records without an account are legacy and resolve to primary.
 import { DurableObject } from 'cloudflare:workers';
 import type { Env } from './state';
 import type { ExpertActivity, ExpertArtifact, ExpertDefinition, ExpertRun, ProjectBrief, ProjectRun, ProjectStatus } from './cloudbite-contract';
@@ -20,7 +23,7 @@ import { CLOUDBITE_EXPERTS, buildExpertWorkspace } from './cloudbite-personas';
 import {
   CB_ACTIVITY_MAX, CB_ACTIVITY_POSTS, CB_ARTIFACT_FILES, CB_ARTIFACT_MAX, CB_CAPABILITY_TTL, CB_CLAIM_STALE, CB_CLEANUP_MAX_TRIES,
   CB_EXPERT_DEADLINE, CB_INFERENCE_MAX_CALLS, CB_INFERENCE_TIMEOUT, CB_MAX_ACTIVE_PROJECTS, CB_MAX_CONCURRENT, CB_MAX_TOKENS, CB_POLL,
-  CB_PROVISION_DEADLINE, CB_RETENTION, CB_WORKDIR, cloudbiteConfig, type CloudbiteConfig,
+  CB_PROVISION_DEADLINE, CB_RETENTION, CB_WORKDIR, cbAccountBinding, cloudbiteConfig, type CbAccountId, type CbDaytonaAccount, type CloudbiteConfig,
 } from './cloudbite-config';
 import { artifactPath, extraArtifactPath, isInvalid, PROJECT_ID, validateBrief, validateResult, validateWorkspace } from './cloudbite-validate';
 import { CbDaytonaError, CB_LABEL_CLAIM, CB_LABEL_PROJECT, CB_LABEL_RUN, cbCreateSandbox, cbDeleteSandbox, cbDownload, cbExec, cbFindByLabels, cbGetSandbox, cbStartRunner, cbUpload, type CbSandbox } from './cloudbite-daytona';
@@ -47,6 +50,7 @@ interface Internal {
   calls: number; inflightUntil?: number; posts: number;
   admittedAt?: number; deadline?: number; nextAt: number; doneSignal?: boolean;
   seq: number; failures: number;
+  account?: CbAccountId; binding?: string; // pinned Daytona account + credential binding (absent = legacy primary)
 }
 interface ExpertRecord { run: ExpertRun; int: Internal }
 interface ProjectRecord {
@@ -56,12 +60,19 @@ interface ProjectRecord {
   history?: HistoryIdentity; feedback?: HistoryFeedback[];
   routing?: CloudbiteRoutingDecision;
 }
-interface CleanupEntry { run: string; sandboxId?: string; label?: string; tries: number; nextAt: number; done?: boolean; stuck?: boolean }
+interface CleanupEntry { run: string; sandboxId?: string; label?: string; tries: number; nextAt: number; done?: boolean; stuck?: boolean; account?: CbAccountId; binding?: string }
+type Account = CbDaytonaAccount & { binding: string };
+type Owner = { account: CbAccountId; binding: string };
+/** The exact account a record is pinned to, or undefined when it was removed, rotated or re-pointed. Legacy = primary. */
+const pinned = (accounts: Account[], r: { account?: CbAccountId; binding?: string }) =>
+  accounts.find((a) => a.id === (r.account ?? 'primary') && (r.binding === undefined || a.binding === r.binding));
+const owner = (a: Account): Owner => ({ account: a.id, binding: a.binding });
 
 const TERMINAL_PROJECT = new Set<ProjectStatus>(['completed', 'partial', 'failed', 'cancelled']);
 const REGISTRY = 'registry';
 const REGISTRY_TTL = 4 * CB_EXPERT_DEADLINE; // a leaked slot (no cleanup confirmation) frees itself
 const SANDBOX_BAD = new Set(['error', 'build_failed', 'destroyed', 'destroying']);
+const UNPINNED = 'assigned Daytona account is no longer configured with the same credentials; cleanup is retained';
 
 const rand = (bytes: number) => {
   const b = crypto.getRandomValues(new Uint8Array(bytes));
@@ -88,6 +99,9 @@ export class CloudbiteProject extends DurableObject<Env> {
   protected workspace(expert: ExpertDefinition, brief: ProjectBrief) { return buildExpertWorkspace(expert, brief); }
   protected clock() { return Date.now(); }
   protected config(): CloudbiteConfig | null { return cloudbiteConfig(this.env); }
+  private async accounts(cfg: CloudbiteConfig | null): Promise<Account[]> {
+    return cfg ? Promise.all(cfg.daytonaAccounts.map(async (a) => ({ ...a, binding: await cbAccountBinding(a) }))) : [];
+  }
 
   // ── registry instance ──
   async registryAcquire(projectId: string): Promise<{ ok: true } | CbFail> {
@@ -129,7 +143,7 @@ export class CloudbiteProject extends DurableObject<Env> {
     e.int.claim = undefined; e.int.claimAt = undefined;
     this.log(e, status === 'failed' ? 'error' : 'status', message);
   }
-  private async addCleanup(entry: Omit<CleanupEntry, 'tries' | 'nextAt'>) {
+  private async addCleanup(entry: Omit<CleanupEntry, 'tries' | 'nextAt'> & Owner) {
     const key = `cleanup:${entry.run}:${entry.sandboxId ? `id:${entry.sandboxId}` : `label:${entry.label}`}`;
     if (await this.ctx.storage.get(key)) return;
     await this.ctx.storage.put(key, { ...entry, tries: 0, nextAt: 0 } satisfies CleanupEntry);
@@ -418,17 +432,24 @@ export class CloudbiteProject extends DurableObject<Env> {
   private async liveTick(experts: ExpertRecord[]) {
     const now = this.clock();
     const cfg = this.config();
+    const accounts = await this.accounts(cfg);
     for (const e of experts.filter((x) => x.int.phase !== 'final')) {
       if (!cfg) await this.commit(e.run.id, null, (x) => this.finish(x, 'failed', 'live configuration is no longer available'));
       else if (e.int.deadline && now > e.int.deadline) await this.commit(e.run.id, null, (x) => this.finish(x, 'failed', 'timed out'));
+      // Never continue on another account: the pinned one must still be configured with the same credentials.
+      else if (e.int.phase !== 'queued' && !pinned(accounts, e.int)) await this.commit(e.run.id, null, (x) => this.finish(x, 'failed', UNPINNED));
     }
     if (!cfg) return;
-    const fresh = (await this.load())!.experts;
+    const { p: proj, experts: fresh } = (await this.load())!;
+    // Deterministic balanced placement: run index plus a per-project offset, persisted at admission (before any create).
+    const offset = parseInt(proj.id.slice(2, 10), 16) || 0;
     let active = fresh.filter((x) => x.int.phase !== 'queued' && x.int.phase !== 'final').length;
     for (const e of fresh.filter((x) => x.int.phase === 'queued')) {
       if (active >= CB_MAX_CONCURRENT) break;
       active++;
+      const a = accounts[(offset + Math.max(0, proj.runs.indexOf(e.run.id))) % accounts.length];
       await this.commit(e.run.id, null, (x) => {
+        x.int.account = a.id; x.int.binding = a.binding;
         x.int.phase = 'creating'; x.int.admittedAt = now; x.int.deadline = now + CB_EXPERT_DEADLINE; x.int.nextAt = now;
         x.run.status = 'provisioning';
         this.log(x, 'status', 'provisioning a dedicated Daytona sandbox');
@@ -441,17 +462,22 @@ export class CloudbiteProject extends DurableObject<Env> {
   private async step(cfg: CloudbiteConfig, run: string) {
     const claim = crypto.randomUUID();
     const now = this.clock();
+    const accounts = await this.accounts(cfg);
     let phase = 'queued' as Phase;
     const got = await this.commit(run, null, (e) => {
       if (e.int.claim && (e.int.claimAt ?? 0) + CB_CLAIM_STALE >= now) { phase = 'final'; return; }
       e.int.claim = claim; e.int.claimAt = now; phase = e.int.phase;
+      // Legacy in-flight record (pre multi-account): pin it to primary before any lookup, adoption or other provider call.
+      if (!e.int.account) { e.int.account = 'primary'; e.int.binding = accounts[0].binding; }
     });
     if (!got || phase === 'final') return;
     const e = (await this.ctx.storage.get<ExpertRecord>(`expert:${run}`))!;
-    const c = { api: cfg.daytona.api, key: cfg.daytona.key };
     const release = (mutate: (x: ExpertRecord) => void) => this.commit(run, claim, (x) => { mutate(x); x.int.claim = undefined; x.int.claimAt = undefined; });
+    const account = pinned(accounts, e.int);
+    if (!account) { await release((x) => this.finish(x, 'failed', UNPINNED)); return; }
+    const c = { api: account.api, key: account.key };
     try {
-      await this.advance(cfg, c, e, claim, release);
+      await this.advance(cfg, account, c, e, claim, release);
     } catch (err) {
       const status = err instanceof CbDaytonaError ? err.message : 'internal step error';
       await release((x) => {
@@ -462,8 +488,8 @@ export class CloudbiteProject extends DurableObject<Env> {
     }
   }
 
-  private async advance(cfg: CloudbiteConfig, c: { api: string; key: string }, e: ExpertRecord, claim: string, release: (m: (x: ExpertRecord) => void) => Promise<boolean>) {
-    const run = e.run.id, pid = (await this.ctx.storage.get<ProjectRecord>('project'))!.id;
+  private async advance(cfg: CloudbiteConfig, account: Account, c: { api: string; key: string }, e: ExpertRecord, claim: string, release: (m: (x: ExpertRecord) => void) => Promise<boolean>) {
+    const run = e.run.id, pid = (await this.ctx.storage.get<ProjectRecord>('project'))!.id, own = owner(account);
     const now = this.clock();
     const labels = { [CB_LABEL_PROJECT]: pid, [CB_LABEL_RUN]: run, [CB_LABEL_CLAIM]: e.int.label };
     const sb = (): CbSandbox => ({ id: e.int.sandboxId!, state: 'started', toolboxProxyUrl: e.int.toolbox });
@@ -474,7 +500,7 @@ export class CloudbiteProject extends DurableObject<Env> {
           // A create may have reached Daytona without us seeing the answer. Adopt it by label; never create a second one.
           const found = await cbFindByLabels(c, labels);
           if (found.length) {
-            for (const f of found) await this.addCleanup({ run, sandboxId: f.id });
+            for (const f of found) await this.addCleanup({ run, sandboxId: f.id, ...own });
             await release((x) => { x.int.sandboxId = found[0].id; x.int.toolbox = found[0].toolboxProxyUrl; x.int.createIntentAt = undefined; x.int.phase = 'booting'; x.run.sandboxId = found[0].id; this.log(x, 'status', `adopted sandbox ${found[0].id} after an unconfirmed create`); });
             return;
           }
@@ -485,11 +511,11 @@ export class CloudbiteProject extends DurableObject<Env> {
           });
           return;
         }
-        await this.addCleanup({ run, label: e.int.label });
+        await this.addCleanup({ run, label: e.int.label, ...own });
         const marked = await this.commit(run, claim, (x) => { x.int.createIntentAt = now; });
         if (!marked) return;
         let created: CbSandbox;
-        try { created = await cbCreateSandbox(c, labels, cfg.daytona.snapshot); }
+        try { created = await cbCreateSandbox(c, labels, account.snapshot); }
         catch (err) {
           if (err instanceof CbDaytonaError && !err.uncertain) {
             await release((x) => { x.int.createIntentAt = undefined; this.finish(x, 'failed', `Daytona rejected sandbox creation (HTTP ${err.status})`); });
@@ -498,7 +524,7 @@ export class CloudbiteProject extends DurableObject<Env> {
           await release((x) => { x.int.nextAt = this.clock() + 10_000; this.log(x, 'error', 'sandbox create response was not received; checking by label'); });
           return;
         }
-        await this.addCleanup({ run, sandboxId: created.id });
+        await this.addCleanup({ run, sandboxId: created.id, ...own });
         await release((x) => {
           x.int.sandboxId = created.id; x.int.toolbox = created.toolboxProxyUrl; x.int.createIntentAt = undefined; x.int.phase = 'booting'; x.int.nextAt = this.clock();
           x.run.sandboxId = created.id;
@@ -617,16 +643,23 @@ export class CloudbiteProject extends DurableObject<Env> {
     const s = await this.load();
     const finalRuns = new Set(s?.experts.filter((e) => e.int.phase === 'final').map((e) => e.run.id));
     const cfg = this.config();
+    const accounts = await this.accounts(cfg);
     const now = this.clock();
-    await Promise.allSettled([...entries].map(async ([key, entry]) => {
+    await Promise.allSettled([...entries].map(async ([key, stored]) => {
+      let entry = stored;
       if (entry.done || entry.stuck || entry.nextAt > now || !finalRuns.has(entry.run)) return;
       if (!cfg || !s) return;
-      const c = { api: cfg.daytona.api, key: cfg.daytona.key };
+      // Only the owning account may delete or look up: another account's 404 must never confirm this cleanup.
+      // A removed, rotated or re-pointed account keeps the entry pending (no try counted) until its credentials return.
+      const account = pinned(accounts, entry);
+      if (!account) return;
+      if (!entry.account) { entry = { ...entry, ...owner(account) }; await this.ctx.storage.put(key, entry); } // legacy: pin before I/O
+      const c = { api: account.api, key: account.key };
       try {
         if (entry.sandboxId) await cbDeleteSandbox(c, entry.sandboxId);
         else {
           const found = await cbFindByLabels(c, { [CB_LABEL_PROJECT]: s.p.id, [CB_LABEL_RUN]: entry.run, [CB_LABEL_CLAIM]: entry.label! });
-          for (const f of found) await this.addCleanup({ run: entry.run, sandboxId: f.id });
+          for (const f of found) await this.addCleanup({ run: entry.run, sandboxId: f.id, ...owner(account) });
         }
         await this.ctx.storage.put(key, { ...entry, done: true });
       } catch {
@@ -672,8 +705,10 @@ export class CloudbiteProject extends DurableObject<Env> {
       for (const e of experts) if (e.int.phase !== 'final') times.push(e.int.phase === 'queued' ? now + 2000 : Math.max(e.int.nextAt, (e.int.claimAt ?? 0) + CB_CLAIM_STALE * (e.int.claim ? 1 : 0)));
       if (p.brief.mode === 'demo') times.push(now + 1500);
     }
-    for (const x of pending) times.push(x.nextAt);
-    if (pending.length && !this.config()) times.push(now + 10 * 60_000);
+    const accounts = await this.accounts(this.config());
+    const blocked = pending.filter((x) => !pinned(accounts, x));
+    for (const x of pending) if (!blocked.includes(x)) times.push(x.nextAt);
+    if (blocked.length) times.push(now + 10 * 60_000); // waiting for configuration or the owning account's credentials
     await this.ctx.storage.setAlarm(Math.max(now + 1000, Math.min(...times)));
   }
 }

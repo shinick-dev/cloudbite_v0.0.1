@@ -31,12 +31,18 @@ export const CB_CLEANUP_MAX_TRIES = 8;
 
 export const CB_WORKDIR = '/home/daytona/cloudbite';
 
+/** Stable internal Daytona account ids. Never derived from or exposing a key. */
+export type CbAccountId = 'primary' | 'secondary';
+export interface CbDaytonaAccount { id: CbAccountId; api: string; key: string; snapshot?: string }
+
 export interface CloudbiteConfig {
-  daytona: { api: string; key: string; snapshot?: string };
+  daytona: { api: string; key: string; snapshot?: string };   // the primary account (unchanged single-account shape)
+  daytonaAccounts: CbDaytonaAccount[];                        // primary first; secondary only when fully configured
   nosana: { base: string; key: string; model: string };
   gateway: string;
 }
 
+const SNAPSHOT = /^[\w./:-]{1,128}$/;
 const httpsUrl = (v: string | undefined, allowLocal: boolean) => {
   if (!v) return null;
   try {
@@ -59,7 +65,16 @@ export function cloudbiteMissing(env: Env, catalogueSize: number): string[] {
   if (!env.CLOUDBITE_NOSANA_API_KEY) missing.push('CLOUDBITE_NOSANA_API_KEY');
   if (!env.CLOUDBITE_NOSANA_MODEL || !/^[\w./:@-]{1,128}$/.test(env.CLOUDBITE_NOSANA_MODEL)) missing.push('CLOUDBITE_NOSANA_MODEL');
   if (!httpsUrl(env.CLOUDBITE_GATEWAY_URL, local)) missing.push('CLOUDBITE_GATEWAY_URL');
-  if (env.CLOUDBITE_DAYTONA_SNAPSHOT && !/^[\w./:-]{1,128}$/.test(env.CLOUDBITE_DAYTONA_SNAPSHOT)) missing.push('CLOUDBITE_DAYTONA_SNAPSHOT (invalid)');
+  if (env.CLOUDBITE_DAYTONA_SNAPSHOT && !SNAPSHOT.test(env.CLOUDBITE_DAYTONA_SNAPSHOT)) missing.push('CLOUDBITE_DAYTONA_SNAPSHOT (invalid)');
+  // Optional second account: absent entirely = single account. Any partial or malformed setting blocks live execution
+  // (fail closed) instead of silently running on the primary account alone.
+  const k2 = env.CLOUDBITE_DAYTONA_SECONDARY_API_KEY, u2 = env.CLOUDBITE_DAYTONA_SECONDARY_API_URL, s2 = env.CLOUDBITE_DAYTONA_SECONDARY_SNAPSHOT;
+  if (k2 || u2 || s2) {
+    if (!k2) missing.push('CLOUDBITE_DAYTONA_SECONDARY_API_KEY');
+    else if (k2 === env.CLOUDBITE_DAYTONA_API_KEY) missing.push('CLOUDBITE_DAYTONA_SECONDARY_API_KEY (must be a different account key)');
+    if (u2 && !httpsUrl(u2, local)) missing.push('CLOUDBITE_DAYTONA_SECONDARY_API_URL');
+    if (s2 && !SNAPSHOT.test(s2)) missing.push('CLOUDBITE_DAYTONA_SECONDARY_SNAPSHOT (invalid)');
+  }
   if (catalogueSize === 0) missing.push('expert catalogue (src/cloudbite-personas.ts)');
   return missing;
 }
@@ -68,9 +83,26 @@ export function cloudbiteMissing(env: Env, catalogueSize: number): string[] {
 export function cloudbiteConfig(env: Env): CloudbiteConfig | null {
   if (cloudbiteMissing(env, 1).length) return null;
   const local = env.CLOUDBITE_ALLOW_HTTP === '1';
+  const daytona = { api: httpsUrl(env.CLOUDBITE_DAYTONA_API_URL, local)!, key: env.CLOUDBITE_DAYTONA_API_KEY!, snapshot: env.CLOUDBITE_DAYTONA_SNAPSHOT || undefined };
+  const accounts: CbDaytonaAccount[] = [{ id: 'primary', ...daytona }];
+  if (env.CLOUDBITE_DAYTONA_SECONDARY_API_KEY) accounts.push({
+    id: 'secondary', key: env.CLOUDBITE_DAYTONA_SECONDARY_API_KEY,
+    api: env.CLOUDBITE_DAYTONA_SECONDARY_API_URL ? httpsUrl(env.CLOUDBITE_DAYTONA_SECONDARY_API_URL, local)! : daytona.api,
+    snapshot: env.CLOUDBITE_DAYTONA_SECONDARY_SNAPSHOT || undefined, // snapshots are organization-scoped: never inherit the primary's
+  });
   return {
-    daytona: { api: httpsUrl(env.CLOUDBITE_DAYTONA_API_URL, local)!, key: env.CLOUDBITE_DAYTONA_API_KEY!, snapshot: env.CLOUDBITE_DAYTONA_SNAPSHOT || undefined },
+    daytona, daytonaAccounts: accounts,
     nosana: { base: httpsUrl(env.CLOUDBITE_NOSANA_BASE_URL, local)!, key: env.CLOUDBITE_NOSANA_API_KEY!, model: env.CLOUDBITE_NOSANA_MODEL! },
     gateway: new URL(httpsUrl(env.CLOUDBITE_GATEWAY_URL, local)!).origin,
   };
+}
+
+/**
+ * Credential binding fingerprint persisted with each account assignment and cleanup entry: a truncated SHA-256 of
+ * account id, API origin and key. A replaced key/API (or swapped accounts) no longer matches, so pinned work stops
+ * instead of being sent with other credentials. Internal only; never part of a public view.
+ */
+export async function cbAccountBinding(a: CbDaytonaAccount): Promise<string> {
+  const d = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`cloudbite-daytona-binding|${a.id}|${a.api}|${a.key}`)));
+  return [...d.slice(0, 16)].map((x) => x.toString(16).padStart(2, '0')).join('');
 }
