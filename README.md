@@ -2,6 +2,8 @@
 
 하나의 프로젝트를 서로 다른 전문가 AI가 독립된 Daytona 샌드박스에서 수행하는 작업 공간입니다. 프로젝트 책임자는 전문가의 페르소나·작업 지시·활동·산출물을 보고 다음 결정을 내립니다.
 
+운영 앱: https://cloudbite-v001.ai-gongbu.workers.dev · [온라인 제출물](https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite-hacksprint-submission). 독립 Worker의 배포·접근 범위는 [운영 문서](docs/cloudbite/production.txt)에 정리합니다.
+
 ## 제품 흐름
 
 1. 프로젝트의 목표와 맥락을 입력합니다.

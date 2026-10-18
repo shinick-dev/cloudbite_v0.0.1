@@ -1,0 +1,35 @@
+Cloudbite production
+
+App: https://cloudbite-v001.ai-gongbu.workers.dev
+Submission: https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite-hacksprint-submission
+Worker: cloudbite-v001 (top-level environment)
+Config: wrangler.cloudbite.jsonc
+Account: 96aee9d5fb56f2efc3d90e147a67f558
+
+This is a separate Worker with its own State and CloudbiteProject SQLite Durable
+Objects. No original gw-shinick DNS, secrets, security keys or lab data were copied
+or changed. Only deliverables/ is served as static assets. The first production
+version was 4540d8e6-0eba-4544-a488-5255aee440d8 on 18 October 2026.
+
+Provider configuration is server-only. Bootstrap liveReady checks configuration,
+not provider uptime or a successful full live project. A public browser demo is
+available without a credential. Live work requires a valid Cloudbite operator
+credential or an admin session from this Worker's own State.
+
+Temporary operator access is documented in temporary-operator.txt. It does not
+approve requests at the existing k.shinick.dev/lab/requests service. The public
+participant QR continues to open https://k.shinick.dev/lab/request.
+
+Owner deployment procedure (from the intended worktree):
+  npm run check
+  node node_modules/wrangler/bin/wrangler.js types .artifacts/production/worker-configuration.d.ts --config wrangler.cloudbite.jsonc --env=
+  node node_modules/wrangler/bin/wrangler.js deploy --config wrangler.cloudbite.jsonc --env= --dry-run
+  node node_modules/wrangler/bin/wrangler.js deploy --config wrangler.cloudbite.jsonc --env= --secrets-file .artifacts/production/secrets.json --strict
+
+Verify the account/Worker before deploying. Use the installed Wrangler version.
+The owner-only, ignored .artifacts/production directory contains secrets.json
+with independent MASTER_KEY and SETUP_TOKEN plus the Cloudbite Daytona/Nosana
+keys. Never publish this directory, its operator HTML/QR, or the secrets file.
+First physical-key registration remains available at /register with SETUP_TOKEN.
+Keep the original MASTER_KEY during redeployment so encrypted state remains
+readable. No key reset or fake WebAuthn proof is needed for temporary access.
