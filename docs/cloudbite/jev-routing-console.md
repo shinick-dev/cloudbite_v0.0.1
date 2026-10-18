@@ -1,7 +1,7 @@
 # Jev 자동 전문가 선택 — 콘솔 (client/cloudbite-console.ts)
 
 구현 범위: 브라우저 콘솔만. 서버 경로·공유 계약은 조정자 소유이며, 아래 모양을 전제로 한다.
-상태: 구현 준비 완료(implementation-ready). 실제 서버·TypeSafe 호출과 브라우저 확인은 아직 하지 않았다.
+아래 검증 수치는 독립 콘솔 작업자의 구현 검사 기록이다. 이후 서버·TypeSafe·Daytona·Nosana와 운영 브라우저까지 통합 확인했으며, 최종 결과는 [운영 검증](jev-routing-acceptance.md)에 기록했다.
 
 ## 전제한 계약
 
