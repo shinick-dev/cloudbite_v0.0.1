@@ -107,9 +107,12 @@ def run_python(code, step):
     path = os.path.join(WORK, 'step_%d.py' % step)
     with open(path, 'w', encoding='utf-8') as f:
         f.write(code[:MAX_FILE])
+    env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': WORK}  # no inherited variables
+    if os.name == 'nt':
+        env['SYSTEMROOT'] = os.environ.get('SYSTEMROOT', '')  # local test hosts only
     try:
         p = subprocess.run([sys.executable, '-I', path], cwd=WORK, capture_output=True, text=True,
-                           timeout=TOOL_SECONDS, env={'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': WORK})
+                           timeout=TOOL_SECONDS, env=env)
         out = 'exit %d\n%s%s' % (p.returncode, p.stdout, p.stderr)
     except subprocess.TimeoutExpired:
         out = 'timed out after %ds' % TOOL_SECONDS

@@ -3,7 +3,7 @@
 import type { CloudbiteBootstrap } from './cloudbite-contract';
 import { CLOUDBITE_EXPERTS } from './cloudbite-personas';
 import { CLOUDBITE_CSS, CLOUDBITE_HTML, CLOUDBITE_JS } from './cloudbite-page';
-import { CB_ACTIVITY_BODY_MAX, CB_COMPLETE_BODY_MAX, CB_CREATE_BODY_MAX, CB_EXPERT_DEADLINE, CB_INFERENCE_BODY_MAX, CB_MAX_EXPERTS, cloudbiteMissing } from './cloudbite-config';
+import { CB_ACTIVITY_BODY_MAX, CB_COMPLETE_BODY_MAX, CB_CREATE_BODY_MAX, CB_INFERENCE_BODY_MAX, CB_MAX_EXPERTS, cloudbiteMissing } from './cloudbite-config';
 import { cbProjectId, isCbFail } from './cloudbite-project';
 import { boundedText } from './cloudbite-inference';
 import { isInvalid, PROJECT_ID, RUN_ID, validateBrief } from './cloudbite-validate';
@@ -86,7 +86,7 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     }
     const id = await cbProjectId(brief.requestId);
     if (brief.mode === 'live') {
-      const slot = await ns.getByName('registry').registryAcquire(id, Date.now() + 4 * CB_EXPERT_DEADLINE);
+      const slot = await ns.getByName('registry').registryAcquire(id);
       if (isCbFail(slot)) return json({ error: slot.error }, slot.status);
     }
     const created = await ns.getByName(id).create(id, brief);

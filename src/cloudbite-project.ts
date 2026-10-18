@@ -54,6 +54,7 @@ interface CleanupEntry { run: string; sandboxId?: string; label?: string; tries:
 
 const TERMINAL_PROJECT = new Set<ProjectStatus>(['completed', 'partial', 'failed', 'cancelled']);
 const REGISTRY = 'registry';
+const REGISTRY_TTL = 4 * CB_EXPERT_DEADLINE; // a leaked slot (no cleanup confirmation) frees itself
 const SANDBOX_BAD = new Set(['error', 'build_failed', 'destroyed', 'destroying']);
 
 const rand = (bytes: number) => {
@@ -76,8 +77,8 @@ export class CloudbiteProject extends DurableObject<Env> {
   protected config(): CloudbiteConfig | null { return cloudbiteConfig(this.env); }
 
   // ── registry instance ──
-  async registryAcquire(projectId: string, until: number): Promise<{ ok: true } | CbFail> {
-    const now = this.clock();
+  async registryAcquire(projectId: string): Promise<{ ok: true } | CbFail> {
+    const now = this.clock(), until = now + REGISTRY_TTL;
     const reg = Object.fromEntries(Object.entries((await this.ctx.storage.get<Record<string, number>>('reg')) ?? {}).filter(([, t]) => t > now));
     if (!reg[projectId] && Object.keys(reg).length >= CB_MAX_ACTIVE_PROJECTS) return fail(429, `at most ${CB_MAX_ACTIVE_PROJECTS} live Cloudbite projects may run at once`);
     reg[projectId] = Math.max(reg[projectId] ?? 0, until);
