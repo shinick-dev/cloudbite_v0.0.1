@@ -49,7 +49,7 @@ If the pinned account is no longer configured, or its key/URL no longer matches 
 
 ### Legacy records
 
-Expert and cleanup records written before this change have no account. They resolve to **primary**, and are pinned
+In-flight expert and cleanup records written before this change have no account. They resolve to **primary**, and are pinned
 to primary (with the current primary binding) before any lookup, adoption, delete or other provider call — even if a
 secondary account has been added since.
 
@@ -72,3 +72,31 @@ accounts with the owning key for the whole lifecycle, pin-before-create, no inhe
 adopted in the secondary without a second POST, cancellation cleanup per account, removed/rotated secondary key
 keeping cleanup pending (no wrong 404), restart with legacy records resolving to primary, and secret redaction.
 No real provider is contacted.
+
+## Production acceptance (2026-10-19 KST)
+
+Implementation source `91d291def8aa9d8275c18644e2537bf1d78e8ba3` was deployed to the independent `cloudbite-v001`
+Worker at `https://cloudbite.shinick.dev`. After the optional secondary secret was uploaded through stdin, active
+version `d6e0c1c5-cb9e-43d8-9a22-402bf87a792c` served the application. Bootstrap reported live execution and Jev
+routing ready with no missing configuration. No legacy Worker was deployed.
+
+Read-only credential checks confirmed both local keys authenticate and identify different Daytona organizations.
+The secondary key has `write:sandboxes` and `delete:sandboxes`; its organization usage endpoint returned 403
+because it lacks limit-viewing permission. The actual additional quota and a 2x throughput improvement were not
+verified. The application admission limits remain unchanged.
+
+A synthetic, manually selected two-expert run (Product Manager and Software Architect) completed in production
+with two valid opinions, six artifacts per expert and zero failures. The new secondary organization's running
+sandbox was directly retrieved with its own key and its project label matched the QA project. After completion,
+both assigned sandbox GETs returned 404 and label-filtered listings found no remaining QA sandboxes in either
+organization. The coordinator deleted only its own QA history through the UI, verified the source returned 404
+and the history index no longer listed it, and restored the new-question screen with default Jev routing.
+
+Coordinator checks: `npm run check` and the complete ten-suite `npm run test:cloudbite` passed, including 39
+runtime checks. The completed worker was closed after a matching native completion receipt. Browser snapshots
+verified actual results; a viewport screenshot attempt timed out, so no screenshot proof is claimed.
+
+Local secret onboarding is separate from activation: the user's key entry succeeded, but `KeyStore.ps1` rejected
+the supplied existing-backup passphrase, before writing a new backup. The remote API-provider Vault registration
+had not been verified at this checkpoint; `Push-DaytonaSecondary.ps1` can perform that step independently using
+the existing physical-security-key login. See [local onboarding](daytona-secondary-setup.md).
