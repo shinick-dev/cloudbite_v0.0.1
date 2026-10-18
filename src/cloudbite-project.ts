@@ -433,7 +433,7 @@ export class CloudbiteProject extends DurableObject<Env> {
       case 'collecting': {
         const read = (path: string, max = CB_ARTIFACT_MAX) => cbDownload(c, sb(), `${CB_WORKDIR}/${path}`, max);
         const [result, report, manifest] = [await read('out/result.json'), await read('out/report.md'), await read('out/manifest.json', 4096)];
-        const opinion = result === null ? { invalid: 'out/result.json missing' } : validateResult(result, e.run.expertId);
+        const opinion = result === null ? { invalid: 'out/result.json missing' } : validateResult(result);
         if (isInvalid(opinion) || !report?.trim()) {
           const why = isInvalid(opinion) ? opinion.invalid : 'out/report.md missing or empty';
           await release((x) => this.finish(x, 'failed', `malformed result: ${why}`));
@@ -480,7 +480,7 @@ export class CloudbiteProject extends DurableObject<Env> {
             evidence: ['[demo] simulated evidence'], assumptions: ['[demo] no live execution took place'], nextActions: ['Run in live mode for a real sandbox result'],
           };
           const report = `# [demo] ${x.run.name}\n\nThis is a simulated report. No Daytona sandbox or Nosana model was used.\n`;
-          artifacts = [['out/result.json', JSON.stringify({ schema: 'cloudbite.expert-result/v1', expertId: x.run.expertId, opinion }, null, 2)], ['out/report.md', report]];
+          artifacts = [['out/result.json', JSON.stringify(opinion, null, 2)], ['out/report.md', report]];
           x.run.opinion = opinion;
           x.run.artifacts = artifacts.map(([path, t]) => ({ path, label: `[demo] ${path}`, bytes: t.length }));
           this.finish(x, 'completed', '[demo] simulated completion');

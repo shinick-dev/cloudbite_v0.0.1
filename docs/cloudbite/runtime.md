@@ -6,10 +6,10 @@ Owner: runtime worker. Implements `docs/cloudbite/api-contract.md` on top of the
 
 | File | Role |
 |---|---|
-| `src/cloudbite-api.ts` | HTTP surface: pages (`/`, `/cloudbite`, `/cloudbite/app.js`, `/cloudbite/style.css`), `/api/cloudbite/*`, `/p/_cloudbite/worker/*` |
+| `src/cloudbite-api.ts` | HTTP surface: pages (`/`, `/cloudbite`, and the assets the page references: `CLOUDBITE_JS_PATH`/`CLOUDBITE_CSS_PATH` from `src/cloudbite-page.ts`, currently `/cloudbite/console.js`, `/cloudbite/console.css`; CSP `script-src 'self'; style-src 'self'`, no inline), `/api/cloudbite/*`, `/p/_cloudbite/worker/*` |
 | `src/cloudbite-project.ts` | `CloudbiteProject` Durable Object: one instance per project + one `registry` instance |
 | `src/cloudbite-config.ts` | `CLOUDBITE_*` settings, readiness (names only), limits |
-| `src/cloudbite-validate.ts` | brief, opinion/result, workspace-path and artifact-path validation |
+| `src/cloudbite-validate.ts` | brief, opinion/result, workspace-path and artifact-path validation (brief/opinion limits and the opinion check come from `src/cloudbite-personas.ts`) |
 | `src/cloudbite-daytona.ts` | Daytona REST via `src/lab.ts` `dt`/`download`, with deadlines and status-only errors |
 | `src/cloudbite-inference.ts` | Nosana OpenAI-compatible `chat/completions`, bounded body reads |
 | `src/cloudbite-runner.ts` | `runner.py` (Python 3 stdlib) uploaded into each sandbox |
@@ -42,7 +42,9 @@ readiness: while `CLOUDBITE_EXPERTS` is empty, live (and demo) creation is refus
 ## Authority
 
 - **Create** (`POST /api/cloudbite/projects`): exact `Origin == ORIGIN`, `application/json`, ≤ 16 KiB, then
-  `x-admin-token` checked through `State.adminList` (storage reads only). 1–5 known experts. `requestId` maps
+  `x-admin-token` checked through `State.adminList` (storage reads only). 1–5 known experts. Brief limits are
+  `CLOUDBITE_BRIEF_LIMITS`: title ≤ 120, objective ≤ 2000, context ≤ 8000, `requestId` 8–64 of `[A-Za-z0-9_-]` — the same
+  constants `buildExpertWorkspace` enforces, so an accepted brief always yields a workspace. `requestId` maps
   deterministically to the project id; a retry returns the same project with a fresh access token (≤ 4), a different brief → 409.
 - **Project access token** `cbt_…` (hash stored): read, cancel (strict Origin), artifact. 24 h retention, then purge.
 - **Worker capability** `cbw_…`: one per expert, hash stored, 13 min expiry, revoked on completion/failure/cancel/timeout.
@@ -64,8 +66,13 @@ Each step persists a claim id first and applies its result only if that claim is
 - **runner**: deletes the capability file after reading it; up to 6 model turns via the gateway; actions `python`
   (subprocess, 20 s, ./work, empty env), `write` (flat `out/<name>.(md|txt|json|csv)`, ≤ 4 files), `final` (validated opinion +
   report). Writes `out/result.json`, `out/report.md`, `out/manifest.json`, `out/done`; posts activity and `complete`.
+- **`out/result.json` is a flat `ExpertOpinion`** — exactly the workspace's `RESULT.schema.json`: the six properties
+  `direction`, `confidence` (integer 0–100, self-assessed), `summary` (1–2000), `evidence`/`assumptions`/`nextActions`
+  (1–12 non-empty strings ≤ 600 each), nothing else. It carries no expert id or schema wrapper: identity is the sandbox/run
+  the server created and downloads from. Runner (`check_opinion`, rejects a bad final and asks again), server
+  (`validateResult` → persona `validateExpertOpinion`) and schema share `CLOUDBITE_OPINION_LIMITS`.
 - **running/collecting**: poll `out/done` every 15 s (or immediately after `complete`), download allowlisted files, validate
-  `result.json` (`cloudbite.expert-result/v1`, matching expert, opinion schema). Malformed → `failed`, never `completed`.
+  `result.json` as above. Malformed (including the old `{schema, expertId, opinion}` wrapper) → `failed`, never `completed`.
 - **cleanup**: delete only ids returned by our create or found under our exact labels; retries with backoff (8 tries, then
   `stuck`); Daytona `autoStopInterval 20 / autoDeleteInterval 30` minutes is the provider-side backstop.
 - **cancel**: one atomic write sets project/experts cancelled and clears capability hashes; late inference returns 410,
@@ -82,4 +89,5 @@ and no `sandboxId` is set. The public demo remains the browser-local UI simulati
 - A step stuck longer than 3 minutes is taken over; its late effects are discarded by the claim check, but a stale upload can
   overwrite the capability file with a revoked one (the expert then fails honestly).
 - Records are purged 24 h after creation (48 h if cleanup is still pending); stuck cleanup then relies on Daytona auto-delete.
+- Local dev: `npm run dev` (port 8808) with `ORIGIN` `http://localhost:8808` in `wrangler.cloudbite.jsonc` `env.dev`.
 - No live Daytona/Nosana call was made during implementation; request shapes follow `src/lab.ts` and the OpenAI chat API.

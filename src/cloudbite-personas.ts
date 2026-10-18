@@ -21,10 +21,12 @@ export const CLOUDBITE_REGISTRY = Object.freeze({
 const AGENCY_REPOSITORY = 'msitarzewski/agency-agents';
 const AGENCY_REVISION = '4bce55aa8b97385a5ad7b37d09b44ab976b96573';
 
+// Shared with the runtime gate (src/cloudbite-validate.ts) and the sandbox runner: one set of limits.
 export const CLOUDBITE_BRIEF_LIMITS = Object.freeze({
-  title: 160,
-  objective: 4000,
-  context: 12000,
+  title: 120,
+  objective: 2000,
+  context: 8000,
+  requestIdMin: 8,
   requestId: 64,
   minExperts: 1,
   maxExperts: 5,
@@ -32,15 +34,15 @@ export const CLOUDBITE_BRIEF_LIMITS = Object.freeze({
 
 export const CLOUDBITE_OPINION_LIMITS = Object.freeze({
   summary: 2000,
-  item: 1000,
-  items: 20,
+  item: 600,
+  items: 12,
 });
 
 const MAX_WORKSPACE_FILE_BYTES = 48 * 1024;
 const MAX_WORKSPACE_BYTES = 128 * 1024;
 const DIRECTIONS: readonly OpinionDirection[] = ['support', 'conditional', 'concern', 'abstain'];
 const SAFE_PATH = /^(?!.*(?:^|\/)\.\.?(?:\/|$))[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/;
-const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const REQUEST_ID = /^[A-Za-z0-9_-]+$/;
 
 /** Registry fields preserved verbatim from registry.seed.jsonl (metadata only). */
 interface RegistryMetadata {
@@ -509,8 +511,8 @@ export function validateProjectBrief(brief: unknown): ProjectBrief {
   const context = boundedText('context', input.context ?? '', limits.context, false);
   if (input.mode !== 'demo' && input.mode !== 'live') throw new Error('brief.mode must be demo or live');
   const requestId = input.requestId;
-  if (typeof requestId !== 'string' || requestId.length > limits.requestId || !REQUEST_ID.test(requestId)) {
-    throw new Error('brief.requestId must be 1-64 letters, digits, _ or -');
+  if (typeof requestId !== 'string' || requestId.length < limits.requestIdMin || requestId.length > limits.requestId || !REQUEST_ID.test(requestId)) {
+    throw new Error(`brief.requestId must be ${limits.requestIdMin}-${limits.requestId} letters, digits, _ or -`);
   }
   const ids = input.expertIds;
   if (!Array.isArray(ids) || ids.length < limits.minExperts || ids.length > limits.maxExperts) {
@@ -758,6 +760,7 @@ function instructionsFile(expert: ExpertDefinition): string {
     '```',
     '',
     'Confidence is a self-assessed 0-100 integer, not calibrated accuracy.',
+    `summary: 1-${CLOUDBITE_OPINION_LIMITS.summary} characters. evidence, assumptions, nextActions: 1-${CLOUDBITE_OPINION_LIMITS.items} non-empty strings of at most ${CLOUDBITE_OPINION_LIMITS.item} characters each. No other properties.`,
     `Required outputs: ${expert.outputs.map(path => `\`${path}\``).join(', ')}.`,
     '',
   ].join('\n');

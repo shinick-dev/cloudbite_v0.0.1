@@ -40,7 +40,7 @@
   "env": {
     "dev": {
       "vars": {
-        "RP_ID": "localhost", "ORIGIN": "http://localhost:8796", "LAB_ORIGIN": "http://lab.cloudbite.invalid",
+        "RP_ID": "localhost", "ORIGIN": "http://localhost:8808", "LAB_ORIGIN": "http://lab.cloudbite.invalid",
         "CLOUDBITE_GATEWAY_URL": "", "CLOUDBITE_ALLOW_HTTP": "1",
         "CLOUDBITE_NOSANA_BASE_URL": "", "CLOUDBITE_NOSANA_MODEL": "", "CLOUDBITE_DAYTONA_API_URL": "", "CLOUDBITE_DAYTONA_SNAPSHOT": ""
       },

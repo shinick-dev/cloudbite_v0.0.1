@@ -2,6 +2,8 @@
 // The fake Daytona toolbox maps each sandbox to its own temp directory and, for live runs, executes the real
 // Python runner (runner.py) there; the runner calls back through a local HTTP gateway into the Worker router.
 // No external network: any host other than the fakes and 127.0.0.1 fails the test.
+// Most checks use a small fixture catalogue (stable ids, EXPERT_ID marker) that re-exports the real opinion/brief
+// contract. The last check bundles the ACTUAL catalogue and buildExpertWorkspace (real-catalogue integration smoke).
 //   node test/cloudbite-runtime.mjs        (needs python3 or PYTHON=<path>)
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
@@ -14,6 +16,7 @@ import { build } from 'esbuild';
 
 const PY = process.env.PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
 const PERSONAS = `
+export { CLOUDBITE_BRIEF_LIMITS, CLOUDBITE_OPINION_LIMITS, validateExpertOpinion } from './src/cloudbite-personas.ts';
 export const CLOUDBITE_EXPERTS = ['market','risk','ops','legal','finance','ux'].map((id) => ({ id, name: 'Expert ' + id, domain: id, summary: 's', prompt: 'p', tools: ['python'], outputs: ['report'], source: { repository: 'fixture', path: id, revision: 'r', license: 'MIT', basis: 'metadata-derived' } }));
 export const findExpert = (id) => CLOUDBITE_EXPERTS.find((e) => e.id === id);
 export function buildExpertWorkspace(expert, brief) {
@@ -25,20 +28,24 @@ export function buildExpertWorkspace(expert, brief) {
     { path: 'contract/result.schema.json', content: '{"type":"object"}' },
   ];
 }`;
-const stub = { name: 'stubs', setup(b) {
+const stubs = (fixture) => ({ name: 'stubs', setup(b) {
   b.onResolve({ filter: /^cloudflare:workers$/ }, () => ({ path: 'cf', namespace: 'stub' }));
   b.onLoad({ filter: /^cf$/, namespace: 'stub' }, () => ({ contents: 'export class DurableObject { constructor(ctx,env){this.ctx=ctx;this.env=env;} }' }));
-  if (process.env.CLOUDBITE_REAL_PERSONAS !== '1') {
+  if (fixture) {
     b.onResolve({ filter: /cloudbite-personas$/ }, () => ({ path: 'personas', namespace: 'stub' }));
-    b.onLoad({ filter: /^personas$/, namespace: 'stub' }, () => ({ contents: PERSONAS, loader: 'js' }));
+    b.onLoad({ filter: /^personas$/, namespace: 'stub' }, () => ({ contents: PERSONAS, loader: 'js', resolveDir: process.cwd() }));
   }
-} };
-const entry = `export { default, CloudbiteProject } from './src/index.ts'; export * from './src/cloudbite-config.ts'; export * from './src/cloudbite-validate.ts'; export { CB_RUNNER_PY } from './src/cloudbite-runner.ts';`;
-const bundle = await build({ stdin: { contents: entry, resolveDir: process.cwd(), loader: 'ts' }, bundle: true, write: false, format: 'esm', platform: 'node', plugins: [stub], loader: { '.ps1': 'text' } });
+} });
+const entry = `export { default, CloudbiteProject } from './src/index.ts'; export * from './src/cloudbite-config.ts'; export * from './src/cloudbite-validate.ts'; export { CB_RUNNER_PY } from './src/cloudbite-runner.ts'; export { CLOUDBITE_OPINION_LIMITS, CLOUDBITE_BRIEF_LIMITS } from './src/cloudbite-personas.ts';`;
 const tmp = mkdtempSync(join(tmpdir(), 'cloudbite-runtime-'));
-writeFileSync(join(tmp, 'w.mjs'), bundle.outputFiles[0].text);
-const M = await import(pathToFileURL(join(tmp, 'w.mjs')));
-const worker = M.default;
+async function load(fixture) {
+  const bundle = await build({ stdin: { contents: entry, resolveDir: process.cwd(), loader: 'ts' }, bundle: true, write: false, format: 'esm', platform: 'node', plugins: [stubs(fixture)], loader: { '.ps1': 'text' } });
+  const file = join(tmp, fixture ? 'fixture.mjs' : 'real.mjs');
+  writeFileSync(file, bundle.outputFiles[0].text);
+  return import(pathToFileURL(file));
+}
+const M = await load(true);      // fixture catalogue
+const REAL = await load(false);  // actual src/cloudbite-personas.ts catalogue and workspace packs
 
 let count = 0;
 const check = async (name, f) => { await f(); count++; console.log('ok', name); };
@@ -64,9 +71,9 @@ function memStorage(w) {
 }
 
 function makeWorld(opts = {}) {
-  const w = { now: 1_800_000_000_000, sandboxes: new Map(), posts: 0, deletes: [], creating: 0, maxCreating: 0, nosana: [], fetches: [], dirs: tmp, runner: opts.runner ?? 'python', procs: [], ...opts };
+  const w = { M, now: 1_800_000_000_000, sandboxes: new Map(), posts: 0, deletes: [], creating: 0, maxCreating: 0, nosana: [], fetches: [], dirs: tmp, runner: opts.runner ?? 'python', procs: [], ...opts };
   const objects = new Map();
-  class TestProject extends M.CloudbiteProject { clock() { return w.now; } }
+  class TestProject extends w.M.CloudbiteProject { clock() { return w.now; } }
   w.ns = { getByName(name) { if (!objects.has(name)) { const storage = memStorage(w); objects.set(name, new TestProject({ storage, id: { name } }, w.env)); objects.get(name).storage = storage; } return objects.get(name); } };
   w.objects = objects;
   w.env = {
@@ -86,7 +93,7 @@ function makeWorld(opts = {}) {
 async function call(w, method, path, { body, headers = {}, raw } = {}) {
   const init = { method, headers: { ...headers } };
   if (body !== undefined) { init.body = raw ?? JSON.stringify(body); init.headers['content-type'] ??= 'application/json'; }
-  const r = await worker.fetch(new Request('https://cb.test' + path, init), w.env, { waitUntil() {} });
+  const r = await w.M.default.fetch(new Request('https://cb.test' + path, init), w.env, { waitUntil() {} });
   const text = await r.text(); let j = null; try { j = JSON.parse(text); } catch {}
   return { status: r.status, j, text, headers: r.headers };
 }
@@ -166,8 +173,10 @@ globalThis.fetch = async (u, init = {}) => {
 // Model script: python tool → write artifact → final (or malformed when w.badFinal)
 function script(req) {
   const turn = req.messages.filter((m) => m.role === 'assistant').length;
-  const id = (req.messages[1].content.match(/EXPERT_ID=(\w+)/) ?? [])[1];
+  const ws = req.messages[1].content;
+  const id = (ws.match(/EXPERT_ID=(\w+)/) ?? ws.match(/^Expert id: `([a-z0-9-]+)`/m) ?? [])[1];
   if (W.badFinal) return '{"action":"final","opinion":{"direction":"maybe"},"report":""}';
+  if (W.finalPatch && turn >= 2) return JSON.stringify({ action: 'final', opinion: { direction: 'support', confidence: 72, summary: 's', evidence: ['e'], assumptions: ['a'], nextActions: ['n'], ...W.finalPatch }, report: '# r' });
   if (turn === 0) return 'Plan: compute.\n```json\n{"action":"python","code":"import json\\nprint(\\"ROI\\", sum(range(10)))\\nopen(\\"calc.txt\\",\\"w\\").write(\\"45\\")"}\n```';
   if (turn === 1) return JSON.stringify({ action: 'write', path: 'out/analysis.md', content: `# ${id} analysis\nTool said: ${req.messages.at(-1).content.slice(0, 60)}` });
   return JSON.stringify({ action: 'final', opinion: { direction: id === 'risk' ? 'concern' : 'support', confidence: 72, summary: `${id} summary`, evidence: ['computed 45 in sandbox'], assumptions: ['fixture'], nextActions: ['pilot'] }, report: `# ${id} report\n\nBased on the python tool.` });
@@ -176,7 +185,7 @@ function script(req) {
 // Local gateway: sandbox runner → http://127.0.0.1:<port>/p/_cloudbite/worker/... → Worker router
 const server = createServer(async (req, res) => {
   const chunks = []; for await (const c of req) chunks.push(c);
-  const r = await worker.fetch(new Request('https://gw.test' + req.url, { method: req.method, headers: Object.fromEntries(Object.entries(req.headers).filter(([k]) => k !== 'host' && k !== 'connection' && k !== 'content-length')), body: chunks.length ? Buffer.concat(chunks) : undefined }), W.env, { waitUntil() {} });
+  const r = await W.M.default.fetch(new Request('https://gw.test' + req.url, { method: req.method, headers: Object.fromEntries(Object.entries(req.headers).filter(([k]) => k !== 'host' && k !== 'connection' && k !== 'content-length')), body: chunks.length ? Buffer.concat(chunks) : undefined }), W.env, { waitUntil() {} });
   res.writeHead(r.status, { 'content-type': 'application/json' }); res.end(Buffer.from(await r.arrayBuffer()));
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -222,8 +231,21 @@ await check('bootstrap reports configuration names only, never values', async ()
 
 await check('pages: / and /cloudbite serve the console with same-origin CSP; legacy /borrow and /p/ token gate preserved', async () => {
   const w = freshWorld();
-  for (const p of ['/', '/cloudbite']) { const r = await call(w, 'GET', p); assert.equal(r.status, 200); assert.match(r.headers.get('content-security-policy'), /script-src 'self'/); }
-  assert.equal((await call(w, 'GET', '/cloudbite/app.js')).headers.get('content-type'), 'text/javascript; charset=utf-8');
+  for (const p of ['/', '/cloudbite']) {
+    const r = await call(w, 'GET', p); assert.equal(r.status, 200);
+    const csp = r.headers.get('content-security-policy');
+    assert.match(csp, /script-src 'self';/); assert.match(csp, /style-src 'self';/); assert.ok(!csp.includes('unsafe-inline'));
+    // every asset the served page references is served by the same router with the right type
+    const scripts = [...r.text.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map((m) => m[1]);
+    const styles = [...r.text.matchAll(/<link\b[^>]*rel="stylesheet"[^>]*href="([^"]+)"/g)].map((m) => m[1]);
+    assert.equal(scripts.length, 1); assert.equal(styles.length, 1);
+    assert.ok(!/<script(?![^>]*\bsrc=)[^>]*>|<style\b|\sstyle="/.test(r.text), 'no inline script/style for the strict CSP');
+    for (const [src, type] of [[scripts[0], 'text/javascript; charset=utf-8'], [styles[0], 'text/css; charset=utf-8']]) {
+      assert.match(src, /^\/cloudbite\//);
+      const a = await call(w, 'GET', src);
+      assert.equal(a.status, 200, src); assert.equal(a.headers.get('content-type'), type); assert.ok(a.text.length > 1000, src);
+    }
+  }
   assert.equal((await call(w, 'GET', '/borrow')).status, 200);
   assert.equal((await call(w, 'POST', '/p/openrouter/api/v1/chat', { body: {} })).status, 401);
 });
@@ -394,14 +416,36 @@ await check('malformed result is failed, not completed', async () => {
   const { obj, caps } = await manualRun(w, 2);
   const ex = await experts(obj);
   const write = (e, files) => { for (const [p, t] of Object.entries(files)) { mkdirSync(dirname(join(sbDir(w, e.run.sandboxId), p)), { recursive: true }); writeFileSync(join(sbDir(w, e.run.sandboxId), p), t); } };
-  write(ex[0], { 'out/result.json': JSON.stringify({ schema: 'cloudbite.expert-result/v1', expertId: 'market', opinion: { direction: 'support', confidence: 140, summary: 'x', evidence: [], assumptions: [], nextActions: [] } }), 'out/report.md': '# r', 'out/done': 'ok' });
-  write(ex[1], { 'out/result.json': JSON.stringify({ schema: 'cloudbite.expert-result/v1', expertId: 'risk', opinion: { direction: 'concern', confidence: 50, summary: 'fine', evidence: ['e'], assumptions: [], nextActions: [] } }), 'out/report.md': '# ok', 'out/manifest.json': JSON.stringify({ files: ['../../etc/passwd', 'out/notes.md', '/x'] }), 'out/notes.md': 'n', 'out/done': 'ok' });
+  write(ex[0], { 'out/result.json': JSON.stringify({ direction: 'support', confidence: 140, summary: 'x', evidence: ['e'], assumptions: ['a'], nextActions: ['n'] }), 'out/report.md': '# r', 'out/done': 'ok' });
+  write(ex[1], { 'out/result.json': JSON.stringify({ direction: 'concern', confidence: 50, summary: 'fine', evidence: ['e'], assumptions: ['a'], nextActions: ['n'] }), 'out/report.md': '# ok', 'out/manifest.json': JSON.stringify({ files: ['../../etc/passwd', 'out/notes.md', '/x'] }), 'out/notes.md': 'n', 'out/done': 'ok' });
   for (const c of caps) await wcall(w, c, 'complete', { status: 'ok' });
   const p = await drive(w, obj, (p) => p.status !== 'running');
   const after = await experts(obj);
   assert.equal(after[0].run.status, 'failed'); assert.match(after[0].run.error, /malformed result: confidence/); assert.equal(after[0].run.opinion, undefined);
   assert.equal(after[1].run.status, 'completed'); assert.deepEqual(after[1].run.artifacts.map((a) => a.path), ['out/result.json', 'out/report.md', 'out/notes.md']);
   assert.equal(p.status, 'partial');
+});
+
+await check('legacy wrapped, fractional-confidence and over-limit result.json files are failed, not completed', async () => {
+  const L = M.CLOUDBITE_OPINION_LIMITS;
+  const good = { direction: 'support', confidence: 60, summary: 's', evidence: ['e'], assumptions: ['a'], nextActions: ['n'] };
+  const cases = [
+    [{ schema: 'cloudbite.expert-result/v1', expertId: 'market', opinion: good }, /unexpected property/],
+    [{ ...good, confidence: 60.5 }, /confidence must be an integer/],
+    [{ ...good, evidence: Array(L.items + 1).fill('e') }, /evidence/],
+  ];
+  const w = freshWorld({ runner: 'none' });
+  const { obj, caps } = await manualRun(w, cases.length);
+  const ex = await experts(obj);
+  for (const [i, [result]] of cases.entries()) {
+    const dir = sbDir(w, ex[i].run.sandboxId); mkdirSync(join(dir, 'out'), { recursive: true });
+    writeFileSync(join(dir, 'out', 'result.json'), JSON.stringify(result)); writeFileSync(join(dir, 'out', 'report.md'), '# r'); writeFileSync(join(dir, 'out', 'done'), 'ok');
+  }
+  for (const c of caps) await wcall(w, c, 'complete', { status: 'ok' });
+  const p = await drive(w, obj, (p) => p.status !== 'running');
+  const after = await experts(obj);
+  for (const [i, [, why]] of cases.entries()) { assert.equal(after[i].run.status, 'failed'); assert.match(after[i].run.error, why); assert.equal(after[i].run.opinion, undefined); }
+  assert.equal(p.status, 'failed');
 });
 
 await check('lost create response adopts the labelled sandbox instead of creating a duplicate', async () => {
@@ -459,9 +503,63 @@ await check('validators: workspace paths and opinion schema', async () => {
   assert.ok(M.isInvalid(M.validateWorkspace([{ path: '/abs.md', content: '' }])));
   assert.ok(M.isInvalid(M.validateWorkspace([{ path: 'a/../b.md', content: '' }])));
   assert.ok(M.isInvalid(M.validateWorkspace([{ path: 'PERSONA.md', content: '' }, { path: 'PROJECT.md', content: '' }])));
-  assert.ok(M.isInvalid(M.validateOpinion({ direction: 'support', confidence: true, summary: 's', evidence: [], assumptions: [], nextActions: [] })));
-  assert.ok(!M.isInvalid(M.validateOpinion({ direction: 'abstain', confidence: 0, summary: 's', evidence: [], assumptions: [], nextActions: [] })));
+  const L = M.CLOUDBITE_OPINION_LIMITS;
+  const edge = { direction: 'abstain', confidence: 0, summary: 's'.repeat(L.summary), evidence: Array(L.items).fill('e'.repeat(L.item)), assumptions: ['a'], nextActions: ['n'] };
+  assert.ok(!M.isInvalid(M.validateOpinion(edge)), 'opinion at exact limits');
+  assert.ok(!M.isInvalid(M.validateResult(JSON.stringify(edge))), 'flat result.json at exact limits');
+  for (const bad of [{ confidence: true }, { confidence: 0.5 }, { evidence: [] }, { summary: 's'.repeat(L.summary + 1) }, { assumptions: ['x'.repeat(L.item + 1)] }, { extra: 1 }])
+    assert.ok(M.isInvalid(M.validateOpinion({ ...edge, ...bad })), JSON.stringify(bad).slice(0, 60));
+  const B = M.CLOUDBITE_BRIEF_LIMITS;
+  const ok = { title: 't'.repeat(B.title), objective: 'o'.repeat(B.objective), context: 'c'.repeat(B.context), expertIds: ['market'], mode: 'demo', requestId: 'r'.repeat(B.requestIdMin) };
+  assert.ok(!M.isInvalid(M.validateBrief(ok)), 'brief at exact limits');
+  for (const bad of [{ title: 't'.repeat(B.title + 1) }, { objective: 'o'.repeat(B.objective + 1) }, { context: 'c'.repeat(B.context + 1) }, { requestId: 'r'.repeat(B.requestIdMin - 1) }, { requestId: 'r'.repeat(B.requestId + 1) }])
+    assert.ok(M.isInvalid(M.validateBrief({ ...ok, ...bad })), Object.keys(bad)[0]);
   assert.ok(M.CB_RUNNER_PY.includes("os.remove(CAP_FILE)"));
+});
+
+await check('real catalogue: actual persona workspace -> python runner -> flat out/result.json -> server validation and artifact', async () => {
+  const w = freshWorld({ M: REAL });
+  const boot = await call(w, 'GET', '/api/cloudbite/bootstrap');
+  assert.ok(boot.j.experts.length >= 10 && boot.j.experts.every((e) => e.id.startsWith('agency-')), 'actual catalogue, not the fixture');
+  const ids = boot.j.experts.slice(0, 3).map((e) => e.id);
+  // the console sends crypto.randomUUID() request ids
+  const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ids, requestId: crypto.randomUUID() }), headers: admin });
+  assert.equal(created.status, 201, created.text);
+  const obj = await project(w, created);
+  await drive(w, obj, (p) => p.status !== 'running', 2000);
+  await Promise.all(w.procs);
+  const p = await obj.storage.get('project'); const ex = await experts(obj);
+  assert.equal(p.status, 'completed', JSON.stringify(ex.map((e) => [e.run.status, e.run.error, e.run.activity.at(-1)])));
+  for (const e of ex) {
+    const dir = sbDir(w, e.run.sandboxId);
+    assert.ok(readFileSync(join(dir, 'PERSONA.md'), 'utf8').includes('Expert id: `' + e.run.expertId + '`'), 'actual persona placed in its own sandbox');
+    const schema = JSON.parse(readFileSync(join(dir, 'RESULT.schema.json'), 'utf8'));
+    const result = JSON.parse(readFileSync(join(dir, 'out', 'result.json'), 'utf8'));
+    // the file the runner wrote is exactly the shape the workspace's schema declares
+    assert.equal(schema.additionalProperties, false);
+    assert.deepEqual(Object.keys(result).sort(), Object.keys(schema.properties).sort());
+    assert.deepEqual([...schema.required].sort(), Object.keys(schema.properties).sort());
+    assert.ok(schema.properties.direction.enum.includes(result.direction) && Number.isInteger(result.confidence));
+    for (const k of ['evidence', 'assumptions', 'nextActions']) assert.ok(result[k].length >= schema.properties[k].minItems && result[k].length <= schema.properties[k].maxItems);
+    assert.equal(e.run.status, 'completed');
+    assert.deepEqual(e.run.opinion, result);
+    const art = await call(w, 'GET', `/api/cloudbite/projects/${created.j.project.id}/artifact?expert=${e.run.id}&path=out/result.json`, { headers: { authorization: 'Bearer ' + created.j.accessToken } });
+    assert.equal(art.status, 200); assert.deepEqual(JSON.parse(art.j.content), result);
+  }
+  for (const [, text] of allText(w)) for (const s of SECRETS) assert.ok(!text.includes(s));
+});
+
+await check('real catalogue: runner refuses a non-canonical final (fractional confidence); the expert fails, never completes', async () => {
+  const w = freshWorld({ M: REAL, finalPatch: { confidence: 72.5 } });
+  const id = (await call(w, 'GET', '/api/cloudbite/bootstrap')).j.experts[0].id;
+  const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: [id] }), headers: admin });
+  const obj = await project(w, created);
+  const p = await drive(w, obj, (p) => p.status !== 'running', 2000);
+  await Promise.all(w.procs);
+  const [e] = await experts(obj);
+  assert.equal(p.status, 'failed'); assert.equal(e.run.status, 'failed'); assert.equal(e.run.opinion, undefined);
+  assert.ok(e.run.activity.some((a) => /final rejected: confidence must be an integer/.test(a.message)));
+  assert.ok(!existsSync(join(sbDir(w, e.run.sandboxId), 'out', 'result.json')));
 });
 
 server.close();

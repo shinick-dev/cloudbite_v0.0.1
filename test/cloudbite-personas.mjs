@@ -9,7 +9,7 @@ import { build } from 'esbuild';
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const out = await build({ entryPoints: [path.join(repo, 'src/cloudbite-personas.ts')], bundle: true, write: false, format: 'esm', platform: 'neutral' });
 const mod = await import('data:text/javascript;base64,' + Buffer.from(out.outputFiles[0].text).toString('base64'));
-const { CLOUDBITE_EXPERTS, CLOUDBITE_REGISTRY, CLOUDBITE_BRIEF_LIMITS, findExpert, buildExpertWorkspace, validateProjectBrief, validateExpertOpinion, expertOpinionSchema } = mod;
+const { CLOUDBITE_EXPERTS, CLOUDBITE_REGISTRY, CLOUDBITE_BRIEF_LIMITS, CLOUDBITE_OPINION_LIMITS, findExpert, buildExpertWorkspace, validateProjectBrief, validateExpertOpinion, expertOpinionSchema } = mod;
 let checks = 0;
 const ok = (cond, message) => { assert.ok(cond, message); checks++; };
 
@@ -64,7 +64,7 @@ if (fs.existsSync(seedPath)) {
 
 // --- brief validation
 function brief(expertIds, extra = {}) {
-  return { title: 'AI advisory launch', objective: 'Launch a 100-expert AI advisory product.', context: 'Small team, B2B.', expertIds, mode: 'demo', requestId: 'req_123', ...extra };
+  return { title: 'AI advisory launch', objective: 'Launch a 100-expert AI advisory product.', context: 'Small team, B2B.', expertIds, mode: 'demo', requestId: 'req_12345', ...extra };
 }
 const pm = findExpert('agency-product-manager');
 const sec = findExpert('agency-security-architect');
@@ -76,13 +76,22 @@ const bad = [
   ['no experts', brief([])],
   ['bad mode', brief([pm.id], { mode: 'prod' })],
   ['bad requestId', brief([pm.id], { requestId: '../x' })],
-  ['long requestId', brief([pm.id], { requestId: 'a'.repeat(65) })],
+  ['long requestId', brief([pm.id], { requestId: 'a'.repeat(CLOUDBITE_BRIEF_LIMITS.requestId + 1) })],
+  ['short requestId', brief([pm.id], { requestId: 'a'.repeat(CLOUDBITE_BRIEF_LIMITS.requestIdMin - 1) })],
+  ['long title', brief([pm.id], { title: 'x'.repeat(CLOUDBITE_BRIEF_LIMITS.title + 1) })],
   ['empty title', brief([pm.id], { title: ' \u202E ' })],
   ['long objective', brief([pm.id], { objective: 'x'.repeat(CLOUDBITE_BRIEF_LIMITS.objective + 1) })],
   ['long context', brief([pm.id], { context: 'x'.repeat(CLOUDBITE_BRIEF_LIMITS.context + 1) })],
   ['non-string title', brief([pm.id], { title: { toString: () => 'x' } })],
 ];
 for (const [label, value] of bad) { assert.throws(() => validateProjectBrief(value), Error, label); checks++; }
+// exact limits are accepted (the runtime gate in src/cloudbite-validate.ts uses the same constants)
+const edge = validateProjectBrief(brief([pm.id], {
+  title: 'x'.repeat(CLOUDBITE_BRIEF_LIMITS.title), objective: 'x'.repeat(CLOUDBITE_BRIEF_LIMITS.objective),
+  context: 'x'.repeat(CLOUDBITE_BRIEF_LIMITS.context), requestId: '_'.repeat(CLOUDBITE_BRIEF_LIMITS.requestIdMin),
+}));
+ok(edge.title.length === CLOUDBITE_BRIEF_LIMITS.title && edge.requestId.length === CLOUDBITE_BRIEF_LIMITS.requestIdMin, 'brief at exact limits accepted');
+ok(validateProjectBrief(brief([pm.id], { requestId: 'a'.repeat(CLOUDBITE_BRIEF_LIMITS.requestId) })).requestId.length === CLOUDBITE_BRIEF_LIMITS.requestId, 'longest requestId accepted');
 assert.throws(() => buildExpertWorkspace(sec, brief([pm.id])), /not selected/); checks++;
 assert.throws(() => buildExpertWorkspace({ ...pm, id: 'agency-evil' }, brief([pm.id])), /unknown expert/); checks++;
 assert.throws(() => buildExpertWorkspace(null, brief([pm.id])), /unknown expert/); checks++;
@@ -115,13 +124,19 @@ ok(accepted.ok && accepted.opinion.confidence === 55, 'valid opinion accepted');
 for (const [label, patch] of [
   ['confidence > 100', { confidence: 101 }], ['confidence fraction', { confidence: 50.5 }], ['confidence string', { confidence: '50' }],
   ['bad direction', { direction: 'maybe' }], ['empty evidence', { evidence: [] }], ['non-string assumption', { assumptions: [1] }],
-  ['missing next actions', { nextActions: undefined }], ['extra property', { secret: 'x' }], ['long summary', { summary: 'x'.repeat(2001) }],
+  ['missing next actions', { nextActions: undefined }], ['extra property', { secret: 'x' }], ['long summary', { summary: 'x'.repeat(CLOUDBITE_OPINION_LIMITS.summary + 1) }],
+  ['too many evidence items', { evidence: Array(CLOUDBITE_OPINION_LIMITS.items + 1).fill('e') }], ['long assumption', { assumptions: ['x'.repeat(CLOUDBITE_OPINION_LIMITS.item + 1)] }],
+  ['blank next action', { nextActions: ['  '] }], ['wrapped legacy result', { schema: 'cloudbite.expert-result/v1', expertId: pm.id, opinion: good }],
 ]) {
   const value = { ...good, ...patch };
   if (patch.nextActions === undefined && 'nextActions' in patch) delete value.nextActions;
   ok(!validateExpertOpinion(value).ok, `opinion rejected: ${label}`);
 }
 ok(!validateExpertOpinion([]).ok && !validateExpertOpinion(null).ok, 'non-object opinion rejected');
+const fullest = { ...good, confidence: 100, summary: 'x'.repeat(CLOUDBITE_OPINION_LIMITS.summary), evidence: Array(CLOUDBITE_OPINION_LIMITS.items).fill('y'.repeat(CLOUDBITE_OPINION_LIMITS.item)) };
+ok(validateExpertOpinion(fullest).ok, 'opinion at exact limits accepted');
+ok(schema.properties.summary.maxLength === CLOUDBITE_OPINION_LIMITS.summary && schema.properties.evidence.maxItems === CLOUDBITE_OPINION_LIMITS.items && schema.properties.evidence.items.maxLength === CLOUDBITE_OPINION_LIMITS.item && schema.properties.confidence.type === 'integer', 'RESULT.schema.json carries the shared limits and integer confidence');
+ok(byPath['INSTRUCTIONS.md'].includes(`1-${CLOUDBITE_OPINION_LIMITS.items} non-empty strings of at most ${CLOUDBITE_OPINION_LIMITS.item} characters`), 'INSTRUCTIONS.md states the list limits');
 
 // --- malicious brief: content stays inert data, paths and authority files unchanged
 const evil = brief([pm.id], {
@@ -149,7 +164,7 @@ ok(JSON.parse(evilBy['project.json']).title.includes('$(rm -rf /)'), 'project.js
 ok(!evilFiles.some(f => /\.(sh|ps1|bat|cmd|py)$/.test(f.path)), 'no executable script is generated');
 const total = evilFiles.reduce((n, f) => n + Buffer.byteLength(f.content), 0);
 ok(total < 128 * 1024, 'workspace stays within size bound');
-const big = buildExpertWorkspace(pm, brief([pm.id], { objective: 'y'.repeat(4000), context: '`'.repeat(12000) }));
-ok(big.some(f => f.path === 'PROJECT.md' && f.content.includes('`'.repeat(12001))), 'maximum-size brief builds with a longer fence');
+const big = buildExpertWorkspace(pm, brief([pm.id], { objective: 'y'.repeat(CLOUDBITE_BRIEF_LIMITS.objective), context: '`'.repeat(CLOUDBITE_BRIEF_LIMITS.context) }));
+ok(big.some(f => f.path === 'PROJECT.md' && f.content.includes('`'.repeat(CLOUDBITE_BRIEF_LIMITS.context + 1))), 'maximum-size brief builds with a longer fence');
 
 console.log(`cloudbite-personas: ${checks} checks passed`);

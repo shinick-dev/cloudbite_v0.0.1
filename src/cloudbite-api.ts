@@ -2,7 +2,7 @@
 // public-get.ts calls cloudbitePage for the console. Errors are {error} only — never upstream bodies or secrets.
 import type { CloudbiteBootstrap } from './cloudbite-contract';
 import { CLOUDBITE_EXPERTS } from './cloudbite-personas';
-import { CLOUDBITE_CSS, CLOUDBITE_HTML, CLOUDBITE_JS } from './cloudbite-page';
+import { CLOUDBITE_CSS, CLOUDBITE_CSS_PATH, CLOUDBITE_HTML, CLOUDBITE_JS, CLOUDBITE_JS_PATH } from './cloudbite-page';
 import { CB_ACTIVITY_BODY_MAX, CB_COMPLETE_BODY_MAX, CB_CREATE_BODY_MAX, CB_INFERENCE_BODY_MAX, CB_MAX_EXPERTS, cloudbiteMissing } from './cloudbite-config';
 import { cbProjectId, isCbFail } from './cloudbite-project';
 import { boundedText } from './cloudbite-inference';
@@ -10,15 +10,16 @@ import { isInvalid, PROJECT_ID, RUN_ID, validateBrief } from './cloudbite-valida
 import type { Env, State } from './state';
 
 type Json = (data: unknown, status?: number) => Response;
-const CB_CSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const CB_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /** GET /, /cloudbite and same-origin assets. null = not a Cloudbite page path. */
 export function cloudbitePage(path: string, sec: Record<string, string>): Response | null {
   const page = (body: string, type: string, csp = false) =>
     new Response(body, { headers: { ...sec, 'content-type': type, ...(csp ? { 'content-security-policy': CB_CSP } : {}) } });
   if (path === '/' || path === '/cloudbite' || path === '/cloudbite/') return page(CLOUDBITE_HTML, 'text/html; charset=utf-8', true);
-  if (path === '/cloudbite/app.js') return page(CLOUDBITE_JS, 'text/javascript; charset=utf-8');
-  if (path === '/cloudbite/style.css') return page(CLOUDBITE_CSS, 'text/css; charset=utf-8');
+  // Asset paths are the ones the page itself references (exported next to the page by the UI build).
+  if (path === CLOUDBITE_JS_PATH) return page(CLOUDBITE_JS, 'text/javascript; charset=utf-8');
+  if (path === CLOUDBITE_CSS_PATH) return page(CLOUDBITE_CSS, 'text/css; charset=utf-8');
   return null;
 }
 
