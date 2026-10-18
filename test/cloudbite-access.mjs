@@ -287,14 +287,26 @@ await check('atomic quota: concurrent creates cannot use one grant twice; a refu
   assert.equal((await create(w, brief({ expertIds: ids.slice(0, 6) }), { cookie: y.cookie })).status, 400);
 });
 
-await check('rate and caps: 5 new requests per hashed source per hour, at most 100 pending', async () => {
+await check('rate: 120 new requests per hashed source per hour, so many attendees behind one venue NAT address get in', async () => {
   const w = world();
-  for (let i = 0; i < 5; i++) await visitor(w, '192.0.2.1');
+  // Distinct applicants (fresh browsers, no cookie) from the SAME source; each is decided at once so the separate
+  // 100-pending cap never fills and only the rate limit can refuse.
+  const seen = new Set();
+  for (let i = 0; i < 120; i++) {
+    const v = await visitor(w, '192.0.2.1', 'Judge ' + i);
+    seen.add(v.id);
+    assert.equal((await act(w, v.id, i % 2 ? 'approve' : 'deny')).status, 200);
+  }
+  assert.equal(seen.size, 120, 'every applicant behind the shared address got its own request (well past the old 5)');
   const r = await call(w, 'POST', '/api/cloudbite/access/requests', { body: { name: 'n', purpose: 'p' }, headers: { ...ORIGIN, 'cf-connecting-ip': '192.0.2.1' } });
-  assert.equal(r.status, 429); assert.equal(r.cookie, null);
+  assert.equal(r.status, 429, 'the 121st new request from that source within the hour is refused'); assert.equal(r.cookie, null);
   await visitor(w, '192.0.2.2');
   w.now += HOUR;
-  await visitor(w, '192.0.2.1');
+  await visitor(w, '192.0.2.1', 'next hour');
+  await visitor(w, '192.0.2.1', 'next hour 2');
+});
+
+await check('caps: at most 100 pending', async () => {
   const cap = world();
   for (let i = 0; i < 100; i++) await visitor(cap, `10.0.${i >> 8}.${i & 255}`);
   assert.equal((await call(cap, 'POST', '/api/cloudbite/access/requests', { body: { name: 'n', purpose: 'p' }, headers: { ...ORIGIN, 'cf-connecting-ip': '10.9.9.9' } })).status, 429);

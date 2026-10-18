@@ -50,8 +50,9 @@ Storage: one CloudbiteAccess DO, getByName('hacksprint-2026-10-18'), SQLite-back
   cred:<sha256>  -> id
   rate:<sha256>  creation times within the last hour for a hashed source
   Every method runs in one in-object serial queue and does storage I/O only; related keys are written in one put().
-  Bounds: 5 new requests per source per hour (source = SHA-256 of MASTER_KEY + cf-connecting-ip; the raw address is
-  never stored), 100 pending, 500 retained; records that ended (expired/denied/revoked) are deleted 8 h after
+  Bounds: 120 new requests per source per hour (source = SHA-256 of MASTER_KEY + cf-connecting-ip; the raw address is
+  never stored; attendees at a venue often share one NAT address, so the rate is sized for a room), 100 pending,
+  500 retained; records that ended (expired/denied/revoked) are deleted 8 h after
   they ended, on the next submit. No provider, sandbox or paid resource is touched by request, approval or status.
 
 Quota and tenant isolation (POST /api/cloudbite/projects with a visitor cookie)
