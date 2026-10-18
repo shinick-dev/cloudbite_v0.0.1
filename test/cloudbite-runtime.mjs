@@ -537,7 +537,7 @@ await check('validators: workspace paths and opinion schema', async () => {
 await check('real catalogue: actual persona workspace -> python runner -> flat out/result.json -> server validation and artifact', async () => {
   const w = freshWorld({ M: REAL });
   const boot = await call(w, 'GET', '/api/cloudbite/bootstrap');
-  assert.ok(boot.j.experts.length >= 10 && boot.j.experts.every((e) => e.id.startsWith('agency-')), 'actual catalogue, not the fixture');
+  assert.ok(boot.j.experts.length === 13 && boot.j.experts.some((e) => e.id === 'probably-primetime-sta'), 'actual catalogue, including the curated STA role');
   const ids = boot.j.experts.slice(0, 3).map((e) => e.id);
   // the console sends crypto.randomUUID() request ids
   const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ids, requestId: crypto.randomUUID() }), headers: admin });
@@ -696,17 +696,15 @@ const oneExpert = async (w) => {
   return { created, p, e, dir: sbDir(w, e.run.sandboxId), procs };
 };
 
-await check('real python runner: the prompt states the reply budget, reserved outputs and a valid compact final example', async () => {
+await check('real python runner: the prompt states reply budget and schema without a preset confidence score', async () => {
   const w = freshWorld();
   const { p } = await oneExpert(w);
   assert.equal(p.status, 'completed');
   const system = w.nosana[0].messages[0].content;
   assert.match(system, /limited to about 1200 tokens/);
   assert.match(system, /out\/result\.json, out\/report\.md, out\/manifest\.json and out\/done are reserved/);
-  // the example the model is shown is itself a final the runner and the server accept
-  const example = JSON.parse(system.match(/^\{"action":"final".*\}$/m)[0]);
-  assert.ok(!M.isInvalid(M.validateOpinion(example.opinion)) && example.report.trim());
-  assert.ok(JSON.stringify(example).length < 2500);
+  assert.match(system, /confidence":<integer 0-100>/);
+  assert.ok(!/"confidence"\s*:\s*\d/.test(system), 'no numeric example biases self-assessment');
 });
 
 await check('real python runner: truncated final and reserved write get compact guidance; the model recovers with a real-script final', async () => {
@@ -794,6 +792,32 @@ await check('real python runner: invalid replies on every turn fail honestly wit
   assert.equal(readFileSync(join(dir, 'out', 'error.txt'), 'utf8'), 'no valid final opinion within 6 turns');
   for (const f of ['result.json', 'report.md']) assert.ok(!existsSync(join(dir, 'out', f)), 'nothing fabricated: ' + f);
   assert.equal(readFileSync(join(dir, 'out', 'done'), 'utf8'), 'error');
+});
+
+await check('curated STA: full persona, question-specific references, follow-up search, unknown citation rejected; audited result survives collection', async () => {
+  const w = freshWorld({ M: REAL, model: (req, turn) => {
+    if (turn === 0) return JSON.stringify({ action: 'knowledge', query: 'setup hold CRPR' });
+    const citation = turn === 1 ? 'made-up-source' : 'education-005';
+    return JSON.stringify({ action: 'final', opinion: { direction: 'conditional', confidence: 73, summary: 'Educational setup calculation; no PrimeTime measurement.', evidence: [`[source:${citation}] Educational slack definitions.`], assumptions: ['single-edge model'], nextActions: ['verify report conditions'] }, report: '# STA review\nEducational result, not a PrimeTime run.' });
+  } });
+  const created = await call(w, 'POST', '/api/cloudbite/projects', { body: brief({ expertIds: ['probably-primetime-sta'], objective: 'Explain setup and hold slack and CRPR.' }), headers: admin });
+  assert.equal(created.status, 201, created.text);
+  const obj = await project(w, created);
+  await drive(w, obj, p => p.status !== 'running', 2000); await Promise.all(w.procs);
+  const [e] = await experts(obj);
+  assert.equal(e.run.status, 'completed', JSON.stringify(e.run));
+  assert.equal(e.run.opinion.confidence, 73);
+  const dir = sbDir(w, e.int.sandboxId);
+  assert.ok(readFileSync(join(dir, 'PERSONA.md'), 'utf8').length > 12000, 'full trusted persona was uploaded');
+  assert.ok(w.nosana[0].messages[1].content.includes('Do not copy a preset confidence number.'), 'persona tail is not truncated at 12000 chars');
+  assert.ok(!w.nosana[0].messages[1].content.includes('sta-eval-'), 'held-out cases absent from model input');
+  assert.ok(e.run.activity.some(a => /source not retrieved/.test(a.message)), 'fabricated source rejected');
+  const a = await call(w, 'GET', `/api/cloudbite/projects/${created.j.project.id}/artifact?expert=${e.run.id}&path=out/knowledge.json`, { headers: { authorization: 'Bearer ' + created.j.accessToken } });
+  assert.equal(a.status, 200); const audit = JSON.parse(a.j.content);
+  assert.equal(audit.citationIdsValidated, true); assert.equal(audit.sourcePagesFetched, false);
+  assert.equal(audit.commercialStaExecuted, false); assert.ok(audit.retrievals.length >= 2);
+  assert.ok(audit.sources.some(s => s.id === 'education-005' || s.aliases.includes('education-005')));
+  assert.ok(w.nosana.every(r => !JSON.stringify(r).includes('DAYTONA-SECRET-VALUE')));
 });
 
 server.close();

@@ -73,6 +73,10 @@ const EN = {
   sampleTitle: 'Launch a 100-expert AI advisory room',
   sampleObjective: 'Decide whether launching a 100-expert AI advisory room for startup teams on a partially paid model within 4 weeks makes sense, and what to watch out for.',
   sampleContext: 'Early users are startup teams of 5–20 people. Every opinion should show its evidence and sources. Team data will not be uploaded.',
+  staExample: 'Try the curated STA expert',
+  staTitle: 'PrimeTime setup / hold review',
+  staObjective: 'Explain setup and hold slack using an educational single-clock model. For setup: launch edge 0 ns, launch latency 0.20 ns, clk-to-Q 0.08 ns, data delay 0.72 ns; capture edge 1.00 ns, capture latency 0.10 ns, setup 0.07 ns, uncertainty 0.04 ns, CRPR 0. Show arrival, required and slack, cite the curated sources, and explain why positive WNS alone is not signoff.',
+  staContext: 'Educational example only. No real design data or licensed PrimeTime execution. Distinguish provided facts, assumptions and version-dependent options.',
   // 폼 검증
   vTitle: 'Enter a project name.',
   vTitleLong: (n: number) => `The project name must be ${n} characters or fewer.`,
@@ -317,7 +321,7 @@ const EN = {
     ['Is the browser demo real?', 'No. The browser demo is a deterministic simulation that runs in this tab only after you start it. It creates no Daytona sandbox and makes no Nosana inference call. Its results change with the wording of your brief, but they are scripted, and its files and activity stay in English.'],
     ['What does confidence mean?', 'Each expert reports its own confidence from 0 to 100. It is a self-assessment, not calibrated accuracy or independent agreement. Failed, pending, cancelled and invalid results are excluded from the average.'],
     ['Why is Live run disabled?', 'Live run needs the server to be configured and one of: the owner signed in with a security key (owner inbox at /cloudbite/requests), an existing admin session token, or an approved, unexpired visitor session with a project left. Visitors can request access at /cloudbite/request. If the server is not ready, Settings lists the missing setting names. API keys are never entered in this console.'],
-    ['How many experts can run?', 'Up to five experts per project, with up to three working at once. The catalogue currently has twelve roles. A hundred-expert room is a future concept, not a verified capacity.'],
+    ['How many experts can run?', 'Up to five experts per project, with up to three working at once. The server catalogue includes a curated PrimeTime STA expert alongside the general roles. A hundred-expert room is a future concept, not a verified capacity.'],
     ['What do Clear view and Full screen do?', 'Clear view, inside Execution activity, only empties the visible activity window; new activity keeps arriving and the project history and files stay intact. Restore history brings the hidden rows back. Full screen expands the workspace with its activity; press Escape or Exit full screen to return.'],
     ['Where is my data kept?', 'Admin and operator tokens live only in this tab\'s memory. The owner sign-in and an approved visitor session are kept by the server in HttpOnly cookies that this page cannot read. The language choice lives only in the address (?lang=). Exports are generated in the browser as downloads and state whether they come from a demo or a live run.'],
   ] as Array<[string, string]>,
@@ -337,6 +341,10 @@ const KO: Messages = {
   sampleTitle: '100명 전문가 AI 자문실 출시',
   sampleObjective: '스타트업 팀을 위한 100명 전문가 AI 자문실을 4주 안에 일부 유료 모델로 출시하는 것이 타당한지, 무엇을 주의해야 하는지 판단해 주세요.',
   sampleContext: '초기 사용자는 5–20명 규모의 스타트업 팀입니다. 모든 의견은 근거와 출처를 보여야 합니다. 팀 데이터는 업로드하지 않습니다.',
+  staExample: '지식 기반 STA 전문가 예제',
+  staTitle: 'PrimeTime setup / hold 검토',
+  staObjective: '교육용 단일 클록 모델에서 setup과 hold slack을 설명해 주세요. setup: launch edge 0 ns, launch latency 0.20 ns, clk-to-Q 0.08 ns, data delay 0.72 ns; capture edge 1.00 ns, capture latency 0.10 ns, setup 0.07 ns, uncertainty 0.04 ns, CRPR 0. arrival·required·slack을 계산하고, 지식 자료의 출처를 인용하며, positive WNS만으로 signoff할 수 없는 이유도 설명해 주세요.',
+  staContext: '교육용 사례입니다. 실제 설계 데이터와 라이선스가 필요한 PrimeTime 실행은 없습니다. 주어진 사실·가정·버전별 확인이 필요한 옵션을 구분해 주세요.',
   vTitle: '프로젝트 이름을 입력하세요.',
   vTitleLong: (n) => `프로젝트 이름은 ${n}자 이하여야 합니다.`,
   vObjective: '목표를 입력하세요.',
@@ -567,7 +575,7 @@ const KO: Messages = {
     ['브라우저 데모는 진짜인가요?', '아닙니다. 브라우저 데모는 시작한 뒤에만 이 탭 안에서 도는 결정적 시뮬레이션입니다. Daytona 샌드박스를 만들지 않고 Nosana 추론도 호출하지 않습니다. 결과는 브리프 문구에 따라 바뀌지만 정해진 각본이며, 파일과 활동은 영어로 남습니다.'],
     ['확신도는 무슨 뜻인가요?', '각 전문가가 0–100 사이의 확신도를 스스로 보고합니다. 자체 평가이며 보정된 정확도나 독립적인 합의가 아닙니다. 실패·대기·취소·형식 오류 결과는 평균에서 제외합니다.'],
     ['실제 실행이 왜 꺼져 있나요?', '실제 실행에는 서버 설정과 다음 중 하나가 필요합니다: 보안 키로 로그인한 소유자(소유자 요청함 /cloudbite/requests), 기존 관리자 세션 토큰, 또는 프로젝트가 남은 승인·유효한 방문자 세션. 방문자는 /cloudbite/request 에서 접근을 요청할 수 있습니다. 서버가 준비되지 않았으면 설정에 빠진 설정 이름이 보입니다. 이 콘솔에는 API 키를 입력하지 않습니다.'],
-    ['전문가는 몇 명까지 실행되나요?', '프로젝트당 최대 5명, 동시에 최대 3명이 작업합니다. 카탈로그에는 현재 역할 12개가 있습니다. 100명 전문가 자문실은 앞으로의 구상이며 검증된 규모가 아닙니다.'],
+    ['전문가는 몇 명까지 실행되나요?', '프로젝트당 최대 5명, 동시에 최대 3명이 작업합니다. 서버 카탈로그에는 일반 역할과 지식 기반 PrimeTime STA 전문가가 있습니다. 100명 전문가 자문실은 앞으로의 구상이며 검증된 규모가 아닙니다.'],
     ['화면 비우기와 전체 화면은 무엇을 하나요?', '실행 기록 안의 화면 비우기는 보이는 기록 창만 비웁니다. 새 활동은 계속 들어오고 프로젝트 기록과 파일은 그대로입니다. 기록 되돌리기로 숨긴 줄을 다시 봅니다. 전체 화면은 작업공간과 기록을 넓혀 보이며, Escape 나 전체 화면 끝내기로 돌아옵니다.'],
     ['내 데이터는 어디에 남나요?', '관리자·운영자 토큰은 이 탭의 메모리에만 있습니다. 소유자 로그인과 승인된 방문자 세션은 서버가 이 페이지에서 읽을 수 없는 HttpOnly 쿠키로 보관합니다. 언어 선택은 주소(?lang=)에만 남습니다. 내보내기는 브라우저에서 다운로드로 만들어지며 데모인지 실제 실행인지 적혀 있습니다.'],
   ],
@@ -576,6 +584,7 @@ const DICT: Record<Lang, Messages> = { en: EN, ko: KO };
 
 /** 알려진 역할(서버 카탈로그 12개·내장 데모 6개)의 한국어 설명. 이름과 페르소나 원문은 그대로 둔다 */
 const ROLE_KO: Record<string, string> = {
+  'probably-primetime-sta': '50개 지식 카드·120개 출처·8개 분야 체크리스트로 ASIC 타이밍을 검토합니다. PrimeTime 실행이나 signoff 인증은 제공하지 않습니다.',
   'agency-product-manager': '문제·대상 사용자·성과 지표를 정리하고, 범위를 좁힌 첫 출시와 Now/Next/Later 로드맵으로 프로젝트를 나눕니다.',
   'agency-business-strategist': '프로젝트가 이길 수 있는 지점을 그리고, 서로 다른 전략안 2–4개를 비교해 각각의 트레이드오프와 중단 기준을 밝힙니다.',
   'agency-specialized-pricing-analyst': '가치 지표와 패키징을 정하고, 제공 원가와 지불 의향 가정에 비추어 가격대를 검증합니다.',
@@ -686,11 +695,11 @@ function normalizeExpertDef(raw: unknown): ExpertDefinition | null {
   if (!id || !name) return null;
   const src = isObj(raw.source) ? raw.source : {};
   return {
-    id, name, domain: str(raw.domain, 80, 'General'), summary: str(raw.summary, 400), prompt: str(raw.prompt, 6000),
+    id, name, domain: str(raw.domain, 80, 'General'), summary: str(raw.summary, 400), prompt: str(raw.prompt, 20000),
     tools: strList(raw.tools, 80, 20), outputs: strList(raw.outputs, 120, 20),
     source: {
       repository: str(src.repository, 200), path: str(src.path, 200), revision: str(src.revision, 80),
-      license: str(src.license, 80), basis: 'metadata-derived',
+      license: str(src.license, 120), basis: src.basis === 'curated-knowledge' ? 'curated-knowledge' : 'metadata-derived',
     },
   };
 }
@@ -1308,6 +1317,14 @@ function boot(): void {
   objectiveIn.value = M.sampleObjective;
   const contextIn = h('textarea', { id: 'cb-context', rows: 3, maxlength: LIMIT.context });
   contextIn.value = M.sampleContext;
+  const staExampleBtn = tx('button', { type: 'button', class: 'cb-link', onclick: () => {
+    if (active() || !findDef('probably-primetime-sta')) return;
+    titleIn.value = M.staTitle; objectiveIn.value = M.staObjective; contextIn.value = M.staContext;
+    S.selected.clear(); S.selected.add('probably-primetime-sta'); S.formErrors = [];
+    for (const update of recount) update();
+    keepFocus(() => { renderCatalogue(); renderControls(); renderProgress(); });
+    objectiveIn.focus();
+  } }, m => m.staExample);
   // 글자 수는 입력 중(포커스)이거나 한도에 가까울 때만 보인다 (CSS)
   const recount: Array<() => void> = [];
   const counter = (inp: HTMLInputElement | HTMLTextAreaElement, max: number) => {
@@ -1361,7 +1378,7 @@ function boot(): void {
   const startNote = h('div', { class: 'cb-startnote' });
   const form = attr(h('form', { class: 'cb-form', novalidate: true },
     h('div', { class: 'cb-field cb-objective' }, tx('label', { for: 'cb-objective', class: 'cb-label' }, m => m.objectiveLabel), objectiveIn, counter(objectiveIn, LIMIT.objective)),
-    projDetails,
+    staExampleBtn, projDetails,
     h('div', { class: 'cb-team', role: 'group', 'aria-labelledby': 'cb-cat-label' },
       h('div', { class: 'cb-label-row' }, tx('span', { id: 'cb-cat-label', class: 'cb-label' }, m => m.chooseExperts), selCount),
       coreBox, alsoSel, moreDetails, catalogueNote),
@@ -1560,6 +1577,8 @@ function boot(): void {
     clearTokenBtn.hidden = !S.adminToken;
 
     const busy = active();
+    staExampleBtn.hidden = !catalogue().some(e => e.id === 'probably-primetime-sta');
+    staExampleBtn.disabled = busy;
     for (const n of [titleIn, objectiveIn, contextIn, failIn, tokenIn, filterIn]) n.disabled = busy;
     const liveReady = S.boot.status === 'ready' && !!cfg?.liveReady && liveCredential();
     const none = S.selected.size === 0;

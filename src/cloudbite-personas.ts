@@ -1,4 +1,5 @@
 import type { ExpertDefinition, ExpertOpinion, OpinionDirection, ProjectBrief } from './cloudbite-contract';
+import { STA_EXPERT, staKnowledgeFiles } from './cloudbite-sta';
 
 // Cloudbite expert personas and per-expert workspace packs.
 //
@@ -39,7 +40,7 @@ export const CLOUDBITE_OPINION_LIMITS = Object.freeze({
 });
 
 const MAX_WORKSPACE_FILE_BYTES = 48 * 1024;
-const MAX_WORKSPACE_BYTES = 128 * 1024;
+const MAX_WORKSPACE_BYTES = 192 * 1024;
 const DIRECTIONS: readonly OpinionDirection[] = ['support', 'conditional', 'concern', 'abstain'];
 const SAFE_PATH = /^(?!.*(?:^|\/)\.\.?(?:\/|$))[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/;
 const REQUEST_ID = /^[A-Za-z0-9_-]+$/;
@@ -460,7 +461,7 @@ function deepFreeze<T>(value: T): T {
 
 const PROFILE_BY_ID = new Map(PROFILES.map(profile => [profile.registry.id, deepFreeze(profile)]));
 
-export const CLOUDBITE_EXPERTS: readonly ExpertDefinition[] = deepFreeze(PROFILES.map((profile): ExpertDefinition => ({
+export const CLOUDBITE_EXPERTS: readonly ExpertDefinition[] = deepFreeze([...PROFILES.map((profile): ExpertDefinition => ({
   id: profile.registry.id,
   name: profile.registry.name,
   domain: profile.registry.domain,
@@ -475,7 +476,7 @@ export const CLOUDBITE_EXPERTS: readonly ExpertDefinition[] = deepFreeze(PROFILE
     license: profile.registry.source.license,
     basis: 'metadata-derived',
   },
-})));
+})), STA_EXPERT]);
 
 export function findExpert(id: string): ExpertDefinition | undefined {
   if (typeof id !== 'string') return undefined;
@@ -746,18 +747,8 @@ function instructionsFile(expert: ExpertDefinition): string {
     '',
     '## Output contract',
     '',
-    '`out/result.json` must be a single JSON object:',
-    '',
-    '```json',
-    '{',
-    '  "direction": "support | conditional | concern | abstain",',
-    '  "confidence": 0,',
-    '  "summary": "one-paragraph recommendation",',
-    '  "evidence": ["source-tagged evidence, e.g. PROJECT.md objective: ..."],',
-    '  "assumptions": ["explicit assumption or uncertainty"],',
-    '  "nextActions": ["concrete next step"]',
-    '}',
-    '```',
+    '`out/result.json` must be a single JSON object with exactly direction, confidence, summary, evidence, assumptions, nextActions. See RESULT.schema.json for the complete contract.',
+    'Choose direction from support, conditional, concern, abstain based on your analysis. Choose confidence from the evidence; no example score is supplied.',
     '',
     'Confidence is a self-assessed 0-100 integer, not calibrated accuracy.',
     `summary: 1-${CLOUDBITE_OPINION_LIMITS.summary} characters. evidence, assumptions, nextActions: 1-${CLOUDBITE_OPINION_LIMITS.items} non-empty strings of at most ${CLOUDBITE_OPINION_LIMITS.item} characters each. No other properties.`,
@@ -769,10 +760,23 @@ function instructionsFile(expert: ExpertDefinition): string {
 export function buildExpertWorkspace(expert: ExpertDefinition, brief: ProjectBrief): Array<{path:string;content:string}> {
   // The catalog is authoritative: caller-supplied persona fields are ignored.
   const known = expert && typeof expert === 'object' ? findExpert(expert.id) : undefined;
-  const profile = known && PROFILE_BY_ID.get(known.id);
-  if (!known || !profile) throw new Error('unknown expert');
+  if (!known) throw new Error('unknown expert');
   const clean = validateProjectBrief(brief);
   if (!clean.expertIds.includes(known.id)) throw new Error('expert is not selected in this brief');
+
+  if (known.id === STA_EXPERT.id) {
+    const knowledge = staKnowledgeFiles(`${clean.title}\n${clean.objective}\n${clean.context}`);
+    return checkWorkspaceFiles([
+      { path: 'INSTRUCTIONS.md', content: instructionsFile(known) },
+      { path: 'PERSONA.md', content: known.prompt },
+      { path: 'PROJECT.md', content: projectFile(clean) },
+      { path: 'project.json', content: JSON.stringify(clean) },
+      { path: 'WORKORDER.md', content: '# STA work order\nApply PERSONA.md to PROJECT.md. Read KNOWLEDGE.md; search further using the knowledge action. Explain the answer first, then evidence, missing inputs, minimal edits and verification. Use [source:ID] in evidence. Never claim a PrimeTime run or signoff. Write supporting analysis to out/timing-review.md if useful. The runner writes out/knowledge.json as an audit of retrieved references; do not write it yourself.' },
+      { path: 'RESULT.schema.json', content: JSON.stringify(expertOpinionSchema()) },
+      ...knowledge,
+    ]);
+  }
+  const profile = PROFILE_BY_ID.get(known.id)!;
 
   const files = [
     { path: 'INSTRUCTIONS.md', content: instructionsFile(known) },
@@ -783,6 +787,10 @@ export function buildExpertWorkspace(expert: ExpertDefinition, brief: ProjectBri
     { path: 'RESULT.schema.json', content: JSON.stringify(expertOpinionSchema(), null, 2) + '\n' },
     { path: 'provenance.json', content: JSON.stringify({ expertId: known.id, ...provenance(profile) }, null, 2) + '\n' },
   ];
+  return checkWorkspaceFiles(files);
+}
+
+function checkWorkspaceFiles(files: Array<{ path: string; content: string }>) {
   const encoder = new TextEncoder();
   let total = 0;
   for (const file of files) {

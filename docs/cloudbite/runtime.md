@@ -78,7 +78,7 @@ Each step persists a claim id first and applies its result only if that claim is
 - **compact protocol**: the gateway caps each reply at `max_tokens` 1200, and a long final cut off mid-JSON was the
   production failure (PM/strategy turn 6, pricing turns 3/4). The system prompt states that budget, asks for one JSON action
   under 2500 characters and, for final, a report under 100 words, a summary under 300 characters and 1–3 items under 120
-  characters per list, with a valid compact example. These are prompt guidelines only: the schema limits below are
+  characters per list. The action schema has no preset numerical confidence example. These are prompt guidelines only: the schema limits below are
   unchanged and a valid final is saved exactly as the model sent it. The prompt names `out/result.json`, `out/report.md`,
   `out/manifest.json`, `out/done` as reserved (saved by `final`); a write to one is rejected with that explanation. An
   invalid or incomplete reply or a rejected final gets one short retry hint (reason, budget, compact rules) inside the same

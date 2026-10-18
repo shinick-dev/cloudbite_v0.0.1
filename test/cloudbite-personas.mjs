@@ -15,7 +15,7 @@ const ok = (cond, message) => { assert.ok(cond, message); checks++; };
 
 // --- catalog shape and distinctness
 const experts = CLOUDBITE_EXPERTS;
-ok(experts.length >= 10 && experts.length <= 12, 'catalog has 10-12 experts');
+ok(experts.length === 13, 'catalog has 12 metadata-derived roles and one curated STA expert');
 ok(Object.isFrozen(experts) && Object.isFrozen(experts[0]) && Object.isFrozen(experts[0].source), 'catalog is deeply frozen');
 const ids = experts.map(e => e.id);
 ok(new Set(ids).size === ids.length, 'expert ids are unique');
@@ -26,9 +26,10 @@ const keys = ['id', 'name', 'domain', 'summary', 'prompt', 'tools', 'outputs', '
 const sourceKeys = ['basis', 'license', 'path', 'repository', 'revision'].sort().join();
 for (const e of experts) {
   ok(Object.keys(e).sort().join() === keys, `${e.id} has exact ExpertDefinition keys`);
-  ok(Object.keys(e.source).sort().join() === sourceKeys && e.source.basis === 'metadata-derived', `${e.id} source shape`);
-  ok(/^[a-z0-9-]+$/.test(e.id) && e.id.startsWith('agency-'), `${e.id} id is a registry slug`);
-  ok(/^[0-9a-f]{40}$/.test(e.source.revision) && e.source.license === 'MIT', `${e.id} pinned revision and license`);
+  const native = e.id === 'probably-primetime-sta';
+  ok(Object.keys(e.source).sort().join() === sourceKeys && e.source.basis === (native ? 'curated-knowledge' : 'metadata-derived'), `${e.id} source shape`);
+  ok(/^[a-z0-9-]+$/.test(e.id) && (native || e.id.startsWith('agency-')), `${e.id} id is a registry slug`);
+  ok(/^[0-9a-f]{40}$/.test(e.source.revision) && (native ? e.source.license.includes('Project-authored') : e.source.license === 'MIT'), `${e.id} pinned revision and license`);
   ok(e.outputs.includes('out/result.json') && e.outputs.includes('out/report.md') && e.outputs.length >= 4, `${e.id} declares common and role outputs`);
   ok(e.outputs.every(p => /^out\/[a-z0-9-]+\.(md|json|csv)$/.test(p)), `${e.id} outputs are allowlist-friendly`);
   ok(e.prompt.includes(e.name) && e.prompt.includes('not a real person') && e.prompt.includes('T0') && /fabricate/.test(e.prompt) && /not calibrated/.test(e.prompt), `${e.id} prompt has role, no-impersonation, T0 and evidence rules`);
@@ -47,7 +48,7 @@ const refRoot = process.argv[2] ?? path.resolve(repo, '../../../.artifacts/pro-b
 const seedPath = path.join(refRoot, CLOUDBITE_REGISTRY.path);
 if (fs.existsSync(seedPath)) {
   const seed = new Map(fs.readFileSync(seedPath, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)).map(entry => [entry.id, entry]));
-  for (const e of experts) {
+  for (const e of experts.filter(e => e.source.basis === 'metadata-derived')) {
     const entry = seed.get(e.id);
     ok(entry && entry.kind === 'persona', `${e.id} exists in registry seed`);
     ok(entry.name === e.name && entry.domain === e.domain, `${e.id} name/domain match registry`);

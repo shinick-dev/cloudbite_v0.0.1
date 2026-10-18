@@ -1196,4 +1196,19 @@ await test('포커스·탭 복귀·Settings 로 세션을 다시 읽되 30초에
   assert.equal(env.ownerCalls.length, 2);
 });
 
+await test('지식 기반 STA: 페르소나 끝을 보존하고 예제 선택은 한 역할만 고르며 자동 실행하지 않는다', async () => {
+  const native = { ...core.DEMO_EXPERTS[0], id: 'probably-primetime-sta', name: 'PrimeTime STA Expert', domain: 'semiconductor-eda.static-timing-analysis', prompt: 'a'.repeat(12500) + 'END OF TRUSTED PERSONA', source: { repository: 'Shinick-Han/pro-bably', path: 'data/experts/primetime-sta.json', revision: 'a'.repeat(40), license: 'Project-authored synthesis', basis: 'curated-knowledge' } };
+  const bootstrap = { experts: [...core.DEMO_EXPERTS, native], configuration: { liveReady: true, missing: [], maxExperts: 5 } };
+  const normalized = core.normalizeBootstrap(bootstrap);
+  assert.ok(normalized.experts.at(-1).prompt.endsWith('END OF TRUSTED PERSONA'));
+  assert.equal(normalized.experts.at(-1).source.basis, 'curated-knowledge');
+  const env = fakeEnv({ fetchImpl: () => json(200, bootstrap) }); await env.flush();
+  env.all().find(n => n.tagName === 'BUTTON' && n.textContent === EN.staExample).click(); await env.flush();
+  assert.equal(env.all().find(n => n.id === 'cb-objective').value, EN.staObjective);
+  const selected = env.all().filter(n => n.tagName === 'INPUT' && n.checked).map(n => n.id);
+  assert.ok(selected.length > 0 && selected.every(id => id.includes('probably-primetime-sta')));
+  assert.equal(env.requests.filter(r => r.init.method === 'POST').length, 0);
+  assert.equal(cards(env), 0, 'example selection does not start a demo');
+});
+
 console.log(`cloudbite-console: ${pass} passed`);

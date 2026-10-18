@@ -12,7 +12,7 @@ The confirmed first audience is the Daytona HackSprint pitch audience. The examp
 Give one common project to several expert personas, let them work inside separate Daytona sandboxes, and collect their advice, evidence, artifacts, and self-reported confidence to support the user's decision.
 
 ## Operating Context
-Reuse gw-shinick, reference pro-bably's metadata-derived expert catalogue, use Daytona for isolated execution and Nosana for inference. The implementation starts with up to five experts selected from twelve roles. A hundred experts is the longer-term concept, not a verified runtime capacity.
+Reuse gw-shinick, reference pro-bably's expert catalogue, use Daytona for isolated execution and Nosana for inference. The implementation supports up to five experts selected from twelve general roles and one curated PrimeTime STA expert. The STA pilot includes authored knowledge cards and source-linked retrieval; the general roles remain metadata-derived. A hundred experts is the longer-term concept, not a verified runtime capacity.
 
 ## Capabilities and Constraints
 The user requests an HTML preview of the finished pitch experience while implementation continues. The preview must be explicitly simulated and separate from the real console. Its data does not prove provider performance, customer demand, accuracy, or business outcomes. Confidence means a model's self-assessment, not measured accuracy or independent expert agreement.

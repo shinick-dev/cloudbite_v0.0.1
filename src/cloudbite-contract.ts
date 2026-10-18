@@ -10,7 +10,7 @@ export interface ExpertDefinition {
   prompt: string;
   tools: string[];
   outputs: string[];
-  source: { repository: string; path: string; revision: string; license: string; basis: 'metadata-derived' };
+  source: { repository: string; path: string; revision: string; license: string; basis: 'metadata-derived' | 'curated-knowledge' };
 }
 export interface ProjectBrief {
   title: string;
