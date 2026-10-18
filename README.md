@@ -37,7 +37,9 @@
 
 공개 QR은 `https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/request`를 엽니다. 이름과 체험 목적을 신청하면 진행자가 `https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/requests`에서 승인합니다. 승인 후 같은 브라우저에서 Cloudbite에 들어가 공통 프로젝트와 전문가를 선택해 실행합니다. 1시간 동안 프로젝트 최대 10개를 체험하며, 프로젝트마다 최대 5명의 전문가를 선택할 수 있습니다. 승인은 외부 자원을 자동 생성하지 않습니다.
 
-운영자용 비공개 접속 파일의 승인함 버튼이나 유효한 Cloudbite 관리자 세션으로 승인합니다. 임시 Cloudbite 운영자 권한으로도 가능하며 기존 공부방 보안키 승인 경로를 사용하지 않습니다. 진행 절차는 [QR 안내](docs/pitch/qr-handoff.txt), 서버 범위는 [접근 서비스](docs/cloudbite/access-service.txt)에 정리합니다. 비공개 운영자 QR을 청중에게 공개하지 마세요.
+운영자는 `/cloudbite/requests`에서 이 Cloudbite 도메인에 등록한 보안키로 로그인합니다. Cloudbite 전용 로그인 유지 세션은 새로고침·새 탭·브라우저 재시작 뒤에도 복원되며, 명시적 로그아웃은 서버의 세션을 폐기합니다. 브라우저 쿠키 삭제나 해당 키 삭제 시에는 재인증해야 합니다. 기존 공부방·금고의 8시간 관리자 세션은 그대로입니다. 처음 키를 등록할 때는 비공개 설정 토큰이 필요하며, 임시 운영자 토큰은 고급 설정의 대체 접속 수단으로 남습니다. 비공개 설정 파일과 운영자 QR을 청중에게 공개하지 마세요.
+
+콘솔·신청·승인·QR 화면의 `KO / EN`으로 언어를 전환합니다. 선택은 `?lang=ko` 또는 `?lang=en` 주소에 유지하며, 입력한 프로젝트·신청 내용과 실행 중인 결과는 언어를 바꿔도 보존합니다. 사용자 입력·전문가 산출물 원문은 자동 번역하지 않습니다. 세션 상세는 [운영자 로그인](docs/cloudbite/owner-session.txt), 신청 범위는 [접근 서비스](docs/cloudbite/access-service.txt)에 정리합니다.
 
 ## 로컬 실행
 
