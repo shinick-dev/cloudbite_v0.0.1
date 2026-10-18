@@ -7,6 +7,7 @@ import type {
   CloudbiteBootstrap, ExpertActivity, ExpertArtifact, ExpertDefinition, ExpertOpinion, ExpertRun, ExpertStatus,
   OpinionDirection, ProjectBrief, ProjectRun, ProjectStatus,
 } from '../src/cloudbite-contract';
+import type { CloudbiteAccessRequest, CloudbiteAccessSession } from '../src/cloudbite-access-contract';
 
 type Mode = 'demo' | 'live';
 type View = 'home' | 'guide' | 'help' | 'settings';
@@ -101,6 +102,29 @@ function normalizeExpertDef(raw: unknown): ExpertDefinition | null {
   };
 }
 
+const ACCESS_STATUSES: CloudbiteAccessRequest['status'][] = ['pending', 'approved', 'denied', 'revoked', 'expired'];
+/** 방문자 접근 상태 (bootstrap.access). 자격 증명은 HttpOnly 쿠키에만 있고 여기에는 상태만 온다. 깨졌으면 없는 것으로 본다 */
+function normalizeAccess(raw: unknown): CloudbiteAccessSession | undefined {
+  if (!isObj(raw)) return undefined;
+  const r = raw.request;
+  if (r === null || r === undefined) return { request: null, canCreate: false };
+  if (!isObj(r)) return undefined;
+  const id = str(r.id, 120), status = r.status as CloudbiteAccessRequest['status'];
+  if (!id || !ACCESS_STATUSES.includes(status)) return undefined;
+  const n = (v: unknown, max: number) => { const x = num(v); return x !== null && x >= 0 ? Math.min(Math.floor(x), max) : 0; };
+  const request: CloudbiteAccessRequest = {
+    id, status, name: str(r.name, 80), purpose: str(r.purpose, 1000), createdAt: n(r.createdAt, Number.MAX_SAFE_INTEGER), expiresAt: n(r.expiresAt, Number.MAX_SAFE_INTEGER),
+    maxExperts: n(r.maxExperts, 100), maxProjects: n(r.maxProjects, 100), usedProjects: n(r.usedProjects, 100),
+  };
+  return { request, canCreate: raw.canCreate === true && status === 'approved' };
+}
+
+/** 승인되고 만료 전인 방문자 요청만 돌려준다. URL 이 아니라 서버 bootstrap 이 알려 준 상태만 본다 */
+function approvedVisitor(a: CloudbiteAccessSession | undefined, now: number): CloudbiteAccessRequest | null {
+  const r = a?.request;
+  return r && r.status === 'approved' && r.expiresAt > now ? r : null;
+}
+
 function normalizeBootstrap(raw: unknown): CloudbiteBootstrap {
   if (!isObj(raw) || !Array.isArray(raw.experts) || !isObj(raw.configuration)) throw new Error('The catalogue response has an invalid format');
   const seen = new Set<string>();
@@ -111,12 +135,14 @@ function normalizeBootstrap(raw: unknown): CloudbiteBootstrap {
   }
   const c = raw.configuration;
   const max = num(c.maxExperts);
+  const access = normalizeAccess(raw.access);
   return {
     experts,
     configuration: {
       liveReady: c.liveReady === true, missing: strList(c.missing, 80, 20),
       maxExperts: max !== null && max >= 1 ? Math.min(Math.floor(max), 100) : 5,
     },
+    ...(access ? { access } : {}),
   };
 }
 
@@ -593,6 +619,10 @@ function boot(): void {
     /** 사용자가 파일을 직접 고르기 전에는 새 파일이 생기면 가장 쓸모 있는 파일(out/report.md 우선)로 따라간다 */
     artifactPicked: false,
     artifactCache: new Map<string, { state: 'loading' | 'ok' | 'error'; text: string }>(),
+    /** 승인된 방문자를 처음 알아챘을 때 한 번만 실제 실행·프로젝트 설정으로 연다 */
+    visitorIntro: false,
+    /** 첫 화면 자동 데모의 세대 번호 (0 = 없음). 사용자가 직접 시작한 데모는 건드리지 않는다 */
+    autoDemoGen: 0,
     formErrors: (link.present && !link.token ? ['The temporary Cloudbite operator link is malformed. It was removed from the address bar; ask the owner for a new link.'] : []) as string[],
   };
   let timers: number[] = [];
@@ -601,7 +631,16 @@ function boot(): void {
 
   const catalogue = (): ExpertDefinition[] => S.mode === 'live' ? S.boot.data?.experts ?? [] : (S.boot.data?.experts.length ? S.boot.data.experts : DEMO_EXPERTS);
   const catalogueIsBuiltin = () => S.mode === 'demo' && !S.boot.data?.experts.length;
-  const limits = (): Limits => ({ min: 1, max: Math.max(1, Math.min(5, S.mode === 'live' ? S.boot.data?.configuration.maxExperts ?? 5 : 5)) });
+  // 승인된 방문자: 서버 쿠키로만 만든다 (JS 는 쿠키를 읽지 않는다). 관리자·운영자 토큰이 있으면 그쪽이 우선이다
+  const visitor = () => approvedVisitor(S.boot.data?.access, Date.now());
+  const visitorLeft = () => { const v = visitor(); return v ? Math.max(0, v.maxProjects - v.usedProjects) : 0; };
+  const visitorCanRun = () => !!visitor() && !!S.boot.data?.access?.canCreate && visitorLeft() > 0;
+  const viaVisitor = () => S.mode === 'live' && !S.adminToken.trim() && !!visitor();
+  const limits = (): Limits => {
+    const server = S.mode === 'live' ? S.boot.data?.configuration.maxExperts ?? 5 : 5;
+    const session = viaVisitor() ? visitor()!.maxExperts : 5;
+    return { min: 1, max: Math.max(1, Math.min(5, server, session)) };
+  };
   const active = () => !!S.run && (S.run.phase === 'starting' || S.run.phase === 'running' || S.run.phase === 'cancelling'
     || (S.run.phase === 'error' && !!S.run.project && !TERMINAL_PROJECT.includes(S.run.project.status)));
   const findDef = (id: string) => catalogue().find(e => e.id === id) ?? DEMO_EXPERTS.find(e => e.id === id);
@@ -663,6 +702,7 @@ function boot(): void {
   // ── 머리 (네이비 70px)
   const modeBadge = h('span', { class: 'cb-badge' });
   const profileState = h('span', { class: 'cb-profile-state' });
+  const profileName = h('span', { class: 'cb-profile-name' }, 'Operator');
   const banner = h('p', { class: 'cb-banner' });
   const live = h('div', { class: 'cb-sr', 'aria-live': 'polite' });
 
@@ -734,7 +774,7 @@ function boot(): void {
     h('div', { class: 'cb-faq' },
       faq('Is the browser demo real?', 'No. The browser demo is a deterministic simulation that runs in this tab. It creates no Daytona sandbox and makes no Nosana inference call. Its results change with the wording of your brief, but they are scripted.'),
       faq('What does confidence mean?', 'Each expert reports its own confidence from 0 to 100. It is a self-assessment, not calibrated accuracy or independent agreement. Failed, pending, cancelled and invalid results are excluded from the average.'),
-      faq('Why is Live run disabled?', 'Live run needs the server to be configured and an existing admin session token. If the server is not ready, Settings lists the missing setting names. API keys are never entered in this console.'),
+      faq('Why is Live run disabled?', 'Live run needs the server to be configured and either an existing admin session token or an approved, unexpired visitor session with a project left. Visitors can request access at /cloudbite/request. If the server is not ready, Settings lists the missing setting names. API keys are never entered in this console.'),
       faq('How many experts can run?', 'Up to five experts per project, with up to three working at once. The catalogue currently has twelve roles. A hundred-expert room is a future concept, not a verified capacity.'),
       faq('What do Clear view and Full screen do?', 'Clear view only empties the visible stream window; new activity keeps arriving and the project history and files stay intact. Restore history brings the hidden rows back. Full screen expands the workspace; press Escape or Exit full screen to return.'),
       faq('Where is my data kept?', 'Tokens live only in this tab\'s memory. Exports are generated in the browser as downloads and state whether they come from a demo or a live run.')));
@@ -762,12 +802,13 @@ function boot(): void {
           h('span', { class: 'cb-sub' }, 'Expert sandboxes for one shared project'))),
       h('div', { class: 'cb-top-right' }, modeBadge,
         h('div', { class: 'cb-profile', role: 'status', 'aria-label': 'Session' }, h('span', { class: 'cb-avatar' }, icon('user')),
-          h('span', { class: 'cb-profile-text' }, h('span', { class: 'cb-profile-name' }, 'Operator'), profileState)))),
+          h('span', { class: 'cb-profile-text' }, profileName, profileState)))),
     live,
     h('div', { class: 'cb-shell' },
       h('nav', { class: 'cb-nav', 'aria-label': 'Primary' }, h('span', { class: 'cb-nav-label' }, 'Workspace'),
         h('ul', { class: 'cb-nav-list' }, ...navBtns.map(b => h('li', null, b))),
-        h('div', { class: 'cb-nav-foot' }, h('span', null, 'Up to 5 experts per project · 3 run at once'), h('a', { href: '/cloudbite/access', target: '_blank', rel: 'noopener noreferrer' }, 'Try a sandbox'), h('a', { href: '/lab' }, 'Legacy lab'))),
+        h('div', { class: 'cb-nav-foot' }, h('span', null, 'Up to 5 experts per project · 3 run at once'), h('a', { href: '/cloudbite/request' }, 'Request visitor access'),
+          h('a', { href: '/cloudbite/access', target: '_blank', rel: 'noopener noreferrer' }, 'Access QR'), h('a', { href: '/lab' }, 'Legacy lab'))),
       h('main', { class: 'cb-main' }, banner, homeView, guideView, helpView, settingsView)));
 
   document.addEventListener('keydown', ev => { if ((ev as KeyboardEvent).key === 'Escape' && S.full) { ev.preventDefault(); setFull(false); } });
