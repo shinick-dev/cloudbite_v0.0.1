@@ -3,6 +3,7 @@ import type { ExpertDefinition, ExpertOpinion, ProjectBrief } from './cloudbite-
 import { CB_ARTIFACT_MAX, CB_MAX_EXPERTS } from './cloudbite-config';
 import { CLOUDBITE_BRIEF_LIMITS, validateExpertOpinion } from './cloudbite-personas';
 import { validateDecisionData } from './cloudbite-decision';
+import { validateWorkflowData } from './cloudbite-workflow';
 
 export type Invalid = { invalid: string };
 export const isInvalid = (x: unknown): x is Invalid => typeof x === 'object' && x !== null && 'invalid' in x;
@@ -20,7 +21,7 @@ export const EXPERT_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export function validateBrief(raw: unknown, catalogue?: readonly ExpertDefinition[]): ProjectBrief | Invalid {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return { invalid: 'brief must be a JSON object' };
   const b = raw as Record<string, unknown>;
-  const allowed = new Set(['title', 'objective', 'context', 'expertIds', 'mode', 'requestId', 'decision', 'documents']);
+  const allowed = new Set(['title', 'objective', 'context', 'expertIds', 'mode', 'requestId', 'decision', 'documents', 'stage', 'responseLanguage', 'budget', 'revision']);
   if (Object.keys(b).some((k) => !allowed.has(k))) return { invalid: 'unknown brief field' };
   if (!text(b.title, 1, LIMITS.title) || CONTROL.test(b.title as string)) return { invalid: `title must be 1-${LIMITS.title} characters` };
   if (!text(b.objective, 1, LIMITS.objective)) return { invalid: `objective must be 1-${LIMITS.objective} characters` };
@@ -33,7 +34,9 @@ export function validateBrief(raw: unknown, catalogue?: readonly ExpertDefinitio
   if (catalogue && b.expertIds.some((id) => !catalogue.some((e) => e.id === id))) return { invalid: 'unknown expert id' };
   const extra = validateDecisionData(b);
   if (isInvalid(extra)) return extra;
-  return { title: b.title as string, objective: b.objective as string, context: b.context, expertIds: [...b.expertIds] as string[], mode: b.mode, requestId: b.requestId, ...extra };
+  const workflow = validateWorkflowData(b);
+  if (isInvalid(workflow)) return workflow;
+  return { title: b.title as string, objective: b.objective as string, context: b.context, expertIds: [...b.expertIds] as string[], mode: b.mode, requestId: b.requestId, ...extra, ...workflow };
 }
 
 /**

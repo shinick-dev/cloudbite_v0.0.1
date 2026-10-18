@@ -5,6 +5,7 @@ import { PHASE_ONE_PACKS, type PhaseOneKnowledgePack } from './cloudbite-phase-o
 import { KNOWLEDGE_PACKS, knowledgeSourcePath } from './cloudbite-knowledge-registry';
 import { knowledgeDigest, knowledgeWorkspaceFiles, PEER_REVIEW_STATEMENT, REVIEW_ROLE_IDS } from './cloudbite-knowledge';
 import { decisionWorkOrderRules, decisionWorkspaceFiles, validateDecisionData } from './cloudbite-decision';
+import { validateWorkflowData } from './cloudbite-workflow';
 
 // Cloudbite expert personas and per-expert workspace packs.
 //
@@ -623,12 +624,14 @@ export function validateProjectBrief(brief: unknown): ProjectBrief {
   }
   const extra = validateDecisionData(input);
   if ('invalid' in extra) throw new Error(`brief.${extra.invalid}`);
-  return { title, objective, context, expertIds: [...seen], mode: input.mode, requestId, ...extra };
+  const workflow = validateWorkflowData(input);
+  if ('invalid' in workflow) throw new Error(`brief.${workflow.invalid}`);
+  return { title, objective, context, expertIds: [...seen], mode: input.mode, requestId, ...extra, ...workflow };
 }
 
-/** project.json keeps the original brief fields; decision data has its own files. */
+/** project.json keeps the original brief fields; decision data has its own files and the budget is runtime-only. */
 function projectJson(brief: ProjectBrief): ProjectBrief {
-  const { decision: _decision, documents: _documents, ...rest } = brief;
+  const { decision: _decision, documents: _documents, budget: _budget, ...rest } = brief;
   return rest;
 }
 

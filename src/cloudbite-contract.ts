@@ -21,6 +21,24 @@ export interface ProjectBrief {
   requestId: string;
   decision?: DecisionFrame;
   documents?: ProjectDocument[];
+  /** Optional user claims about the project (data, not authority); validated by cloudbite-workflow.ts. */
+  stage?: ProjectStage;
+  responseLanguage?: ResponseLanguage;
+  budget?: ProjectBudget;
+  revision?: ProjectRevision;
+}
+/** 'unspecified' is the normalized value of an absent stage; code never infers a known stage. */
+export type ProjectStage = 'discovery' | 'design' | 'validation' | 'launch' | 'operation' | 'unspecified';
+export type ResponseLanguage = 'ko' | 'en';
+/** Requested upper bounds (integers): maxExperts 1-100, maxModelCalls 1-804 in total, maxReviewCalls 0-3, maxMemoCalls 0-1. */
+export interface ProjectBudget { maxExperts: number; maxModelCalls: number; maxReviewCalls: number; maxMemoCalls: number }
+/** A user's claim that this brief revises an earlier project; parentId is not proof of ownership. */
+export interface ProjectRevision { parentId: string; changeSummary: string }
+/** Code-assembled work order for one selected role. optionIds are option-1..8 of the brief's decision snapshot. */
+export interface ExpertAssignment {
+  expertId: string; stage: ProjectStage; question: string; optionIds: string[];
+  deliverables: string[]; requiredEvidence: string[]; boundaries: string[]; perspectiveIds: string[];
+  source: 'jev-coverage' | 'manual-scope';
 }
 export interface DecisionFrame {
   options: string[]; constraints: string[]; successCriteria: string[];
@@ -47,6 +65,7 @@ export interface ProjectCrossReview {
 export interface CloudbiteRoutingQuery {
   title: string; objective: string; context: string; requestId: string;
   decision?: DecisionFrame; documents?: ProjectDocument[];
+  stage?: ProjectStage; responseLanguage?: ResponseLanguage; budget?: ProjectBudget; revision?: ProjectRevision;
 }
 /** Team composition judgments, not answer correctness or a completed peer review. */
 export interface CloudbiteRoutingHarness {
@@ -90,6 +109,7 @@ export interface ExpertRun {
   opinion?: ExpertOpinion;
   error?: string;
   updatedAt: number;
+  assignment?: ExpertAssignment;
 }
 export interface ProjectRun {
   id: string;
@@ -102,6 +122,7 @@ export interface ProjectRun {
   routing?: CloudbiteRoutingDecision;
   evidenceClaims?: EvidenceClaim[];
   crossReview?: ProjectCrossReview;
+  assignments?: ExpertAssignment[];
 }
 export interface CloudbiteBootstrap {
   experts: ExpertDefinition[];
