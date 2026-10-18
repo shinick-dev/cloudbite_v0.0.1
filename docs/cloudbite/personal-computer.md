@@ -100,8 +100,8 @@ node test/cloudbite-computer-ui.mjs
 자원 보존·정리:
 - 사용자 데이터 샌드박스 `1af294ee-b648-461c-a78a-039695413922` (`cloudbite-computer-primary-543bd0888b7460ae3b30d32a`) — **유지**.
 - QA 샌드박스 d7a0 및 복원 clone 44fd 삭제 확인. 누락 CLI 구 이미지도 삭제.
-- 임시 QA 컨트롤러 Worker `cloudbite-computer-qa-d5a322c6`(만료 20분)은 최종 페어링 발급 후 root가 **반드시 삭제**.
-- WorkBite T0067 checkpoint와 최종 사실 확정은 root 담당.
+- 임시 QA 컨트롤러 Worker `cloudbite-computer-qa-d5a322c6`(만료 20분)은 최종 페어링 발급 후 **삭제 완료**(공급자 GET 404/10007 확인).
+- 사용자 머신 stopped 확인(데이터 보존). WorkBite T0067에 최종 검증 사실 기록.
 
 ## 7. 휴대폰 로컬 입력
 
