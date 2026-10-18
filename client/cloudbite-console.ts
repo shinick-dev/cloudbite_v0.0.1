@@ -2,12 +2,14 @@
 // CLOUDBITE_JS 로 고정한다. 같은 출처 외부 스크립트로 내려가며, 화면은 전부 textContent·createElement 로만 그린다.
 // 데모는 브라우저 안 시뮬레이션이다 — 실제 Daytona 샌드박스나 Nosana 추론을 만들지 않으며 화면에서 그렇게 밝힌다.
 // 실제 실행은 서버 준비 상태와 기존 관리자 토큰(메모리에만)을 요구하고, 실패해도 데모로 몰래 바꾸지 않는다.
+// 화면 문구는 영어다 (2026-10-18 사용자 요청). 서버·모델이 돌려준 내용은 받은 그대로 보여 주고 번역하지 않는다.
 import type {
   CloudbiteBootstrap, ExpertActivity, ExpertArtifact, ExpertDefinition, ExpertOpinion, ExpertRun, ExpertStatus,
   OpinionDirection, ProjectBrief, ProjectRun, ProjectStatus,
 } from '../src/cloudbite-contract';
 
 type Mode = 'demo' | 'live';
+type View = 'home' | 'guide' | 'help' | 'settings';
 type ConsoleExpert = ExpertRun & { invalidOpinion?: boolean };
 type ConsoleProject = Omit<ProjectRun, 'experts'> & { experts: ConsoleExpert[] };
 interface Limits { min: number; max: number }
@@ -27,19 +29,21 @@ interface Aggregate {
 }
 
 const DIRECTIONS: OpinionDirection[] = ['support', 'conditional', 'concern', 'abstain'];
-const DIRECTION_LABEL: Record<OpinionDirection, string> = { support: '지지', conditional: '조건부', concern: '우려', abstain: '판단 보류' };
+const DIRECTION_LABEL: Record<OpinionDirection, string> = { support: 'Support', conditional: 'Conditional', concern: 'Concern', abstain: 'Abstain' };
 const STATUS_LABEL: Record<ExpertStatus, string> = {
-  queued: '대기', provisioning: '작업공간 준비', running: '작업 중', completed: '완료', failed: '실패', cancelled: '취소됨',
+  queued: 'Queued', provisioning: 'Preparing sandbox', running: 'Working', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled',
 };
 const PROJECT_STATUS_LABEL: Record<ProjectStatus, string> = {
-  draft: '초안', running: '진행 중', completed: '완료', partial: '일부 완료', failed: '실패', cancelled: '취소됨',
+  draft: 'Draft', running: 'Running', completed: 'Completed', partial: 'Partially complete', failed: 'Failed', cancelled: 'Cancelled',
 };
+const KIND_LABEL: Record<ExpertActivity['kind'], string> = { status: 'status', thought: 'note', tool: 'tool', artifact: 'file', error: 'error' };
 const EXPERT_STATUSES = Object.keys(STATUS_LABEL) as ExpertStatus[];
 const PROJECT_STATUSES = Object.keys(PROJECT_STATUS_LABEL) as ProjectStatus[];
 const ACTIVITY_KINDS: ExpertActivity['kind'][] = ['status', 'thought', 'tool', 'artifact', 'error'];
 const TERMINAL_EXPERT: ExpertStatus[] = ['completed', 'failed', 'cancelled'];
 const TERMINAL_PROJECT: ProjectStatus[] = ['completed', 'partial', 'failed', 'cancelled'];
 const LIMIT = { title: 120, objective: 1500, context: 3000 };
+const STREAM_ROWS = 400;
 
 // ───────────────────────── 값 정리 (서버·모델이 보낸 것은 전부 의심한다) ─────────────────────────
 
@@ -55,6 +59,7 @@ function hash(s: string): number {
   for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
   return h >>> 0;
 }
+function plural(n: number, one: string, many = `${one}s`): string { return `${n} ${n === 1 ? one : many}`; }
 
 function normalizeExpertDef(raw: unknown): ExpertDefinition | null {
   if (!isObj(raw)) return null;
@@ -62,7 +67,7 @@ function normalizeExpertDef(raw: unknown): ExpertDefinition | null {
   if (!id || !name) return null;
   const src = isObj(raw.source) ? raw.source : {};
   return {
-    id, name, domain: str(raw.domain, 80, '일반'), summary: str(raw.summary, 400), prompt: str(raw.prompt, 6000),
+    id, name, domain: str(raw.domain, 80, 'General'), summary: str(raw.summary, 400), prompt: str(raw.prompt, 6000),
     tools: strList(raw.tools, 80, 20), outputs: strList(raw.outputs, 120, 20),
     source: {
       repository: str(src.repository, 200), path: str(src.path, 200), revision: str(src.revision, 80),
@@ -72,7 +77,7 @@ function normalizeExpertDef(raw: unknown): ExpertDefinition | null {
 }
 
 function normalizeBootstrap(raw: unknown): CloudbiteBootstrap {
-  if (!isObj(raw) || !Array.isArray(raw.experts) || !isObj(raw.configuration)) throw new Error('카탈로그 응답 형식이 올바르지 않습니다');
+  if (!isObj(raw) || !Array.isArray(raw.experts) || !isObj(raw.configuration)) throw new Error('The catalogue response has an invalid format');
   const seen = new Set<string>();
   const experts: ExpertDefinition[] = [];
   for (const r of raw.experts.slice(0, 500)) {
@@ -108,7 +113,7 @@ function normalizeExpertRun(raw: unknown, i: number): ConsoleExpert | null {
   if (!id || !expertId) return null;
   let status = raw.status as ExpertStatus;
   let error = str(raw.error, 400) || undefined;
-  if (!EXPERT_STATUSES.includes(status)) { status = 'failed'; error = '서버가 알 수 없는 상태를 보냈습니다'; }
+  if (!EXPERT_STATUSES.includes(status)) { status = 'failed'; error = 'The server sent an unknown status'; }
   const activity: ExpertActivity[] = [];
   if (Array.isArray(raw.activity)) {
     for (const [j, a] of raw.activity.slice(-200).entries()) {
@@ -134,7 +139,7 @@ function normalizeExpertRun(raw: unknown, i: number): ConsoleExpert | null {
   }
   const opinion = raw.opinion === undefined || raw.opinion === null ? null : normalizeOpinion(raw.opinion);
   const run: ConsoleExpert = {
-    id, expertId, name: str(raw.name, 80, `전문가 ${i + 1}`), status, activity, artifacts, updatedAt: num(raw.updatedAt) ?? 0,
+    id, expertId, name: str(raw.name, 80, `Expert ${i + 1}`), status, activity, artifacts, updatedAt: num(raw.updatedAt) ?? 0,
   };
   const sandboxId = str(raw.sandboxId, 120);
   if (sandboxId) run.sandboxId = sandboxId;
@@ -172,13 +177,13 @@ function statusFromExperts(experts: ConsoleExpert[]): ProjectStatus {
 
 function validateForm(f: FormInput, limits: Limits): string[] {
   const errors: string[] = [];
-  if (!f.title.trim()) errors.push('프로젝트 이름을 입력하세요.');
-  if (f.title.length > LIMIT.title) errors.push(`프로젝트 이름은 ${LIMIT.title}자 이하여야 합니다.`);
-  if (!f.objective.trim()) errors.push('목표를 입력하세요.');
-  if (f.objective.length > LIMIT.objective) errors.push(`목표는 ${LIMIT.objective}자 이하여야 합니다.`);
-  if (f.context.length > LIMIT.context) errors.push(`맥락은 ${LIMIT.context}자 이하여야 합니다.`);
-  if (f.expertIds.length < limits.min) errors.push(`전문가를 ${limits.min}명 이상 선택하세요.`);
-  if (f.expertIds.length > limits.max) errors.push(`전문가는 최대 ${limits.max}명까지 선택할 수 있습니다.`);
+  if (!f.title.trim()) errors.push('Enter a project name.');
+  if (f.title.length > LIMIT.title) errors.push(`The project name must be ${LIMIT.title} characters or fewer.`);
+  if (!f.objective.trim()) errors.push('Enter an objective.');
+  if (f.objective.length > LIMIT.objective) errors.push(`The objective must be ${LIMIT.objective} characters or fewer.`);
+  if (f.context.length > LIMIT.context) errors.push(`The context must be ${LIMIT.context} characters or fewer.`);
+  if (f.expertIds.length < limits.min) errors.push(`Select at least ${plural(limits.min, 'expert')}.`);
+  if (f.expertIds.length > limits.max) errors.push(`You can select up to ${plural(limits.max, 'expert')}.`);
   return errors;
 }
 
@@ -219,14 +224,14 @@ function aggregate(p: ConsoleProject): Aggregate {
   const disagreement = counts.support > 0 && counts.concern > 0;
   const actions = [...actionMap.values()].sort((a, b) => b.count - a.count || b.conf - a.conf).slice(0, 5)
     .map(({ text, count, names }) => ({ text, count, names }));
-  let headline = '아직 종합할 완료 의견이 없습니다.';
+  let headline = 'No completed opinions to synthesise yet.';
   if (valid > 0 && leading) {
-    const base = tie ? '의견이 팽팽히 갈립니다 — 결정 전에 쟁점을 먼저 좁히세요.'
-      : leading === 'support' ? '진행 쪽 의견이 우세합니다 — 제시된 다음 행동으로 바로 옮길 수 있습니다.'
-        : leading === 'conditional' ? '조건을 정하고 작게 시작하라는 의견이 우세합니다.'
-          : leading === 'concern' ? '우려가 우세합니다 — 핵심 위험을 해소하기 전에는 확대하지 마세요.'
-            : '판단을 보류한 의견이 많습니다 — 추가 정보가 필요합니다.';
-    headline = valid < p.experts.length ? `${base} (선택한 ${p.experts.length}명 중 ${valid}명 의견 기준)` : base;
+    const base = tie ? 'Opinions are evenly split — narrow down the disputed points before deciding.'
+      : leading === 'support' ? 'Most opinions favour going ahead — you can move straight to the suggested next actions.'
+        : leading === 'conditional' ? 'Most opinions say: set the conditions first and start small.'
+          : leading === 'concern' ? 'Concerns dominate — do not expand until the key risks are resolved.'
+            : 'Many experts abstained — more information is needed.';
+    headline = valid < p.experts.length ? `${base} (based on ${valid} of ${p.experts.length} selected experts)` : base;
   }
   return {
     selected: p.experts.length, completed, valid, invalid, failed, pending, cancelled, counts,
@@ -237,17 +242,17 @@ function aggregate(p: ConsoleProject): Aggregate {
 
 // ───────────────────────── 브라우저 데모 (시뮬레이션) ─────────────────────────
 
-const DEMO_SOURCE = { repository: 'cloudbite 내장 데모', path: 'client/cloudbite-console.ts', revision: 'demo', license: 'demo', basis: 'metadata-derived' as const };
+const DEMO_SOURCE = { repository: 'cloudbite built-in demo', path: 'client/cloudbite-console.ts', revision: 'demo', license: 'demo', basis: 'metadata-derived' as const };
 const DEMO_EXPERTS: ExpertDefinition[] = [
-  ['demo-product-strategist', '제품 전략가', '제품 전략', '출시 범위와 단계, 경쟁 대안 대비 차별점을 판단합니다.'],
-  ['demo-business-model', '비즈니스 모델 전문가', '사업·재무', '가격, 단위 경제성, 추론 비용 회수 경로를 검토합니다.'],
-  ['demo-ai-trust', 'AI 윤리·신뢰성 전문가', 'AI 신뢰성', '근거 표기, 책임 한계, 위험 도메인의 안전장치를 점검합니다.'],
-  ['demo-data-validation', '데이터 검증 전문가', '데이터 품질', '출처 품질과 의견 근거의 검증 가능성을 따집니다.'],
-  ['demo-ux-research', 'UX 리서처', '사용자 경험', '첫 사용 흐름과 이해 가능성, 사용자 가치 도달 시간을 봅니다.'],
-  ['demo-security-compliance', '보안·컴플라이언스 전문가', '보안·규제', '데이터 처리, 접근 통제, 규제 요구를 검토합니다.'],
+  ['demo-product-strategist', 'Product Strategist', 'Product strategy', 'Judges launch scope, phasing and differentiation against alternatives.'],
+  ['demo-business-model', 'Business Model Expert', 'Business & finance', 'Reviews pricing, unit economics and how inference costs are recovered.'],
+  ['demo-ai-trust', 'AI Ethics & Trust Expert', 'AI trust', 'Checks evidence labelling, liability limits and safeguards for high-risk domains.'],
+  ['demo-data-validation', 'Data Validation Expert', 'Data quality', 'Examines source quality and whether the evidence behind opinions can be verified.'],
+  ['demo-ux-research', 'UX Researcher', 'User experience', 'Looks at the first-use flow, clarity and time to user value.'],
+  ['demo-security-compliance', 'Security & Compliance Expert', 'Security & regulation', 'Reviews data handling, access control and regulatory requirements.'],
 ].map(([id, name, domain, summary]) => ({
   id, name, domain, summary,
-  prompt: `당신은 Cloudbite 데모의 AI 역할 "${name}"입니다. 실제 인물이 아니며 보증을 뜻하지 않습니다. ${summary} 공통 프로젝트 문서를 읽고 역할 관점의 권고·근거·가정·자체 평가 확신도·다음 행동을 out/result.json 에 씁니다.`,
+  prompt: `You are "${name}", an AI role in the Cloudbite demo. You are not a real person and your output is not an endorsement. ${summary} Read the shared project documents and write your role's recommendation, evidence, assumptions, self-assessed confidence and next actions to out/result.json.`,
   tools: ['read_file', 'write_file', 'python'], outputs: ['out/notes.md', 'out/result.json', 'out/report.md'], source: DEMO_SOURCE,
 }));
 
@@ -264,158 +269,159 @@ function archetypeOf(e: ExpertDefinition): Archetype {
 }
 
 function has(text: string, words: string[]): boolean { return words.some(w => text.includes(w)); }
-function quote(s: string, n = 48): string { const t = s.replace(/\s+/g, ' ').trim(); return t ? `“${clip(t, n)}”` : '“(비어 있음)”'; }
+function quote(s: string, n = 48): string { const t = s.replace(/\s+/g, ' ').trim(); return t ? `“${clip(t, n)}”` : '“(empty)”'; }
 
 interface DemoWork { steps: Array<[ExpertActivity['kind'], string]>; notes: string; opinion: ExpertOpinion }
 function demoWork(e: ExpertDefinition, b: ProjectBrief, h: number): DemoWork {
-  const all = `${b.title}\n${b.objective}\n${b.context}`;
+  // 키워드는 영어·한국어 둘 다 본다 (브리프를 어느 언어로 써도 결정적으로 반응)
+  const all = `${b.title}\n${b.objective}\n${b.context}`.toLowerCase();
   const jitter = (base: number, span: number) => base + (h % span);
-  const ctx = b.context.trim() ? quote(b.context) : '맥락 미입력';
+  const ctx = b.context.trim() ? quote(b.context) : 'no context given';
   const obj = quote(b.objective);
   let direction: OpinionDirection, confidence: number, summary: string;
   let steps: DemoWork['steps'], evidence: string[], assumptions: string[], nextActions: string[];
   switch (archetypeOf(e)) {
     case 'strategy': {
-      const fast = has(all, ['2주', '4주', '빠르', '단기']);
-      const wide = has(all, ['100', '전체', '모든']);
+      const fast = has(all, ['2 weeks', '4 weeks', 'two weeks', 'four weeks', '2-week', '4-week', 'fast', 'quick', '2주', '4주', '빠르', '단기']);
+      const wide = has(all, ['100', 'every', 'entire', 'all roles', '전체', '모든']);
       direction = fast || wide ? 'conditional' : 'support';
       confidence = jitter(fast && wide ? 70 : 64, 14);
-      summary = fast && wide ? '일정은 짧고 범위는 넓습니다. 핵심 역할로 범위를 좁힌 단계 출시가 필요합니다.'
-        : wide ? '범위가 넓습니다. 핵심 역할로 먼저 검증한 뒤 확장하세요.'
-          : '목표와 범위가 맞물려 있어 바로 실행할 만합니다.';
+      summary = fast && wide ? 'The timeline is short and the scope is wide. Launch in phases, narrowing to the core roles first.'
+        : wide ? 'The scope is wide. Validate with the core roles first, then expand.'
+          : 'Objective and scope fit together; this is ready to execute.';
       steps = [
-        ['tool', `python scope_matrix.py — 목표 ${obj} 를 기능·범위·일정 축으로 분해`],
-        ['thought', wide ? '역할 수가 많으면 첫 주에 품질 편차가 커짐. 상위 20개 역할 우선 검토' : '범위가 좁아 첫 출시 리스크가 낮음'],
-        ['tool', 'write_file out/notes.md — 단계별 출시안 3안 비교표 작성'],
+        ['tool', `python scope_matrix.py — split objective ${obj} into feature, scope and schedule axes`],
+        ['thought', wide ? 'Many roles widen quality variance in week one. Review the top 20 roles first' : 'Narrow scope keeps first-launch risk low'],
+        ['tool', 'write_file out/notes.md — comparison table of three phased launch options'],
       ];
-      evidence = [`목표 ${obj}`, fast ? '일정 관련 표현(단기 일정)이 브리프에 있음' : '일정 제약이 명시되지 않음', wide ? '넓은 범위 표현이 있음' : '범위가 좁게 정의됨'];
-      assumptions = ['첫 사용자 집단이 하나로 정해져 있다고 가정', '경쟁 서비스와 같은 기능 비교는 범위 밖'];
-      nextActions = ['핵심 역할 20개로 첫 출시 범위 제한', '2주 단위 출시 체크포인트 설정'];
+      evidence = [`Objective ${obj}`, fast ? 'The brief mentions a short timeline' : 'No schedule constraint is stated', wide ? 'The brief uses wide-scope wording' : 'The scope is narrowly defined'];
+      assumptions = ['Assumes a single first user group', 'Feature-by-feature comparison with competitors is out of scope'];
+      nextActions = ['Limit the first launch to 20 core roles', 'Set two-week launch checkpoints'];
       break;
     }
     case 'business': {
-      const free = has(all, ['무료']) && !has(all, ['유료', '구독', '과금']);
-      const paid = has(all, ['부분 유료', '유료', '구독', '과금']);
+      const paid = has(all, ['paid', 'subscription', 'freemium', 'pricing', 'billing', '유료', '구독', '과금']);
+      const free = has(all, ['free', '무료']) && !paid;
       direction = free ? 'concern' : paid ? 'support' : 'conditional';
       confidence = jitter(free ? 72 : paid ? 66 : 58, 12);
-      summary = free ? '무료만으로는 전문가 수만큼 늘어나는 추론 비용을 회수할 경로가 없습니다.'
-        : paid ? '유료 전환 경로가 있어 사용량 한도만 정하면 단위 경제성이 성립합니다.'
-          : '수익 모델이 정해지지 않아 가격 실험부터 필요합니다.';
+      summary = free ? 'A free-only model has no way to recover inference costs that grow with every expert.'
+        : paid ? 'There is a paid conversion path; with usage limits in place the unit economics work.'
+          : 'No revenue model is defined yet, so start with pricing experiments.';
       steps = [
-        ['tool', 'python unit_economics.py --experts 5 --rounds 3 — 의견 1회당 추론 비용 추정'],
-        ['thought', free ? '무료 사용자당 비용이 선형 증가, 상한 없음' : paid ? '부분 유료 시 상위 10% 사용자가 비용을 상쇄' : '가격 가설 3개를 비교해야 함'],
-        ['tool', 'write_file out/notes.md — 가격 시나리오별 손익분기 표'],
+        ['tool', 'python unit_economics.py --experts 5 --rounds 3 — estimate inference cost per opinion'],
+        ['thought', free ? 'Cost per free user grows linearly with no cap' : paid ? 'With partial paid plans, the top 10% of users offset costs' : 'Three pricing hypotheses need comparing'],
+        ['tool', 'write_file out/notes.md — break-even table per pricing scenario'],
       ];
-      evidence = [free ? '브리프에 무료 모델만 언급' : paid ? '브리프에 유료 전환 표현이 있음' : '수익 모델 언급 없음', `맥락 ${ctx}`];
-      assumptions = ['전문가 1명당 추론 3회 내외', '모델 단가는 데모 가정값이며 실제 견적이 아님'];
-      nextActions = ['사용 한도와 가격 상한을 먼저 설정', '핵심 역할 20개로 첫 출시 범위 제한'];
+      evidence = [free ? 'The brief mentions only a free model' : paid ? 'The brief mentions a paid conversion path' : 'No revenue model mentioned', `Context ${ctx}`];
+      assumptions = ['About three inference rounds per expert', 'Model unit prices are demo assumptions, not real quotes'];
+      nextActions = ['Set usage limits and a price ceiling first', 'Limit the first launch to 20 core roles'];
       break;
     }
     case 'trust': {
-      const risky = has(all, ['의료', '법률', '투자', '금융', '진단']);
-      const sourced = has(all, ['출처', '근거', '검증']);
+      const risky = has(all, ['medical', 'legal', 'investment', 'financial', 'diagnos', '의료', '법률', '투자', '금융', '진단']);
+      const sourced = has(all, ['source', 'evidence', 'citation', 'verif', '출처', '근거', '검증']);
       direction = risky ? 'concern' : sourced ? 'conditional' : 'concern';
       confidence = jitter(risky ? 78 : 61, 12);
-      summary = risky ? '고위험 도메인 조언이 포함됩니다. 책임 한계와 전문가 검토 없이 공개하면 안 됩니다.'
-        : sourced ? '근거 표기 의도가 있습니다. 출처 품질 기준을 문서로 정하면 진행 가능합니다.'
-          : '의견마다 근거·출처를 표기하는 기준이 없어 신뢰를 설명하기 어렵습니다.';
+      summary = risky ? 'The advice touches high-risk domains. Do not publish without liability limits and human expert review.'
+        : sourced ? 'The intent to cite evidence is there. Document source-quality criteria and you can proceed.'
+          : 'There is no standard for citing evidence per opinion, so trust is hard to explain.';
       steps = [
-        ['tool', 'read_file PROJECT.md — 위험 도메인 키워드 점검'],
-        ['thought', risky ? '고위험 도메인 표현 발견: 면책·사람 검토 단계 필수' : '고위험 도메인 표현 없음, 근거 표기 기준이 관건'],
-        ['tool', 'write_file out/notes.md — 근거 표기 체크리스트 초안'],
+        ['tool', 'read_file PROJECT.md — scan for high-risk domain keywords'],
+        ['thought', risky ? 'High-risk domain wording found: disclaimer and human review required' : 'No high-risk domain wording; evidence labelling is the key issue'],
+        ['tool', 'write_file out/notes.md — draft evidence-labelling checklist'],
       ];
-      evidence = [risky ? '브리프에 고위험 도메인 표현이 있음' : '고위험 도메인 표현 없음', sourced ? '근거·출처 언급 있음' : '근거·출처 기준 언급 없음'];
-      assumptions = ['AI 역할 의견은 실제 전문가 보증이 아님을 사용자에게 고지한다고 가정'];
-      nextActions = ['의견별 근거·출처 표기 기준 문서화', risky ? '고위험 주제는 사람 전문가 검토 후 공개' : 'AI 역할 고지 문구를 첫 화면에 배치'];
+      evidence = [risky ? 'The brief contains high-risk domain wording' : 'No high-risk domain wording', sourced ? 'Evidence or sources are mentioned' : 'No evidence or source standard mentioned'];
+      assumptions = ['Assumes users are told AI role opinions are not real expert endorsements'];
+      nextActions = ['Document an evidence and source labelling standard per opinion', risky ? 'Publish high-risk topics only after human expert review' : 'Show the AI-role disclosure on the first screen'];
       break;
     }
     case 'data': {
-      const sourced = has(all, ['데이터', '근거', '출처', '지표']);
+      const sourced = has(all, ['data', 'evidence', 'source', 'metric', '데이터', '근거', '출처', '지표']);
       direction = sourced ? 'support' : 'conditional';
       confidence = jitter(sourced ? 69 : 55, 15);
-      summary = sourced ? '근거 데이터를 쓰려는 방향이 분명합니다. 자동 검증 파이프라인을 붙이면 됩니다.'
-        : '의견의 근거 데이터가 정의되지 않았습니다. 검증 가능한 지표부터 정하세요.';
+      summary = sourced ? 'The plan clearly intends to use evidence. Add an automated verification pipeline.'
+        : 'The evidence behind opinions is not defined. Start with verifiable metrics.';
       steps = [
-        ['tool', 'python claim_check.py PROJECT.md — 검증 가능한 주장 수 집계'],
-        ['thought', sourced ? '검증 가능한 주장이 있어 표본 점검 가능' : '정량 지표가 없어 결과 비교 기준 부재'],
-        ['tool', 'write_file out/notes.md — 지표 정의서와 표본 점검 절차'],
+        ['tool', 'python claim_check.py PROJECT.md — count verifiable claims'],
+        ['thought', sourced ? 'Verifiable claims exist, so sampling checks are possible' : 'No quantitative metric, so there is no baseline for comparison'],
+        ['tool', 'write_file out/notes.md — metric definitions and sampling procedure'],
       ];
-      evidence = [`목표 ${obj}`, sourced ? '데이터·근거 관련 표현이 있음' : '정량 지표 언급 없음'];
-      assumptions = ['초기 표본 30건으로 의견 품질을 점검할 수 있다고 가정'];
-      nextActions = ['의견별 근거·출처 표기 기준 문서화', '주간 표본 30건 품질 점검'];
+      evidence = [`Objective ${obj}`, sourced ? 'The brief mentions data or evidence' : 'No quantitative metric mentioned'];
+      assumptions = ['Assumes an initial sample of 30 items is enough to check opinion quality'];
+      nextActions = ['Document an evidence and source labelling standard per opinion', 'Check a weekly sample of 30 opinions'];
       break;
     }
     case 'ux': {
-      const simple = has(all, ['간단', '쉽', '초보', '처음']);
+      const simple = has(all, ['simple', 'easy', 'beginner', 'first-time', 'onboarding', '간단', '쉽', '초보', '처음']);
       direction = simple ? 'support' : 'conditional';
       confidence = jitter(simple ? 67 : 60, 14);
-      summary = simple ? '쉬운 첫 경험을 목표로 해 사용자 가치 도달이 빠를 것입니다.'
-        : '전문가 수가 많을수록 결과 이해가 어렵습니다. 요약→근거 순 정보 구조가 필요합니다.';
+      summary = simple ? 'Aiming for an easy first experience should get users to value quickly.'
+        : 'The more experts, the harder results are to read. Use a summary-then-evidence structure.';
       steps = [
-        ['tool', 'python flow_walkthrough.py — 첫 질문부터 결과 이해까지 단계 수 계산'],
-        ['thought', simple ? '첫 결과까지 3단계, 양호' : '결과 화면에서 의견 비교 단계가 길어질 위험'],
-        ['tool', 'write_file out/notes.md — 첫 사용 흐름 스토리보드'],
+        ['tool', 'python flow_walkthrough.py — count steps from first question to understanding results'],
+        ['thought', simple ? 'Three steps to the first result, good' : 'Comparing opinions on the results screen risks getting long'],
+        ['tool', 'write_file out/notes.md — first-use flow storyboard'],
       ];
-      evidence = [`목표 ${obj}`, simple ? '쉬운 사용 경험 표현이 있음' : '사용 흐름 요구 언급 없음'];
-      assumptions = ['첫 사용자는 의견 원문보다 요약을 먼저 본다고 가정'];
-      nextActions = ['종합 요약을 먼저, 근거를 펼쳐 보기로 배치', '초기 사용자 5명 사용성 테스트'];
+      evidence = [`Objective ${obj}`, simple ? 'The brief asks for an easy experience' : 'No usage-flow requirement mentioned'];
+      assumptions = ['Assumes first-time users read the summary before raw opinions'];
+      nextActions = ['Show the synthesis first and let users expand the evidence', 'Run usability tests with 5 early users'];
       break;
     }
     case 'security': {
-      const sensitive = has(all, ['기업', '개인정보', '고객 데이터', 'B2B', '사내']);
+      const sensitive = has(all, ['enterprise', 'personal data', 'customer data', 'b2b', 'internal', 'pii', '기업', '개인정보', '고객 데이터', '사내']);
       direction = sensitive ? 'concern' : 'conditional';
       confidence = jitter(sensitive ? 74 : 57, 12);
-      summary = sensitive ? '고객 데이터가 전문가 작업공간마다 복제됩니다. 격리·보존 기한 정책 없이는 진행하면 안 됩니다.'
-        : '민감 데이터 언급은 없지만 작업공간별 데이터 보존 기한은 정해야 합니다.';
+      summary = sensitive ? 'Customer data is copied into every expert workspace. Do not proceed without isolation and retention policies.'
+        : 'No sensitive data is mentioned, but a retention period per workspace still has to be set.';
       steps = [
-        ['tool', 'python data_flow.py — 브리프가 작업공간으로 복제되는 경로 추적'],
-        ['thought', sensitive ? '민감 데이터 표현 발견: 작업공간 수만큼 노출면 증가' : '민감 데이터 표현 없음'],
-        ['tool', 'write_file out/notes.md — 데이터 보존·삭제 정책 초안'],
+        ['tool', 'python data_flow.py — trace how the brief is copied into each workspace'],
+        ['thought', sensitive ? 'Sensitive data wording found: exposure grows with the number of workspaces' : 'No sensitive data wording'],
+        ['tool', 'write_file out/notes.md — draft data retention and deletion policy'],
       ];
-      evidence = [sensitive ? '브리프에 기업·개인정보 관련 표현이 있음' : '민감 데이터 표현 없음', '작업공간은 전문가별로 분리되어 있음'];
-      assumptions = ['작업 종료 후 작업공간을 삭제한다고 가정'];
-      nextActions = ['작업공간 데이터 보존 기한과 삭제 절차 확정', sensitive ? '고객 데이터는 익명화 후 투입' : '접근 로그 보관 정책 수립'];
+      evidence = [sensitive ? 'The brief mentions enterprise or personal data' : 'No sensitive data wording', 'Workspaces are separated per expert'];
+      assumptions = ['Assumes workspaces are deleted after the run ends'];
+      nextActions = ['Confirm workspace data retention and deletion steps', sensitive ? 'Anonymise customer data before use' : 'Define an access-log retention policy'];
       break;
     }
     default: {
       const pick = h % 3;
       direction = (['support', 'conditional', 'concern'] as const)[pick];
       confidence = jitter(52, 25);
-      summary = `${e.domain} 관점에서 ${DIRECTION_LABEL[direction]} 의견입니다. 목표 ${obj} 의 전제를 역할 기준으로 검토했습니다.`;
+      summary = `${DIRECTION_LABEL[direction]} opinion from a ${e.domain} perspective. Reviewed the premises of objective ${obj} against the role's criteria.`;
       steps = [
-        ['tool', `read_file PROJECT.md — ${e.domain} 관점 쟁점 추출`],
-        ['thought', `${e.domain} 기준으로 가장 큰 불확실성을 정리`],
-        ['tool', 'write_file out/notes.md — 역할 관점 검토 메모'],
+        ['tool', `read_file PROJECT.md — extract issues from a ${e.domain} perspective`],
+        ['thought', `List the largest uncertainty by ${e.domain} criteria`],
+        ['tool', 'write_file out/notes.md — role review notes'],
       ];
-      evidence = [`목표 ${obj}`, `맥락 ${ctx}`];
-      assumptions = ['역할 정의는 카탈로그 메타데이터 기반'];
-      nextActions = [`${e.domain} 관점 핵심 가정 검증`];
+      evidence = [`Objective ${obj}`, `Context ${ctx}`];
+      assumptions = ['Role definition is based on catalogue metadata'];
+      nextActions = [`Validate the key ${e.domain} assumptions`];
     }
   }
   confidence = Math.max(0, Math.min(100, confidence));
-  const notes = [`# ${e.name} 작업 메모 (브라우저 데모)`, '', `프로젝트: ${b.title}`, `목표: ${b.objective}`, '',
-    '## 검토 단계', ...steps.map(([, m], i) => `${i + 1}. ${m}`), '', '## 근거', ...evidence.map(x => `- ${x}`), '',
-    '> 이 파일은 브라우저 안에서 만든 시뮬레이션 결과입니다. 실제 샌드박스나 모델 추론을 거치지 않았습니다.'].join('\n');
+  const notes = [`# ${e.name} working notes (browser demo)`, '', `Project: ${b.title}`, `Objective: ${b.objective}`, '',
+    '## Review steps', ...steps.map(([, m], i) => `${i + 1}. ${m}`), '', '## Evidence', ...evidence.map(x => `- ${x}`), '',
+    '> This file is a simulation produced in the browser. No real sandbox or model inference was involved.'].join('\n');
   return { steps, notes, opinion: { direction, confidence, summary, evidence, assumptions, nextActions } };
 }
 
 function workorderText(e: ExpertDefinition, b: ProjectBrief): string {
-  return [`# 작업 지시서 — ${e.name}`, '', `역할 분야: ${e.domain}`, '', '## 공통 프로젝트', `- 이름: ${b.title}`, `- 목표: ${b.objective}`,
-    `- 맥락: ${b.context || '(없음)'}`, '', '## 역할 목표', e.summary || `${e.domain} 관점에서 공통 프로젝트를 검토한다.`, '',
-    '## 산출물 계약', '- out/result.json: direction(support|conditional|concern|abstain), confidence(0–100, 자체 평가), summary, evidence[], assumptions[], nextActions[]',
-    '- out/report.md: 사람이 읽는 보고서', '', '확신도는 자체 평가이며 보정된 정확도가 아니다.'].join('\n');
+  return [`# Work order — ${e.name}`, '', `Domain: ${e.domain}`, '', '## Shared project', `- Name: ${b.title}`, `- Objective: ${b.objective}`,
+    `- Context: ${b.context || '(none)'}`, '', '## Role goal', e.summary || `Review the shared project from a ${e.domain} perspective.`, '',
+    '## Output contract', '- out/result.json: direction(support|conditional|concern|abstain), confidence(0–100, self-assessed), summary, evidence[], assumptions[], nextActions[]',
+    '- out/report.md: human-readable report', '', 'Confidence is a self-assessment, not calibrated accuracy.'].join('\n');
 }
 
 function personaText(e: ExpertDefinition): string {
-  return [`# ${e.name}`, '', `분야: ${e.domain}`, '', e.summary, '', '## 역할 지시', e.prompt || '(카탈로그에 지시문 없음)', '',
-    `## 도구\n${e.tools.map(t => `- ${t}`).join('\n') || '- (없음)'}`, '', `## 출처\n${e.source.repository} · ${e.source.path} · ${e.source.revision} · ${e.source.license} (${e.source.basis})`,
-    '', 'AI 역할이며 실제 인물의 의견이나 보증이 아니다.'].join('\n');
+  return [`# ${e.name}`, '', `Domain: ${e.domain}`, '', e.summary, '', '## Role instructions', e.prompt || '(no instructions in the catalogue)', '',
+    `## Tools\n${e.tools.map(t => `- ${t}`).join('\n') || '- (none)'}`, '', `## Source\n${e.source.repository} · ${e.source.path} · ${e.source.revision} · ${e.source.license} (${e.source.basis})`,
+    '', 'This is an AI role, not the opinion or endorsement of a real person.'].join('\n');
 }
 
 function reportText(e: ExpertDefinition, b: ProjectBrief, o: ExpertOpinion): string {
-  return [`# ${e.name} 보고서 (브라우저 데모)`, '', `프로젝트: ${b.title}`, '', `## 권고: ${DIRECTION_LABEL[o.direction]} · 자체 평가 확신도 ${o.confidence}%`, '', o.summary, '',
-    '## 근거', ...o.evidence.map(x => `- ${x}`), '', '## 가정', ...o.assumptions.map(x => `- ${x}`), '', '## 다음 행동', ...o.nextActions.map((x, i) => `${i + 1}. ${x}`), '',
-    '> 시뮬레이션 결과. 실제 Daytona 샌드박스나 Nosana 추론을 거치지 않았습니다.'].join('\n');
+  return [`# ${e.name} report (browser demo)`, '', `Project: ${b.title}`, '', `## Recommendation: ${DIRECTION_LABEL[o.direction]} · self-assessed confidence ${o.confidence}%`, '', o.summary, '',
+    '## Evidence', ...o.evidence.map(x => `- ${x}`), '', '## Assumptions', ...o.assumptions.map(x => `- ${x}`), '', '## Next actions', ...o.nextActions.map((x, i) => `${i + 1}. ${x}`), '',
+    '> Simulated result. No real Daytona sandbox or Nosana inference was involved.'].join('\n');
 }
 
 /** 데모 실행 계획: 결정적(같은 브리프면 같은 결과). failIndex 의 전문가는 중간에 실패한다 */
@@ -429,33 +435,33 @@ function demoPlan(b: ProjectBrief, experts: ExpertDefinition[], failIndex: numbe
     const w = demoWork(e, b, h);
     let t = 300 + i * 450;
     steps.push({ at: t, expert: i, status: 'provisioning', sandboxId: `demo-ws-${(h % 0xffff).toString(16).padStart(4, '0')}`,
-      activity: { kind: 'status', message: '데모 작업공간 준비 — 브라우저 시뮬레이션, 실제 샌드박스 아님' },
+      activity: { kind: 'status', message: 'Preparing demo workspace — browser simulation, not a real sandbox' },
       artifacts: [
-        { path: 'PERSONA.md', label: '페르소나', content: personaText(e) },
-        { path: 'PROJECT.md', label: '공통 프로젝트', content: `# ${b.title}\n\n## 목표\n${b.objective}\n\n## 맥락\n${b.context || '(없음)'}` },
-        { path: 'WORKORDER.md', label: '작업 지시서', content: workorderText(e, b) },
+        { path: 'PERSONA.md', label: 'Persona', content: personaText(e) },
+        { path: 'PROJECT.md', label: 'Shared project', content: `# ${b.title}\n\n## Objective\n${b.objective}\n\n## Context\n${b.context || '(none)'}` },
+        { path: 'WORKORDER.md', label: 'Work order', content: workorderText(e, b) },
       ] });
     t += 900 + (h % 500);
-    steps.push({ at: t, expert: i, status: 'running', activity: { kind: 'tool', message: 'read_file WORKORDER.md — 역할 목표와 산출물 계약 확인' } });
+    steps.push({ at: t, expert: i, status: 'running', activity: { kind: 'tool', message: 'read_file WORKORDER.md — check role goal and output contract' } });
     w.steps.forEach(([kind, message], j) => {
       t += 1300 + ((h >>> (j * 4)) % 1100);
       steps.push({ at: t, expert: i, activity: { kind, message } });
       if (i === failIndex && j === 1) {
         t += 900;
-        steps.push({ at: t, expert: i, status: 'failed', error: '데모: 추론 응답 시간 초과를 시뮬레이션했습니다',
-          activity: { kind: 'error', message: '추론 응답 시간 초과(시뮬레이션) — 이 전문가 의견은 종합에서 제외됩니다' } });
+        steps.push({ at: t, expert: i, status: 'failed', error: 'Demo: simulated an inference response timeout',
+          activity: { kind: 'error', message: 'Inference response timed out (simulated) — this expert is excluded from the synthesis' } });
       }
     });
     if (i === failIndex) return;
     t += 700;
-    steps.push({ at: t, expert: i, activity: { kind: 'artifact', message: 'out/notes.md 작성 완료' },
-      artifacts: [{ path: 'out/notes.md', label: '작업 메모', content: w.notes }] });
+    steps.push({ at: t, expert: i, activity: { kind: 'artifact', message: 'Wrote out/notes.md' },
+      artifacts: [{ path: 'out/notes.md', label: 'Working notes', content: w.notes }] });
     t += 1000 + (h % 600);
     steps.push({ at: t, expert: i, status: 'completed', opinion: w.opinion,
-      activity: { kind: 'artifact', message: `out/result.json 제출 — ${DIRECTION_LABEL[w.opinion.direction]} · 확신도 ${w.opinion.confidence}%` },
+      activity: { kind: 'artifact', message: `Submitted out/result.json — ${DIRECTION_LABEL[w.opinion.direction]} · confidence ${w.opinion.confidence}%` },
       artifacts: [
-        { path: 'out/result.json', label: '결과 JSON', content: JSON.stringify(w.opinion, null, 2) },
-        { path: 'out/report.md', label: '보고서', content: reportText(e, b, w.opinion) },
+        { path: 'out/result.json', label: 'Result JSON', content: JSON.stringify(w.opinion, null, 2) },
+        { path: 'out/report.md', label: 'Report', content: reportText(e, b, w.opinion) },
       ] });
   });
   steps.sort((a, b2) => a.at - b2.at);
@@ -484,7 +490,7 @@ function applyStep(p: ConsoleProject, s: DemoStep, now: number): ConsoleProject 
 function cancelProject(p: ConsoleProject, now: number): ConsoleProject {
   const experts = p.experts.map(e => TERMINAL_EXPERT.includes(e.status) ? e : {
     ...e, status: 'cancelled' as const, updatedAt: now,
-    activity: [...e.activity, { id: `${e.id}-${e.activity.length}`, at: now, kind: 'status' as const, message: '사용자가 프로젝트를 취소했습니다' }],
+    activity: [...e.activity, { id: `${e.id}-${e.activity.length}`, at: now, kind: 'status' as const, message: 'The user stopped the project' }],
   });
   return { ...p, experts, status: 'cancelled', updatedAt: now };
 }
@@ -493,17 +499,17 @@ function cancelProject(p: ConsoleProject, now: number): ConsoleProject {
 
 function markdownReport(p: ConsoleProject, demo: boolean): string {
   const a = aggregate(p);
-  const lines = [`# ${p.brief.title}`, '', demo ? '> 브라우저 데모 시뮬레이션 결과입니다. 실제 Daytona 샌드박스나 Nosana 추론을 거치지 않았습니다.' : '> 실제 실행 결과입니다. 확신도는 각 AI 역할의 자체 평가이며 보정된 정확도가 아닙니다.', '',
-    '## 목표', p.brief.objective, '', '## 맥락', p.brief.context || '(없음)', '',
-    '## 종합', `- 상태: ${PROJECT_STATUS_LABEL[p.status]}`, `- 선택 ${a.selected}명 · 유효 의견 ${a.valid}명 · 실패 ${a.failed} · 대기·진행 ${a.pending} · 취소 ${a.cancelled} · 형식 오류 ${a.invalid}`,
+  const lines = [`# ${p.brief.title}`, '', demo ? '> Browser demo simulation. No real Daytona sandbox or Nosana inference was involved.' : '> Live run result. Confidence is each AI role\'s self-assessment, not calibrated accuracy.', '',
+    '## Objective', p.brief.objective, '', '## Context', p.brief.context || '(none)', '',
+    '## Synthesis', `- Status: ${PROJECT_STATUS_LABEL[p.status]}`, `- Selected ${a.selected} · valid opinions ${a.valid} · failed ${a.failed} · queued/working ${a.pending} · cancelled ${a.cancelled} · invalid format ${a.invalid}`,
     `- ${DIRECTIONS.map(d => `${DIRECTION_LABEL[d]} ${a.counts[d]}`).join(' · ')}`,
-    `- 평균 자체 평가 확신도: ${a.meanConfidence === null ? '—' : a.meanConfidence + '%'}`, '', a.headline, '', '## 다음 행동',
-    ...(a.actions.length ? a.actions.map((x, i) => `${i + 1}. ${x.text} (${x.names.join(', ')})`) : ['(없음)']), '', '## 전문가별 의견'];
+    `- Mean self-assessed confidence: ${a.meanConfidence === null ? '—' : a.meanConfidence + '%'}`, '', a.headline, '', '## Next actions',
+    ...(a.actions.length ? a.actions.map((x, i) => `${i + 1}. ${x.text} (${x.names.join(', ')})`) : ['(none)']), '', '## Opinions by expert'];
   for (const e of p.experts) {
     lines.push('', `### ${e.name} — ${STATUS_LABEL[e.status]}`);
-    if (e.opinion) lines.push(`${DIRECTION_LABEL[e.opinion.direction]} · 확신도 ${e.opinion.confidence}%`, '', e.opinion.summary);
-    else if (e.error) lines.push(`오류: ${e.error}`);
-    else if (e.invalidOpinion) lines.push('결과 형식이 올바르지 않아 종합에서 제외했습니다.');
+    if (e.opinion) lines.push(`${DIRECTION_LABEL[e.opinion.direction]} · confidence ${e.opinion.confidence}%`, '', e.opinion.summary);
+    else if (e.error) lines.push(`Error: ${e.error}`);
+    else if (e.invalidOpinion) lines.push('Excluded from the synthesis because the result format was invalid.');
   }
   return lines.join('\n') + '\n';
 }
@@ -526,6 +532,13 @@ function h<K extends keyof HTMLElementTagNameMap>(tag: K, props?: Record<string,
 }
 
 function fill(n: Element, ...kids: Kid[]): void { n.replaceChildren(...kids.filter((k): k is Node | string => k !== null && k !== undefined && k !== false)); }
+/** CSS 마스크 아이콘 (cloudbite-console.css 의 .i-*) — 장식이므로 읽기 프로그램에서 숨긴다 */
+function icon(name: string): HTMLElement { return h('span', { class: `cb-i i-${name}`, 'aria-hidden': 'true' }); }
+function clock(at: number): string {
+  if (!at) return '--:--:--';
+  const d = new Date(at), p2 = (n: number) => String(n).padStart(2, '0');
+  return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+}
 
 function boot(): void {
   const root = document.getElementById('cloudbite');
@@ -542,9 +555,16 @@ function boot(): void {
       mode: Mode; phase: 'starting' | 'running' | 'cancelling' | 'done' | 'error'; project: ConsoleProject | null;
       accessToken: string; error: string; startedAt: number; pollErrors: number;
     },
+    view: 'home' as View,
+    setupOpen: false,
+    full: false,
+    /** "Clear view" 때 화면에서만 숨긴 실행 기록 줄. 프로젝트 기록·파일은 그대로 둔다 */
+    hiddenRows: new Set<string>(),
     focusExpert: '',
-    tab: 'activity' as 'persona' | 'workorder' | 'activity' | 'artifacts',
+    tab: 'artifacts' as 'persona' | 'workorder' | 'activity' | 'artifacts',
     artifactPath: '',
+    /** 사용자가 파일을 직접 고르기 전에는 새 파일이 생기면 가장 쓸모 있는 파일(out/report.md 우선)로 따라간다 */
+    artifactPicked: false,
     artifactCache: new Map<string, { state: 'loading' | 'ok' | 'error'; text: string }>(),
     formErrors: [] as string[],
   };
@@ -560,74 +580,168 @@ function boot(): void {
   const findDef = (id: string) => catalogue().find(e => e.id === id) ?? DEMO_EXPERTS.find(e => e.id === id);
 
   // ── 고정 뼈대 (입력란은 한 번만 만들어 포커스·입력 중 글자를 잃지 않는다)
-  const titleIn = h('input', { id: 'cb-title', type: 'text', maxlength: LIMIT.title, autocomplete: 'off', value: '100인 AI 자문실 출시' });
+  const titleIn = h('input', { id: 'cb-title', type: 'text', maxlength: LIMIT.title, autocomplete: 'off', value: 'Launch a 100-expert AI advisory room' });
   const objectiveIn = h('textarea', { id: 'cb-objective', rows: 3, maxlength: LIMIT.objective });
-  objectiveIn.value = '스타트업 팀을 대상으로 부분 유료 모델의 100인 AI 자문실을 4주 안에 출시하는 것이 적절한지 판단하고, 주의할 점을 받고 싶습니다.';
-  const contextIn = h('textarea', { id: 'cb-context', rows: 4, maxlength: LIMIT.context });
-  contextIn.value = '초기 사용자는 5~20인 스타트업 팀. 의견마다 근거와 출처를 보여 주려 함. 팀 데이터는 업로드하지 않음.';
+  objectiveIn.value = 'Decide whether launching a 100-expert AI advisory room for startup teams on a partially paid model within 4 weeks makes sense, and what to watch out for.';
+  const contextIn = h('textarea', { id: 'cb-context', rows: 3, maxlength: LIMIT.context });
+  contextIn.value = 'Early users are startup teams of 5–20 people. Every opinion should show its evidence and sources. Team data will not be uploaded.';
   const counter = (inp: HTMLInputElement | HTMLTextAreaElement, max: number) => {
     const c = h('span', { class: 'cb-count', 'aria-hidden': 'true' });
     const upd = () => { c.textContent = `${inp.value.length} / ${max}`; };
     inp.addEventListener('input', upd); upd();
     return c;
   };
-  const tokenIn = h('input', { id: 'cb-token', type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: '기존 관리자 세션 토큰' });
-  tokenIn.addEventListener('input', () => { S.adminToken = tokenIn.value; renderControls(); });
+  for (const inp of [titleIn, objectiveIn]) inp.addEventListener('input', () => { if (!S.run) renderControls(); });
+  const tokenIn = h('input', { id: 'cb-token', type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: 'Existing admin session token' });
+  tokenIn.addEventListener('input', () => { S.adminToken = tokenIn.value; renderControls(); renderProgress(); });
   const failIn = h('input', { id: 'cb-fail', type: 'checkbox' });
   failIn.addEventListener('change', () => { S.failSim = failIn.checked; });
-  const filterIn = h('input', { id: 'cb-filter', type: 'search', placeholder: '역할·분야 검색', autocomplete: 'off', 'aria-label': '전문가 검색' });
+  const filterIn = h('input', { id: 'cb-filter', type: 'search', placeholder: 'Search roles or domains', autocomplete: 'off', 'aria-label': 'Search experts' });
   filterIn.addEventListener('input', () => renderCatalogue());
 
-  const modeDemo = h('button', { type: 'button', class: 'cb-seg', 'aria-pressed': 'true', onclick: () => setMode('demo') }, '브라우저 데모');
-  const modeLive = h('button', { type: 'button', class: 'cb-seg', 'aria-pressed': 'false', onclick: () => setMode('live') }, '실제 실행');
-  const startBtn = h('button', { type: 'submit', class: 'cb-primary' }, '전문가 작업 시작');
-  const cancelBtn = h('button', { type: 'button', class: 'cb-secondary', onclick: () => cancelRun() }, '취소');
+  const modeDemo = h('button', { type: 'button', class: 'cb-seg', 'aria-pressed': 'true', onclick: () => setMode('demo') }, 'Browser demo');
+  const modeLive = h('button', { type: 'button', class: 'cb-seg', 'aria-pressed': 'false', onclick: () => setMode('live') }, 'Live run');
+  const startBtn = h('button', { type: 'button', class: 'cb-primary', onclick: () => startRun() });
+  const startLabel = h('span');
+  startBtn.append(icon('play'), startLabel);
+  const cancelBtn = h('button', { type: 'button', class: 'cb-secondary', onclick: () => cancelRun() });
+  const cancelLabel = h('span');
+  cancelBtn.append(icon('stop'), cancelLabel);
   const formMsg = h('div', { class: 'cb-formmsg', role: 'alert' });
   const catalogueBox = h('div', { class: 'cb-catalogue', role: 'group', 'aria-labelledby': 'cb-cat-label' });
   const catalogueNote = h('p', { class: 'cb-help' });
   const selCount = h('span', { class: 'cb-selcount' });
   const liveStatus = h('div', { class: 'cb-live-status' });
-  const clearTokenBtn = h('button', { type: 'button', class: 'cb-ghost', onclick: () => { S.adminToken = ''; tokenIn.value = ''; renderControls(); tokenIn.focus(); } }, '토큰 지우기');
+  const clearTokenBtn = h('button', { type: 'button', class: 'cb-ghost', onclick: () => { S.adminToken = ''; tokenIn.value = ''; renderControls(); tokenIn.focus(); } }, 'Clear token');
   const liveBox = h('div', { class: 'cb-live' }, liveStatus,
-    h('label', { for: 'cb-token', class: 'cb-label' }, '관리자 토큰'), tokenIn,
-    h('p', { class: 'cb-help' }, '토큰은 이 탭 메모리에만 두고 저장하지 않습니다. Daytona·Nosana API 키는 입력받지 않습니다.'), clearTokenBtn);
+    h('label', { for: 'cb-token', class: 'cb-label' }, 'Admin token'), tokenIn,
+    h('p', { class: 'cb-help' }, 'The token stays in this tab\'s memory only and is never stored. Daytona and Nosana API keys are configured on the server, never entered here.'), clearTokenBtn);
   const demoBox = h('div', { class: 'cb-demoopts' },
-    h('label', { class: 'cb-check' }, failIn, ' 한 전문가 실패 시뮬레이션'));
+    h('label', { class: 'cb-check' }, failIn, ' Simulate one expert failing'));
 
-  const form = h('form', { class: 'cb-form', novalidate: true, 'aria-labelledby': 'cb-brief-h' },
-    h('div', { class: 'cb-segs', role: 'group', 'aria-label': '실행 방식' }, modeDemo, modeLive),
-    liveBox, demoBox,
-    h('label', { for: 'cb-title', class: 'cb-label' }, '프로젝트 이름'), titleIn, counter(titleIn, LIMIT.title),
-    h('label', { for: 'cb-objective', class: 'cb-label' }, '목표 — 무엇을 판단하거나 만들까요?'), objectiveIn, counter(objectiveIn, LIMIT.objective),
-    h('label', { for: 'cb-context', class: 'cb-label' }, '맥락 (선택)'), contextIn, counter(contextIn, LIMIT.context),
-    h('div', { class: 'cb-label-row' }, h('span', { id: 'cb-cat-label', class: 'cb-label' }, '전문가 선택'), selCount),
-    filterIn, catalogueBox, catalogueNote, formMsg,
-    h('div', { class: 'cb-actions' }, startBtn, cancelBtn));
+  const modeLine = h('span');
+  const form = h('form', { class: 'cb-form', novalidate: true, 'aria-label': 'Project setup' },
+    h('div', { class: 'cb-field' }, h('label', { for: 'cb-title', class: 'cb-label' }, 'Project name'), titleIn, counter(titleIn, LIMIT.title)),
+    h('div', { class: 'cb-field' }, h('label', { for: 'cb-context', class: 'cb-label' }, 'Context (optional)'), contextIn, counter(contextIn, LIMIT.context)),
+    h('div', { class: 'cb-field is-wide' }, h('label', { for: 'cb-objective', class: 'cb-label' }, 'Objective — what should the experts decide or produce?'), objectiveIn, counter(objectiveIn, LIMIT.objective)),
+    h('div', { class: 'cb-field is-wide' },
+      h('div', { class: 'cb-label-row' }, h('span', { id: 'cb-cat-label', class: 'cb-label' }, 'Choose experts'), selCount),
+      filterIn, catalogueBox, catalogueNote),
+    h('div', { class: 'cb-mode-line' }, icon('settings'), modeLine,
+      h('button', { type: 'button', class: 'cb-ghost', onclick: () => setView('settings') }, 'Change in Settings')));
   form.addEventListener('submit', ev => { ev.preventDefault(); startRun(); });
 
+  // ── 머리 (네이비 70px)
   const modeBadge = h('span', { class: 'cb-badge' });
-  const crumb = h('span', { class: 'cb-crumb-title' });
-  const dlJson = h('button', { type: 'button', class: 'cb-ghost', onclick: () => download('json') }, 'JSON 내보내기');
-  const dlMd = h('button', { type: 'button', class: 'cb-ghost', onclick: () => download('md') }, '보고서 내보내기');
+  const profileState = h('span', { class: 'cb-profile-state' });
   const banner = h('p', { class: 'cb-banner' });
   const live = h('div', { class: 'cb-sr', 'aria-live': 'polite' });
-  const progress = h('div', { class: 'cb-progress' });
-  const cards = h('div', { class: 'cb-cards' });
-  const detail = h('div', { class: 'cb-detail' });
+
+  // ── 현재 프로젝트 카드
+  const projTitle = h('h2', { id: 'cb-project-h', class: 'cb-project-title' });
+  const projObjective = h('p', { class: 'cb-project-obj' });
+  const projStatus = h('span', { class: 'cb-pill' });
+  const projMeta = h('div', { class: 'cb-project-meta' });
+  const setupLabel = h('span');
+  const setupBtn = h('button', { type: 'button', class: 'cb-ghost', 'aria-expanded': 'false', 'aria-controls': 'cb-setup', 'data-fk': 'setup',
+    onclick: () => { S.setupOpen = !S.setupOpen; renderControls(); if (S.setupOpen && !active()) titleIn.focus(); } }, icon('edit'), setupLabel);
+  const dlJson = h('button', { type: 'button', class: 'cb-ghost', onclick: () => download('json') }, icon('download'), h('span', null, 'Export JSON'));
+  const dlMd = h('button', { type: 'button', class: 'cb-ghost', onclick: () => download('md') }, icon('download'), h('span', null, 'Export report'));
+  const setup = h('div', { id: 'cb-setup', class: 'cb-setup' }, form);
+  const projectCard = h('section', { class: 'cb-panel cb-project', 'aria-labelledby': 'cb-project-h' },
+    h('div', { class: 'cb-project-top' },
+      h('div', { class: 'cb-project-text' }, h('span', { class: 'cb-eyebrow' }, 'Current project'), projTitle, projObjective), projStatus),
+    projMeta,
+    h('div', { class: 'cb-project-actions' }, startBtn, cancelBtn, setupBtn, h('span', { class: 'cb-spacer' }), dlMd, dlJson),
+    formMsg, setup);
+
+  // ── 전문가 작업공간 (실행 기록 + 파일)
+  const wsSub = h('p', { class: 'cb-ws-sub' });
+  const fullLabel = h('span'), fullIcon = h('span');
+  const fullBtn = h('button', { type: 'button', class: 'cb-tool', 'data-fk': 'full', onclick: () => setFull(!S.full) }, fullIcon, fullLabel);
+  const clearBtn = h('button', { type: 'button', class: 'cb-tool', 'data-fk': 'clear', onclick: () => clearView() }, icon('clear'), h('span', null, 'Clear view'));
+  const restoreBtn = h('button', { type: 'button', class: 'cb-tool', 'data-fk': 'restore', onclick: () => restoreView() }, icon('history'), h('span', null, 'Restore history'));
+  const roster = h('div', { class: 'cb-roster', role: 'group', 'aria-label': 'Experts in this project' });
+  const streamState = h('span', { class: 'cb-stream-state' });
+  const streamLog = h('ol', { class: 'cb-stream-log', role: 'log', 'aria-label': 'Execution stream', tabindex: '0' });
+  const streamNote = h('p', { class: 'cb-stream-note' });
+  const inspector = h('div', { class: 'cb-inspector' });
+  const wsPanel = h('section', { class: 'cb-panel cb-workspace', 'aria-labelledby': 'cb-ws-h' },
+    h('div', { class: 'cb-ws-head' },
+      h('div', { class: 'cb-ws-title' }, h('h2', { id: 'cb-ws-h' }, 'Expert workspace'), wsSub),
+      h('div', { class: 'cb-ws-actions' }, fullBtn, clearBtn, restoreBtn)),
+    roster,
+    h('div', { class: 'cb-stream' },
+      h('div', { class: 'cb-stream-bar' }, icon('pulse'), h('span', { class: 'cb-stream-title' }, 'Execution stream'), h('span', { class: 'cb-stream-ro' }, 'read-only'), streamState),
+      streamLog, streamNote),
+    inspector);
+
+  // ── 오른쪽: 진행 · 할 일 · 종합
+  const progressBody = h('div');
+  const tipBody = h('div');
   const synth = h('div', { class: 'cb-synth-body' });
+  const aside = h('aside', { class: 'cb-aside', 'aria-label': 'Progress and decision' },
+    h('section', { class: 'cb-panel', 'aria-labelledby': 'cb-prog-h' }, h('div', { class: 'cb-panel-head' }, h('h2', { id: 'cb-prog-h' }, 'Project progress')), progressBody),
+    h('section', { class: 'cb-tip', 'aria-labelledby': 'cb-tip-h' }, h('div', { class: 'cb-tip-head' }, icon('tip'), h('h2', { id: 'cb-tip-h' }, 'What to do now')), tipBody),
+    h('section', { class: 'cb-panel cb-synth', 'aria-labelledby': 'cb-synth-h' }, h('div', { class: 'cb-panel-head' }, icon('chart'), h('h2', { id: 'cb-synth-h' }, 'Synthesis & confidence')), synth));
+
+  // ── Guide · Help · Settings (기존 안내·설정 내용을 실제로 보여 준다)
+  const guideStep = (n: number, title: string, text: string) => h('li', null, h('span', { class: 'cb-guide-n' }, String(n)), h('h3', null, title), h('p', null, text));
+  const goHome = h('button', { type: 'button', class: 'cb-primary', onclick: () => setView('home') }, icon('home'), h('span', null, 'Back to Home'));
+  const guideView = h('section', { class: 'cb-view cb-page', id: 'cb-view-guide', 'aria-labelledby': 'cb-guide-h' },
+    h('div', { class: 'cb-page-head' }, h('h2', { id: 'cb-guide-h' }, 'Guide'), h('p', null, 'How a Cloudbite project runs, from brief to decision.')),
+    h('ol', { class: 'cb-guide-steps' },
+      guideStep(1, 'Write the shared brief', 'On Home, open Edit project. Give the project a name, the objective the experts should judge and optional context. Every expert receives the same brief.'),
+      guideStep(2, 'Choose up to five experts', 'Pick roles from the catalogue in Project setup. Each selected expert works in its own isolated workspace with its own persona and work order. Three to five experts are recommended.'),
+      guideStep(3, 'Run in demo or live mode', 'Browser demo simulates the run inside this tab. Live run asks the server to create one Daytona sandbox per expert, with inference configured on the server. Choose the mode in Settings.'),
+      guideStep(4, 'Watch the execution stream', 'The stream lists the activity each expert reports — status changes, tool steps, notes and files. It is read-only: you cannot type commands into it.'),
+      guideStep(5, 'Inspect files and personas', 'Select an expert in the workspace to open its files, activity, work order and persona. Files are read from the run itself; nothing is invented.'),
+      guideStep(6, 'Review the synthesis', 'The right panel counts only completed, valid opinions. Failed, pending and cancelled experts are listed separately. Export a report or JSON when you are done.')),
+    h('div', null, goHome));
+
+  const faq = (q: string, a: string) => h('section', null, h('h3', null, q), h('p', null, a));
+  const helpView = h('section', { class: 'cb-view cb-page', id: 'cb-view-help', 'aria-labelledby': 'cb-help-h' },
+    h('div', { class: 'cb-page-head' }, h('h2', { id: 'cb-help-h' }, 'Help'), h('p', null, 'What the console shows, and what it does not claim.')),
+    h('div', { class: 'cb-faq' },
+      faq('Is the browser demo real?', 'No. The browser demo is a deterministic simulation that runs in this tab. It creates no Daytona sandbox and makes no Nosana inference call. Its results change with the wording of your brief, but they are scripted.'),
+      faq('What does confidence mean?', 'Each expert reports its own confidence from 0 to 100. It is a self-assessment, not calibrated accuracy or independent agreement. Failed, pending, cancelled and invalid results are excluded from the average.'),
+      faq('Why is Live run disabled?', 'Live run needs the server to be configured and an existing admin session token. If the server is not ready, Settings lists the missing setting names. API keys are never entered in this console.'),
+      faq('How many experts can run?', 'Up to five experts per project, with up to three working at once. The catalogue currently has twelve roles. A hundred-expert room is a future concept, not a verified capacity.'),
+      faq('What do Clear view and Full screen do?', 'Clear view only empties the visible stream window; new activity keeps arriving and the project history and files stay intact. Restore history brings the hidden rows back. Full screen expands the workspace; press Escape or Exit full screen to return.'),
+      faq('Where is my data kept?', 'Tokens live only in this tab\'s memory. Exports are generated in the browser as downloads and state whether they come from a demo or a live run.')));
+
+  const settingsView = h('section', { class: 'cb-view cb-page', id: 'cb-view-settings', 'aria-labelledby': 'cb-settings-h' },
+    h('div', { class: 'cb-page-head' }, h('h2', { id: 'cb-settings-h' }, 'Settings'), h('p', null, 'Execution mode and session. Project details and expert selection are under Home → Edit project.')),
+    h('div', { class: 'cb-settings' },
+      h('section', { class: 'cb-panel', 'aria-labelledby': 'cb-mode-h' }, h('h2', { id: 'cb-mode-h' }, 'Execution mode'),
+        h('div', { class: 'cb-segs', role: 'group', 'aria-label': 'Execution mode' }, modeDemo, modeLive),
+        h('p', { class: 'cb-help' }, 'The mode is locked while a project is running.'), demoBox, liveBox),
+      h('section', { class: 'cb-panel', 'aria-labelledby': 'cb-about-h' }, h('h2', { id: 'cb-about-h' }, 'About this console'),
+        h('p', { class: 'cb-help' }, 'Cloudbite v0.0.1 — one shared project, several expert personas, each in a separate Daytona sandbox, with inference configured on the server.'),
+        h('p', { class: 'cb-help' }, 'The legacy classroom lab is a separate product and is not part of this console.'),
+        h('a', { href: '/lab' }, 'Open the legacy lab'))));
+
+  const homeView = h('div', { class: 'cb-view cb-home', id: 'cb-view-home' }, h('div', { class: 'cb-center' }, projectCard, wsPanel), aside);
+  const views: Record<View, HTMLElement> = { home: homeView, guide: guideView, help: helpView, settings: settingsView };
+  const NAV: Array<[View, string]> = [['home', 'Home'], ['guide', 'Guide'], ['help', 'Help'], ['settings', 'Settings']];
+  const navBtns = NAV.map(([v, label]) => h('button', { type: 'button', class: 'cb-nav-btn', 'data-fk': `nav:${v}`, onclick: () => setView(v) }, icon(v), h('span', null, label)));
 
   root.replaceChildren(
     h('header', { class: 'cb-top' },
-      h('div', { class: 'cb-brand' }, h('span', { class: 'cb-word' }, 'cloudbite'), h('span', { class: 'cb-suffix' }, '전문가 작업공간')),
-      h('nav', { class: 'cb-crumbs', 'aria-label': '위치' }, h('span', null, '프로젝트'), h('span', { 'aria-hidden': 'true' }, '›'), crumb, h('span', { 'aria-hidden': 'true' }, '›'), h('strong', null, '전문가 작업공간')),
-      h('div', { class: 'cb-topright' }, modeBadge, dlMd, dlJson, h('a', { class: 'cb-legacy', href: '/lab' }, '기존 실습실'))),
-    banner, live,
-    h('main', { class: 'cb-grid' },
-      h('section', { class: 'cb-panel cb-brief', 'aria-labelledby': 'cb-brief-h' }, h('h2', { id: 'cb-brief-h' }, '공통 프로젝트'),
-        h('p', { class: 'cb-help' }, '선택한 전문가마다 독립 작업공간에서 같은 브리프를 각자의 역할로 수행합니다.'), form),
-      h('section', { class: 'cb-panel cb-synth', 'aria-labelledby': 'cb-synth-h' }, h('h2', { id: 'cb-synth-h' }, '종합'), synth),
-      h('section', { class: 'cb-panel cb-work', 'aria-labelledby': 'cb-work-h' },
-        h('div', { class: 'cb-work-head' }, h('h2', { id: 'cb-work-h' }, '전문가 작업공간'), progress), cards, detail)));
+      h('div', { class: 'cb-brand' }, h('span', { class: 'cb-logo' }, icon('cloud')),
+        h('div', { class: 'cb-brand-text' }, h('span', { class: 'cb-word' }, 'Cloudbite', h('small', null, 'v0.0.1')),
+          h('span', { class: 'cb-sub' }, 'Expert sandboxes for one shared project'))),
+      h('div', { class: 'cb-top-right' }, modeBadge,
+        h('div', { class: 'cb-profile', role: 'status', 'aria-label': 'Session' }, h('span', { class: 'cb-avatar' }, icon('user')),
+          h('span', { class: 'cb-profile-text' }, h('span', { class: 'cb-profile-name' }, 'Operator'), profileState)))),
+    live,
+    h('div', { class: 'cb-shell' },
+      h('nav', { class: 'cb-nav', 'aria-label': 'Primary' }, h('span', { class: 'cb-nav-label' }, 'Workspace'),
+        h('ul', { class: 'cb-nav-list' }, ...navBtns.map(b => h('li', null, b))),
+        h('div', { class: 'cb-nav-foot' }, h('span', null, 'Up to 5 experts per project · 3 run at once'), h('a', { href: '/lab' }, 'Legacy lab'))),
+      h('main', { class: 'cb-main' }, banner, homeView, guideView, helpView, settingsView)));
+
+  document.addEventListener('keydown', ev => { if ((ev as KeyboardEvent).key === 'Escape' && S.full) { ev.preventDefault(); setFull(false); } });
 
   // ── 렌더 (동적 영역만 다시 그린다. 포커스는 data-fk 로 되돌린다)
   function keepFocus(fn: () => void): void {
@@ -637,45 +751,70 @@ function boot(): void {
     if (key) { const n = root!.querySelector(`[data-fk="${CSS.escape(key)}"]`) as HTMLElement | null; if (n) n.focus(); }
   }
 
-  function renderAll(): void { keepFocus(() => { renderControls(); renderCatalogue(); renderWork(); renderSynth(); }); }
+  function renderAll(): void { keepFocus(() => { renderNav(); renderControls(); renderCatalogue(); renderWork(); renderProgress(); renderSynth(); }); }
+
+  function renderNav(): void {
+    NAV.forEach(([v], i) => { navBtns[i].setAttribute('aria-current', v === S.view ? 'page' : 'false'); views[v].hidden = v !== S.view; });
+  }
 
   function renderControls(): void {
     const demo = S.mode === 'demo';
     modeDemo.setAttribute('aria-pressed', String(demo)); modeLive.setAttribute('aria-pressed', String(!demo));
     modeDemo.disabled = modeLive.disabled = active();
     const runMode = S.run?.mode ?? S.mode;
-    modeBadge.textContent = runMode === 'demo' ? '브라우저 데모' : '실제 실행';
+    modeBadge.textContent = runMode === 'demo' ? 'Browser demo' : 'Live run';
     modeBadge.className = `cb-badge ${runMode === 'demo' ? 'is-demo' : 'is-live'}`;
+    profileState.textContent = S.adminToken.trim() ? 'Admin token held in memory' : 'No admin token';
     banner.textContent = runMode === 'demo'
-      ? '브라우저 데모 — 이 화면의 작업공간·활동·파일은 브라우저 안 시뮬레이션입니다. 실제 Daytona 샌드박스나 Nosana 추론을 만들지 않습니다.'
-      : '실제 실행 — 서버가 전문가별 Daytona 샌드박스를 만들고 반환한 상태만 표시합니다. 확신도는 자체 평가이며 보정된 정확도가 아닙니다.';
+      ? 'Browser demo — the workspaces, activity and files on this screen are simulated in your browser. No real Daytona sandbox or Nosana inference is created.'
+      : 'Live run — the server creates one Daytona sandbox per expert; this screen only shows the state it returns. Confidence is self-assessed, not calibrated accuracy.';
     banner.className = `cb-banner ${runMode === 'demo' ? 'is-demo' : 'is-live'}`;
-    crumb.textContent = clip(S.run?.project?.brief.title || titleIn.value || '새 프로젝트', 40);
+    modeLine.textContent = demo ? 'Next run: Browser demo (simulated in this tab).' : 'Next run: Live run (server sandboxes).';
     demoBox.hidden = !demo; liveBox.hidden = demo;
     const cfg = S.boot.data?.configuration;
     const liveKids: Kid[] = [];
-    if (S.boot.status === 'loading') liveKids.push(h('p', { class: 'cb-help' }, '서버 준비 상태를 확인하는 중…'));
-    else if (S.boot.status === 'error') liveKids.push(h('p', { class: 'cb-warn' }, `서버 카탈로그를 불러오지 못했습니다: ${S.boot.error}`),
-      h('button', { type: 'button', class: 'cb-ghost', onclick: () => loadBootstrap() }, '다시 확인'));
-    else if (cfg && !cfg.liveReady) liveKids.push(h('div', { class: 'cb-warn' }, h('strong', null, '실제 실행 준비 안 됨'),
-      h('p', null, cfg.missing.length ? '서버 운영자가 다음 설정을 서버에 넣어야 합니다 (값은 이 화면에서 받지 않습니다):' : '서버가 실제 실행 준비가 안 됐다고 응답했습니다.'),
+    if (S.boot.status === 'loading') liveKids.push(h('p', { class: 'cb-help' }, 'Checking server readiness…'));
+    else if (S.boot.status === 'error') liveKids.push(h('p', { class: 'cb-warn' }, `Could not load the server catalogue: ${S.boot.error}`),
+      h('button', { type: 'button', class: 'cb-ghost', onclick: () => loadBootstrap() }, 'Check again'));
+    else if (cfg && !cfg.liveReady) liveKids.push(h('div', { class: 'cb-warn' }, h('strong', null, 'Live run is not ready'),
+      h('p', null, cfg.missing.length ? 'The server operator must add these settings on the server (values are never entered here):' : 'The server reported that live runs are not ready.'),
       cfg.missing.length ? h('ul', null, ...cfg.missing.map(m => h('li', null, h('code', null, m)))) : null));
-    else if (cfg) liveKids.push(h('p', { class: 'cb-ok' }, `서버 준비됨 · 최대 ${cfg.maxExperts}명`));
+    else if (cfg) liveKids.push(h('p', { class: 'cb-ok' }, `Server ready · up to ${plural(cfg.maxExperts, 'expert')}`));
     liveStatus.replaceChildren(...liveKids.filter((k): k is Node => !!k));
     clearTokenBtn.hidden = !S.adminToken;
     const busy = active();
-    for (const n of [titleIn, objectiveIn, contextIn, failIn, tokenIn]) n.disabled = busy;
+    for (const n of [titleIn, objectiveIn, contextIn, failIn, tokenIn, filterIn]) n.disabled = busy;
     const liveBlocked = !demo && (S.boot.status !== 'ready' || !cfg?.liveReady || !S.adminToken.trim());
     startBtn.disabled = busy || liveBlocked;
-    startBtn.textContent = S.run?.phase === 'starting' ? '시작하는 중…' : busy ? '진행 중…' : S.run ? '다시 실행' : '전문가 작업 시작';
+    startLabel.textContent = S.run?.phase === 'starting' ? 'Starting…' : busy ? 'Running…' : S.run ? 'Run again' : 'Run experts';
     cancelBtn.disabled = !busy || S.run?.phase === 'cancelling' || S.run?.phase === 'starting';
-    cancelBtn.textContent = S.run?.phase === 'cancelling' ? '취소하는 중…' : '취소';
+    cancelLabel.textContent = S.run?.phase === 'cancelling' ? 'Stopping…' : 'Stop';
+    if (S.formErrors.length) S.setupOpen = true;
+    setup.hidden = !S.setupOpen;
+    setupBtn.setAttribute('aria-expanded', String(S.setupOpen));
+    setupLabel.textContent = S.setupOpen ? 'Hide project setup' : 'Edit project';
     const msgs = [...S.formErrors];
     if (S.run?.error) msgs.push(S.run.error);
     formMsg.replaceChildren(...msgs.map(m => h('p', null, m)));
     const p = S.run?.project;
     dlJson.disabled = dlMd.disabled = !p;
-    selCount.textContent = `${S.selected.size} / 최대 ${limits().max}명`;
+    selCount.textContent = `${S.selected.size} of max ${limits().max} selected`;
+    // 프로젝트 카드: 실행 중이면 서버·데모가 돌려준 브리프, 아니면 지금 입력한 브리프
+    projTitle.textContent = clip(p?.brief.title || titleIn.value.trim() || 'Untitled project', 120);
+    projObjective.textContent = p?.brief.objective || objectiveIn.value.trim() || 'Add an objective in Edit project.';
+    const pst = p ? p.status : S.run?.phase === 'starting' ? 'running' : S.run?.phase === 'error' ? 'failed' : 'draft';
+    projStatus.textContent = S.run?.phase === 'starting' ? 'Starting' : PROJECT_STATUS_LABEL[pst];
+    projStatus.className = `cb-pill p-${pst}`;
+    const meta: Kid[] = [];
+    if (p) {
+      const done = p.experts.filter(e => TERMINAL_EXPERT.includes(e.status)).length;
+      const valid = p.experts.filter(e => e.status === 'completed' && e.opinion).length;
+      meta.push(h('span', null, h('strong', null, `${done} of ${plural(p.experts.length, 'expert')}`), ' finished'),
+        h('span', null, h('strong', null, String(valid)), ' valid ', valid === 1 ? 'opinion' : 'opinions'));
+    } else meta.push(h('span', null, h('strong', null, plural(S.selected.size, 'expert')), ' selected'));
+    meta.push(h('span', null, 'Mode: ', h('strong', null, runMode === 'demo' ? 'Browser demo' : 'Live run')));
+    if (p && S.run?.mode === 'live') meta.push(h('span', null, 'Project ', h('code', null, clip(p.id, 24))));
+    fill(projMeta, ...meta);
   }
 
   function renderCatalogue(): void {
@@ -689,60 +828,82 @@ function boot(): void {
       const cb = h('input', { type: 'checkbox', id: `cb-x-${e.id}`, 'data-fk': `x:${e.id}`, checked: on, disabled: busy || (!on && full) });
       cb.addEventListener('change', () => {
         if (cb.checked) S.selected.add(e.id); else S.selected.delete(e.id);
-        S.formErrors = []; keepFocus(() => { renderCatalogue(); renderControls(); });
+        S.formErrors = []; keepFocus(() => { renderCatalogue(); renderControls(); renderProgress(); });
       });
       return h('label', { class: `cb-expert-opt${on ? ' is-on' : ''}`, for: `cb-x-${e.id}` }, cb,
         h('span', { class: 'cb-opt-text' }, h('span', { class: 'cb-opt-name' }, e.name), h('span', { class: 'cb-opt-domain' }, e.domain)));
     }));
-    if (!shown.length) catalogueBox.append(h('p', { class: 'cb-empty' }, list.length ? '검색과 맞는 역할이 없습니다.' : S.mode === 'live' ? '서버 카탈로그가 비어 있어 실제 실행을 할 수 없습니다.' : '역할이 없습니다.'));
-    catalogueNote.textContent = catalogueIsBuiltin() ? '서버 카탈로그가 비어 있거나 응답하지 않아 데모 전용 내장 역할 6개를 씁니다.'
-      : `${list.length}개 역할 카탈로그${list.length > shown.length ? ` · ${shown.length}개 표시` : ''} · 3–5명을 권장합니다.`;
+    if (!shown.length) catalogueBox.append(h('p', { class: 'cb-empty' }, list.length ? 'No roles match your search.' : S.mode === 'live' ? 'The server catalogue is empty, so a live run is not possible.' : 'No roles available.'));
+    catalogueNote.textContent = catalogueIsBuiltin() ? 'The server catalogue is empty or unreachable, so the demo uses 6 built-in demo roles.'
+      : `${list.length}-role catalogue${list.length > shown.length ? ` · ${shown.length} shown` : ''} · 3–5 experts recommended.`;
   }
 
   function statusDot(s: ExpertStatus): HTMLElement { return h('span', { class: `cb-dot s-${s}`, 'aria-hidden': 'true' }); }
-  function ago(at: number): string {
-    if (!at) return '';
-    const s = Math.max(0, Math.round((Date.now() - at) / 1000));
-    return s < 60 ? `${s}초 전` : `${Math.round(s / 60)}분 전`;
+
+  function streamRows(p: ConsoleProject): Array<{ key: string; at: number; name: string; kind: ExpertActivity['kind']; message: string }> {
+    const rows: Array<{ key: string; at: number; name: string; kind: ExpertActivity['kind']; message: string; seq: number }> = [];
+    let seq = 0;
+    for (const e of p.experts) for (const a of e.activity) rows.push({ key: `${e.id}\n${a.id}`, at: a.at, name: e.name, kind: a.kind, message: a.message, seq: seq++ });
+    return rows.sort((a, b) => a.at - b.at || a.seq - b.seq);
   }
 
   function renderWork(): void {
     const p = S.run?.project;
-    if (!S.run) { progress.replaceChildren(); cards.replaceChildren(h('p', { class: 'cb-empty' }, '프로젝트를 시작하면 전문가별 작업공간이 여기에 나타납니다.')); detail.replaceChildren(); return; }
-    if (!p) {
-      progress.replaceChildren(h('span', { class: 'cb-help' }, S.run.phase === 'error' ? '시작하지 못했습니다' : '프로젝트를 만드는 중…'));
-      cards.replaceChildren(h('p', { class: S.run.phase === 'error' ? 'cb-warn' : 'cb-empty' }, S.run.phase === 'error' ? S.run.error : '서버가 전문가 작업공간을 준비하고 있습니다.'));
-      detail.replaceChildren(); return;
+    restoreBtn.disabled = S.hiddenRows.size === 0;
+    if (!S.run || !p) {
+      roster.replaceChildren();
+      wsSub.textContent = !S.run ? 'Experts appear here once the project starts.' : S.run.phase === 'error' ? 'The project did not start.' : 'Creating expert workspaces…';
+      streamState.textContent = S.run?.phase === 'starting' ? 'starting…' : 'idle';
+      const msg = S.run?.phase === 'error' ? S.run.error : S.run ? 'The server is preparing expert workspaces.' : 'The execution stream shows each expert\'s reported activity once a project starts.';
+      streamLog.replaceChildren(h('li', { class: S.run?.phase === 'error' ? 'cb-stream-empty k-error' : 'cb-stream-empty' }, msg));
+      streamNote.textContent = '';
+      clearBtn.disabled = true;
+      inspector.replaceChildren();
+      return;
     }
-    const done = p.experts.filter(e => TERMINAL_EXPERT.includes(e.status)).length;
-    const bar = h('div', { class: 'cb-bar', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': p.experts.length, 'aria-valuenow': done, 'aria-label': '전문가 진행' },
-      ...p.experts.map(e => h('span', { class: `cb-bar-seg s-${e.status}`, title: `${e.name}: ${STATUS_LABEL[e.status]}` })));
-    progress.replaceChildren(h('span', { class: `cb-pstatus p-${p.status}` }, PROJECT_STATUS_LABEL[p.status]), bar,
-      h('span', { class: 'cb-help' }, `${done} / ${p.experts.length} 종료`));
     if (!S.focusExpert || !p.experts.some(e => e.id === S.focusExpert)) S.focusExpert = p.experts[0]?.id ?? '';
-    cards.replaceChildren(...p.experts.map(e => {
-      const last = e.activity.slice(-3);
-      const def = findDef(e.expertId);
-      return h('button', { type: 'button', class: `cb-card s-${e.status}${e.id === S.focusExpert ? ' is-focus' : ''}`, 'data-fk': `card:${e.id}`,
-        'aria-pressed': String(e.id === S.focusExpert), onclick: () => { S.focusExpert = e.id; keepFocus(renderWork); } },
-        h('span', { class: 'cb-card-head' }, statusDot(e.status), h('span', { class: 'cb-card-name' }, e.name), h('span', { class: 'cb-card-status' }, STATUS_LABEL[e.status])),
-        h('span', { class: 'cb-card-meta' }, `${def?.domain ?? ''}${def ? ' · ' : ''}${e.sandboxId ? (S.run!.mode === 'demo' ? `데모 작업공간 ${e.sandboxId}` : `샌드박스 ${e.sandboxId}`) : '작업공간 대기'}`),
-        h('span', { class: 'cb-card-log' }, ...(last.length ? last.map(a => h('span', { class: `cb-log k-${a.kind}` }, a.message)) : [h('span', { class: 'cb-log' }, '대기 중')])),
-        h('span', { class: 'cb-card-foot' }, `파일 ${e.artifacts.length}개`,
-          e.opinion ? h('span', { class: `cb-chip d-${e.opinion.direction}` }, `${DIRECTION_LABEL[e.opinion.direction]} ${e.opinion.confidence}%`) : null,
-          e.invalidOpinion ? h('span', { class: 'cb-chip d-invalid' }, '형식 오류') : null));
-    }));
+    roster.replaceChildren(...p.experts.map(e => h('button', { type: 'button', class: `cb-card s-${e.status}${e.id === S.focusExpert ? ' is-focus' : ''}`, 'data-fk': `card:${e.id}`,
+      'aria-pressed': String(e.id === S.focusExpert), onclick: () => { if (S.focusExpert !== e.id) S.artifactPicked = false; S.focusExpert = e.id; keepFocus(renderWork); } },
+      h('span', { class: 'cb-card-head' }, statusDot(e.status), h('span', { class: 'cb-card-name' }, e.name)),
+      h('span', { class: 'cb-card-foot' }, h('span', { class: 'cb-card-status' }, STATUS_LABEL[e.status]),
+        e.opinion ? h('span', { class: `cb-chip d-${e.opinion.direction}` }, `${DIRECTION_LABEL[e.opinion.direction]} ${e.opinion.confidence}%`) : null,
+        e.invalidOpinion ? h('span', { class: 'cb-chip d-invalid' }, 'Invalid format') : null))));
+    const fe = p.experts.find(e => e.id === S.focusExpert);
+    const def = fe ? findDef(fe.expertId) : undefined;
+    wsSub.textContent = fe ? [fe.name, def?.domain, fe.sandboxId ? (S.run.mode === 'demo' ? `demo workspace ${fe.sandboxId}` : `sandbox ${fe.sandboxId}`) : 'workspace pending', STATUS_LABEL[fe.status]].filter(Boolean).join(' · ') : '';
+
+    // 실행 기록: 모든 전문가가 보고한 활동을 시간순으로. 숨긴 줄은 화면에서만 뺀다
+    const rows = streamRows(p);
+    const visible = rows.filter(r => !S.hiddenRows.has(r.key));
+    const shown = visible.slice(-STREAM_ROWS);
+    const working = p.experts.filter(e => !TERMINAL_EXPERT.includes(e.status) && e.status !== 'queued').length;
+    const phase = S.run.phase === 'cancelling' ? 'stopping' : PROJECT_STATUS_LABEL[p.status].toLowerCase();
+    streamState.textContent = `${S.run.mode === 'demo' ? 'simulated · ' : ''}${phase} · ${working} active · ${plural(rows.length, 'event')}`;
+    const atBottom = streamLog.scrollHeight - streamLog.scrollTop - streamLog.clientHeight < 48;
+    if (!shown.length) {
+      streamLog.replaceChildren(h('li', { class: 'cb-stream-empty' }, S.hiddenRows.size
+        ? 'View cleared. New activity will appear here; the project history is unchanged.' : 'No activity reported yet.'));
+    } else {
+      streamLog.replaceChildren(...shown.map(r => h('li', { class: `cb-row k-${r.kind}` },
+        h('time', { class: 'cb-row-at' }, clock(r.at)), h('span', { class: 'cb-row-who' }, r.name),
+        h('span', { class: 'cb-row-kind' }, KIND_LABEL[r.kind]), h('span', { class: 'cb-row-msg' }, r.message))));
+    }
+    if (atBottom) streamLog.scrollTop = streamLog.scrollHeight;
+    const hiddenCount = rows.length - visible.length;
+    streamNote.textContent = hiddenCount ? `${plural(hiddenCount, 'earlier row')} hidden from this view. Restore history to show them again.`
+      : visible.length > shown.length ? `Showing the latest ${shown.length} of ${visible.length} rows.` : '';
+    clearBtn.disabled = visible.length === 0;
     renderDetail(p);
   }
 
   function renderDetail(p: ConsoleProject): void {
     const e = p.experts.find(x => x.id === S.focusExpert);
-    if (!e) { detail.replaceChildren(); return; }
+    if (!e) { inspector.replaceChildren(); return; }
     const def = findDef(e.expertId);
-    const tabs: Array<[typeof S.tab, string]> = [['activity', '활동'], ['artifacts', `파일 ${e.artifacts.length}`], ['workorder', '작업 지시서'], ['persona', '페르소나']];
+    const tabs: Array<[typeof S.tab, string]> = [['artifacts', `Files ${e.artifacts.length}`], ['activity', 'Activity'], ['workorder', 'Work order'], ['persona', 'Persona']];
     const tabBtns = tabs.map(([k, label]) => h('button', { type: 'button', role: 'tab', id: `cb-tab-${k}`, 'data-fk': `tab:${k}`, 'aria-selected': String(S.tab === k),
       'aria-controls': 'cb-tabpanel', tabindex: S.tab === k ? '0' : '-1', class: 'cb-tab', onclick: () => { S.tab = k; keepFocus(renderWork); } }, label));
-    const tablist = h('div', { class: 'cb-tabs', role: 'tablist', 'aria-label': `${e.name} 작업공간` }, ...tabBtns);
+    const tablist = h('div', { class: 'cb-tabs', role: 'tablist', 'aria-label': `${e.name} workspace` }, ...tabBtns);
     tablist.addEventListener('keydown', ev => {
       const k = (ev as KeyboardEvent).key;
       if (k !== 'ArrowRight' && k !== 'ArrowLeft' && k !== 'Home' && k !== 'End') return;
@@ -755,51 +916,107 @@ function boot(): void {
     let body: Node;
     if (S.tab === 'activity') {
       body = e.activity.length ? h('ol', { class: 'cb-activity' }, ...e.activity.slice().reverse().map(a =>
-        h('li', { class: `k-${a.kind}` }, h('span', { class: 'cb-act-kind' }, { status: '상태', thought: '판단', tool: '도구', artifact: '파일', error: '오류' }[a.kind]),
-          h('span', { class: 'cb-act-msg' }, a.message), h('time', { class: 'cb-act-at' }, ago(a.at)))))
-        : h('p', { class: 'cb-empty' }, '아직 활동이 없습니다.');
-      if (e.error) body = h('div', null, h('p', { class: 'cb-warn' }, `오류: ${e.error}`), body);
+        h('li', { class: `k-${a.kind}` }, h('span', { class: 'cb-act-kind' }, KIND_LABEL[a.kind]),
+          h('span', { class: 'cb-act-msg' }, a.message), h('time', { class: 'cb-act-at' }, clock(a.at)))))
+        : h('p', { class: 'cb-empty' }, 'No activity yet.');
+      if (e.error) body = h('div', null, h('p', { class: 'cb-warn' }, `Error: ${e.error}`), body);
     } else if (S.tab === 'artifacts') {
       body = artifactView(p, e);
     } else if (S.tab === 'workorder') {
       const wo = e.artifacts.find(a => a.path === 'WORKORDER.md' && typeof a.content === 'string');
-      body = h('div', null, !wo ? h('p', { class: 'cb-help' }, '작업공간이 아직 작업 지시서를 내보내지 않아 브리프로 만든 미리보기를 보여 줍니다.') : null,
-        h('pre', { class: 'cb-file' }, wo?.content ?? (def ? workorderText(def, p.brief) : '역할 정의를 찾을 수 없습니다.')));
+      body = h('div', null, !wo ? h('p', { class: 'cb-help' }, 'The workspace has not exported a work order yet, so this is a preview built from the brief.') : null,
+        h('pre', { class: 'cb-file' }, wo?.content ?? (def ? workorderText(def, p.brief) : 'The role definition could not be found.')));
     } else {
-      body = def ? h('div', null, h('pre', { class: 'cb-file' }, personaText(def))) : h('p', { class: 'cb-empty' }, '카탈로그에서 이 역할을 찾을 수 없습니다.');
+      body = def ? h('div', null, h('pre', { class: 'cb-file' }, personaText(def))) : h('p', { class: 'cb-empty' }, 'This role was not found in the catalogue.');
     }
     const op = e.opinion;
-    fill(detail,
+    fill(inspector,
       h('div', { class: 'cb-detail-head' }, statusDot(e.status), h('h3', null, e.name), h('span', { class: 'cb-help' }, def?.summary ?? '')),
-      op ? h('div', { class: `cb-opinion d-${op.direction}` }, h('span', { class: `cb-chip d-${op.direction}` }, `${DIRECTION_LABEL[op.direction]} · 자체 평가 ${op.confidence}%`),
+      op ? h('div', { class: `cb-opinion d-${op.direction}` }, h('span', { class: `cb-chip d-${op.direction}` }, `${DIRECTION_LABEL[op.direction]} · self-assessed ${op.confidence}%`),
         h('p', null, op.summary)) : null,
       tablist, h('div', { id: 'cb-tabpanel', role: 'tabpanel', 'aria-labelledby': `cb-tab-${S.tab}`, class: 'cb-tabpanel' }, body));
   }
 
   function artifactView(p: ConsoleProject, e: ConsoleExpert): Node {
-    if (!e.artifacts.length) return h('p', { class: 'cb-empty' }, '아직 만든 파일이 없습니다.');
-    if (!e.artifacts.some(a => a.path === S.artifactPath)) S.artifactPath = (e.artifacts.find(a => a.path === 'out/report.md') ?? e.artifacts.find(a => a.path.startsWith('out/')) ?? e.artifacts[0]).path;
+    if (!e.artifacts.length) return h('p', { class: 'cb-empty' }, 'No files yet. Files appear as the expert writes them.');
+    if (!S.artifactPicked || !e.artifacts.some(a => a.path === S.artifactPath)) S.artifactPath = (e.artifacts.find(a => a.path === 'out/report.md') ?? e.artifacts.find(a => a.path.startsWith('out/')) ?? e.artifacts[0]).path;
     const a = e.artifacts.find(x => x.path === S.artifactPath)!;
-    const list = h('ul', { class: 'cb-files' }, ...e.artifacts.map(x => h('li', null, h('button', { type: 'button', class: `cb-filebtn${x.path === a.path ? ' is-on' : ''}`,
-      'data-fk': `file:${x.path}`, 'aria-pressed': String(x.path === a.path), onclick: () => { S.artifactPath = x.path; keepFocus(renderWork); } },
-      h('span', { class: 'cb-file-path' }, x.path), h('span', { class: 'cb-help' }, x.label)))));
+    const list = h('ul', { class: 'cb-files', 'aria-label': 'Available files' }, ...e.artifacts.map(x => h('li', null, h('button', { type: 'button', class: `cb-filebtn${x.path === a.path ? ' is-on' : ''}`,
+      'data-fk': `file:${x.path}`, 'aria-pressed': String(x.path === a.path), onclick: () => { S.artifactPath = x.path; S.artifactPicked = true; keepFocus(renderWork); } },
+      icon('file'), h('span', { class: 'cb-file-text' }, h('span', { class: 'cb-file-path' }, x.path), h('span', { class: 'cb-help' }, x.label))))));
     let view: Node;
-    if (typeof a.content === 'string') view = h('pre', { class: 'cb-file', tabindex: '0', 'aria-label': `${a.path} 내용` }, a.content || '(빈 파일)');
+    if (typeof a.content === 'string') view = h('pre', { class: 'cb-file', tabindex: '0', 'aria-label': `${a.path} contents` }, a.content || '(empty file)');
     else if (S.run?.mode === 'live' && S.run.accessToken) {
       const key = `${p.id}\n${e.expertId}\n${a.path}`;
       const c = S.artifactCache.get(key);
-      if (!c) { fetchArtifact(p.id, e.expertId, a.path, key); view = h('p', { class: 'cb-help' }, '파일을 불러오는 중…'); }
-      else if (c.state === 'loading') view = h('p', { class: 'cb-help' }, '파일을 불러오는 중…');
+      if (!c) { fetchArtifact(p.id, e.expertId, a.path, key); view = h('p', { class: 'cb-help' }, 'Loading file…'); }
+      else if (c.state === 'loading') view = h('p', { class: 'cb-help' }, 'Loading file…');
       else if (c.state === 'error') view = h('div', null, h('p', { class: 'cb-warn' }, c.text),
-        h('button', { type: 'button', class: 'cb-ghost', onclick: () => { S.artifactCache.delete(key); renderWork(); } }, '다시 불러오기'));
-      else view = h('pre', { class: 'cb-file', tabindex: '0' }, c.text || '(빈 파일)');
-    } else view = h('p', { class: 'cb-empty' }, '이 파일은 내용을 함께 보내지 않았습니다.');
+        h('button', { type: 'button', class: 'cb-ghost', onclick: () => { S.artifactCache.delete(key); renderWork(); } }, 'Load again'));
+      else view = h('pre', { class: 'cb-file', tabindex: '0', 'aria-label': `${a.path} contents` }, c.text || '(empty file)');
+    } else view = h('p', { class: 'cb-empty' }, 'This file was reported without its contents.');
     return h('div', { class: 'cb-artifacts' }, list, view);
+  }
+
+  function renderProgress(): void {
+    const p = S.run?.project;
+    const run = S.run;
+    // 진행 단계는 관찰된 상태에서만 만든다 (클릭으로 완료되는 단계 없음)
+    type StepState = 'done' | 'active' | 'pending' | 'blocked';
+    const step = (label: string, state: StepState, n = '') => h('li', { class: `cb-step is-${state}` },
+      h('span', { class: 'cb-step-mark', 'aria-hidden': 'true' }, state === 'done' ? icon('check') : null),
+      h('span', null, label, h('span', { class: 'cb-sr' }, ` — ${state}`)), h('span', { class: 'cb-step-n' }, n));
+    if (!run) {
+      fill(progressBody, h('div', { class: 'cb-progress-num' }, h('span', { class: 'cb-big' }, String(S.selected.size)), h('span', { class: 'cb-help' }, `${S.selected.size === 1 ? 'expert' : 'experts'} selected · not started`)),
+        h('ol', { class: 'cb-steps' }, step('Brief submitted', 'pending'), step('Workspaces prepared', 'pending'), step('Experts working', 'pending'), step('Opinions submitted', 'pending'), step('Synthesis ready', 'pending')));
+    } else if (!p) {
+      fill(progressBody, h('div', { class: 'cb-progress-num' }, h('span', { class: 'cb-big' }, '0'), h('span', { class: 'cb-help' }, run.phase === 'error' ? 'project not created' : 'creating project…')),
+        h('ol', { class: 'cb-steps' }, step('Brief submitted', run.phase === 'error' ? 'blocked' : 'active'), step('Workspaces prepared', 'pending'), step('Experts working', 'pending'), step('Opinions submitted', 'pending'), step('Synthesis ready', 'pending')));
+    } else {
+      const n = p.experts.length;
+      const started = p.experts.filter(e => e.status !== 'queued').length;
+      const working = p.experts.filter(e => e.status === 'running' || e.status === 'provisioning').length;
+      const done = p.experts.filter(e => TERMINAL_EXPERT.includes(e.status)).length;
+      const a = aggregate(p);
+      const terminal = TERMINAL_PROJECT.includes(p.status);
+      const stopped = p.status === 'cancelled' || p.status === 'failed';
+      const bar = h('div', { class: 'cb-bar', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': n, 'aria-valuenow': done, 'aria-label': 'Experts finished' },
+        ...p.experts.map(e => h('span', { class: `cb-bar-seg s-${e.status}`, title: `${e.name}: ${STATUS_LABEL[e.status]}` })));
+      fill(progressBody,
+        h('div', { class: 'cb-progress-num' }, h('span', { class: 'cb-big' }, `${done} / ${n}`), h('span', { class: 'cb-help' }, `experts finished · ${PROJECT_STATUS_LABEL[p.status].toLowerCase()}`)),
+        bar,
+        h('ol', { class: 'cb-steps' },
+          step('Brief submitted', 'done'),
+          step('Workspaces prepared', started === n ? 'done' : stopped ? 'blocked' : 'active', `${started}/${n}`),
+          step('Experts working', done === n ? 'done' : stopped ? 'blocked' : working ? 'active' : 'pending', working ? `${working} active` : ''),
+          step('Opinions submitted', a.valid + a.failed + a.cancelled + a.invalid === n ? (a.valid ? 'done' : 'blocked') : a.valid ? 'active' : stopped ? 'blocked' : 'pending', `${a.valid} valid`),
+          step('Synthesis ready', terminal ? (a.valid ? 'done' : 'blocked') : a.valid ? 'active' : 'pending', a.failed ? `${a.failed} failed` : '')));
+    }
+    // 지금 할 일
+    const cfg = S.boot.data?.configuration;
+    const tips: Kid[] = [];
+    const go = (label: string, v: View) => h('button', { type: 'button', class: 'cb-ghost', onclick: () => setView(v) }, label);
+    if (!run) {
+      tips.push(h('p', null, 'Check the brief with Edit project, choose up to five experts, then select Run experts.'));
+      if (S.mode === 'live' && (!cfg?.liveReady || !S.adminToken.trim())) tips.push(h('p', null, 'Live run is blocked until the server is ready and an admin token is entered.'), go('Open Settings', 'settings'));
+    } else if (run.phase === 'starting') tips.push(h('p', null, run.mode === 'demo' ? 'Starting the browser simulation…' : 'Asking the server to create one sandbox per expert…'));
+    else if (run.phase === 'error' && !p) tips.push(h('p', null, 'The project could not start. Read the error on the project card, fix it and run again. Nothing was switched to demo mode.'));
+    else if (p && active()) {
+      tips.push(h('p', null, run.mode === 'demo' ? 'The simulated experts are working. Select an expert above the stream to open its files.'
+        : 'Experts are working in separate sandboxes. Select an expert to read its files; the synthesis updates as valid opinions arrive.'));
+      if (run.error) tips.push(h('p', null, run.error));
+    } else if (p) {
+      const a = aggregate(p);
+      tips.push(h('p', null, a.valid ? 'Results are in. Read the synthesis below, check any dissent, then export a report.'
+        : 'No valid opinions to synthesise. Check the errors in the execution stream and run again.'));
+      if (a.failed || a.invalid) tips.push(h('p', null, `${plural(a.failed + a.invalid, 'expert')} did not produce a valid opinion and ${a.failed + a.invalid === 1 ? 'is' : 'are'} excluded.`));
+    }
+    fill(tipBody, ...tips);
   }
 
   function renderSynth(): void {
     const p = S.run?.project;
-    if (!p) { synth.replaceChildren(h('p', { class: 'cb-empty' }, S.run ? '프로젝트가 만들어지면 완료된 의견을 종합합니다.' : '아직 실행한 프로젝트가 없습니다.')); return; }
+    if (!p) { synth.replaceChildren(h('p', { class: 'cb-empty' }, S.run ? 'Completed opinions are synthesised once the project exists.' : 'No project has run yet.')); return; }
     const a = aggregate(p);
     const total = a.valid || 1;
     const segs = DIRECTIONS.filter(d => a.counts[d] > 0).map(d => {
@@ -809,27 +1026,57 @@ function boot(): void {
     });
     const maxB = Math.max(1, ...a.buckets);
     fill(synth,
-      h('div', { class: 'cb-tally' }, h('span', { class: 'cb-big' }, String(a.valid)), h('span', null, ` / ${a.selected} 유효 의견`)),
-      h('p', { class: 'cb-counts' }, `실패 ${a.failed} · 대기·진행 ${a.pending} · 취소 ${a.cancelled}${a.invalid ? ` · 형식 오류 ${a.invalid}` : ''} — 완료된 유효 의견만 종합합니다.`),
+      h('div', { class: 'cb-tally' }, h('span', { class: 'cb-big' }, String(a.valid)), h('span', null, ` / ${a.selected} valid opinions`)),
+      h('p', { class: 'cb-counts' }, `Failed ${a.failed} · queued/working ${a.pending} · cancelled ${a.cancelled}${a.invalid ? ` · invalid format ${a.invalid}` : ''} — only completed, valid opinions are counted.`),
       a.valid ? h('div', { class: 'cb-dist', role: 'img', 'aria-label': DIRECTIONS.map(d => `${DIRECTION_LABEL[d]} ${a.counts[d]}`).join(', ') }, ...segs) : null,
       h('ul', { class: 'cb-legend' }, ...DIRECTIONS.map(d => h('li', null, h('span', { class: `cb-sw d-${d}`, 'aria-hidden': 'true' }), `${DIRECTION_LABEL[d]} `, h('strong', null, String(a.counts[d]))))),
-      h('div', { class: 'cb-recommend' }, h('h3', null, '종합 제안'), h('p', { class: 'cb-headline' }, a.headline),
+      h('div', { class: 'cb-recommend' }, h('h3', null, 'Suggested decision'), h('p', { class: 'cb-headline' }, a.headline),
         a.actions.length ? h('ol', { class: 'cb-actions-list' }, ...a.actions.map(x => h('li', null, h('span', null, x.text),
-          h('span', { class: 'cb-help' }, `${x.names.join(', ')}${x.count > 1 ? ` · ${x.count}명 공통` : ''}`)))) : null),
-      a.disagreement ? h('div', { class: 'cb-dispute' }, h('h3', null, '이견'),
-        ...a.supportVoices.slice(0, 1).map(v => h('blockquote', { class: 'd-support' }, h('span', { class: 'cb-chip d-support' }, `지지 · ${v.name} ${v.confidence}%`), h('p', null, v.summary))),
-        ...a.concernVoices.slice(0, 1).map(v => h('blockquote', { class: 'd-concern' }, h('span', { class: 'cb-chip d-concern' }, `우려 · ${v.name} ${v.confidence}%`), h('p', null, v.summary))))
-        : a.valid > 1 ? h('p', { class: 'cb-help' }, '지지와 우려가 동시에 나온 쟁점은 아직 없습니다.') : null,
-      h('div', { class: 'cb-conf' }, h('h3', null, '자체 평가 확신도'),
-        h('p', { class: 'cb-help' }, a.meanConfidence === null ? '완료된 유효 의견이 없습니다.' : `평균 ${a.meanConfidence}% · 각 역할의 자체 평가이며 보정된 정확도가 아닙니다.`),
-        h('div', { class: 'cb-hist', role: 'img', 'aria-label': `확신도 분포 ${a.buckets.map((n, i) => `${i * 20}–${i * 20 + 20}%: ${n}`).join(', ')}` },
+          h('span', { class: 'cb-help' }, `${x.names.join(', ')}${x.count > 1 ? ` · shared by ${x.count}` : ''}`)))) : null),
+      a.disagreement ? h('div', { class: 'cb-dispute' }, h('h3', null, 'Dissent'),
+        ...a.supportVoices.slice(0, 1).map(v => h('blockquote', { class: 'd-support' }, h('span', { class: 'cb-chip d-support' }, `Support · ${v.name} ${v.confidence}%`), h('p', null, v.summary))),
+        ...a.concernVoices.slice(0, 1).map(v => h('blockquote', { class: 'd-concern' }, h('span', { class: 'cb-chip d-concern' }, `Concern · ${v.name} ${v.confidence}%`), h('p', null, v.summary))))
+        : a.valid > 1 ? h('p', { class: 'cb-help' }, 'No point has drawn both support and concern yet.') : null,
+      h('div', { class: 'cb-conf' }, h('h3', null, 'Self-assessed confidence'),
+        h('p', { class: 'cb-help' }, a.meanConfidence === null ? 'No completed, valid opinions yet.' : `Mean ${a.meanConfidence}% · each role's self-assessment, not calibrated accuracy.`),
+        h('div', { class: 'cb-hist', role: 'img', 'aria-label': `Confidence distribution ${a.buckets.map((n, i) => `${i * 20}–${i * 20 + 20}%: ${n}`).join(', ')}` },
           ...a.buckets.map((n, i) => { const col = h('span', { class: 'cb-hist-col' }, h('span', { class: 'cb-hist-n' }, n ? String(n) : ''));
-            const fill = h('span', { class: 'cb-hist-bar' }); fill.style.height = `${Math.round(n / maxB * 100)}%`; col.append(fill, h('span', { class: 'cb-hist-x' }, i === 4 ? '80–100' : `${i * 20}–${i * 20 + 19}`)); return col; }))));
-    const phrase = `${PROJECT_STATUS_LABEL[p.status]}: 유효 의견 ${a.valid}, 실패 ${a.failed}`;
+            const bar = h('span', { class: 'cb-hist-bar' }); bar.style.height = `${Math.round(n / maxB * 100)}%`; col.append(bar, h('span', { class: 'cb-hist-x' }, i === 4 ? '80–100' : `${i * 20}–${i * 20 + 19}`)); return col; }))));
+    const phrase = `${PROJECT_STATUS_LABEL[p.status]}: ${plural(a.valid, 'valid opinion')}, ${a.failed} failed`;
     if (TERMINAL_PROJECT.includes(p.status) && phrase !== lastAnnounce) { lastAnnounce = phrase; live.textContent = phrase; }
   }
 
   // ── 동작
+  function setView(v: View): void {
+    if (S.full && v !== 'home') setFull(false);
+    S.view = v; renderNav();
+    navBtns[NAV.findIndex(([k]) => k === v)].focus();
+  }
+
+  function setFull(on: boolean): void { paintFull(on); fullBtn.focus(); }
+  function paintFull(on: boolean): void {
+    S.full = on;
+    wsPanel.className = `cb-panel cb-workspace${on ? ' is-full' : ''}`;
+    root!.className = `cb-root${on ? ' is-fullscreen' : ''}`;
+    fullIcon.className = `cb-i i-${on ? 'collapse' : 'expand'}`;
+    fullIcon.setAttribute('aria-hidden', 'true');
+    fullLabel.textContent = on ? 'Exit full screen' : 'Full screen';
+    fullBtn.setAttribute('aria-pressed', String(on));
+  }
+
+  function clearView(): void {
+    const p = S.run?.project;
+    if (!p) return;
+    for (const r of streamRows(p)) S.hiddenRows.add(r.key);
+    keepFocus(renderWork);
+  }
+
+  function restoreView(): void {
+    S.hiddenRows.clear();
+    keepFocus(renderWork);
+    streamLog.scrollTop = 0;
+  }
+
   function setMode(m: Mode): void {
     if (active() || S.mode === m) return;
     S.mode = m; S.formErrors = [];
@@ -853,14 +1100,14 @@ function boot(): void {
     const f: FormInput = { title: titleIn.value.trim(), objective: objectiveIn.value.trim(), context: contextIn.value.trim(), expertIds: [...S.selected] };
     S.formErrors = validateForm(f, limits());
     if (S.mode === 'live') {
-      if (!S.boot.data?.configuration.liveReady) S.formErrors.push('서버가 실제 실행 준비가 되지 않았습니다.');
-      if (!S.adminToken.trim()) S.formErrors.push('관리자 토큰을 입력하세요.');
+      if (!S.boot.data?.configuration.liveReady) S.formErrors.push('The server is not ready for live runs.');
+      if (!S.adminToken.trim()) S.formErrors.push('Enter the admin token in Settings.');
     }
     if (S.formErrors.length) { renderControls(); return; }
     clearTimers();
     const gen = ++S.gen;
     const brief: ProjectBrief = { ...f, mode: S.mode, requestId: crypto.randomUUID() };
-    S.artifactCache.clear(); S.focusExpert = ''; S.artifactPath = ''; lastAnnounce = '';
+    S.artifactCache.clear(); S.hiddenRows.clear(); S.focusExpert = ''; S.artifactPath = ''; S.artifactPicked = false; lastAnnounce = '';
     S.run = { mode: S.mode, phase: 'starting', project: null, accessToken: '', error: '', startedAt: Date.now(), pollErrors: 0 };
     if (S.mode === 'demo') startDemo(gen, brief); else void startLive(gen, brief);
     renderAll();
@@ -884,13 +1131,13 @@ function boot(): void {
   async function errorText(res: Response): Promise<string> {
     let server = '';
     try { const j = await res.json(); if (isObj(j)) server = str(j.error, 200); } catch { /* 본문 없음 */ }
-    const base = res.status === 401 || res.status === 403 ? '관리자 또는 프로젝트 권한이 없거나 만료되었습니다. 토큰을 다시 확인하세요.'
-      : res.status === 404 ? '프로젝트를 찾을 수 없습니다.'
-        : res.status === 409 ? '같은 요청이 이미 처리 중입니다.'
-          : res.status === 413 ? '입력이 너무 깁니다. 목표나 맥락을 줄이세요.'
-            : res.status === 429 ? '요청이 너무 많습니다. 잠시 뒤 다시 시도하세요.'
-              : res.status === 503 ? '서버 실행 설정이 준비되지 않았습니다.'
-                : `서버 오류 (HTTP ${res.status})`;
+    const base = res.status === 401 || res.status === 403 ? 'Admin or project permission is missing or has expired. Check the token.'
+      : res.status === 404 ? 'The project could not be found.'
+        : res.status === 409 ? 'The same request is already being processed.'
+          : res.status === 413 ? 'The input is too long. Shorten the objective or context.'
+            : res.status === 429 ? 'Too many requests. Try again shortly.'
+              : res.status === 503 ? 'The server run configuration is not ready.'
+                : `Server error (HTTP ${res.status})`;
     return server ? `${base} — ${server}` : base;
   }
 
@@ -901,7 +1148,7 @@ function boot(): void {
         headers: { 'content-type': 'application/json', 'x-admin-token': S.adminToken.trim() }, body: JSON.stringify(brief) });
     } catch {
       if (gen !== S.gen) return;
-      S.run!.phase = 'error'; S.run!.error = '서버에 연결하지 못했습니다. 네트워크를 확인하고 다시 실행하세요. (데모로 바꾸지 않았습니다)'; renderAll(); return;
+      S.run!.phase = 'error'; S.run!.error = 'Could not reach the server. Check the network and run again. (Not switched to demo.)'; renderAll(); return;
     }
     if (gen !== S.gen) return;
     if (!res.ok) { const msg = await errorText(res); if (gen !== S.gen) return; S.run!.phase = 'error'; S.run!.error = msg; renderAll(); return; }
@@ -910,7 +1157,7 @@ function boot(): void {
     if (gen !== S.gen) return;
     const project = isObj(body) ? normalizeProject(body.project) : null;
     const token = isObj(body) ? str(body.accessToken, 2000) : '';
-    if (!project || !token) { S.run!.phase = 'error'; S.run!.error = '서버 응답 형식이 올바르지 않습니다.'; renderAll(); return; }
+    if (!project || !token) { S.run!.phase = 'error'; S.run!.error = 'The server response has an invalid format.'; renderAll(); return; }
     S.run!.project = project; S.run!.accessToken = token;
     S.run!.phase = TERMINAL_PROJECT.includes(project.status) ? 'done' : 'running';
     if (S.run!.phase === 'running') schedulePoll(gen, 1200);
@@ -930,7 +1177,7 @@ function boot(): void {
       res = await fetch(`/api/cloudbite/projects/${encodeURIComponent(run.project.id)}`, { credentials: 'same-origin', cache: 'no-store', headers: { authorization: `Bearer ${run.accessToken}` } });
     } catch {
       if (gen !== S.gen) return;
-      return pollFailed(gen, '서버 연결이 끊겼습니다.');
+      return pollFailed(gen, 'The connection to the server was lost.');
     }
     if (gen !== S.gen) return;
     if (!res.ok) {
@@ -943,7 +1190,7 @@ function boot(): void {
     try { body = await res.json(); } catch { /* 형식 오류 */ }
     if (gen !== S.gen) return;
     const p = normalizeProject(body);
-    if (!p || p.id !== run.project.id) return pollFailed(gen, '서버 응답 형식이 올바르지 않습니다.');
+    if (!p || p.id !== run.project.id) return pollFailed(gen, 'The server response has an invalid format.');
     run.pollErrors = 0; run.error = '';
     if (p.updatedAt >= run.project.updatedAt) run.project = p; // 늦게 도착한 옛 상태는 버린다
     if (TERMINAL_PROJECT.includes(run.project.status)) run.phase = 'done'; else schedulePoll(gen, 2000);
@@ -953,9 +1200,9 @@ function boot(): void {
   function pollFailed(gen: number, msg: string): void {
     const run = S.run!;
     run.pollErrors++;
-    if (run.pollErrors >= 4) { run.phase = 'error'; run.error = `${msg} 상태 확인을 멈췄습니다.`; renderAll(); appendRetry(gen); return; }
-    run.error = `${msg} 다시 확인하는 중… (${run.pollErrors}/3)`;
-    renderControls();
+    if (run.pollErrors >= 4) { run.phase = 'error'; run.error = `${msg} Stopped checking the status.`; renderAll(); appendRetry(gen); return; }
+    run.error = `${msg} Checking again… (${run.pollErrors}/3)`;
+    renderControls(); renderProgress();
     schedulePoll(gen, 1500 * 2 ** run.pollErrors);
   }
 
@@ -963,7 +1210,7 @@ function boot(): void {
     formMsg.append(h('button', { type: 'button', class: 'cb-ghost', onclick: () => {
       if (gen !== S.gen || !S.run?.project) return;
       S.run.phase = 'running'; S.run.error = ''; S.run.pollErrors = 0; renderAll(); void poll(gen);
-    } }, '상태 다시 확인'));
+    } }, 'Check status again'));
   }
 
   async function cancelRun(): Promise<void> {
@@ -982,7 +1229,7 @@ function boot(): void {
       const res = await fetch(`/api/cloudbite/projects/${encodeURIComponent(id)}/cancel`, { method: 'POST', credentials: 'same-origin', cache: 'no-store',
         headers: { authorization: `Bearer ${run.accessToken}` } });
       if (gen !== S.gen) return;
-      if (!res.ok) { const msg = await errorText(res); if (gen !== S.gen) return; run.phase = 'error'; run.error = `취소하지 못했습니다: ${msg}`; renderAll(); return; }
+      if (!res.ok) { const msg = await errorText(res); if (gen !== S.gen) return; run.phase = 'error'; run.error = `Could not stop the project: ${msg}`; renderAll(); return; }
       let body: unknown = null;
       try { body = await res.json(); } catch { /* 형식 오류 */ }
       if (gen !== S.gen) return;
@@ -992,7 +1239,7 @@ function boot(): void {
       run.phase = 'done';
     } catch {
       if (gen !== S.gen) return;
-      run.phase = 'error'; run.error = '취소 요청을 보내지 못했습니다. 다시 시도하세요.';
+      run.phase = 'error'; run.error = 'Could not send the stop request. Try again.';
     }
     renderAll();
   }
@@ -1008,7 +1255,7 @@ function boot(): void {
       S.artifactCache.set(key, { state: res.ok ? 'ok' : 'error', text });
     } catch {
       if (gen !== S.gen) return;
-      S.artifactCache.set(key, { state: 'error', text: '파일을 불러오지 못했습니다.' });
+      S.artifactCache.set(key, { state: 'error', text: 'Could not load the file.' });
     }
     keepFocus(renderWork);
   }
@@ -1018,7 +1265,7 @@ function boot(): void {
     if (!p) return;
     const demo = S.run!.mode === 'demo';
     const text = kind === 'json'
-      ? JSON.stringify({ kind: demo ? 'cloudbite-browser-demo' : 'cloudbite-live', note: demo ? '브라우저 시뮬레이션 — 실제 샌드박스·추론 아님' : '확신도는 자체 평가이며 보정된 정확도가 아님', project: p, aggregate: aggregate(p) }, null, 2)
+      ? JSON.stringify({ kind: demo ? 'cloudbite-browser-demo' : 'cloudbite-live', note: demo ? 'Browser simulation — no real sandbox or inference' : 'Confidence is self-assessed, not calibrated accuracy', project: p, aggregate: aggregate(p) }, null, 2)
       : markdownReport(p, demo);
     const url = URL.createObjectURL(new Blob([text], { type: kind === 'json' ? 'application/json' : 'text/markdown' }));
     const safe = p.brief.title.replace(/[^\p{L}\p{N}_-]+/gu, '-').slice(0, 40) || 'cloudbite';
@@ -1034,7 +1281,7 @@ function boot(): void {
       if (!res.ok) throw new Error(await errorText(res));
       S.boot = { status: 'ready', data: normalizeBootstrap(await res.json()), error: '' };
     } catch (e) {
-      S.boot = { status: 'error', data: null, error: e instanceof Error ? clip(e.message, 200) : '알 수 없는 오류' };
+      S.boot = { status: 'error', data: null, error: e instanceof Error ? clip(e.message, 200) : 'Unknown error' };
     }
     // 실행 중인 프로젝트는 그대로 둔다. 선택만 지금 카탈로그에 있는 역할로 맞추고, 아직 시작 전이면 기본 선택을 다시 잡는다
     if (!S.run) S.selected.clear();
@@ -1045,11 +1292,11 @@ function boot(): void {
   }
 
   // 첫 화면부터 전문가가 각자 작업공간에서 일하는 모습을 보인다: 내장 예시 브리프로 데모를 바로 시작한다 (명시적 데모 표시)
+  paintFull(false);
   defaultSelection();
   renderAll();
   // 카탈로그를 잠깐(최대 1.5초) 기다렸다가 시작한다. 늦으면 내장 데모 역할로 먼저 시작한다
   void Promise.race([loadBootstrap(), new Promise(r => setTimeout(r, 1500))]).then(() => { if (!S.run && S.mode === 'demo') startRun(); });
-  setInterval(() => { if (S.run?.project && active()) keepFocus(renderWork); }, 5000);
 }
 
 const CloudbiteCore = { normalizeBootstrap, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, DEMO_EXPERTS };

@@ -40,11 +40,11 @@ if (/@import|url\(\s*['"]?https?:/i.test(css)) fail('CSS 에 외부 자원이 �
 
 // 엄격 모드 함수로 감싸 전역을 더럽히지 않는다
 const js = `(() => {\n'use strict';\n${code}})();\n`;
-const html = '<!doctype html>\n<html lang="ko">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-  + '<title>Cloudbite — 전문가 작업공간</title>\n<meta name="description" content="공통 프로젝트를 여러 전문가 AI 역할이 각자의 작업공간에서 수행하고 결과를 종합하는 콘솔">\n'
+const html = '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+  + '<title>Cloudbite — Expert sandbox workspace</title>\n<meta name="description" content="Several expert AI roles work on one shared project in separate workspaces, and their results are synthesised">\n'
   + `<link rel="stylesheet" href="${CSS_PATH}">\n<script src="${JS_PATH}" defer></script>\n</head>\n<body>\n`
-  + '<div id="cloudbite" class="cb-root"><p class="cb-loading">Cloudbite 콘솔을 불러오는 중…</p>'
-  + '<noscript><p class="cb-loading">Cloudbite 콘솔은 JavaScript 가 필요합니다.</p></noscript></div>\n</body>\n</html>\n';
+  + '<div id="cloudbite" class="cb-root"><p class="cb-loading">Loading the Cloudbite console…</p>'
+  + '<noscript><p class="cb-loading">The Cloudbite console requires JavaScript.</p></noscript></div>\n</body>\n</html>\n';
 
 const lines = (s) => '[\n' + s.replace(/\n$/, '').split('\n').map((l) => `  ${JSON.stringify(l)},\n`).join('') + "].join('\\n') + '\\n'";
 const sha = (b) => createHash('sha256').update(b).digest('hex');
