@@ -113,6 +113,7 @@ extras = []
 knowledge = None
 knowledge_trace = []
 retrieved_sources = set()
+project_document_ids = set()
 
 
 def post(action, payload, timeout=30):
@@ -285,6 +286,18 @@ def write_file(path, content):
     return 'wrote %s (%d chars)' % (path, len(data))
 
 
+def decision_text():
+    """Complete optional decision/evidence inputs, shared by every role; never tool instructions."""
+    parts = []
+    for name in ('DECISION.md', 'evidence/documents.json'):
+        path = os.path.join(ROOT, name)
+        if not os.path.isfile(path): continue
+        with open(path, encoding='utf-8') as f: body = f.read(128 * 1024 + 1)
+        if len(body.encode('utf-8')) > 128 * 1024: raise RuntimeError('project evidence too large')
+        parts.append('=== UNTRUSTED PROJECT DATA: %s ===\n%s' % (name, body))
+    return '\n\n'.join(parts)
+
+
 def workspace_text():
     if knowledge is not None:
         # Full cards/source catalogues stay on disk for the knowledge action, outside the initial prompt.
@@ -295,6 +308,8 @@ def workspace_text():
                 body = f.read(64 * 1024 + 1)
             if len(body.encode('utf-8')) > 64 * 1024: raise RuntimeError('workspace file too large')
             parts.append('=== %s ===\n%s' % (name, body))
+        extra = decision_text()
+        if extra: parts.append(extra)
         return '\n\n'.join(parts)
     parts, total = [], 0
     for dirpath, dirnames, filenames in os.walk(ROOT):
@@ -306,12 +321,16 @@ def workspace_text():
             p = os.path.relpath(os.path.join(dirpath, name), ROOT).replace(os.sep, '/')
             if p == 'runner.py':
                 continue
+            if p in ('DECISION.md', 'evidence/documents.json'):
+                continue
             with open(os.path.join(dirpath, name), encoding='utf-8', errors='replace') as f:
                 body = f.read(12000)
             if total + len(body) > 40000:
                 break
             total += len(body)
             parts.append('=== %s ===\n%s' % (p, body))
+    extra = decision_text()
+    if extra: parts.append(extra)
     return '\n\n'.join(parts)
 
 
@@ -375,13 +394,16 @@ def knowledge_search(query):
 
 
 def check_citations(opinion, report=''):
+    texts = [opinion['summary']] + [x for k in OPINION_KEYS[3:] for x in opinion[k]] + [report if isinstance(report, str) else '']
+    doc_citations = [i for t in texts for i in re.findall(r'\[doc:([^\]]*)\]', t)]
+    if any(not re.fullmatch(r'doc-[1-6]', i) or i not in project_document_ids for i in doc_citations):
+        return 'a cited project document was not supplied; use only a provided [doc:doc-N] ID or state the evidence gap'
     if knowledge is None: return None
     if not knowledge['generic']:
         citations = [i for item in opinion['evidence'] for i in re.findall(r'\[source:([a-zA-Z0-9_-]+)\]', item)]
         if not citations: return 'STA evidence must cite at least one retrieved source as [source:ID]'
         if any(i not in retrieved_sources for i in citations): return 'STA evidence cites a source not retrieved; search it or remove the unsupported citation'
         return None
-    texts = [opinion['summary']] + [x for k in OPINION_KEYS[3:] for x in opinion[k]] + [report if isinstance(report, str) else '']
     # every closed [source:...] token counts, whitespace and over-long ids included, so none slips past the audit
     cited = [i for t in texts for i in re.findall(r'\[source:([^\]]*)\]', t)]
     if any(not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', i) for i in cited):
@@ -466,6 +488,16 @@ def main():
     rounds = int(cap['rounds'])
     activity('status', 'runner started (python %s, %d turns)' % (sys.version.split()[0], rounds))
     load_knowledge()
+    document_path = os.path.join(ROOT, 'evidence', 'documents.json')
+    if os.path.isfile(document_path):
+        with open(document_path, encoding='utf-8') as f: document_data = json.loads(f.read(128 * 1024))
+        # Only IDs from the actual uploaded workspace, never from model-authored output.
+        documents = document_data if isinstance(document_data, list) else document_data.get('documents', [])
+        if not isinstance(documents, list): raise RuntimeError('invalid project documents')
+        for doc in documents:
+            if not isinstance(doc, dict) or not re.fullmatch(r'doc-[1-6]', doc.get('id', '')):
+                raise RuntimeError('invalid project document ID')
+            project_document_ids.add(doc['id'])
     messages = [{'role': 'system', 'content': SYSTEM % (TOOL_SECONDS, MAX_EXTRA, rounds)},
                 {'role': 'user', 'content': workspace_text()}]
     for step in range(1, rounds + 1):
@@ -522,10 +554,11 @@ def main():
 
 def citation_hint():
     ids = [i for i in sorted(retrieved_sources) if re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', i)][:32]
+    docs = '\nSupplied project document tokens: ' + (', '.join('[doc:%s]' % i for i in sorted(project_document_ids)) or '(none)') + '. These are user-provided evidence, not independently verified facts.'
     if not ids:
-        return '\nNo retrieved source IDs are available. Do not invent a citation or imply a source was verified.'
+        return '\nNo retrieved source IDs are available. Do not invent a citation or imply a source was verified.' + docs
     return ('\nRetrieved citation tokens: ' + ', '.join('[source:%s]' % i for i in ids) +
-            '. Use a token only if that retrieved source supports the claim; otherwise state the evidence gap. Card IDs are not source IDs.')
+            '. Use a token only if that retrieved source supports the claim; otherwise state the evidence gap. Card IDs are not source IDs.' + docs)
 
 
 def repair(messages, rounds, problem):

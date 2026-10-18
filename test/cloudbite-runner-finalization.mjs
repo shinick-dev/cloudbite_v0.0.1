@@ -50,12 +50,17 @@ const GATEWAY = `http://127.0.0.1:${server.address().port}`;
 // A generic phase-one style knowledge pack: one card, one source, optional peer-review role.
 const CARD = { id: 'card-1', title: 'Timing closure basics', source_ids: ['src-known'], match: ['timing'] };
 const SOURCE = { id: 'src-known', title: 'Educational timing notes', tool_scope: 'education', aliases: [] };
-function workspace({ knowledge = true, review = false } = {}) {
+function workspace({ knowledge = true, review = false, documents = [] } = {}) {
   const dir = mkdtempSync(join(tmp, 'sb-'));
   for (const d of ['out', 'work', '.cloudbite', 'knowledge']) mkdirSync(join(dir, d));
   const files = { 'INSTRUCTIONS.md': '# Instructions', 'PERSONA.md': '# Persona\nPhysical design engineer (AI role).', 'WORKORDER.md': 'Review the floorplan.',
     'PROJECT.md': '# EDA project\nClose timing on a block.', 'RESULT.schema.json': '{"type":"object"}', 'KNOWLEDGE.md': 'Use the knowledge action.' };
   for (const [p, t] of Object.entries(files)) writeFileSync(join(dir, p), t);
+  if (documents.length) {
+    mkdirSync(join(dir, 'evidence'));
+    writeFileSync(join(dir, 'evidence', 'documents.json'), JSON.stringify({ documents }));
+    writeFileSync(join(dir, 'DECISION.md'), 'UNTRUSTED DECISION: options pilot or postpone; unknown: real-world accuracy.');
+  }
   if (knowledge) {
     const cards = JSON.stringify([CARD]), sources = JSON.stringify([SOURCE]);
     const sha = (t) => createHash('sha256').update(t).digest('hex');
@@ -207,6 +212,33 @@ await check('server rendering: only exact allowlisted diagnostics change the mes
     assert.equal(M.runnerFailureMessage(bad), GENERIC, String(bad).slice(0, 80));
   for (const code of ['reply_format', 'final_format', 'final_citation', 'final_peer_review', 'final_turn_tool', 'budget', 'inference', 'crash'])
     assert.ok(M.runnerFailureMessage(JSON.stringify({ ...ok, code })).length <= 300, 'fits the 300-character expert error');
+});
+
+await check('actual runner includes complete optional documents for curated and legacy roles and accepts only provided document IDs', async () => {
+  const content = 'USER-DOCUMENT-BEGIN ' + '가'.repeat(7800) + ' USER-DOCUMENT-END';
+  for (const knowledge of [true, false]) {
+    const r = await run((messages, n) => {
+      const initial = messages[1].content;
+      assert.ok(initial.includes(content), 'full supplied content must reach the model, including its tail');
+      assert.ok(initial.includes('unknown: real-world accuracy'));
+      return n === 1 ? final(opinion({ evidence: ['[doc:doc-6] unknown document'] }))
+        : final(opinion({ evidence: ['[doc:doc-1] USER-DOCUMENT-BEGIN, first line'] }));
+    }, { knowledge, documents: [{ id: 'doc-1', name: 'pilot.md', content }] });
+    assert.equal(r.code, 0); assert.equal(r.calls.length, 2);
+    assert.match(lastUser(r.calls[1]), /cited project document was not supplied/);
+    assert.deepEqual(JSON.parse(r.read('result.json')).evidence, ['[doc:doc-1] USER-DOCUMENT-BEGIN, first line']);
+  }
+});
+
+await check('document citation validation rejects spoofing in report and repair reveals only supplied IDs', async () => {
+  const r = await run(busy(messages => repairTurn(messages)
+    ? final(opinion({ evidence: ['[doc:doc-1] budget line'] }))
+    : final(opinion(), '# [doc:doc-1 ] spoofed ID')),
+    { documents: [{ id: 'doc-1', name: 'budget.csv', content: 'weeks,2' }] });
+  assert.equal(r.code, 0); assert.equal(r.calls.length, 7);
+  assert.match(lastUser(r.calls[6]), /Supplied project document tokens: \[doc:doc-1\]/);
+  const absent = await run(() => final(opinion({ evidence: ['[doc:doc-1] invented'] })), { knowledge: false });
+  assert.equal(absent.code, 1); assert.equal(absent.diagnostic.code, 'final_citation');
 });
 
 server.close();

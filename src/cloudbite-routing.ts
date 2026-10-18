@@ -5,6 +5,7 @@ import { CLOUDBITE_POOL } from './cloudbite-pool';
 import { boundedText } from './cloudbite-inference';
 import { CB_MAX_EXPERTS } from './cloudbite-config';
 import { CATALOGUE_MAX_ROLES } from './cloudbite-catalogue-limits';
+import { validateDecisionData } from './cloudbite-decision';
 import { HARNESS_VERSION, harnessAssessmentRequest, parseHarnessAssessment, harnessReviewRequest, parseHarnessReview, composeHarnessTeam, type HarnessCandidate } from './cloudbite-routing-harness';
 
 export const JEV_MODEL = 'jev-1.13.0';
@@ -26,12 +27,14 @@ export function routingReady(key: unknown): boolean { return typeof key === 'str
 export function routingQuery(raw: unknown): CloudbiteRoutingQuery | RoutingFailure {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return fail(400, 'routing query must be an object');
   const q = raw as Record<string, unknown>;
-  if (Object.keys(q).some(k => !['title', 'objective', 'context', 'requestId'].includes(k))) return fail(400, 'unknown routing query field');
+  if (Object.keys(q).some(k => !['title', 'objective', 'context', 'requestId', 'decision', 'documents'].includes(k))) return fail(400, 'unknown routing query field');
   if (typeof q.title !== 'string' || !q.title.trim() || q.title.length > 120 || /[\u0000-\u001f\u007f]/.test(q.title)) return fail(400, 'title must be 1-120 characters');
   if (typeof q.objective !== 'string' || !q.objective.trim() || q.objective.length > 2000) return fail(400, 'objective must be 1-2000 characters');
   if (typeof q.context !== 'string' || q.context.length > 8000) return fail(400, 'context must be at most 8000 characters');
   if (typeof q.requestId !== 'string' || !ID.test(q.requestId)) return fail(400, 'invalid routing requestId');
-  return { title: q.title, objective: q.objective, context: q.context, requestId: q.requestId };
+  const data = validateDecisionData(q);
+  if ('invalid' in data) return fail(400, data.invalid);
+  return { title: q.title, objective: q.objective, context: q.context, requestId: q.requestId, ...data };
 }
 
 /** Every runnable role, never a silent prefix. A catalogue above CATALOGUE_MAX_ROLES is refused by askJev instead. */
@@ -45,6 +48,7 @@ async function hash(text: string) {
 }
 export async function routingQueryHash(query: CloudbiteRoutingQuery, experts: readonly ExpertDefinition[], max: number) {
   return hash(JSON.stringify({ title: query.title, objective: query.objective, context: query.context, max,
+    ...(query.decision ? { decision: query.decision } : {}), ...(query.documents ? { documents: query.documents } : {}),
     policy: ROUTING_POLICY, harness: HARNESS_VERSION, model: JEV_MODEL, candidates: routingCandidates(experts) }));
 }
 

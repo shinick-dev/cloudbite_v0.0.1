@@ -44,7 +44,10 @@ export interface ProjectCrossReview {
   /** No sandbox is created for this bounded server-side second pass. */
   execution: 'server-nosana';
 }
-export interface CloudbiteRoutingQuery { title: string; objective: string; context: string; requestId: string }
+export interface CloudbiteRoutingQuery {
+  title: string; objective: string; context: string; requestId: string;
+  decision?: DecisionFrame; documents?: ProjectDocument[];
+}
 /** Team composition judgments, not answer correctness or a completed peer review. */
 export interface CloudbiteRoutingHarness {
   version: 'project-team/v1';
