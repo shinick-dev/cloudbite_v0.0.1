@@ -87,7 +87,7 @@ if (py) for (const f of ['install.py', 'start-desktop.py', 'probe-tools.py', 'in
   ok(r.status === 0, `${f} parses`);
 }
 if (py) {
-  const r = spawnSync(py, ['-I', 'test/cloudbite-computer-install.py'], { encoding: 'utf8' });
+  const r = spawnSync(py, ['-I', '-B', 'test/cloudbite-computer-install.py'], { encoding: 'utf8' });
   ok(r.status === 0, `install.py unit checks pass\n${r.stderr}`);
 }
 console.log(`cloudbite-computer-tools: ${checks} checks passed`);
