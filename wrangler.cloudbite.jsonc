@@ -6,6 +6,8 @@
   // Secrets (wrangler secret put … -c wrangler.cloudbite.jsonc): MASTER_KEY, SETUP_TOKEN (first admin key registration),
   //   CLOUDBITE_DAYTONA_API_KEY, CLOUDBITE_NOSANA_API_KEY. Missing settings are reported by name in /api/cloudbite/bootstrap.
   "name": "cloudbite-v001",
+  "account_id": "96aee9d5fb56f2efc3d90e147a67f558",
+  "assets": { "directory": "./deliverables" },
   "main": "src/index.ts",
   "build": { "command": "node tools/build-lab-renderer.mjs --check && node tools/build-lab-dom-capture.mjs --check && node tools/build-lab-demo-broadcast.mjs --check && node tools/build-cloudbite-console.mjs --check && node tools/build-cloudbite-access.mjs --check" },
   "compatibility_date": "2026-09-01",
@@ -14,19 +16,19 @@
   "workers_dev": true,
   "routes": [],
   "vars": {
-    // Replace SUBDOMAIN with this account's workers.dev subdomain before any deploy.
+    // Production workers.dev origin, verified against the authenticated account subdomain.
     // WebAuthn RP is this workers.dev host; admin keys are registered against this Worker's own State (not gw-shinick's).
-    "RP_ID": "cloudbite-v001.SUBDOMAIN.workers.dev",
-    "ORIGIN": "https://cloudbite-v001.SUBDOMAIN.workers.dev",
+    "RP_ID": "cloudbite-v001.ai-gongbu.workers.dev",
+    "ORIGIN": "https://cloudbite-v001.ai-gongbu.workers.dev",
     // Legacy lab hosts are disabled here: a non-routable placeholder origin and no seat domain.
     "LAB_ORIGIN": "https://lab.cloudbite.invalid",
     // Gateway the sandbox runner calls (/p/_cloudbite/worker/…). Same workers.dev host.
-    "CLOUDBITE_GATEWAY_URL": "https://cloudbite-v001.SUBDOMAIN.workers.dev",
+    "CLOUDBITE_GATEWAY_URL": "https://cloudbite-v001.ai-gongbu.workers.dev",
     // OpenAI-compatible Nosana inference endpoint and model (no key here — secret CLOUDBITE_NOSANA_API_KEY).
-    "CLOUDBITE_NOSANA_BASE_URL": "",
-    "CLOUDBITE_NOSANA_MODEL": "",
+    "CLOUDBITE_NOSANA_BASE_URL": "https://3H6pZ6D8jMrAHTzJ9njYcTMzJYD2z3FneH4YXhpSKnW2.node.k8s.prd.nos.ci/v1",
+    "CLOUDBITE_NOSANA_MODEL": "DeepSeek-R1-Distill-Qwen-1.5B",
     // Daytona API for Cloudbite's own organization/key (secret CLOUDBITE_DAYTONA_API_KEY). Optional snapshot with python3.
-    "CLOUDBITE_DAYTONA_API_URL": "",
+    "CLOUDBITE_DAYTONA_API_URL": "https://app.daytona.io/api",
     "CLOUDBITE_DAYTONA_SNAPSHOT": ""
   },
   "durable_objects": {
@@ -36,7 +38,7 @@
     ]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["State", "CloudbiteProject"] }],
-  "observability": { "enabled": true },
+  "observability": { "enabled": true, "traces": { "enabled": true, "head_sampling_rate": 1 } },
   "env": {
     "dev": {
       "vars": {
