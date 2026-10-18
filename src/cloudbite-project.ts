@@ -254,6 +254,8 @@ export class CloudbiteProject extends DurableObject<Env> {
       const p = await tx.get<ProjectRecord>('project');
       if (!p?.history || (!owner && p.history.actor !== actor) || p.purgeAt <= this.clock()) return fail(404, 'history record not found');
       if (!TERMINAL_PROJECT.has(p.status)) return fail(409, 'stop the running project before deleting its history');
+      const hadRouting = !!p.routing;
+      delete p.routing;
       if (!p.history.deleted) {
         p.history.deleted = true; p.history.revision++; p.history.nextAt = 0;
         p.brief.title = '[deleted]'; p.brief.objective = '[deleted]'; p.brief.context = ''; p.feedback = [];
@@ -261,7 +263,7 @@ export class CloudbiteProject extends DurableObject<Env> {
         const experts = [...records.values()];
         for (const e of experts) { delete e.run.opinion; if (e.run.error) e.run.error = '[deleted]'; e.run.activity = []; e.run.artifacts = []; }
         await tx.put({ project: p, ...Object.fromEntries(experts.map(e => [`expert:${e.run.id}`, e])) });
-      }
+      } else if (hadRouting) await tx.put('project', p);
       return null;
     });
     if (bad) return bad;

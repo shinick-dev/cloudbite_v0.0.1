@@ -559,6 +559,7 @@ await check('Jev routing API: authenticated, actor-bound, cached and authoritati
   const changed = await call(w, 'POST', '/api/cloudbite/projects', { body: { ...create, objective: 'Different question' }, headers: admin });
   assert.equal(changed.status, 409);
   assert.equal((await call(w, 'POST', '/api/cloudbite/projects', { body: { ...create, expertIds: ['agency-product-manager'] }, headers: admin })).status, 409);
+  w.env.CLOUDBITE_HISTORY = { getByName: () => ({ upsert: async () => ({ ok: true }) }) };
   const created = await call(w, 'POST', '/api/cloudbite/projects', { body: create, headers: admin });
   assert.equal(created.status, 201, created.text); assert.deepEqual(created.j.project.brief.expertIds, ['cb-role-022']);
   assert.equal(created.j.project.routing.queryHash, routed.j.queryHash); assert.equal(created.j.project.routing.model, 'jev-1.13.0');
@@ -567,6 +568,9 @@ await check('Jev routing API: authenticated, actor-bound, cached and authoritati
   assert.equal(w.posts, 0); assert.equal(w.nosana.length, 0, 'browser demo remains simulated after actual Jev routing');
   const boot = await call(w, 'GET', '/api/cloudbite/bootstrap');
   assert.equal(boot.j.configuration.routing.ready, true); assert.ok(!JSON.stringify(boot.j).includes('TYPESAFE-TEST-KEY'));
+  assert.equal((await call(w, 'POST', `/api/cloudbite/projects/${created.j.project.id}/cancel`, { body: {}, headers: { origin: w.env.ORIGIN, authorization: 'Bearer ' + created.j.accessToken } })).status, 200);
+  assert.equal((await call(w, 'DELETE', `/api/cloudbite/history/${created.j.project.id}`, { headers: admin })).status, 200);
+  assert.equal((await w.ns.getByName(created.j.project.id).storage.get('project')).routing, undefined, 'history deletion also erases the new routing metadata');
 });
 
 await check('Jev routing API: missing key, provider error and direct auto-create do not start jobs or leak keys', async () => {
