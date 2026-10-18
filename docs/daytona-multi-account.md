@@ -1,6 +1,6 @@
-# Cloudbite — optional second Daytona account
+# Cloudbite — optional additional Daytona accounts
 
-Cloudbite can place expert sandboxes in two different Daytona organizations so that both organizations'
+Cloudbite can place expert sandboxes in up to three different Daytona organizations so that the organizations'
 capacity pools are used. This is placement only: it does **not** raise Cloudbite's own limits (3 experts
 provisioning/running at once per project, 5 experts per project, 2 live projects), and it makes no claim about
 provider quota or throughput. Each organization's own Daytona limits still apply to the sandboxes placed in it.
@@ -15,6 +15,9 @@ provider quota or throughput. Each organization's own Daytona limits still apply
 | `CLOUDBITE_DAYTONA_SECONDARY_API_KEY` | no | Secondary account key (Worker secret). Must be a key of a **different** account. |
 | `CLOUDBITE_DAYTONA_SECONDARY_API_URL` | no | Secondary API URL. Defaults to the primary URL. |
 | `CLOUDBITE_DAYTONA_SECONDARY_SNAPSHOT` | no | Secondary snapshot. Defaults to **no snapshot** (snapshots are organization-scoped). |
+| `CLOUDBITE_DAYTONA_TERTIARY_API_KEY` | no | Third organization key (Worker secret); must differ from both existing keys. |
+| `CLOUDBITE_DAYTONA_TERTIARY_API_URL` | no | Third API URL. Defaults to the primary URL. |
+| `CLOUDBITE_DAYTONA_TERTIARY_SNAPSHOT` | no | Third snapshot. Defaults to **no snapshot**. See [tertiary setup](daytona-tertiary-setup.md). |
 
 - No secondary setting at all: single-account behavior, every expert on the primary account (as before).
 - Fail closed: any secondary URL/snapshot without a key, a key equal to the primary key, an invalid secondary URL or
@@ -24,7 +27,7 @@ provider quota or throughput. Each organization's own Daytona limits still apply
 
 ## Placement and pinning (`src/cloudbite-project.ts`)
 
-- Account ids are internal and stable: `primary`, `secondary`.
+- Account ids are internal and stable: `primary`, `secondary`, `tertiary`. An omitted optional slot is not renumbered.
 - When an expert is admitted (queued → creating), it is assigned an account and this is persisted **before** the
   first provider create: `accounts[(projectOffset + runIndex) % accounts.length]`, where `projectOffset` comes from
   the project id. Deterministic and balanced; no module-level or global round-robin state.

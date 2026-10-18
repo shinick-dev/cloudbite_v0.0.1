@@ -32,12 +32,12 @@ export const CB_CLEANUP_MAX_TRIES = 8;
 export const CB_WORKDIR = '/home/daytona/cloudbite';
 
 /** Stable internal Daytona account ids. Never derived from or exposing a key. */
-export type CbAccountId = 'primary' | 'secondary';
+export type CbAccountId = 'primary' | 'secondary' | 'tertiary';
 export interface CbDaytonaAccount { id: CbAccountId; api: string; key: string; snapshot?: string }
 
 export interface CloudbiteConfig {
   daytona: { api: string; key: string; snapshot?: string };   // the primary account (unchanged single-account shape)
-  daytonaAccounts: CbDaytonaAccount[];                        // primary first; secondary only when fully configured
+  daytonaAccounts: CbDaytonaAccount[];                        // stable primary/secondary/tertiary slots; optional ones require a key
   nosana: { base: string; key: string; model: string };
   gateway: string;
 }
@@ -75,6 +75,13 @@ export function cloudbiteMissing(env: Env, catalogueSize: number): string[] {
     if (u2 && !httpsUrl(u2, local)) missing.push('CLOUDBITE_DAYTONA_SECONDARY_API_URL');
     if (s2 && !SNAPSHOT.test(s2)) missing.push('CLOUDBITE_DAYTONA_SECONDARY_SNAPSHOT (invalid)');
   }
+  const k3 = env.CLOUDBITE_DAYTONA_TERTIARY_API_KEY, u3 = env.CLOUDBITE_DAYTONA_TERTIARY_API_URL, s3 = env.CLOUDBITE_DAYTONA_TERTIARY_SNAPSHOT;
+  if (k3 || u3 || s3) {
+    if (!k3) missing.push('CLOUDBITE_DAYTONA_TERTIARY_API_KEY');
+    else if (k3 === env.CLOUDBITE_DAYTONA_API_KEY || k3 === k2) missing.push('CLOUDBITE_DAYTONA_TERTIARY_API_KEY (must be a different account key)');
+    if (u3 && !httpsUrl(u3, local)) missing.push('CLOUDBITE_DAYTONA_TERTIARY_API_URL');
+    if (s3 && !SNAPSHOT.test(s3)) missing.push('CLOUDBITE_DAYTONA_TERTIARY_SNAPSHOT (invalid)');
+  }
   if (catalogueSize === 0) missing.push('expert catalogue (src/cloudbite-personas.ts)');
   return missing;
 }
@@ -89,6 +96,11 @@ export function cloudbiteConfig(env: Env): CloudbiteConfig | null {
     id: 'secondary', key: env.CLOUDBITE_DAYTONA_SECONDARY_API_KEY,
     api: env.CLOUDBITE_DAYTONA_SECONDARY_API_URL ? httpsUrl(env.CLOUDBITE_DAYTONA_SECONDARY_API_URL, local)! : daytona.api,
     snapshot: env.CLOUDBITE_DAYTONA_SECONDARY_SNAPSHOT || undefined, // snapshots are organization-scoped: never inherit the primary's
+  });
+  if (env.CLOUDBITE_DAYTONA_TERTIARY_API_KEY) accounts.push({
+    id: 'tertiary', key: env.CLOUDBITE_DAYTONA_TERTIARY_API_KEY,
+    api: env.CLOUDBITE_DAYTONA_TERTIARY_API_URL ? httpsUrl(env.CLOUDBITE_DAYTONA_TERTIARY_API_URL, local)! : daytona.api,
+    snapshot: env.CLOUDBITE_DAYTONA_TERTIARY_SNAPSHOT || undefined,
   });
   return {
     daytona, daytonaAccounts: accounts,

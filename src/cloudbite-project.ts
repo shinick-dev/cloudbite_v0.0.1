@@ -14,7 +14,7 @@
 // A claim id is persisted before external I/O; results are applied only if the same claim is still current and
 // the project is still running, so cancellation and lost/duplicate ticks cannot resurrect or double-apply work.
 // Sandbox creation records a unique label first: a lost create response is resolved by label lookup, never by a blind retry.
-// Each expert is pinned to one Daytona account (primary/secondary) at admission, before its first create; every later
+// Each expert is pinned to one Daytona account (primary/secondary/tertiary) at admission, before its first create; every later
 // call and cleanup for it uses that account only. Records without an account are legacy and resolve to primary.
 import { DurableObject } from 'cloudflare:workers';
 import type { Env } from './state';
