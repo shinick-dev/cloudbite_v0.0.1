@@ -651,5 +651,72 @@ await check('per-slot confirm/release interleavings: each acts only on its own i
   assert.equal(rec(w, v.id).projects.find((b) => b.id === C)?.holds, 1);
 });
 
+await check('auto-approval policy: owner-only, exact Origin, strict bounded boolean input; defaults OFF', async () => {
+  const w = world(), v = await visitor(w);
+  const policy = (method, body, headers = owner(), raw) => call(w, method, '/api/cloudbite/access/policy', { body, headers, raw });
+  assert.deepEqual((await policy('GET')).j, { autoApprove: false });
+  for (const headers of [{}, { cookie: v.cookie }, owner('wrong')]) {
+    assert.equal((await policy('GET', undefined, headers)).status, 401);
+    assert.equal((await policy('POST', { autoApprove: true }, { ...ORIGIN, ...headers })).status, 401);
+  }
+  assert.equal((await policy('POST', { autoApprove: true }, { 'x-admin-token': OPERATOR })).status, 403);
+  assert.equal((await policy('POST', { autoApprove: true }, { ...owner(), origin: 'https://evil.test' })).status, 403);
+  for (const body of [{}, { autoApprove: 'true' }, { autoApprove: 1 }, { autoApprove: null }, { autoApprove: true, extra: true }, []]) {
+    assert.equal((await policy('POST', body)).status, 400);
+  }
+  assert.equal((await policy('POST', { autoApprove: true }, { ...owner(), 'content-type': 'text/plain' })).status, 415);
+  assert.equal((await policy('POST', {}, owner(), '{bad')).status, 400);
+  assert.equal((await policy('POST', { autoApprove: true }, owner(), ' '.repeat(300))).status, 413);
+  assert.equal((await policy('DELETE')).status, 405);
+  assert.deepEqual((await policy('POST', { autoApprove: true }, owner(ADMIN))).j, { autoApprove: true });
+  assert.equal((await call(w, 'GET', '/api/cloudbite/access/requests', { headers: owner() })).j.autoApprove, true);
+  assert.equal((await call(world({ access: false }), 'GET', '/api/cloudbite/access/policy', { headers: owner() })).status, 503);
+});
+
+await check('auto-approval: persists across DO reconstruction; new requests only, no provider calls; OFF stops future approvals', async () => {
+  const w = world(), old = await visitor(w, '203.0.113.1', 'Already waiting');
+  await inboxOf(w).setPolicy(true);
+  const box = inboxOf(w);
+  const restored = new M.CloudbiteAccess({ storage: box.storage, id: { name: 'hacksprint-2026-10-18' } }, w.env);
+  restored.clock = () => w.now;
+  restored.storage = box.storage;
+  w.access.objects.set('hacksprint-2026-10-18', restored);
+  assert.deepEqual(await restored.policy(), { autoApprove: true });
+  const beforeFetch = fetches;
+  const fresh = await visitor(w, '203.0.113.2', 'Auto approved');
+  assert.equal(fresh.res.j.request.status, 'approved'); assert.equal(fresh.res.j.canCreate, true);
+  assert.equal(fresh.res.j.request.expiresAt - fresh.res.j.request.createdAt, HOUR);
+  assert.equal(fresh.res.j.request.maxProjects, 10); assert.equal(fresh.res.j.request.maxExperts, 5);
+  noCredentialIn(fresh.res, fresh.cookie);
+  assert.equal((await status(w, old.cookie)).j.request.status, 'pending', 'old requests unchanged');
+  const repeat = await call(w, 'POST', '/api/cloudbite/access/requests', { body: { name: 'repeat', purpose: 'repeat' }, headers: { ...ORIGIN, cookie: old.cookie } });
+  assert.equal(repeat.status, 200); assert.equal(repeat.j.request.status, 'pending', 'a retry cannot promote an existing request');
+  assert.equal(fetches, beforeFetch, 'approval allocates no sandbox and calls no provider');
+  await restored.setPolicy(false);
+  assert.equal((await visitor(w, '203.0.113.3')).res.j.request.status, 'pending');
+  assert.equal((await status(w, fresh.cookie)).j.canCreate, true, 'OFF keeps previously approved sessions');
+  await act(w, fresh.id, 'revoke');
+  assert.equal((await status(w, fresh.cookie)).j.canCreate, false, 'manual revoke still works');
+  w.now += HOUR;
+  assert.equal((await status(w, old.cookie)).j.request.status, 'expired');
+});
+
+await check('auto-approval and submit share a serial order; rate, quota and expert limits remain enforced', async () => {
+  const w = world(), box = inboxOf(w);
+  const [on, a, off, b] = await Promise.all([
+    box.setPolicy(true), box.submit(null, sha('a'), sha('source'), 'A', 'try'),
+    box.setPolicy(false), box.submit(null, sha('b'), sha('source'), 'B', 'try'),
+  ]);
+  assert.equal(on.autoApprove, true); assert.equal(a.session.request.status, 'approved');
+  assert.equal(off.autoApprove, false); assert.equal(b.session.request.status, 'pending');
+  assert.equal((await box.reserve(sha('a'), sha('invalid'), 6)).status, 403);
+  const slots = await Promise.all(Array.from({ length: 11 }, (_, i) => box.reserve(sha('a'), sha('slot-' + i), 1)));
+  assert.equal(slots.filter(x => !x.status).length, 10); assert.equal(slots.at(-1).status, 409);
+  await box.setPolicy(true);
+  for (let i = 0; i < 118; i++) assert.equal((await box.submit(null, sha('rate-' + i), sha('source'), 'N', 'try')).reused, false);
+  assert.equal((await box.submit(null, sha('over'), sha('source'), 'N', 'try')).status, 429);
+  assert.equal((await box.setPolicy('yes')).status, 400);
+});
+
 rmSync(tmp, { recursive: true, force: true });
 console.log(`cloudbite-access: ${count} checks passed`);

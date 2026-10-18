@@ -17,7 +17,10 @@ Routes (all on the Cloudbite Worker ORIGIN)
                                                    Response: CloudbiteAccessSession.
   GET  /api/cloudbite/access/status                the cookie's CloudbiteAccessSession, or {request:null,canCreate:false}.
                                                    Runs the failed-run refund check first (below).
-  GET  /api/cloudbite/access/requests              owner cookie or x-admin-token. {requests: [...]} newest first, max 100.
+  GET  /api/cloudbite/access/requests              owner cookie or x-admin-token. {requests: [...],autoApprove:boolean} newest first, max 100.
+  GET  /api/cloudbite/access/policy                owner only. {autoApprove:boolean}; missing stored policy = false.
+  POST /api/cloudbite/access/policy                owner only, exact Origin, bounded JSON exactly {autoApprove:boolean}.
+                                                   Stores event policy; new requests only. No change to existing pending/denied/revoked/expired requests.
   POST /api/cloudbite/access/requests/<id>/approve owner only, exact Origin, JSON body exactly {}.
   POST /api/cloudbite/access/requests/<id>/deny    "
   POST /api/cloudbite/access/requests/<id>/revoke  "    Each returns CloudbiteAccessRequest.
@@ -40,6 +43,11 @@ Visitor credential
   Request ids authenticate nothing: status/bootstrap/create look up the cookie hash only.
 
 Lifecycle (server clock)
+  Auto-approval defaults OFF. When ON, new submissions start approved for 1 hour with the same 10-project/5-expert
+  limits. Browser close, owner logout and deployment do not reset it: explicitly switch OFF to stop auto-approving
+  new requests. Existing approved sessions remain valid until expiry or manual revoke. Existing pending requests
+  are still manual; retrying their submission does not promote them. Rate/capacity checks remain enforced.
+  Approval alone never starts an expert, sandbox or paid provider call.
   pending  -> approved   approve; grant lasts 1 h from approval (expiresAt updated)
   pending  -> denied     deny
   approved -> revoked    revoke
@@ -56,6 +64,7 @@ Storage: one CloudbiteAccess DO, getByName('hacksprint-2026-10-18'), SQLite-back
                  quota therefore reads maxProjects 10, usedProjects 1 and may create nine more.
   cred:<sha256>  -> id
   rate:<sha256>  creation times within the last hour for a hashed source
+  policy:autoApprove boolean, stored in the same serial queue as request creation (default false)
   Every method runs in one in-object serial queue and does storage I/O only; related keys are written in one put().
   Bounds: 120 new requests per source per hour (source = SHA-256 of MASTER_KEY + cf-connecting-ip; the raw address is
   never stored; attendees at a venue often share one NAT address, so the rate is sized for a room), 100 pending,

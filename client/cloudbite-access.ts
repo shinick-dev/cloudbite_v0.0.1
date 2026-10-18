@@ -147,6 +147,15 @@ const EN = {
   operatorMalformed: 'The operator link was malformed. It was removed from the address bar; ask for a new link.',
   operatorTokenMalformed: 'The temporary Cloudbite operator token is malformed. Clear it and use a new link.',
   inboxH: 'Inbox',
+  autoH: 'Auto-approval',
+  autoHelp: 'When ON, new requests are approved immediately, even while this page is closed or you are logged out. Stays ON until you switch it OFF. Existing requests keep their status. Sessions last 1 hour, with up to 10 projects and 5 experts per project. Experts run only when the visitor starts them.',
+  autoOn: 'ON · New requests are approved automatically.',
+  autoOff: 'OFF · New requests need your approval.',
+  autoUnknown: 'Load the inbox to check the current mode.',
+  autoSaving: 'Saving…',
+  autoFailed: 'Could not save the approval mode. Refresh to check the server state.',
+  autoSavedOn: 'Auto-approval is ON for new requests.',
+  autoSavedOff: 'Auto-approval is OFF. New requests need your approval.',
   refresh: 'Refresh',
   listAria: 'Access requests',
   stateSignIn: 'Sign in to open the inbox.',
@@ -291,6 +300,15 @@ const KO: Dict = {
   operatorMalformed: '운영자 링크 형식이 올바르지 않습니다. 주소창에서 지웠으니 새 링크를 요청하세요.',
   operatorTokenMalformed: '임시 Cloudbite 운영자 토큰 형식이 올바르지 않습니다. 지우고 새 링크를 사용하세요.',
   inboxH: '요청함',
+  autoH: '자동승인',
+  autoHelp: 'ON이면 페이지를 닫거나 로그아웃해도 새 요청을 즉시 승인합니다. 직접 OFF로 바꿀 때까지 유지됩니다. 기존 요청 상태는 바뀌지 않습니다. 체험은 1시간·최대 10회·회당 전문가 5명이며, 전문가 실행은 방문자가 직접 시작합니다.',
+  autoOn: 'ON · 새 요청을 자동으로 승인합니다.',
+  autoOff: 'OFF · 새 요청은 직접 승인해야 합니다.',
+  autoUnknown: '요청함을 불러오면 현재 모드를 확인할 수 있습니다.',
+  autoSaving: '저장 중…',
+  autoFailed: '승인 모드를 저장하지 못했습니다. 새로고침으로 서버 상태를 확인하세요.',
+  autoSavedOn: '새 요청에 대한 자동승인을 켰습니다.',
+  autoSavedOff: '자동승인을 껐습니다. 새 요청은 직접 승인해야 합니다.',
   refresh: '새로 고침',
   listAria: '접근 요청 목록',
   stateSignIn: '로그인하면 요청함이 열립니다.',
@@ -766,6 +784,8 @@ function ownerPage(root: HTMLElement): void {
     notice: null as Msg | null, noticeKind: 'ok' as 'ok' | 'warn',
     busy: new Set<string>(),
     loadedAt: 0,
+    autoApprove: null as boolean | null,
+    policyBusy: false,
   };
   // gen: 자격 증명이 바뀔 때마다 올린다 — 그 전에 떠난 응답은 화면·상태를 바꾸지 못한다. authSeq: 로그인 상태 확인·로그인·로그아웃 순서
   let gen = 0, loadSeq = 0, authSeq = 0, timer = 0, loading = false;
@@ -809,12 +829,18 @@ function ownerPage(root: HTMLElement): void {
   const state = h('div', { class: 'ax-state', role: 'status' });
   const msg = h('div', { class: 'ax-msg', 'aria-live': 'polite' });
   const list = ta(h('ul', { class: 'ax-list' }), 'aria-label', () => T().listAria);
+  const policyState = h('p', { class: 'ax-help', role: 'status' });
+  const policyBtn = ta(h('button', { type: 'button', class: 'ax-button', role: 'switch', onclick: () => { void togglePolicy(); } }), 'aria-label', () => T().autoH);
+  const policyPanel = h('section', { class: 'ax-panel ax-policy', 'aria-labelledby': 'ax-policy-h' },
+    h('div', { class: 'ax-inbox-head' }, tx(h('h2', { id: 'ax-policy-h' }), () => T().autoH), policyBtn),
+    policyState, tx(h('p', { class: 'ax-help' }), () => T().autoHelp));
 
   root.replaceChildren(header(() => T().ownerSub, () => render()),
     h('main', { class: 'ax-main' },
       tx(h('h1'), () => T().ownerH1),
       tx(h('p', { class: 'ax-lead' }), () => T().ownerLead),
       authPanel,
+      policyPanel,
       h('section', { class: 'ax-panel', 'aria-labelledby': 'ax-inbox-h' },
         h('div', { class: 'ax-inbox-head' }, tx(h('h2', { id: 'ax-inbox-h' }), () => T().inboxH), state, refreshBtn), msg, list),
       advanced,
@@ -839,6 +865,7 @@ function ownerPage(root: HTMLElement): void {
   function resetInbox(): void {
     gen++; loadSeq++; stopPoll(); loading = false;
     O.rows = []; O.phase = 'idle'; O.error = null; O.notice = null; O.busy.clear(); O.loadedAt = 0;
+    O.autoApprove = null; O.policyBusy = false;
   }
   /** 쿠키 세션이 서버에서 끝났다 (다른 탭 로그아웃·만료) */
   function signedOut(): void {
@@ -998,7 +1025,27 @@ function ownerPage(root: HTMLElement): void {
     const raw = isObj(r.body) && Array.isArray(r.body.requests) ? r.body.requests : null;
     if (!raw) { O.error = () => T().inboxOdd; if (O.phase !== 'ready') O.phase = 'error'; render(); schedule(); return; }
     O.rows = raw.slice(0, 200).map(normalizeRequest).filter((x): x is CloudbiteAccessRequest => x !== null);
+    if (!O.policyBusy) O.autoApprove = isObj(r.body) && typeof r.body.autoApprove === 'boolean' ? r.body.autoApprove : null;
     O.phase = 'ready'; O.error = null; O.loadedAt = Date.now();
+    render(); schedule();
+  }
+
+  async function togglePolicy(): Promise<void> {
+    const c = creds();
+    if (!c || O.policyBusy || O.autoApprove === null || O.authBusy === 'logout') return;
+    const g = gen, target = !O.autoApprove;
+    O.policyBusy = true; O.notice = null; render();
+    const r = await postJSON(`${API}/policy`, { autoApprove: target }, c.headers);
+    if (g !== gen) return;
+    O.policyBusy = false;
+    loadSeq++; // A list started before this save must not overwrite the new policy.
+    if (!r.ok || !isObj(r.body) || r.body.autoApprove !== target) {
+      if ((r.status === 401 || r.status === 403) && c.via === 'key') { signedOut(); return; }
+      O.autoApprove = null; O.noticeKind = 'warn'; O.notice = () => T().autoFailed;
+      render(); void load(); return;
+    }
+    O.autoApprove = target;
+    O.noticeKind = 'ok'; O.notice = () => target ? T().autoSavedOn : T().autoSavedOff;
     render(); schedule();
   }
 
@@ -1082,6 +1129,13 @@ function ownerPage(root: HTMLElement): void {
     clearBtn.hidden = !O.token && !typed;
     // 요청함
     const c = creds();
+    policyPanel.hidden = !c;
+    policyBtn.disabled = !c || O.autoApprove === null || O.policyBusy || !!O.authBusy || O.phase !== 'ready';
+    policyBtn.textContent = O.policyBusy ? d.autoSaving : O.autoApprove === null ? '—' : O.autoApprove ? 'ON' : 'OFF';
+    policyBtn.setAttribute('aria-checked', String(O.autoApprove === true));
+    policyBtn.className = `ax-button${O.autoApprove ? ' primary' : ''}`;
+    policyPanel.setAttribute('aria-busy', String(O.policyBusy));
+    policyState.textContent = O.autoApprove === null ? d.autoUnknown : O.autoApprove ? d.autoOn : d.autoOff;
     refreshBtn.disabled = !c || loading;
     const via = c ? (c.via === 'key' ? d.viaKey : c.via === 'operator' ? d.viaOperator : d.viaAdmin) : '';
     state.textContent = !c ? d.stateSignIn

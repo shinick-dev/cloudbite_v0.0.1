@@ -80,6 +80,9 @@ footer{margin-top:36px;border-top:1px solid var(--line);padding-top:18px;color:v
 .ax-tokenform .ax-field{flex:1 1 320px}
 .ax-inbox-head{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px}
 .ax-inbox-head h2{margin:0}
+.ax-policy .ax-inbox-head{justify-content:space-between}
+.ax-policy [role=switch]{min-width:84px}
+.ax-policy>p+p{margin-top:10px;max-width:90ch}
 .ax-state{font-size:13px;color:var(--muted);margin-right:auto}
 .ax-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:12px}
 .ax-row{border:1px solid var(--line);border-radius:12px;padding:16px 18px}

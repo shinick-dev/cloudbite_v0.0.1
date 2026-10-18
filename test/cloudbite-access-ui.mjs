@@ -91,7 +91,7 @@ const REG_OPTIONS = { challenge: 'AAEC_-8', rp: { name: 'shinick gw', id: 'cb.te
   authenticatorSelection: { residentKey: 'discouraged', userVerification: 'required', authenticatorAttachment: 'cross-platform' }, extensions: { prf: {} }, hints: ['security-key'] };
 /** 주인 API 모형: 세션 상태와 요청함. 쿠키 세션은 인증 상태로만 표현한다 */
 function ownerServer({ authenticated = false, hasCredentials = true, rows = [ROW()], login = 200 } = {}) {
-  const s = { authenticated, hasCredentials, rows, login, inbox: null, logout: null, regOptions: null, verify: null };
+  const s = { authenticated, hasCredentials, rows, login, autoApprove: false, policy: null, inbox: null, logout: null, regOptions: null, verify: null };
   s.route = (r) => {
     if (r.url === '/api/cloudbite/owner/session') return json(200, { authenticated: s.authenticated, hasCredentials: s.hasCredentials });
     if (r.url === '/api/cloudbite/owner/options') return json(200, OPTIONS);
@@ -103,7 +103,12 @@ function ownerServer({ authenticated = false, hasCredentials = true, rows = [ROW
       if (s.inbox) return s.inbox(r);
       const tok = r.headers['x-admin-token'];
       if (tok ? tok !== OPERATOR : !s.authenticated) return json(401, { error: 'unauthorized' });
-      return json(200, { requests: s.rows });
+      return json(200, { requests: s.rows, autoApprove: s.autoApprove });
+    }
+    if (r.url === '/api/cloudbite/access/policy') {
+      if (s.policy) return s.policy(r);
+      if (!s.authenticated && r.headers['x-admin-token'] !== OPERATOR) return json(401, {});
+      s.autoApprove = r.body.autoApprove; return json(200, { autoApprove: s.autoApprove });
     }
     const m = /^\/api\/cloudbite\/access\/requests\/([^/]+)\/(approve|deny|revoke)$/.exec(r.url);
     if (m) { if (!r.headers['x-admin-token'] && !s.authenticated) return json(401, { error: 'unauthorized' }); const row = { ...s.rows.find(x => x.id === m[1]), status: m[2] === 'approve' ? 'approved' : m[2] === 'deny' ? 'denied' : 'revoked' }; s.rows = s.rows.map(x => x.id === row.id ? row : x); return json(200, row); }
@@ -568,6 +573,38 @@ await test('주인 전환: 목록·바쁜 상태·폴링을 유지하고 행 단
   assert.equal(inboxCalls(e).length, n + 1);
   const links = e.all().filter(n => n.tagName === 'A').map(a => a.getAttribute('href'));
   assert.ok(links.includes('/cloudbite/request?lang=en') && links.includes('/cloudbite?lang=en'));
+});
+
+await test('자동승인: 실제 저장 응답 후 ON, 언어 전환·새 탭 복원, OFF, 오류와 로그아웃 경합', async () => {
+  const s = ownerServer({ authenticated: true });
+  const e = env({ route: s.route, search: '?lang=ko' });
+  await e.boot('owner');
+  const sw = () => e.all().find(n => n.getAttribute('role') === 'switch');
+  assert.equal(sw().getAttribute('aria-checked'), 'false'); assert.equal(sw().disabled, false);
+  const hold = deferred(); s.policy = () => hold.promise;
+  sw().click(); await e.flush();
+  assert.equal(sw().getAttribute('aria-checked'), 'false', 'no optimistic approval claim');
+  assert.equal(sw().disabled, true); assert.equal(sw().textContent, '저장 중…');
+  e.byText('BUTTON', 'EN').click(); await e.flush();
+  assert.equal(sw().textContent, 'Saving…'); assert.equal(sw().getAttribute('aria-label'), 'Auto-approval');
+  s.autoApprove = true; hold.resolve(await json(200, { autoApprove: true })); await e.flush();
+  assert.equal(sw().getAttribute('aria-checked'), 'true');
+  assert.match(e.root.textContent, /even while this page is closed or you are logged out/);
+  const tab = env({ route: s.route }); await tab.boot('owner');
+  assert.equal(tab.all().find(n => n.getAttribute('role') === 'switch').getAttribute('aria-checked'), 'true');
+  s.policy = null;
+  sw().click(); await e.flush();
+  assert.equal(s.autoApprove, false); assert.equal(sw().getAttribute('aria-checked'), 'false');
+  s.policy = () => json(503, {});
+  sw().click(); await e.flush();
+  assert.match(e.root.textContent, /Could not save the approval mode/);
+  assert.equal(sw().getAttribute('aria-checked'), 'false');
+  const late = deferred(); s.policy = () => late.promise;
+  sw().click(); await e.flush();
+  e.shownBtn('Log out').click(); await e.flush();
+  late.resolve(await json(200, { autoApprove: true })); await e.flush();
+  assert.ok(!sw().shown()); assert.ok(e.shownBtn('Sign in with security key'));
+  assert.equal(rowsShown(e).length, 0, 'late response cannot restore private UI');
 });
 
 console.log(`cloudbite-access-ui: ${pass} checks passed`);

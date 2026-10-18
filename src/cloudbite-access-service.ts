@@ -7,6 +7,7 @@
 //   req:<id>        AccessRecord — public fields + credential hash (never returned) + quota binding
 //   cred:<sha256>   request id the browser credential belongs to
 //   rate:<srcHash>  creation times (ms) for that hashed source within the last hour
+//   policy:autoApprove boolean — default off; applies only to newly created requests
 import { DurableObject } from 'cloudflare:workers';
 import type { Env } from './state';
 import type { CloudbiteAccessRequest, CloudbiteAccessSession } from './cloudbite-access-contract';
@@ -137,7 +138,10 @@ export class CloudbiteAccess extends DurableObject<Env> {
       if (await this.ctx.storage.get(`cred:${newCredHash}`)) return fail(409, 'credential collision; retry');
       const bytes = crypto.getRandomValues(new Uint8Array(16));
       const id = 'cba_' + [...bytes].map((x) => x.toString(16).padStart(2, '0')).join('');
-      const r: AccessRecord = { id, name, purpose, status: 'pending', createdAt: now, expiresAt: now + CB_ACCESS_PENDING_TTL, credHash: newCredHash, projects: [] };
+      const autoApprove = await this.ctx.storage.get<boolean>('policy:autoApprove') === true;
+      const r: AccessRecord = { id, name, purpose, status: autoApprove ? 'approved' : 'pending', createdAt: now,
+        expiresAt: now + (autoApprove ? CB_ACCESS_GRANT_TTL : CB_ACCESS_PENDING_TTL),
+        ...(autoApprove ? { decidedAt: now } : {}), credHash: newCredHash, projects: [] };
       times.push(now);
       await this.ctx.storage.put({ [`req:${id}`]: r, [`cred:${newCredHash}`]: id, [rateKey]: times });
       return { session: this.session(r, now), reused: false };
@@ -150,12 +154,25 @@ export class CloudbiteAccess extends DurableObject<Env> {
   }
 
   /** Owner list: newest first, at most 100, public fields only. */
-  list(): Promise<{ requests: CloudbiteAccessRequest[] }> {
+  list(): Promise<{ requests: CloudbiteAccessRequest[]; autoApprove: boolean }> {
     return this.serial(async () => {
       const now = this.clock();
       const rows = [...(await this.ctx.storage.list<AccessRecord>({ prefix: 'req:' })).values()];
       rows.sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? 1 : -1));
-      return { requests: rows.slice(0, CB_ACCESS_LIST_MAX).map((r) => this.view(r, now)) };
+      const autoApprove = await this.ctx.storage.get<boolean>('policy:autoApprove') === true;
+      return { requests: rows.slice(0, CB_ACCESS_LIST_MAX).map((r) => this.view(r, now)), autoApprove };
+    });
+  }
+
+  /** Owner-controlled event policy. The same queue as submit makes ON/OFF changes ordered with new requests. */
+  policy(): Promise<{ autoApprove: boolean }> {
+    return this.serial(async () => ({ autoApprove: await this.ctx.storage.get<boolean>('policy:autoApprove') === true }));
+  }
+  setPolicy(autoApprove: boolean): Promise<{ autoApprove: boolean } | Fail> {
+    return this.serial(async () => {
+      if (typeof autoApprove !== 'boolean') return fail(400, 'autoApprove must be a boolean');
+      await this.ctx.storage.put('policy:autoApprove', autoApprove);
+      return { autoApprove };
     });
   }
 

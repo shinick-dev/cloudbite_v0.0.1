@@ -127,6 +127,18 @@ export async function accessRoute(req: Request, env: Env, path: string, owner: (
     return json(await settledSession(env, await accessCredentialHash(req, env)));
   }
 
+  if (path === '/api/cloudbite/access/policy') {
+    if (req.method !== 'GET' && req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
+    if (req.method === 'POST' && !strictOrigin()) return json({ error: 'bad origin' }, 403);
+    if (!await owner()) return json({ error: 'admin session required' }, 401);
+    if (!env.CLOUDBITE_ACCESS) return json({ error: 'Cloudbite access is not configured' }, 503);
+    if (req.method === 'GET') return json(await inbox(env).policy());
+    const b = await readObject(req, 256);
+    if ('error' in b) return json({ error: b.error }, b.status);
+    if (Object.keys(b.ok).length !== 1 || typeof b.ok.autoApprove !== 'boolean') return json({ error: 'body must contain only autoApprove (boolean)' }, 400);
+    return out(await inbox(env).setPolicy(b.ok.autoApprove));
+  }
+
   if (path === '/api/cloudbite/access/requests') {
     if (req.method === 'GET') {
       if (!await owner()) return json({ error: 'admin session required' }, 401);
