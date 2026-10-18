@@ -1256,6 +1256,22 @@ await check('parallelism override validates and does not change selection or leg
   for (const id of ['e0', 'e4', 'e5', 'e10', 'e99']) assert.ok(M.RUN_ID.test(id));
   for (const id of ['e100', 'e01', 'e-1', 'e', 'e1/foo']) assert.ok(!M.RUN_ID.test(id));
 });
+await check('decision evidence: API -> actual workspace -> Python runner -> collected opinion -> structural ledger, with owned sandbox cleanup', async () => {
+  const source='SYNTHETIC-SOURCE: budget is two weeks. END-OF-DOCUMENT';
+  const w=freshWorld({M:REAL,model:req=>{
+    assert.ok(req.messages.some(m=>m.content.includes(source)), 'complete supplied document reaches inference');
+    assert.ok(req.messages.some(m=>m.content.includes('Unknown pilot adoption')), 'decision unknown reaches inference');
+    return JSON.stringify({action:'final',opinion:{direction:'conditional',confidence:64,summary:'Run a two-week pilot before scaling.',evidence:['[doc:doc-1] Budget is two weeks, line 1.'],assumptions:['Pilot adoption remains unknown.'],nextActions:['Measure repeat usage.']},report:'# Pilot\n[doc:doc-1] Budget is two weeks. Original independent opinion, not peer validation.'});
+  }});
+  const data=brief({expertIds:['cb-role-022'],documents:[{id:'doc-1',name:'pilot.md',content:source}],decision:{options:['Pilot','Wait'],constraints:['Two weeks'],successCriteria:['Repeat usage'],knownFacts:['No private data'],assumptions:[],unknowns:['Unknown pilot adoption']}});
+  const created=await call(w,'POST','/api/cloudbite/projects',{body:data,headers:admin});assert.equal(created.status,201,created.text);
+  const obj=await project(w,created);await drive(w,obj,p=>p.status!=='running',2000);await Promise.all(w.procs);
+  const auth={authorization:'Bearer '+created.j.accessToken};
+  const p=await call(w,'GET','/api/cloudbite/projects/'+created.j.project.id,{headers:auth});assert.equal(p.j.status,'completed',JSON.stringify(p.j.experts));
+  assert.deepEqual(p.j.brief.documents,data.documents);assert.deepEqual(p.j.brief.decision,data.decision);
+  assert.equal(p.j.evidenceClaims[0].status,'linked');assert.deepEqual(p.j.evidenceClaims[0].references,[{kind:'document',id:'doc-1',available:true}]);
+  await drive(w,obj,()=>w.deletes.length===1);assert.equal(w.sandboxes.size,0);
+});
 server.close();
 rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${count} cloudbite runtime checks passed`);
