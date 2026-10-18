@@ -2,12 +2,20 @@
    Navy header, blue actions, white panels. No external fonts or resources. tools/build-cloudbite-access.mjs pins this file into CLOUDBITE_ACCESS_CSS. */
 :root{color-scheme:light;--navy:#142440;--blue:#2563eb;--blue-hover:#1d4ed8;--text:#293c55;--muted:#5e718b;--line:#dbe6f5;--pale:#edf4ff;--bg:#f4f7fc;--ok:#147a50;--ok-soft:#e3f6ee;--warn:#b93547;--warn-soft:#fde8eb;--wait:#9c6508;--wait-soft:#fdf2dc}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font:15px/1.7 'Segoe UI',Arial,sans-serif}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.7 'Segoe UI','Malgun Gothic','Apple SD Gothic Neo','Noto Sans KR',Arial,sans-serif}
+:lang(ko){word-break:keep-all;overflow-wrap:anywhere}
 ::selection{background:#bfdbfe;color:var(--navy)}
 a{color:var(--blue);text-underline-offset:4px}
-a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #3b82f6;outline-offset:3px}
+a:focus-visible,button:focus-visible,input:focus-visible,textarea:focus-visible,summary:focus-visible{outline:3px solid #3b82f6;outline-offset:3px}
 [hidden]{display:none!important}
-header{height:70px;background:var(--navy);display:flex;align-items:center;justify-content:space-between;padding:0 32px;color:white;gap:20px}
+header{min-height:70px;background:var(--navy);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:12px 32px;color:white;gap:12px 20px}
+.ax-top-side,.qr-top-side{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.ax-lang{display:inline-flex;border:1px solid #3c5378;border-radius:8px;overflow:hidden}
+.ax-lang-btn,.ax-lang a{min-width:44px;min-height:36px;display:inline-flex;align-items:center;justify-content:center;padding:0 10px;border:0;background:transparent;color:#c9d8ed;font-weight:600;font-size:12px;line-height:1;font-family:inherit;letter-spacing:.04em;text-decoration:none;cursor:pointer}
+.ax-lang-btn+.ax-lang-btn,.ax-lang a+a{border-left:1px solid #3c5378}
+.ax-lang-btn:hover,.ax-lang a:hover{color:white;background:#1d3256}
+.ax-lang-btn[aria-pressed=true],.ax-lang a[aria-current=true]{background:white;color:var(--navy)}
+.ax-lang-btn:focus-visible,.ax-lang a:focus-visible{outline:3px solid #93c5fd;outline-offset:-3px}
 header strong,.ax-brand{font-size:24px;font-weight:700;letter-spacing:-.03em;color:white;text-decoration:none}
 header span{font-size:13px;color:#c9d8ed}
 main{max-width:1120px;margin:52px auto;padding:0 24px}
@@ -21,7 +29,7 @@ p{margin:0 0 17px}
 figcaption{font-size:13px;color:var(--muted);margin-top:18px;overflow-wrap:anywhere}
 figure{margin:0}
 .actions{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:22px}
-.button,.ax-button{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:10px 15px;border-radius:8px;text-decoration:none;border:1px solid var(--line);background:white;color:var(--blue);font:600 13px/1.3 'Segoe UI',Arial,sans-serif;cursor:pointer}
+.button,.ax-button{display:inline-flex;align-items:center;justify-content:center;min-height:44px;padding:10px 15px;border-radius:8px;text-decoration:none;border:1px solid var(--line);background:white;color:var(--blue);font-weight:600;font-size:13px;line-height:1.3;font-family:inherit;cursor:pointer;text-align:center}
 .primary{background:var(--blue);border-color:var(--blue);color:white}
 .primary:hover{background:var(--blue-hover)}
 .secondary:hover,.ax-button:not(.primary):hover{background:var(--pale)}
@@ -77,6 +85,18 @@ footer{margin-top:36px;border-top:1px solid var(--line);padding-top:18px;color:v
 .ax-row{border:1px solid var(--line);border-radius:12px;padding:16px 18px}
 .ax-row.s-pending{border-color:#f0d9a8}
 .ax-row .ax-help{margin-bottom:10px}
+.ax-auth .ax-actions{margin-top:4px}
+.ax-auth>p{margin:0 0 10px}
+.ax-strong{font-weight:600;color:var(--navy)}
+.ax-panel[aria-busy=true] .ax-button.primary{cursor:progress}
+.ax-advanced{margin-top:22px;border:1px solid var(--line);border-radius:14px;background:white}
+.ax-advanced summary{cursor:pointer;padding:14px 28px;font-weight:600;color:var(--navy);font-size:14px}
+.ax-advanced[open] summary{border-bottom:1px solid var(--line)}
+.ax-advanced .ax-tokenform{padding:20px 28px 24px}
+/* standalone QR file: without script, #ko / #en fragments choose the language block */
+.qr-alt{display:none}
+.qr-alt:target{display:block}
+.qr-alt:target~.qr-lang{display:none}
 .ax-empty{color:var(--muted);font-size:14px;padding:18px;text-align:center;border:1px dashed var(--line);border-radius:12px}
-@media(max-width:800px){main{margin:30px auto}.access-grid,.ax-grid{grid-template-columns:minmax(0,1fr);gap:22px}.qr-panel{max-width:440px;width:100%;margin:auto}h1{font-size:29px}header{padding:0 20px}header span{font-size:12px}.instructions{padding:0}footer{flex-direction:column;gap:10px}.instructions li{padding-bottom:22px}.ax-panel{padding:20px}}
-@media print{body{background:white}header{print-color-adjust:exact;-webkit-print-color-adjust:exact}.actions,.downloads,.owner{display:none}main{margin:25px auto}.access-grid{grid-template-columns:420px 1fr}.qr-panel{break-inside:avoid}footer{margin-top:20px}}
+@media(max-width:800px){main{margin:30px auto}.access-grid,.ax-grid{grid-template-columns:minmax(0,1fr);gap:22px}.qr-panel{max-width:440px;width:100%;margin:auto}h1{font-size:29px}header{padding:12px 20px}header span{font-size:12px}.ax-advanced summary,.ax-advanced .ax-tokenform{padding-left:20px;padding-right:20px}.instructions{padding:0}footer{flex-direction:column;gap:10px}.instructions li{padding-bottom:22px}.ax-panel{padding:20px}}
+@media print{body{background:white}header{print-color-adjust:exact;-webkit-print-color-adjust:exact}.actions,.downloads,.owner,.ax-lang{display:none}main{margin:25px auto}.access-grid{grid-template-columns:420px 1fr}.qr-panel{break-inside:avoid}footer{margin-top:20px}}

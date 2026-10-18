@@ -1,0 +1,51 @@
+Cloudbite access UI — owner sign-in and KO/EN (client/cloudbite-access.ts, tools/build-cloudbite-access.mjs)
+==========================================================================================================
+
+Surfaces
+  /cloudbite/access     public QR showcase. Two static language blocks (data-lang-block="en"|"ko"); access.js shows one.
+  /cloudbite/request    visitor request form + status (data-view="request").
+  /cloudbite/requests   owner inbox (data-view="owner").
+  demo/access-qr.html   standalone QR file, no script. #ko / #en fragments pick the block via CSS :target; English default.
+  The QR image encodes the bare public request URL (no ?lang, no secret). QR SVG/PNG bytes are unchanged by language.
+
+Owner sign-in (primary)
+  Boot:   GET /api/cloudbite/owner/session -> {authenticated, hasCredentials} (200 even when signed out).
+          authenticated -> inbox loads with the HttpOnly cookie only (no x-admin-token), then polls every 5 s.
+  Login:  POST /api/cloudbite/owner/options {} -> raw PublicKeyCredentialRequestOptionsJSON. challenge and
+          allowCredentials[].id are base64url-decoded to ArrayBuffer for navigator.credentials.get; the assertion is sent
+          as POST /api/cloudbite/owner/login {response: AuthenticationResponseJSON} (id, rawId, type, response.{clientDataJSON,
+          authenticatorData, signature, userHandle?}, clientExtensionResults, authenticatorAttachment?).
+          Signed in only when the server answers {authenticated:true}. Cancel/timeout (NotAllowedError, AbortError),
+          SecurityError, InvalidStateError, unsupported browser, HTTP failures and odd replies each show a KO/EN message
+          and leave the page signed out. The button is disabled while a sign-in is in flight.
+  No key: hasCredentials false -> explains that a key must be registered on THIS domain and links /register (needs the
+          owner setup token). There is no in-page registration and a token is never treated as key proof.
+  Logout: POST /api/cloudbite/owner/logout {} — signed out only after {authenticated:false}. It stops polling, clears rows,
+          busy state and the in-memory token, and bumps the generation so late replies render nothing. A failed or
+          unconfirmed logout keeps the signed-in state and shows why.
+  Other tab / expiry: a 401/403 on a cookie-mode inbox call or decision returns to the sign-in state and clears rows.
+  All POSTs: application/json, fetch credentials same-origin (the browser adds the exact Origin).
+
+Advanced: temporary token (collapsed <details>; opened automatically by an #operator= link)
+  Admin session or cbo_ operator token, held in memory only. While set it is sent as x-admin-token and used INSTEAD of
+  the cookie; a rejected token never falls back to the cookie. "Clear token" is not a logout: with a signed-in cookie
+  the inbox reopens through it. "Log out" ends both.
+
+Language
+  Default: valid ?lang=ko|en, else navigator language (ko* -> ko), else en. The KO / EN control sits in the header of
+  every surface (buttons with aria-pressed on request/owner; links with aria-current on the QR page). Switching sets
+  <html lang>, document.title and ?lang= in the current URL (history.replaceState; no storage, no hash rewrite) and
+  adds ?lang= to same-origin Cloudbite links. Static elements are repainted in place, so typed name/purpose/token,
+  focus, pending requests, rows, busy rows and polling all survive; redrawn row buttons regain focus via data-key.
+  Messages come from the DICT (en/ko, same keys); state stores message functions, not strings, so errors re-render in
+  the new language. Names, purposes, raw server error text and file names stay as sent. The browser's own key/PIN
+  prompt is not translated by the page. Times use Intl.DateTimeFormat (24 h) and Intl.RelativeTimeFormat.
+
+Build guard
+  Legacy URLs and credential-like values are refused in every generated file. Security-key wording (EN/KO, webauthn,
+  passkey) is refused on the public surfaces only: both QR pages, the QR SVG and the request/owner HTML shells.
+  The owner sign-in copy inside CLOUDBITE_ACCESS_JS may name the real security-key login.
+
+Tests
+  node test/cloudbite-access-ui.mjs   fake-DOM checks of the above (not browser evidence).
+  node test/cloudbite-access.mjs      backend access service (unchanged).
