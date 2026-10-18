@@ -9,9 +9,9 @@ Segment          Slot   Pauses  EN words  KO chars*  Main screen
 0:22-0:42        20 s   0 s        46        121     project screen, idle
 0:42-1:56        74 s  14 s       133        316     demo clicks (5 cues)
 1:56-2:20        24 s   2 s        48        131     decision view, idle
-2:20-2:48        28 s   2 s        57        139     decision view, idle
+2:20-2:48        28 s   2 s        56        130     decision view, idle
 2:48-3:00        12 s   0 s        17         45     decision view
-TOTAL           180 s  18 s       346        864
+TOTAL           180 s  18 s       345        855
 * Korean characters counted without spaces.
 
 Assumed cadence: English about 130 words/min, Korean about 320 chars/min,

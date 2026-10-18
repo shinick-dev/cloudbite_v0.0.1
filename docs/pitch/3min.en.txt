@@ -74,11 +74,11 @@ Next: the first full run with live Nosana inference.
 
 >>> NOT SPOKEN: hands off the mouse. Pause 2 s. <<<
 
-Without Daytona, an expert can only talk. With a workspace, it calculates and leaves a file you can open.
-Without Nosana, nothing in that workspace can reason.
-Together, opinions become work you can inspect.
-We start small on purpose: five experts, three at once.
-A hundred is the direction, as each expert earns its seat with evidence.
+Daytona gives every expert a separate place to execute code and leave files.
+Nosana is the inference layer that drives the reasoning loop.
+Together, they connect an opinion to work you can inspect.
+We start with five experts, three at a time.
+A hundred is our direction, with each new role earning its place through evidence.
 
 
 [2:48-3:00] CLOSE
