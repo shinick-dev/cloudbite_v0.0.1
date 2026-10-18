@@ -40,6 +40,22 @@ export interface ExpertAssignment {
   deliverables: string[]; requiredEvidence: string[]; boundaries: string[]; perspectiveIds: string[];
   source: 'jev-coverage' | 'manual-scope';
 }
+/** A validated plan, not a reservation or permission to execute. Creation revalidates the same brief. */
+export interface ProjectPreview {
+  expertIds: string[];
+  assignments: ExpertAssignment[];
+  budget: ProjectBudget;
+  envelope: {
+    sandboxMaximum: number;
+    nosanaMaximum: number;
+    expertMaximum: number;
+    reviewMaximum: number;
+    memoMaximum: number;
+    /** Separate typed routing calls, outside the Nosana budget; zero for manual selection. */
+    jevCalls: number;
+  };
+  warnings: string[];
+}
 export interface DecisionFrame {
   options: string[]; constraints: string[]; successCriteria: string[];
   knownFacts: string[]; assumptions: string[]; unknowns: string[];
