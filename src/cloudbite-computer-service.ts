@@ -254,7 +254,7 @@ export class ComputerService {
     await this.save(r); // ledger before mutation
     // Resources come from the prepared snapshot; no image/cpu/memory/disk here. Persistent: autoDeleteInterval -1.
     const body = { name, snapshot: a.snapshot, labels: computerLabels(r.ownerTag!, a.id), public: false,
-      autoStopInterval: COMPUTER_AUTO_STOP_MINUTES, autoDeleteInterval: -1 };
+      autoStopInterval: COMPUTER_AUTO_STOP_MINUTES, autoDeleteInterval: -1, envVars: { VNC_RESOLUTION: '1920x1080' } };
     try {
       const sb = await this.d.daytona.create(dt, body);
       if (this.owned(r, sb)) this.adopt(r, sb); else { r.machine.created = 'unknown'; r.status = 'unknown'; }

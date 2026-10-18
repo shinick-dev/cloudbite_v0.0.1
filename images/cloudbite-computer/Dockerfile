@@ -20,9 +20,13 @@ ARG BASE_IMAGE=daytonaio/sandbox:0.9.0
 FROM ${BASE_IMAGE}
 
 USER root
-COPY install_selkies.py install.py start-desktop.py probe-tools.py first-run.sh /tmp/cloudbite-computer/
+ENV VNC_RESOLUTION=1920x1080
+ENV PATH=/opt/cloudbite/computer/tools:/opt/cloudbite/node/bin:${PATH}
+ENV BROWSER=/usr/local/bin/cloudbite-browser
+COPY install_selkies.py install.py start-desktop.py probe-tools.py first-run.sh configure-display.py keyring-default.py /tmp/cloudbite-computer/
 RUN python3 /tmp/cloudbite-computer/install_selkies.py /opt/cloudbite/selkies \
  && test -f /opt/cloudbite/selkies/.cloudbite-selkies.json \
+ && python3 /tmp/cloudbite-computer/configure-display.py \
  && python3 /tmp/cloudbite-computer/install.py /tmp/cloudbite-computer \
  && rm -rf /tmp/cloudbite-computer \
  && chmod -R a+rX /opt/cloudbite

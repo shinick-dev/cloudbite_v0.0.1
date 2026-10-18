@@ -12,7 +12,8 @@ first-run.sh.  Steps, each bounded by a timeout:
 4. Cursor Agent and Antigravity ``agy`` from the exact tarballs their official installers
    download (https://cursor.com/install, https://antigravity.google/cli/install.sh),
    checked against the digest recorded here instead of running those scripts.
-5. Fixed scripts, the Chromium wrapper, desktop launchers and the image manifest.
+5. Fixed scripts, the Chromium wrapper (also the system default browser for xdg-open and
+   XFCE), desktop launchers, sign-in icons and the image manifest.
 
 Chromium, DBus, keyring, Node and npm are required: any failure aborts the build.  The
 agent CLIs in REQUIRED_TOOLS are required too: every step is attempted, the manifest
@@ -47,7 +48,7 @@ REQUIRED_TOOLS = ("claude-code", "codex", "opencode", "cursor-agent", "antigravi
 # applies its own containment checks either way.
 TAR_FILTER = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
 
-APT_PACKAGES = ("chromium", "dbus", "dbus-x11", "gnome-keyring", "libsecret-1-0",
+APT_PACKAGES = ("chromium", "dbus", "dbus-x11", "python3-dbus", "gnome-keyring", "libsecret-1-0",
                 "xdg-utils", "ca-certificates", "xz-utils")
 
 NODE = {
@@ -93,25 +94,125 @@ WEB_APPS = (
     ("k-broker", "k broker", "https://k.shinick.dev/borrow"),
 )
 
+# The base image's nvm puts its own, older claude/codex ahead of /usr/local/bin (seen live:
+# `bash -lc 'command -v claude'` gave nvm's 2.1.19, not the pinned 2.1.302), so the pinned
+# CLIs live in TOOLS_DIR, kept first on PATH by TOOLS_PATH_SH wherever it runs: in
+# PROFILE_SH, in a profile.d file sorted after any nvm one, and at the end of ~/.bashrc
+# (first-run.sh) after nvm's own init.  Launchers call the CLIs by absolute path.
+TOOLS_DIR = ROOT + "/tools"
+TOOL_EXES = ("claude", "codex", "opencode", "cursor-agent", "agent", "agy")
+TOOLS_PATH_SH = """\
+cloudbite_path_rest="$PATH:"
+cloudbite_path_clean=""
+while [ -n "$cloudbite_path_rest" ]; do
+  cloudbite_path_part=${cloudbite_path_rest%%:*}
+  cloudbite_path_rest=${cloudbite_path_rest#*:}
+  if [ "$cloudbite_path_part" != /opt/cloudbite/computer/tools ]; then
+    cloudbite_path_clean="$cloudbite_path_clean:$cloudbite_path_part"
+  fi
+done
+PATH="/opt/cloudbite/computer/tools$cloudbite_path_clean"; export PATH
+unset cloudbite_path_rest cloudbite_path_clean cloudbite_path_part
+"""
+
 PROFILE_SH = """\
 # CloudBite computer: pinned runtimes and per-user session bus (no secrets here).
 case ":$PATH:" in *":/opt/cloudbite/computer/bin:"*) ;; *)
   PATH="$HOME/.local/bin:/opt/cloudbite/computer/bin:$PATH"; export PATH ;;
 esac
+""" + TOOLS_PATH_SH + """\
 export DISABLE_AUTOUPDATER=1
 export BROWSER=/usr/local/bin/cloudbite-browser
-if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && [ -S "/tmp/cloudbite-dbus-$(id -u)/bus" ]; then
+if [ -S "/tmp/cloudbite-dbus-$(id -u)/bus" ]; then
   DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/cloudbite-dbus-$(id -u)/bus"; export DBUS_SESSION_BUS_ADDRESS
+  XDG_RUNTIME_DIR="/tmp/cloudbite-dbus-$(id -u)"; export XDG_RUNTIME_DIR
 fi
 """
 
 # No --no-sandbox: Chromium keeps its sandbox; if the container forbids it, the browser
 # fails visibly and start-desktop reports it instead of silently weakening isolation.
+# A CLI started outside the desktop (no DISPLAY) still opens its sign-in page in this VM's
+# desktop browser, so the OAuth redirect reaches the CLI's own localhost callback; with no
+# display at all it exits non-zero and the CLI falls back to printing the URL.  The session
+# bus is inherited as is: the existing profile keeps the key store it was created with.
 BROWSER_SH = """\
 #!/bin/sh
-. /etc/profile.d/cloudbite-computer.sh
+[ -r /etc/profile.d/cloudbite-computer.sh ] && . /etc/profile.d/cloudbite-computer.sh
+if [ -z "${DISPLAY:-}" ]; then
+  for s in /tmp/.X11-unix/X*; do
+    if [ -S "$s" ]; then DISPLAY=":${s#/tmp/.X11-unix/X}"; export DISPLAY; break; fi
+  done
+fi
+if [ -z "${DISPLAY:-}" ]; then
+  echo "cloudbite-browser: no desktop display; open the URL in the CloudBite desktop browser" >&2
+  exit 1
+fi
 exec /usr/bin/chromium --user-data-dir="$HOME/.config/cloudbite-browser" \\
   --password-store=gnome-libsecret --no-first-run --no-default-browser-check "$@"
+"""
+
+# Desktop sign-in icons: one official sign-in command each, run in a terminal that stays
+# open so the CLI's exact message (success or error) can be read and reported.  The helper
+# never reads, prints, copies or stores a credential; each CLI keeps its own sign-in.
+SIGN_IN_SH = """\
+#!/bin/sh
+[ -r /etc/profile.d/cloudbite-computer.sh ] && . /etc/profile.d/cloudbite-computer.sh
+T=/opt/cloudbite/computer/tools
+run() {
+  printf '\\n$ %s\\n' "$*"
+  "$@"
+  printf '[exit %s]\\n' "$?"
+}
+case "${1:-}" in
+  claude)
+    run "$T/claude" auth login
+    echo "If the browser shows a code instead of returning, paste it at 'Paste code here if prompted'." ;;
+  codex)
+    run "$T/codex" login
+    echo "If the browser cannot return to localhost:1455, use the 'Sign in: Codex (device code)' icon." ;;
+  codex-device)
+    run "$T/codex" login --device-auth
+    echo "Device code sign-in must first be turned on in ChatGPT security settings (or by your workspace admin)." ;;
+  cursor)
+    run "$T/cursor-agent" login
+    echo "If no browser tab opened, run: NO_OPEN_BROWSER=1 cursor-agent login  and open the printed URL in the CloudBite browser." ;;
+  status)
+    run "$T/claude" auth status --text
+    run "$T/codex" login status
+    run "$T/cursor-agent" status ;;
+  *)
+    echo "usage: cloudbite-sign-in claude|codex|codex-device|cursor|status" >&2
+    exit 2 ;;
+esac
+printf '\\ndisplay=%s browser=%s session_bus=%s\\n' "${DISPLAY:-none}" "${BROWSER:-none}" \\
+  "$([ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] && echo set || echo none)"
+[ -t 0 ] && exec bash -l
+exit 0
+"""
+
+# (id, icon name, cloudbite-sign-in argument)
+SIGN_IN = (
+    ("claude", "Sign in: Claude Code", "claude"),
+    ("codex", "Sign in: Codex", "codex"),
+    ("codex-device", "Sign in: Codex (device code)", "codex-device"),
+    ("cursor", "Sign in: Cursor Agent", "cursor"),
+    ("status", "Sign-in status", "status"),
+)
+
+# Every way a CLI opens a URL lands in the one persistent profile: $BROWSER (above),
+# xdg-open's generic path (mimeapps.list) and XFCE's exo-open (WebBrowser helper).
+BROWSER_MIME = ("x-scheme-handler/http", "x-scheme-handler/https", "text/html")
+XFCE_HELPER = """\
+[Desktop Entry]
+Version=1.0
+Type=X-XFCE-Helper
+X-XFCE-Category=WebBrowser
+Name=CloudBite Browser
+Icon=applications-internet
+NoDisplay=true
+X-XFCE-Binaries=cloudbite-browser;
+X-XFCE-Commands=/usr/local/bin/cloudbite-browser;
+X-XFCE-CommandsWithParameter=/usr/local/bin/cloudbite-browser "%s";
 """
 
 WRAPPER_SH = """\
@@ -364,6 +465,47 @@ def install_antigravity(work):
     return {"version": ANTIGRAVITY["version"], "source": ANTIGRAVITY["url"]}
 
 
+def merge_settings(text, section, pairs):
+    """Set each key=value of pairs in an INI-style text, keeping every other line.
+
+    ``section`` names the ``[section]`` that holds the keys (created at the end when
+    missing); None means the keys live outside any section, as in XFCE's helpers.rc.
+    """
+    lines = text.splitlines()
+    todo = dict(pairs)
+    current, insert_at = None, (0 if section is None else None)
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            current = stripped[1:-1]
+            if current == section:
+                insert_at = i + 1
+            continue
+        if current != section:
+            continue
+        if stripped:
+            insert_at = i + 1
+        key = stripped.split("=", 1)[0].strip()
+        if "=" in stripped and key in todo:
+            lines[i] = key + "=" + todo.pop(key)
+    if insert_at is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append("[" + section + "]")
+        insert_at = len(lines)
+    lines[insert_at:insert_at] = [k + "=" + v for k, v in todo.items()]
+    return "\n".join(lines) + "\n"
+
+
+def merge_settings_file(path, section, pairs):
+    try:
+        with open(path) as fh:
+            text = fh.read()
+    except OSError:
+        text = ""
+    write(path, merge_settings(text, section, pairs))
+
+
 def desktop_entry(name, exec_line, terminal):
     return ("[Desktop Entry]\nType=Application\nVersion=1.0\n"
             f"Name={name}\nExec={exec_line}\nTerminal={'true' if terminal else 'false'}\n"
@@ -379,13 +521,27 @@ def install_scripts(src):
         os.chmod(os.path.join(BIN, target), 0o755)
     os.makedirs(ROOT + "/lib", exist_ok=True)
     shutil.copyfile(os.path.join(src, "install_selkies.py"), ROOT + "/lib/install_selkies.py")
+    shutil.copyfile(os.path.join(src, "keyring-default.py"), ROOT + "/lib/keyring-default.py")
     write("/etc/profile.d/cloudbite-computer.sh", PROFILE_SH)
+    write("/etc/profile.d/zz-cloudbite-tools.sh", "# CloudBite computer: pinned agent CLIs first.\n" + TOOLS_PATH_SH)
     with open("/etc/bash.bashrc", "a") as fh:
         fh.write("\n[ -r /etc/profile.d/cloudbite-computer.sh ] && . /etc/profile.d/cloudbite-computer.sh\n")
     write("/usr/local/bin/cloudbite-browser", BROWSER_SH, 0o755)
     write("/usr/share/applications/cloudbite-browser.desktop",
           desktop_entry("CloudBite Browser", "/usr/local/bin/cloudbite-browser %U", False)
           + "MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;\n")
+    merge_settings_file("/etc/xdg/mimeapps.list", "Default Applications",
+                        [(t, "cloudbite-browser.desktop") for t in BROWSER_MIME])
+    write("/usr/share/xfce4/helpers/cloudbite-browser.desktop", XFCE_HELPER)
+    merge_settings_file("/etc/xdg/xfce4/helpers.rc", None, [("WebBrowser", "cloudbite-browser")])
+    write(BIN + "/cloudbite-sign-in", SIGN_IN_SH, 0o755)
+    os.makedirs(TOOLS_DIR, exist_ok=True)
+    for exe in TOOL_EXES:
+        link = f"{TOOLS_DIR}/{exe}"
+        if os.path.lexists(link):
+            os.remove(link)
+        if os.path.exists("/usr/local/bin/" + exe):
+            os.symlink("/usr/local/bin/" + exe, link)
     launchers = ROOT + "/share/launchers"
     os.makedirs(launchers, exist_ok=True)
     for app_id, name, url in WEB_APPS:
@@ -395,7 +551,10 @@ def install_scripts(src):
     for exe, name in (("claude", "Claude Code"), ("codex", "Codex"), ("opencode", "OpenCode"),
                       ("cursor-agent", "Cursor Agent"), ("agy", "Antigravity CLI")):
         write(f"{launchers}/cli-{exe}.desktop",
-              desktop_entry(name, f"xfce4-terminal --title '{name}' -e 'bash -lc \"{exe}; exec bash\"'", False), 0o755)
+              desktop_entry(name, f"xfce4-terminal --title '{name}' -e 'bash -lc \"{TOOLS_DIR}/{exe}; exec bash\"'", False), 0o755)
+    for sign_id, name, arg in SIGN_IN:
+        write(f"{launchers}/signin-{sign_id}.desktop",
+              desktop_entry(name, f"xfce4-terminal --title '{name}' -e '{BIN}/cloudbite-sign-in {arg}'", False), 0o755)
 
 
 COMMANDS = {"claude-code": "claude", "codex": "codex", "opencode": "opencode",
