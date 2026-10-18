@@ -35,8 +35,7 @@ def run(*args, display=None, sockets=()):
     if display is not None: env['DISPLAY'] = display
     subprocess.run([SH, str(WRAPPER), *args], env=env, check=True, timeout=20)
     argv = out.read_text().split('\n')[:-1]
-    return argv, out.with_suffix('.env').read_text().split('\n')[:-1] if False else \
-        Path(str(out) + '.env').read_text().split('\n')[:-1]
+    return argv, Path(str(out) + '.env').read_text().split('\n')[:-1]
 
 DEFAULT = ['--disable-server', '-x', '/opt/cloudbite/computer/bin/cloudbite-shell']
 argv, env = run(display=':7')
