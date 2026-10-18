@@ -1,5 +1,5 @@
 // Cloudbite 접근 화면 (src/cloudbite-access-page.ts 의 CLOUDBITE_ACCESS_JS) 을 브라우저 없이 고정한다: 작은 가짜 DOM 으로
-// 주인 보안 키 로그인·세션 복원·로그아웃·다른 탭 로그아웃·명시 토큰, 한국어/영어 전환(입력값·포커스·폴링 유지), 공개 QR 문구.
+// 주인 보안 키 로그인·첫 키 등록(#setup=)·세션 복원·로그아웃·다른 탭 로그아웃·명시 토큰, 한국어/영어 전환(입력값·포커스·폴링 유지), 공개 QR 문구.
 // 실제 브라우저 확인은 조정자가 한다 — 이 파일은 브라우저 증거가 아니다.
 //   node test/cloudbite-access-ui.mjs
 import assert from 'node:assert/strict';
@@ -34,7 +34,7 @@ class Node_ {
   shown() { let n = this; while (n) { if (n.hidden) return false; n = n.parent; } return true; }
 }
 
-function env({ route, search = '', language = 'en-US', webauthn = true, credGet } = {}) {
+function env({ route, search = '', language = 'en-US', webauthn = true, credGet, credCreate, noCreate = false } = {}) {
   const timers = new Map(); let seq = 0, now = 0;
   const doc = { readyState: 'complete', activeElement: null, title: '', documentElement: { lang: 'en' }, visibilityState: 'visible',
     createElement: (t) => new Node_(doc, t), getElementById: (id) => (id === 'cb-access' ? root : null), listeners: {}, addEventListener(t, f) { (this.listeners[t] ||= []).push(f); } };
@@ -44,8 +44,9 @@ function env({ route, search = '', language = 'en-US', webauthn = true, credGet 
   const urls = [];
   const history = { state: null, replaceState(_s, _t, url) { urls.push(url); const i = url.indexOf('?'); location.search = i < 0 ? '' : url.slice(i); } };
   const requests = [];
-  const gets = [];
-  const credentials = { get: async (opts) => { gets.push(opts); return credGet ? credGet(opts) : assertion(); } };
+  const gets = [], creates = [];
+  const credentials = { get: async (opts) => { gets.push(opts); return credGet ? credGet(opts) : assertion(); },
+    ...(noCreate ? {} : { create: async (opts) => { creates.push(opts); return credCreate ? credCreate(opts) : attestation(); } }) };
   const ctx = vm.createContext({
     document: doc, location, history, URLSearchParams, atob, btoa, Intl,
     navigator: { language, languages: [language], credentials },
@@ -67,7 +68,7 @@ function env({ route, search = '', language = 'en-US', webauthn = true, credGet 
   const all = () => [...root.walk()];
   const byText = (tag, text) => all().find(n => n.tagName === tag && n.textContent.trim() === text);
   const shownBtn = (text) => all().find(n => n.tagName === 'BUTTON' && n.textContent.trim() === text && n.shown());
-  return { root, doc, ctx, location, urls, requests, gets, flush, advance, all, byText, shownBtn, timers, boot: async (view) => { root.setAttribute('data-view', view); vm.runInContext(CLOUDBITE_ACCESS_JS, ctx); await flush(); } };
+  return { root, doc, ctx, location, urls, requests, gets, creates, flush, advance, all, byText, shownBtn, timers, boot: async (view) => { root.setAttribute('data-view', view); vm.runInContext(CLOUDBITE_ACCESS_JS, ctx); await flush(); } };
 }
 const json = (status, body) => Promise.resolve({ ok: status >= 200 && status < 300, status, json: async () => body });
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
@@ -77,15 +78,26 @@ function assertion() {
     response: { clientDataJSON: buf(123, 125), authenticatorData: buf(9, 9), signature: buf(255, 254, 253), userHandle: buf(7) },
     getClientExtensionResults: () => ({}) };
 }
+function attestation() {
+  return { id: 'new-1', rawId: buf(4, 5, 6), type: 'public-key', authenticatorAttachment: 'cross-platform',
+    response: { clientDataJSON: buf(123, 125), attestationObject: buf(161, 0), getTransports: () => ['usb', 'nfc'] },
+    getClientExtensionResults: () => ({ prf: { enabled: true } }) };
+}
 const ROW = (over = {}) => ({ id: 'r1', status: 'pending', name: 'Ada <b>', purpose: 'try it', createdAt: 1_000, expiresAt: Date.now() + 20 * 60_000, maxExperts: 5, maxProjects: 10, usedProjects: 0, ...over });
 const OPTIONS = { challenge: 'AAEC_-8', rpId: 'cb.test', allowCredentials: [{ id: 'AQID', type: 'public-key', transports: ['usb'] }], userVerification: 'required', timeout: 60000 };
+const SETUP = 'S3tup_' + 'x'.repeat(30);
+const REG_OPTIONS = { challenge: 'AAEC_-8', rp: { name: 'shinick gw', id: 'cb.test' }, user: { id: 'b3duZXI', name: 'owner', displayName: 'owner' },
+  pubKeyCredParams: [{ alg: -7, type: 'public-key' }], timeout: 180000, attestation: 'none', excludeCredentials: [{ id: 'AQID', type: 'public-key' }],
+  authenticatorSelection: { residentKey: 'discouraged', userVerification: 'required', authenticatorAttachment: 'cross-platform' }, extensions: { prf: {} }, hints: ['security-key'] };
 /** 주인 API 모형: 세션 상태와 요청함. 쿠키 세션은 인증 상태로만 표현한다 */
 function ownerServer({ authenticated = false, hasCredentials = true, rows = [ROW()], login = 200 } = {}) {
-  const s = { authenticated, hasCredentials, rows, login, inbox: null, logout: null };
+  const s = { authenticated, hasCredentials, rows, login, inbox: null, logout: null, regOptions: null, verify: null };
   s.route = (r) => {
     if (r.url === '/api/cloudbite/owner/session') return json(200, { authenticated: s.authenticated, hasCredentials: s.hasCredentials });
     if (r.url === '/api/cloudbite/owner/options') return json(200, OPTIONS);
     if (r.url === '/api/cloudbite/owner/login') { if (s.login !== 200) return json(s.login, { error: 'signature check failed' }); s.authenticated = true; return json(200, { authenticated: true, hasCredentials: true }); }
+    if (r.url === '/api/register/options') { if (s.regOptions) return s.regOptions(r); return r.body?.setup === SETUP ? json(200, REG_OPTIONS) : json(403, { error: 'setup token이 틀렸습니다.' }); }
+    if (r.url === '/api/register/verify') { if (s.verify) return s.verify(r); if (r.body?.setup !== SETUP) return json(403, { error: 'no' }); s.hasCredentials = true; return json(200, { ok: true, id: 'new-1', label: r.body.label, prf: true }); }
     if (r.url === '/api/cloudbite/owner/logout') { if (s.logout) return s.logout(r); s.authenticated = false; return json(200, { authenticated: false }); }
     if (r.url === '/api/cloudbite/access/requests') {
       if (s.inbox) return s.inbox(r);
@@ -223,6 +235,177 @@ await test('등록된 키 없음: 이 도메인에 등록이 필요하다고 설
   const reg = e.all().find(n => n.tagName === 'A' && n.getAttribute('href') === '/register?lang=ko');
   assert.ok(reg && reg.shown());
   assert.ok(!e.shownBtn('보안 키로 로그인'));
+});
+
+// ───────── 첫 키 등록
+const setupField = (e) => e.all().find(n => n.id === 'ax-setup');
+const regCalls = (e) => e.requests.filter(r => r.url.startsWith('/api/register/'));
+/** 설정 토큰이 등록 요청 본문 말고 어디에도(주소·헤더·다른 본문·기록) 가지 않았는가 */
+function setupOnlyInRegister(e, token) {
+  for (const r of e.requests) {
+    assert.ok(!r.url.includes(token) && !JSON.stringify(r.headers).includes(token), `no setup in url/headers: ${r.url}`);
+    if (!r.url.startsWith('/api/register/')) assert.ok(!JSON.stringify(r.body ?? null).includes(token), `no setup in body: ${r.url}`);
+  }
+  assert.ok(!e.urls.some(u => u.includes(token)), 'no setup in history');
+}
+
+await test('첫 키 등록 화면: 키 없음일 때만 설정 토큰 칸과 등록 단추, 누르기 전에는 등록하지 않는다', async () => {
+  const e = env({ route: ownerServer({ hasCredentials: false }).route });
+  await e.boot('owner');
+  const btn = e.shownBtn('Register security key');
+  assert.ok(btn && setupField(e).shown(), 'setup field and button in the auth panel');
+  assert.equal(setupField(e).attrs.type, 'password');
+  assert.match(e.root.textContent, /Register your first key here once with the private owner setup token/);
+  assert.ok(!e.shownBtn('Sign in with security key'));
+  await e.advance(20000);
+  assert.equal(regCalls(e).length, 0, 'no automatic registration'); assert.equal(e.creates.length, 0);
+  for (const over of [{ hasCredentials: true }, { authenticated: true }]) {
+    const x = env({ route: ownerServer(over).route });
+    await x.boot('owner');
+    assert.ok(!x.shownBtn('Register security key') && !setupField(x).shown(), `no enrollment when ${JSON.stringify(over)}`);
+  }
+});
+
+await test('#setup= 링크: 어떤 요청보다 먼저 조각을 지우고 입력칸에만 둔다, 운영자 조각과 섞이지 않고 잘못된 조각도 지운다', async () => {
+  let firstFetchUrls = -1;
+  const s = ownerServer({ hasCredentials: false });
+  const e = env({ route: (r, n) => { if (n === 1) firstFetchUrls = e.urls.length; return s.route(r); }, search: '?lang=ko' });
+  e.location.hash = `#setup=${SETUP}&operator=${OPERATOR}`;
+  await e.boot('owner');
+  assert.equal(firstFetchUrls, 1, 'address rewritten before the first request');
+  assert.equal(e.urls[0], '/cloudbite/requests?lang=ko', 'fragment removed, language query kept');
+  assert.equal(setupField(e).value, SETUP);
+  assert.equal(inboxCalls(e)[0].headers['x-admin-token'], OPERATOR, 'operator link still works beside the setup link');
+  assert.equal(regCalls(e).length, 0);
+  e.byText('BUTTON', 'EN').click(); await e.flush();
+  setupOnlyInRegister(e, SETUP);
+  // 운영자 조각처럼 보이는 값이 setup 안에 있어도 운영자 링크로 읽지 않는다. 퍼센트 인코딩은 한 번만 푼다
+  let core;
+  vm.runInContext(CLOUDBITE_ACCESS_JS, vm.createContext({ __cloudbiteAccessTestHook: (c) => { core = c; }, URLSearchParams }));
+  const cbo = 'cbo_' + 'B'.repeat(30);
+  assert.deepEqual(JSON.parse(JSON.stringify(core.handoffFragment(`#setup=${cbo}`))), { operator: { present: false, token: '' }, setup: { present: true, token: cbo } });
+  assert.equal(core.handoffFragment(`#setup=%41${'a'.repeat(25)}`).setup.token, 'A' + 'a'.repeat(25));
+  assert.equal(core.handoffFragment(`#setup=%2541${'a'.repeat(25)}`).setup.token, '', 'decoded once only');
+  assert.equal(core.handoffFragment('#setup=short').setup.token, '');
+  assert.equal(core.handoffFragment('#operator=' + OPERATOR).operator.token, OPERATOR);
+  // 잘못된 setup 조각: 지우고 알린다, 입력칸은 비어 있다
+  const m = env({ route: ownerServer({ hasCredentials: false }).route });
+  m.location.hash = '#setup=bad%ZZ';
+  await m.boot('owner');
+  assert.equal(m.urls[0], '/cloudbite/requests');
+  assert.equal(setupField(m).value, '');
+  assert.match(m.root.textContent, /owner setup link was malformed/);
+  assert.equal(m.all().find(n => n.tagName === 'DETAILS').open, false, 'a setup link does not open the operator token section');
+  // 이미 키가 있으면 링크를 쓰지 않고 메모리에서도 지운다
+  const k = env({ route: ownerServer({ hasCredentials: true }).route });
+  k.location.hash = `#setup=${SETUP}`;
+  await k.boot('owner');
+  assert.equal(setupField(k).value, ''); assert.match(k.root.textContent, /setup link was not used and was cleared/);
+  assert.equal(regCalls(k).length, 0);
+});
+
+await test('등록: options{setup} → create(ArrayBuffer, 서버 옵션 유지) → verify{setup,response,label} → 토큰을 지우고 다시 확인, 로그인은 따로 누른다', async () => {
+  const s = ownerServer({ hasCredentials: false });
+  s.verify = (r) => { s.hasCredentials = true; return json(200, { ok: true, authenticated: true, id: 'new-1' }); }; // 응답이 로그인을 주장해도 믿지 않는다
+  const e = env({ route: s.route });
+  await e.boot('owner');
+  setupField(e).value = `  ${SETUP} `;
+  e.shownBtn('Register security key').click(); await e.flush();
+  const opt = e.requests.find(r => r.url === '/api/register/options');
+  assert.equal(opt.method, 'POST'); assert.equal(opt.headers['content-type'], 'application/json'); assert.deepEqual(opt.body, { setup: SETUP });
+  assert.equal(opt.headers['x-admin-token'], undefined);
+  assert.equal(e.creates.length, 1);
+  const pk = e.creates[0].publicKey;
+  assert.deepEqual([...new Uint8Array(pk.challenge)], [...Buffer.from(REG_OPTIONS.challenge, 'base64url')]);
+  assert.deepEqual([...new Uint8Array(pk.user.id)], [...Buffer.from('owner')]);
+  assert.equal(pk.user.name, 'owner');
+  assert.deepEqual([...new Uint8Array(pk.excludeCredentials[0].id)], [1, 2, 3]);
+  assert.deepEqual(pk.authenticatorSelection, REG_OPTIONS.authenticatorSelection, 'cross-platform, UV required kept');
+  assert.deepEqual(pk.extensions, { prf: {} }); assert.deepEqual(pk.rp, REG_OPTIONS.rp); assert.deepEqual(pk.pubKeyCredParams, REG_OPTIONS.pubKeyCredParams);
+  assert.equal(pk.timeout, 180000);
+  const ver = e.requests.find(r => r.url === '/api/register/verify');
+  assert.deepEqual(ver.body, { setup: SETUP, label: 'Cloudbite owner key', response: { id: 'new-1', rawId: 'BAUG', type: 'public-key',
+    response: { clientDataJSON: 'e30', attestationObject: 'oQA', transports: ['usb', 'nfc'] }, clientExtensionResults: { prf: { enabled: true } }, authenticatorAttachment: 'cross-platform' } });
+  assert.match(e.root.textContent, /Key registered\. Sign in with your security key\./);
+  assert.equal(setupField(e).value, '', 'setup cleared after success');
+  assert.equal(e.requests.filter(r => r.url === '/api/cloudbite/owner/session').length, 2, 'session checked again');
+  assert.ok(e.shownBtn('Sign in with security key')); assert.ok(!e.shownBtn('Log out'), 'registration is not a login');
+  assert.ok(!e.shownBtn('Register security key'));
+  assert.equal(e.gets.length, 0, 'no second native prompt'); assert.equal(inboxCalls(e).length, 0);
+  setupOnlyInRegister(e, SETUP);
+  e.shownBtn('Sign in with security key').click(); await e.flush();
+  assert.equal(e.gets.length, 1); assert.ok(e.shownBtn('Log out'));
+  // 서버가 다시 확인해도 로그인되지 않았다고 하면 등록 응답만으로 로그인으로 치지 않는다
+  const t = ownerServer({ hasCredentials: false });
+  t.verify = () => { t.hasCredentials = true; return json(200, { ok: true, authenticated: true }); };
+  const x = env({ route: t.route });
+  await x.boot('owner');
+  setupField(x).value = SETUP; x.shownBtn('Register security key').click(); await x.flush();
+  assert.ok(!x.shownBtn('Log out')); assert.equal(inboxCalls(x).length, 0); assert.match(x.root.textContent, /Sign in to open the inbox\./);
+});
+
+await test('등록 실패: 빈칸·형식·지원 안 함·취소·틀린 토큰·검증 실패·형식 오류 — 로그인 없음, 토큰 유지, 다시 시도할 수 있다', async () => {
+  let mode = 'cancel';
+  const s = ownerServer({ hasCredentials: false });
+  const e = env({ route: s.route, credCreate: () => { if (mode === 'cancel') throw Object.assign(new Error('x'), { name: 'NotAllowedError' }); if (mode === 'dup') throw Object.assign(new Error('x'), { name: 'InvalidStateError' }); return attestation(); } });
+  await e.boot('owner');
+  const press = async () => { e.shownBtn('Register security key').click(); await e.flush(); };
+  await press();
+  assert.match(e.root.textContent, /Enter the owner setup token\./); assert.equal(regCalls(e).length, 0);
+  setupField(e).value = 'has spaces in it and more';
+  await press();
+  assert.match(e.root.textContent, /owner setup token has the wrong format/); assert.equal(regCalls(e).length, 0);
+  setupField(e).value = SETUP;
+  await press();
+  assert.match(e.root.textContent, /Key registration was cancelled or timed out/);
+  assert.ok(!e.requests.some(r => r.url === '/api/register/verify'), 'no verify after cancel');
+  mode = 'dup';
+  await press();
+  assert.match(e.root.textContent, /This security key is already registered on this domain/);
+  mode = 'ok';
+  setupField(e).value = 'W' + SETUP.slice(1);
+  await press();
+  assert.match(e.root.textContent, /Could not start key registration\. The owner setup token was rejected.* — setup token이 틀렸습니다\./);
+  setupField(e).value = SETUP;
+  s.verify = () => json(400, { error: '등록 검증 실패' });
+  await press();
+  assert.match(e.root.textContent, /Cloudbite did not verify this registration\. Try again\. — 등록 검증 실패/);
+  s.verify = () => json(200, { ok: false });
+  await press();
+  assert.match(e.root.textContent, /unexpected format\. No key was confirmed/);
+  assert.equal(setupField(e).value, SETUP, 'setup kept for a retry');
+  assert.ok(e.shownBtn('Register security key') && !e.shownBtn('Register security key').disabled, 'retryable');
+  assert.ok(!e.shownBtn('Log out')); assert.equal(inboxCalls(e).length, 0); assert.equal(e.gets.length, 0);
+  s.verify = null;
+  await press();
+  assert.match(e.root.textContent, /Key registered/);
+  setupOnlyInRegister(e, SETUP);
+  const u = env({ route: ownerServer({ hasCredentials: false }).route, noCreate: true });
+  await u.boot('owner');
+  setupField(u).value = SETUP; u.shownBtn('Register security key').click(); await u.flush();
+  assert.match(u.root.textContent, /cannot register a security key on this page/); assert.equal(regCalls(u).length, 0);
+});
+
+await test('등록 중 KO/EN 전환: 입력칸·바쁜 상태를 유지하고, 끝난 뒤 문구는 새 언어로', async () => {
+  const s = ownerServer({ hasCredentials: false });
+  const hold = deferred();
+  const e = env({ route: s.route, credCreate: () => hold.promise });
+  await e.boot('owner');
+  const field = setupField(e);
+  field.value = SETUP;
+  e.shownBtn('Register security key').click(); await e.flush();
+  const busy = e.shownBtn('Registering — follow your browser\'s prompt…');
+  assert.ok(busy && busy.disabled && field.disabled);
+  busy.disabled = false; busy.click(); await e.flush();
+  assert.equal(e.creates.length, 1, 'a second press while busy does nothing');
+  e.byText('BUTTON', 'KO').click(); await e.flush();
+  assert.equal(setupField(e), field, 'same input element'); assert.equal(field.value, SETUP);
+  assert.ok(e.shownBtn('등록 중 — 브라우저 안내를 따르세요…')?.disabled, 'busy survives the switch');
+  assert.ok(e.byText('LABEL', '소유자 설정 토큰'));
+  assert.equal(e.all().find(n => n.tagName === 'FORM' && n.className.includes('ax-enroll')).getAttribute('aria-label'), '보안 키 등록');
+  hold.resolve(attestation()); await e.flush();
+  assert.match(e.root.textContent, /키를 등록했습니다\. 보안 키로 로그인하세요\./);
+  assert.ok(e.shownBtn('보안 키로 로그인')); assert.equal(e.gets.length, 0);
 });
 
 // ───────── 로그아웃

@@ -2,6 +2,7 @@
 // CLOUDBITE_ACCESS_JS 로 고정한다. 같은 출처 외부 스크립트이며 화면은 전부 textContent·createElement 로만 그린다.
 //   data-view="request"  /cloudbite/request  — 방문자가 이름·목적을 보내고, 주인 승인 상태를 5초마다 확인한다 (서버 HttpOnly 쿠키, JS 는 읽지 않음)
 //   data-view="owner"    /cloudbite/requests — 주인이 보안 키로 한 번 로그인하면(서버 HttpOnly 쿠키) 로그아웃까지 승인·거절·회수한다.
+//                                              등록된 키가 없으면 비공개 소유자 설정 토큰(#setup= 또는 입력)으로 첫 키를 여기서 등록한다.
 //                                              임시 Cloudbite 운영자 토큰·관리자 세션은 '고급' 아래 메모리에만 두는 대안이다
 //   data-view="qr"       /cloudbite/access   — 빌드가 만든 두 언어 블록 중 하나만 보이게 한다
 // 승인은 서버 응답이 성공한 뒤에만 화면에 보인다. 자격 증명은 저장소·주소·쿼리에 두지 않는다.
@@ -106,8 +107,27 @@ const EN = {
   logoutOdd: 'Cloudbite did not confirm the logout, so you may still be signed in. Try again.',
   signedOutElsewhere: 'You were signed out — the session ended in another tab or expired. Sign in again to continue.',
   noKeyH: 'No security key is registered on this Cloudbite domain yet.',
-  noKeyP: 'Owner sign-in accepts only a key registered on this exact domain. Register one on the key registration page — it requires the owner setup token — then return here.',
+  noKeyP: 'Owner sign-in accepts only a key registered on this exact domain. Register your first key here once with the private owner setup token, then sign in with that key.',
   registerLink: 'Open key registration',
+  setupLabel: 'Owner setup token',
+  setupHelp: 'From your private owner setup link. Held in this tab only and sent only with the registration request. It opens registration; it does not sign you in.',
+  registerBtn: 'Register security key',
+  registering: 'Registering — follow your browser\'s prompt…',
+  setupMissing: 'Enter the owner setup token.',
+  setupInvalid: 'The owner setup token has the wrong format. Check it, or ask for a new owner setup link.',
+  setupMalformed: 'The owner setup link was malformed. It was removed from the address bar; ask for a new link.',
+  setupUnused: 'A security key is already registered on this domain, so the setup link was not used and was cleared.',
+  regUnsupported: 'This browser cannot register a security key on this page. Open it in a current browser over HTTPS.',
+  regCancelled: 'Key registration was cancelled or timed out. Press Register security key to try again.',
+  regExists: 'This security key is already registered on this domain. Sign in with it, or use a different key.',
+  regDomainRefused: 'The browser refused security-key registration for this address.',
+  regFailed: 'The security key did not complete registration.',
+  regStartFailed: 'Could not start key registration.',
+  regRejected: (s: number): string => s === 400 ? 'Cloudbite did not verify this registration. Try again.'
+    : s === 403 ? 'The owner setup token was rejected, has already registered two keys, or expired 30 minutes after first use. Ask for a new owner setup link.'
+      : s === 503 ? 'Key registration is not available right now.' : '',
+  regOdd: 'Cloudbite answered the registration in an unexpected format. No key was confirmed.',
+  registered: 'Key registered. Sign in with your security key.',
   sessionFailed: 'Could not check whether this browser is signed in.',
   tryAgain: 'Try again',
   unsupported: 'This browser cannot use a security key on this page. Open it in a current browser over HTTPS, or use a temporary token under Advanced.',
@@ -231,8 +251,27 @@ const KO: Dict = {
   logoutOdd: 'Cloudbite가 로그아웃을 확인해 주지 않아 아직 로그인 상태일 수 있습니다. 다시 시도하세요.',
   signedOutElsewhere: '로그아웃되었습니다. 다른 탭에서 세션이 끝났거나 만료되었습니다. 계속하려면 다시 로그인하세요.',
   noKeyH: '이 Cloudbite 도메인에 등록된 보안 키가 아직 없습니다.',
-  noKeyP: '소유자 로그인은 바로 이 도메인에 등록된 키만 받습니다. 키 등록 페이지에서 소유자 설정 토큰으로 키를 등록한 뒤 이곳으로 돌아오세요.',
+  noKeyP: '소유자 로그인은 바로 이 도메인에 등록된 키만 받습니다. 비공개 소유자 설정 토큰으로 여기서 첫 키를 한 번 등록한 뒤, 그 키로 로그인하세요.',
   registerLink: '키 등록 페이지 열기',
+  setupLabel: '소유자 설정 토큰',
+  setupHelp: '비공개 소유자 설정 링크에 들어 있는 값입니다. 이 탭에만 두고 등록 요청에만 보냅니다. 등록을 열어 줄 뿐 로그인시키지는 않습니다.',
+  registerBtn: '보안 키 등록',
+  registering: '등록 중 — 브라우저 안내를 따르세요…',
+  setupMissing: '소유자 설정 토큰을 입력하세요.',
+  setupInvalid: '소유자 설정 토큰 형식이 올바르지 않습니다. 확인하거나 새 소유자 설정 링크를 요청하세요.',
+  setupMalformed: '소유자 설정 링크 형식이 올바르지 않습니다. 주소창에서 지웠으니 새 링크를 요청하세요.',
+  setupUnused: '이 도메인에는 이미 등록된 보안 키가 있어 설정 링크를 쓰지 않고 지웠습니다.',
+  regUnsupported: '이 브라우저에서는 이 페이지에서 보안 키를 등록할 수 없습니다. 최신 브라우저에서 HTTPS 로 여세요.',
+  regCancelled: '키 등록이 취소되었거나 시간이 초과되었습니다. 보안 키 등록을 눌러 다시 시도하세요.',
+  regExists: '이 보안 키는 이미 이 도메인에 등록되어 있습니다. 그 키로 로그인하거나 다른 키를 쓰세요.',
+  regDomainRefused: '브라우저가 이 주소에서 보안 키 등록을 거부했습니다.',
+  regFailed: '보안 키 등록이 완료되지 않았습니다.',
+  regStartFailed: '키 등록을 시작하지 못했습니다.',
+  regRejected: (s) => s === 400 ? 'Cloudbite가 이 등록을 검증하지 못했습니다. 다시 시도하세요.'
+    : s === 403 ? '소유자 설정 토큰이 거부되었거나, 이미 키 두 개를 등록했거나, 처음 쓴 지 30분이 지나 만료되었습니다. 새 소유자 설정 링크를 요청하세요.'
+      : s === 503 ? '지금은 키 등록을 사용할 수 없습니다.' : '',
+  regOdd: 'Cloudbite가 예상하지 못한 형식으로 등록에 답했습니다. 키 등록이 확인되지 않았습니다.',
+  registered: '키를 등록했습니다. 보안 키로 로그인하세요.',
   sessionFailed: '이 브라우저의 로그인 상태를 확인하지 못했습니다.',
   tryAgain: '다시 시도',
   unsupported: '이 브라우저에서는 이 페이지에서 보안 키를 쓸 수 없습니다. 최신 브라우저에서 HTTPS 로 열거나, 고급 아래의 임시 토큰을 사용하세요.',
@@ -365,18 +404,32 @@ function validateRequest(name: string, purpose: string): Msg[] {
 // 임시 Cloudbite 운영자 토큰: 콘솔(client/cloudbite-console.ts)·서버(src/cloudbite-operator.ts)와 같은 모양만 받는다
 const OPERATOR_TOKEN = /^cbo_[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/;
 const isOperatorToken = (t: string) => t.trim().startsWith('cbo_');
-function operatorFragment(hash: string): { present: boolean; token: string } {
+// 소유자 설정 토큰(SETUP_TOKEN): 첫 보안 키 등록에만 쓰는 불투명 값. /api/register/* 본문 말고는 어디에도 보내지 않는다
+const SETUP_TOKEN = /^[A-Za-z0-9_-]{20,256}$/;
+type Found = { present: boolean; token: string };
+/** 한 번에 두 비밀을 나눠 읽는다: setup 조각의 값이 운영자 조각으로 잘못 읽히거나 서로 덮어쓰지 않는다 */
+function handoffFragment(hash: string): { operator: Found; setup: Found } {
   const raw = hash.startsWith('#') ? hash.slice(1) : hash;
-  const hit = raw.split('&').find(p => p === 'operator' || p.startsWith('operator='));
-  const value = hit === undefined ? null : hit.slice('operator='.length);
-  return { present: hit !== undefined || raw.includes('cbo_'), token: value !== null && OPERATOR_TOKEN.test(value) ? value : '' };
+  const parts = raw.split('&');
+  const isSetup = (p: string) => p === 'setup' || p.startsWith('setup=');
+  const rest = parts.filter(p => !isSetup(p));
+  const op = rest.find(p => p === 'operator' || p.startsWith('operator='));
+  const opValue = op === undefined ? null : op.slice('operator='.length);
+  const su = parts.find(isSetup);
+  let suValue = su === undefined ? '' : su.slice('setup='.length);
+  try { suValue = decodeURIComponent(suValue); } catch { suValue = ''; } // 한 번만 푼다
+  return {
+    operator: { present: op !== undefined || rest.join('&').includes('cbo_'), token: opValue !== null && OPERATOR_TOKEN.test(opValue) ? opValue : '' },
+    setup: { present: su !== undefined || raw.includes('setup='), token: su !== undefined && SETUP_TOKEN.test(suValue) ? suValue : '' },
+  };
 }
-/** 운영자 조각을 메모리로 옮기고 어떤 요청보다 먼저 주소창·현재 기록 항목에서 지운다 */
-function takeOperatorLink(): { present: boolean; token: string } {
+function operatorFragment(hash: string): Found { return handoffFragment(hash).operator; }
+/** 운영자·설정 조각을 메모리로 옮기고 어떤 요청보다 먼저 주소창·현재 기록 항목에서 지운다 */
+function takeHandoffLink(): { operator: Found; setup: Found } {
   const g = globalThis as { location?: Location; history?: History };
   const loc = g.location;
-  const found = operatorFragment(loc && typeof loc.hash === 'string' ? loc.hash : '');
-  if (!found.present || !loc) return found;
+  const found = handoffFragment(loc && typeof loc.hash === 'string' ? loc.hash : '');
+  if (!(found.operator.present || found.setup.present) || !loc) return found;
   const clean = `${loc.pathname ?? ''}${loc.search ?? ''}`;
   try {
     if (g.history && typeof g.history.replaceState === 'function') { g.history.replaceState(g.history.state, '', clean); return found; }
@@ -431,9 +484,50 @@ function assertionJSON(c: Assertion): Record<string, unknown> {
     ...(c.authenticatorAttachment ? { authenticatorAttachment: c.authenticatorAttachment } : {}),
   };
 }
-function webauthnAvailable(): boolean {
-  const g = globalThis as { PublicKeyCredential?: unknown; navigator?: { credentials?: { get?: unknown } } };
-  return typeof g.PublicKeyCredential !== 'undefined' && typeof g.navigator?.credentials?.get === 'function';
+/** 서버의 PublicKeyCredentialCreationOptionsJSON → navigator.credentials.create 인자. 나머지(교차 플랫폼·UV 필수·PRF)는 그대로 둔다 */
+function creationOptions(raw: unknown): PublicKeyCredentialCreationOptions | null {
+  if (!isObj(raw) || typeof raw.challenge !== 'string' || !raw.challenge) return null;
+  if (!isObj(raw.user) || typeof raw.user.id !== 'string' || !raw.user.id) return null;
+  const exclude = raw.excludeCredentials === undefined ? [] : raw.excludeCredentials;
+  if (!Array.isArray(exclude) || !exclude.every(x => isObj(x) && typeof x.id === 'string')) return null;
+  try {
+    return {
+      ...(raw as object),
+      challenge: fromB64u(raw.challenge),
+      user: { ...raw.user, id: fromB64u(raw.user.id) },
+      excludeCredentials: (exclude as Record<string, unknown>[]).map(x => ({ ...x, type: 'public-key', id: fromB64u(x.id as string) }) as PublicKeyCredentialDescriptor),
+    } as PublicKeyCredentialCreationOptions;
+  } catch { return null; }
+}
+type Attestation = {
+  id: string; rawId: ArrayBuffer; type: string; authenticatorAttachment?: string | null;
+  response: { clientDataJSON: ArrayBuffer; attestationObject: ArrayBuffer; getTransports?: () => unknown };
+  getClientExtensionResults?: () => unknown;
+};
+/** RegistrationResponseJSON — @simplewebauthn/browser 가 보내는 모양 (선택 항목은 있을 때만) */
+function attestationJSON(c: Attestation): Record<string, unknown> {
+  const transports = typeof c.response.getTransports === 'function' ? c.response.getTransports() : undefined;
+  return {
+    id: c.id, rawId: toB64u(c.rawId), type: c.type,
+    response: {
+      clientDataJSON: toB64u(c.response.clientDataJSON), attestationObject: toB64u(c.response.attestationObject),
+      ...(Array.isArray(transports) && transports.every(t => typeof t === 'string') ? { transports } : {}),
+    },
+    clientExtensionResults: typeof c.getClientExtensionResults === 'function' ? c.getClientExtensionResults() : {},
+    ...(c.authenticatorAttachment ? { authenticatorAttachment: c.authenticatorAttachment } : {}),
+  };
+}
+function webauthnAvailable(op: 'get' | 'create' = 'get'): boolean {
+  const g = globalThis as { PublicKeyCredential?: unknown; navigator?: { credentials?: { get?: unknown; create?: unknown } } };
+  return typeof g.PublicKeyCredential !== 'undefined' && typeof g.navigator?.credentials?.[op] === 'function';
+}
+function registerError(e: unknown): Msg {
+  const name = isObj(e) || e instanceof Error ? str((e as { name?: unknown }).name, 60) : '';
+  if (name === 'NotAllowedError' || name === 'AbortError') return () => T().regCancelled;
+  if (name === 'SecurityError') return () => T().regDomainRefused;
+  if (name === 'InvalidStateError') return () => T().regExists;
+  if (name === 'NotSupportedError') return () => T().regUnsupported;
+  return () => withRaw(T().regFailed, name);
 }
 function keyError(e: unknown): Msg {
   const name = isObj(e) || e instanceof Error ? str((e as { name?: unknown }).name, 60) : '';
@@ -656,13 +750,14 @@ function visitorPage(root: HTMLElement): void {
 // ───────────────────────── 주인: 로그인 + 요청함 ─────────────────────────
 
 function ownerPage(root: HTMLElement): void {
-  // 운영자 링크는 화면·요청보다 먼저 지운다
-  const link = takeOperatorLink();
+  // 운영자·설정 링크는 화면·요청보다 먼저 지운다
+  const handoff = takeHandoffLink();
+  const link = handoff.operator;
   const O = {
     /** 서버 쿠키 세션: checking(부팅 확인 중) · in · out · unknown(확인 실패) */
     auth: 'checking' as 'checking' | 'in' | 'out' | 'unknown',
     hasCredentials: true,
-    authBusy: '' as '' | 'login' | 'logout',
+    authBusy: '' as '' | 'login' | 'logout' | 'register',
     authMsg: null as Msg | null, authMsgKind: 'warn' as 'ok' | 'warn',
     token: link.token,
     rows: [] as CloudbiteAccessRequest[],
@@ -684,8 +779,17 @@ function ownerPage(root: HTMLElement): void {
   const retryBtn = tx(h('button', { type: 'button', class: 'ax-button', onclick: () => { void checkSession(); } }), () => T().tryAgain);
   const registerLink = ta(tx(h('a', { class: 'ax-button' }), () => T().registerLink), 'href', () => withLang(REGISTER_PATH));
   const authMsgBox = h('div', { class: 'ax-msg', 'aria-live': 'polite' });
+  // 첫 키 등록: 등록된 키가 없고 로그인 전일 때만 보인다. 설정 토큰은 이 입력칸(메모리)에만 있다
+  const setupIn = h('input', { id: 'ax-setup', type: 'password', autocomplete: 'off', spellcheck: 'false' });
+  setupIn.value = handoff.setup.token;
+  const registerBtn = h('button', { type: 'submit', class: 'ax-button primary' });
+  const enrollForm = ta(h('form', { class: 'ax-form ax-tokenform ax-enroll', novalidate: true },
+    h('div', { class: 'ax-field' }, tx(h('label', { for: 'ax-setup' }), () => T().setupLabel), setupIn,
+      tx(h('p', { class: 'ax-help' }), () => T().setupHelp)),
+    h('div', { class: 'ax-actions' }, registerBtn)), 'aria-label', () => T().registerBtn);
+  enrollForm.addEventListener('submit', ev => { ev.preventDefault(); void register(); });
   const authPanel = h('section', { class: 'ax-panel ax-auth', 'aria-labelledby': 'ax-auth-h' },
-    tx(h('h2', { id: 'ax-auth-h' }), () => T().signInH), authText, authHelp, authMsgBox,
+    tx(h('h2', { id: 'ax-auth-h' }), () => T().signInH), authText, authHelp, enrollForm, authMsgBox,
     h('div', { class: 'ax-actions' }, signInBtn, logoutBtn, retryBtn, registerLink));
 
   const tokenIn = h('input', { id: 'ax-token', type: 'password', autocomplete: 'off', spellcheck: 'false' });
@@ -744,20 +848,64 @@ function ownerPage(root: HTMLElement): void {
     render();
   }
 
-  async function checkSession(): Promise<void> {
-    const s = ++authSeq;
-    O.auth = 'checking'; O.authMsg = null; render();
+  /** note: 확인이 끝난 뒤 보일 안내 (설정 링크 오류·등록 완료) */
+  async function checkSession(note: { msg: Msg; kind: 'ok' | 'warn' } | null = null): Promise<void> {
+    const s = ++authSeq; // 진행 중이던 로그인·등록은 이것으로 버려진다
+    O.auth = 'checking'; O.authBusy = ''; O.authMsg = null; render();
     const r = await call(`${OWNER_API}/session`);
     if (s !== authSeq) return; // 그 사이 로그인·로그아웃이 있었다
     const sess = r.ok ? normalizeOwnerSession(r.body) : null;
     if (!sess) {
       O.auth = 'unknown'; O.authMsgKind = 'warn';
-      O.authMsg = r.ok ? () => T().sessionFailed : (() => { const f = failure(r, () => ''); return () => `${T().sessionFailed} ${f()}`; })();
+      const base: Msg = r.ok ? () => T().sessionFailed : (() => { const f = failure(r, () => ''); return () => `${T().sessionFailed} ${f()}`; })();
+      O.authMsg = note ? () => `${note.msg()} ${base()}` : base;
       render(); return;
     }
     O.auth = sess.authenticated ? 'in' : 'out'; O.hasCredentials = sess.hasCredentials;
+    if (note) { O.authMsg = note.msg; O.authMsgKind = note.kind; }
+    // 등록할 수 없는 상태면 설정 토큰을 메모리에 남기지 않는다
+    if (O.hasCredentials && setupIn.value) {
+      setupIn.value = '';
+      if (!note) { O.authMsg = () => T().setupUnused; O.authMsgKind = 'warn'; }
+    }
     render();
     if (O.auth === 'in' && !O.token) void load();
+  }
+
+  /** 첫 보안 키 등록. 단추를 눌렀을 때만 시작하고, 성공해도 로그인으로 치지 않는다 — 로그인은 따로 누른다 */
+  async function register(): Promise<void> {
+    if (O.authBusy || O.auth !== 'out' || O.hasCredentials) return;
+    O.authMsgKind = 'warn';
+    const setup = setupIn.value.trim();
+    if (!setup) { O.authMsg = () => T().setupMissing; render(); setupIn.focus(); return; }
+    if (!SETUP_TOKEN.test(setup)) { O.authMsg = () => T().setupInvalid; render(); setupIn.focus(); return; }
+    if (!webauthnAvailable('create')) { O.authMsg = () => T().regUnsupported; render(); return; }
+    const s = ++authSeq;
+    O.authBusy = 'register'; O.authMsg = null; render();
+    const done = (m: Msg) => { if (s !== authSeq) return; O.authBusy = ''; O.authMsgKind = 'warn'; O.authMsg = m; render(); };
+    const opts = await postJSON('/api/register/options', { setup });
+    if (s !== authSeq) return;
+    if (!opts.ok) { const f = failure(opts, d => d.regRejected(opts.status)); done(() => `${T().regStartFailed} ${f()}`); return; }
+    const publicKey = creationOptions(opts.body);
+    if (!publicKey) { done(() => T().regOdd); return; }
+    let cred: Attestation | null;
+    try {
+      cred = await (navigator.credentials.create({ publicKey }) as Promise<unknown>) as Attestation | null;
+    } catch (e) { done(registerError(e)); return; }
+    if (s !== authSeq) return;
+    if (!cred || !isObj(cred.response)) { done(() => T().regCancelled); return; }
+    let response: Record<string, unknown>;
+    try { response = attestationJSON(cred); } catch { done(() => T().regFailed); return; }
+    const r = await postJSON('/api/register/verify', { setup, response, label: 'Cloudbite owner key' });
+    if (s !== authSeq) return;
+    if (!r.ok) { done(failure(r, d => d.regRejected(r.status))); return; }
+    if (!isObj(r.body) || r.body.ok !== true) { done(() => T().regOdd); return; }
+    // 등록됨: 토큰을 지우고 서버에 상태를 다시 묻는다. 로그인 여부는 그 답만 따른다
+    setupIn.value = '';
+    const refocus = focusWasOn(registerBtn) || document.activeElement === setupIn;
+    O.authBusy = '';
+    await checkSession({ msg: () => T().registered, kind: 'ok' });
+    if (refocus && !signInBtn.hidden) signInBtn.focus();
   }
 
   async function login(): Promise<void> {
@@ -923,6 +1071,9 @@ function ownerPage(root: HTMLElement): void {
     logoutBtn.textContent = O.authBusy === 'logout' ? d.loggingOut : d.logout;
     retryBtn.hidden = O.auth !== 'unknown';
     registerLink.hidden = !(out && !O.hasCredentials);
+    enrollForm.hidden = !(out && !O.hasCredentials);
+    registerBtn.disabled = setupIn.disabled = !!O.authBusy;
+    registerBtn.textContent = O.authBusy === 'register' ? d.registering : d.registerBtn;
     authPanel.setAttribute('aria-busy', String(!!O.authBusy || O.auth === 'checking'));
     fill(authMsgBox, O.authMsg ? h('p', { class: O.authMsgKind === 'ok' ? 'ax-ok' : 'ax-warn' }, O.authMsg()) : null);
     // 고급: 토큰
@@ -950,7 +1101,7 @@ function ownerPage(root: HTMLElement): void {
 
   render();
   if (O.token) void load();
-  void checkSession();
+  void checkSession(handoff.setup.present && !handoff.setup.token ? { msg: () => T().setupMalformed, kind: 'warn' } : null);
 }
 
 // ───────────────────────── 공개 QR 페이지 ─────────────────────────
@@ -986,7 +1137,7 @@ function boot(): void {
   if (view === 'owner') ownerPage(root); else if (view === 'request') visitorPage(root); else if (view === 'qr') qrPage(root);
 }
 
-const CloudbiteAccessCore = { normalizeRequest, normalizeSession, normalizeOwnerSession, effectiveStatus, validateRequest, operatorFragment, pickLang, requestOptions, assertionJSON, DICT };
+const CloudbiteAccessCore = { normalizeRequest, normalizeSession, normalizeOwnerSession, effectiveStatus, validateRequest, operatorFragment, handoffFragment, pickLang, requestOptions, assertionJSON, creationOptions, attestationJSON, DICT };
 const hook = (globalThis as { __cloudbiteAccessTestHook?: (core: typeof CloudbiteAccessCore) => void }).__cloudbiteAccessTestHook;
 if (typeof hook === 'function') hook(CloudbiteAccessCore);
 if (typeof document !== 'undefined') {

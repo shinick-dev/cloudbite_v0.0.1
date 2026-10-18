@@ -18,8 +18,28 @@ Owner sign-in (primary)
           Signed in only when the server answers {authenticated:true}. Cancel/timeout (NotAllowedError, AbortError),
           SecurityError, InvalidStateError, unsupported browser, HTTP failures and odd replies each show a KO/EN message
           and leave the page signed out. The button is disabled while a sign-in is in flight.
-  No key: hasCredentials false -> explains that a key must be registered on THIS domain and links /register (needs the
-          owner setup token). There is no in-page registration and a token is never treated as key proof.
+  No key: hasCredentials false (and signed out) -> explains that a key must be registered on THIS domain and shows the
+          first-key enrollment in the auth panel: a password field "Owner setup token" and "Register security key"
+          (/register stays as a fallback link). Hidden whenever the domain already has a key or the browser is signed in.
+  Enroll: only on an explicit button press (never automatic). The token is trimmed and must match [A-Za-z0-9_-]{20,256}.
+          POST /api/register/options {setup} -> raw PublicKeyCredentialCreationOptionsJSON; challenge, user.id and
+          excludeCredentials[].id are base64url-decoded, every other server option (cross-platform, UV required, PRF
+          extension, rp, timeout, ...) is passed unchanged to navigator.credentials.create. The attestation is sent as
+          POST /api/register/verify {setup, response: RegistrationResponseJSON (id, rawId, type, response.{clientDataJSON,
+          attestationObject, transports?}, clientExtensionResults, authenticatorAttachment?), label: 'Cloudbite owner key'}.
+          Success only on {ok:true}: the field is cleared, the session is re-checked, and the page says "Key registered.
+          Sign in with your security key." The owner then presses Sign in separately — registration never counts as a
+          login (even if a reply claims authenticated) and no second native prompt is started. Empty/malformed token,
+          unsupported browser, cancel/timeout, already-registered key (InvalidStateError), rejected/expired token (403),
+          failed verification (400) and odd replies each show a KO/EN message (+ raw server text), keep the typed token
+          and stay retryable. Busy state disables the field and button; a superseding session check drops late replies.
+  #setup= private owner handoff (e.g. /cloudbite/requests?lang=ko#setup=TOKEN): one combined parser reads #setup= and
+          #operator= together, so a setup value is never read as an operator link and neither overwrites the other.
+          The value is percent-decoded once and validated; a valid one prefills the field (memory only). Any setup or
+          operator fragment, valid or malformed, is removed with history.replaceState before the first request, keeping
+          ?lang=. A malformed one shows a KO/EN notice; if the domain already has a key the prefilled token is cleared.
+          The setup token goes only into the two /api/register/* bodies — never a URL, query, header, storage, log or QR.
+          A setup token opens registration only; it is not proof of a hardware key. Advanced tokens remain the fallback.
   Logout: POST /api/cloudbite/owner/logout {} — signed out only after {authenticated:false}. It stops polling, clears rows,
           busy state and the in-memory token, and bumps the generation so late replies render nothing. A failed or
           unconfirmed logout keeps the signed-in state and shows why.
@@ -47,5 +67,6 @@ Build guard
   The owner sign-in copy inside CLOUDBITE_ACCESS_JS may name the real security-key login.
 
 Tests
-  node test/cloudbite-access-ui.mjs   fake-DOM checks of the above (not browser evidence).
+  node test/cloudbite-access-ui.mjs   fake-DOM checks of the above (not browser evidence; a physical key touch and the
+                                      browser's own create/PIN prompt are not proven by it).
   node test/cloudbite-access.mjs      backend access service (unchanged).
