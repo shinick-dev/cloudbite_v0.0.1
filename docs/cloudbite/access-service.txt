@@ -1,8 +1,9 @@
 Cloudbite audience access — backend (src/cloudbite-access-service.ts, src/cloudbite-access-api.ts)
 =================================================================================================
 
-Purpose: a visitor (QR at the event) asks Cloudbite itself for access; the owner approves in Cloudbite with the
-temporary cbo_ operator token or a Cloudbite State admin session; the approved browser may then create up to TEN
+Purpose: a visitor (QR at the event) asks Cloudbite itself for access; the owner signs in with a registered security
+key and approves using a persistent Cloudbite owner cookie (owner-session.txt). Temporary cbo_ operator tokens and
+Cloudbite State admin sessions remain fallback credentials. The approved browser may then create up to TEN
 Cloudbite projects of its own. Nothing here touches gw-shinick, its admin, vault or studyroom routes.
 Wire shapes: src/cloudbite-access-contract.ts (CloudbiteAccessRequest, CloudbiteAccessSession).
 
@@ -16,18 +17,19 @@ Routes (all on the Cloudbite Worker ORIGIN)
                                                    Response: CloudbiteAccessSession.
   GET  /api/cloudbite/access/status                the cookie's CloudbiteAccessSession, or {request:null,canCreate:false}.
                                                    Runs the failed-run refund check first (below).
-  GET  /api/cloudbite/access/requests              owner only (x-admin-token). {requests: [...]} newest first, max 100.
+  GET  /api/cloudbite/access/requests              owner cookie or x-admin-token. {requests: [...]} newest first, max 100.
   POST /api/cloudbite/access/requests/<id>/approve owner only, exact Origin, JSON body exactly {}.
   POST /api/cloudbite/access/requests/<id>/deny    "
   POST /api/cloudbite/access/requests/<id>/revoke  "    Each returns CloudbiteAccessRequest.
   GET  /api/cloudbite/bootstrap                    adds .access only when the binding exists AND a cookie is sent;
                                                    otherwise byte-for-byte the previous bootstrap.
-  POST /api/cloudbite/projects                     unchanged for x-admin-token callers. With NO x-admin-token, an
-                                                   approved visitor cookie is accepted instead (see Quota). A wrong
+  POST /api/cloudbite/projects                     unchanged for x-admin-token callers. With NO x-admin-token, the
+                                                   owner cookie is checked before an approved visitor cookie (Quota). A wrong
                                                    admin header is never rescued by a cookie.
 
-Owner check (x-admin-token): cbo_ prefix -> verifyCloudbiteOperator (never reaches State); anything else ->
-State.adminList. Only these Cloudbite paths use it; there is no new legacy bypass.
+Owner check: an explicit x-admin-token decides alone: cbo_ prefix -> verifyCloudbiteOperator (never reaches State);
+anything else -> State.adminList. Without that header, check the Cloudbite owner cookie. The persistent cookie is
+issued only after verified WebAuthn, and logout revokes it server-side. Only these Cloudbite paths use it; no legacy bypass.
 
 Visitor credential
   cbv_ + base64url(32 random bytes). Only its SHA-256 is stored (cred:<hash> index + record field); the plaintext

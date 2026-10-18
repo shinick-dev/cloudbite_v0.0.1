@@ -13,8 +13,8 @@ version was 4540d8e6-0eba-4544-a488-5255aee440d8 on 18 October 2026.
 
 Provider configuration is server-only. Bootstrap liveReady checks configuration,
 not provider uptime or a successful full live project. A public browser demo is
-available without a credential. Live work requires a valid Cloudbite operator
-credential or an admin session from this Worker's own State.
+available without a credential. Live work requires a signed-in Cloudbite owner,
+a valid temporary operator/admin credential, or an approved visitor session.
 
 Temporary operator access is documented in temporary-operator.txt. It does not
 approve requests at the existing legacy studyroom service. The public QR now
@@ -31,6 +31,11 @@ Verify the account/Worker before deploying. Use the installed Wrangler version.
 The owner-only, ignored .artifacts/production directory contains secrets.json
 with independent MASTER_KEY and SETUP_TOKEN plus the Cloudbite Daytona/Nosana
 keys. Never publish this directory, its operator HTML/QR, or the secrets file.
-First physical-key registration remains available at /register with SETUP_TOKEN.
+Owner security-key sign-in is at /cloudbite/requests (KO/EN). Its scoped HttpOnly
+cookie survives reloads, new tabs and browser restarts until explicit logout,
+key removal, or browser cookie deletion; the server has no eight-hour expiry.
+Legacy admin, vault and studyroom policies are unchanged. See owner-session.txt.
+First physical-key registration requires the private SETUP_TOKEN. Never register
+test virtual authenticators in production; browser WebAuthn QA stays local.
 Keep the original MASTER_KEY during redeployment so encrypted state remains
 readable. No key reset or fake WebAuthn proof is needed for temporary access.

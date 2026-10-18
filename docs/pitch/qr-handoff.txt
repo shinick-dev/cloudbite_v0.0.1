@@ -27,13 +27,15 @@ PARTICIPANT
    cannot recover your project by reusing the same client request ID.
 
 OWNER
-1. Open the Cloudbite owner inbox using the private owner access file's inbox
-   button, or enter a valid temporary Cloudbite operator / Cloudbite admin token.
+1. Open the Cloudbite owner inbox and sign in with a security key registered on
+   this Cloudbite domain. After initial key enrollment, no token paste is needed.
 2. Review the applicant's name and purpose. Press Approve or Deny.
-3. Approval is recorded by Cloudbite itself. The temporary owner credential is
-   sufficient; no physical-key tap is required for this Cloudbite flow.
+3. Approval is recorded by Cloudbite itself. The same browser stays signed in
+   across reloads and browser restarts until Log out. Temporary tokens remain
+   available under Advanced as a fallback; they do not become security-key proof.
 4. Use Revoke to stop future creation by an approved visitor. Already issued
    project capabilities retain their existing 24-hour read/cancel policy.
+5. Use KO / EN on the console, request, inbox and QR pages to switch language.
 
 BOUNDS
 Up to ten projects per approved one-hour visitor session, up to five experts each;
