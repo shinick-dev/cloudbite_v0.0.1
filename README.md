@@ -35,7 +35,7 @@
 
 [QR PNG](demo/cloudbite-access-request.png) · [SVG](demo/cloudbite-access-request.svg) · [영문 QR 안내](demo/access-qr.html)
 
-공개 QR은 `https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/request`를 엽니다. 이름과 체험 목적을 신청하면 진행자가 `https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/requests`에서 승인합니다. 승인 후 같은 브라우저에서 Cloudbite에 들어가 공통 프로젝트와 전문가를 선택해 실행합니다. 1시간 동안 프로젝트 1개, 최대 5명의 전문가를 체험할 수 있습니다. 승인은 외부 자원을 자동 생성하지 않습니다.
+공개 QR은 `https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/request`를 엽니다. 이름과 체험 목적을 신청하면 진행자가 `https://cloudbite-v001.ai-gongbu.workers.dev/cloudbite/requests`에서 승인합니다. 승인 후 같은 브라우저에서 Cloudbite에 들어가 공통 프로젝트와 전문가를 선택해 실행합니다. 1시간 동안 프로젝트 최대 10개를 체험하며, 프로젝트마다 최대 5명의 전문가를 선택할 수 있습니다. 승인은 외부 자원을 자동 생성하지 않습니다.
 
 운영자용 비공개 접속 파일의 승인함 버튼이나 유효한 Cloudbite 관리자 세션으로 승인합니다. 임시 Cloudbite 운영자 권한으로도 가능하며 기존 공부방 보안키 승인 경로를 사용하지 않습니다. 진행 절차는 [QR 안내](docs/pitch/qr-handoff.txt), 서버 범위는 [접근 서비스](docs/cloudbite/access-service.txt)에 정리합니다. 비공개 운영자 QR을 청중에게 공개하지 마세요.
 
