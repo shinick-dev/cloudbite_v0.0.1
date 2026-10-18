@@ -12,8 +12,8 @@
 | `src/cloudbite-page.ts` | `CLOUDBITE_HTML`, `CLOUDBITE_JS`, `CLOUDBITE_CSS`, `CLOUDBITE_JS_PATH`, `CLOUDBITE_CSS_PATH` |
 | `test/cloudbite-console.mjs` | 코어 함수 + 가짜 DOM 화면 동작 검사 (`node test/cloudbite-console.mjs`) |
 
-소스를 고친 뒤에는 `node tools/build-cloudbite-console.mjs` 로 다시 만든다. `package.json` 스크립트는 이 작업 범위 밖이라
-`npm run check` 에 `--check` 가 아직 들어 있지 않다 — 통합 시 조정자가 추가할 것을 권한다.
+소스를 고친 뒤에는 `node tools/build-cloudbite-console.mjs` 로 다시 만든다.
+`npm run check` 는 콘솔과 QR 안내 화면의 생성 파일 최신 여부 및 서버·클라이언트 타입을 함께 검사한다.
 
 ## 라우팅 (런타임 담당)
 
@@ -21,8 +21,8 @@
 - `GET CLOUDBITE_JS_PATH` (`/cloudbite/console.js`) → `CLOUDBITE_JS` (`text/javascript`)
 - `GET CLOUDBITE_CSS_PATH` (`/cloudbite/console.css`) → `CLOUDBITE_CSS` (`text/css`)
 
-페이지에는 인라인 스크립트·`style` 속성이 없다. 현재 `src/index.ts` 의 CSP 는 `style-src 'unsafe-inline'` 만 허용하므로
-Cloudbite 응답에는 `script-src 'self'; style-src 'self'; connect-src 'self'` 를 포함한 CSP 를 써야 스타일이 적용된다.
+페이지에는 인라인 스크립트·`style` 속성이 없다. Cloudbite 응답에는
+`script-src 'self'; style-src 'self'; connect-src 'self'` 를 포함한 CSP가 적용된다.
 JS 는 CSSOM(`element.style.x = …`)으로만 막대 너비·높이를 정한다(CSP 허용 범위).
 
 ## API 사용
@@ -37,7 +37,7 @@ JS 는 CSSOM(`element.style.x = …`)으로만 막대 너비·높이를 정한�
 ## 동작 규칙
 
 - 화면 문구는 영어다(2026-10-18 사용자 요청). 내장 데모 역할·데모 활동·보고서·오류 문구는 영어로 옮겼고, 서버·모델이 돌려준 내용은 받은 그대로 보인다.
-- 첫 화면은 예시 브리프("Launch a 100-expert AI advisory room")로 **브라우저 데모**를 자동 시작해 전문가 4명이 각자 작업공간에서 일하는 모습을 보인다. 머리 배지·띠에 "No real Daytona sandbox or Nosana inference is created"를 항상 표시한다.
+- 첫 화면은 예시 브리프("Launch a 100-expert AI advisory room")로 **브라우저 데모**를 자동 시작해 전문가 4명이 각자 작업공간에서 일하는 모습을 보인다. 머리 배지·띠에 "Browser demo — simulated activity and files; no Daytona or Nosana calls."를 표시한다.
 - 데모 결과는 브리프 문구에서 결정적으로 만든다(같은 입력 → 같은 결과). 무료/유료, 의료·법률, 기업·개인정보, 근거·출처, 일정·범위 표현(영어·한국어 키워드 모두)에 따라 역할별 의견이 바뀐다. 파일(`PERSONA.md`, `PROJECT.md`, `WORKORDER.md`, `out/notes.md`, `out/result.json`, `out/report.md`)은 실제 내용을 담는다. Settings 의 "Simulate one expert failing"으로 실패 경로를 볼 수 있다.
 - 취소·재실행 시 세대 번호를 올리고 타이머를 모두 지운다. 이전 세대의 타이머·조회·파일 응답은 적용되지 않는다. 진행 중에는 시작 버튼·입력·모드 전환이 잠긴다.
 - 실제 실행 실패는 오류로 보여 주며 데모로 바꾸지 않는다. 서버가 준비 안 됐으면 빠진 설정 **이름**만 보여 주고 시작을 막는다. API 키 입력란은 없다.
