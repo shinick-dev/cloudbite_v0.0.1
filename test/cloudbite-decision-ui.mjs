@@ -41,7 +41,8 @@ await test('결정 세부 정보: 한 줄 한 항목, 빈 줄 버림, 모두 비
 
 await test('근거 파일 거르기: TXT·MD·CSV·JSON 만, PDF·이미지·형식 위장·빈 파일·너무 큰 파일은 읽기 전에 거부', () => {
   const ok = (name, type = '', size = 10) => core.docProblem({ name, type, size });
-  for (const [n, t] of [['a.txt', 'text/plain'], ['b.md', ''], ['c.CSV', 'text/csv'], ['d.json', 'application/json'], ['e.markdown', 'text/markdown'], ['f.csv', 'application/vnd.ms-excel']]) assert.equal(ok(n, t), null, n);
+  for (const [n, t] of [['a.txt', 'text/plain'], ['b.md', ''], ['c.CSV', 'text/csv'], ['d.json', 'application/json'], ['f.csv', 'application/vnd.ms-excel']]) assert.equal(ok(n, t), null, n);
+  assert.ok(ok('unsupported.markdown', 'text/markdown'), 'same extension allowlist as the backend');
   const pdf = ok('paper.pdf', 'application/pdf');
   assert.equal(pdf(EN), 'paper.pdf: only TXT, MD, CSV and JSON files can be added. PDF and other binary files are not imported.');
   assert.match(pdf(KO), /^paper\.pdf: TXT·MD·CSV·JSON 파일만 추가할 수 있습니다/);
@@ -388,15 +389,15 @@ await test('교차 검토: 버튼은 끝난 실제 실행에서만, bearer·빈 
   assert.equal(env.requests.filter(r => r.url.endsWith('/review')).length, 1, 'no automatic paid retry');
 });
 
-await test('교차 검토 실패: 요청 실패는 아무것도 바꾸지 않았다고 알리고 다시 걸 수 있다, 서버의 실패는 완료로 꾸미지 않고 버튼이 없다', async () => {
+await test('교차 검토 실패: 응답 미확인은 실행되지 않았다고 단정하지 않으며 저장된 상태를 확인할 수 있다', async () => {
   let n = 0;
   const env = await finishedLive(() => ++n === 1 ? json(503, { error: 'cross-review inference is not configured' })
     : json(200, projectRaw({ evidenceClaims: CLAIMS, crossReview: { status: 'failed', snapshotHash: 'h', startedAt: 1, completedAt: 2, reports: [], error: 'x2: inference upstream unavailable', execution: 'server-nosana' } })));
   env.fk('review-run').click(); await env.flush();
-  assert.match(panelOf(env).textContent, /Could not run the cross-review: .*cross-review inference is not configured.* Nothing was changed\./);
-  assert.equal(env.fk('review-run').textContent, 'Run cross-review again');
+  assert.match(panelOf(env).textContent, /Could not confirm the cross-review: .*cross-review inference is not configured.* Check its saved status/);
+  assert.equal(env.fk('review-run').textContent, 'Check or request cross-review');
   langBtn(env, 'ko').click(); await env.flush();
-  assert.match(panelOf(env).textContent, /교차 검토를 실행하지 못했습니다/);
+  assert.match(panelOf(env).textContent, /교차 검토 응답을 확인하지 못했습니다/);
   env.fk('review-run').click(); await env.flush();
   const text = panelOf(env).textContent;
   assert.match(text, /교차 검토가 실패했습니다: x2: inference upstream unavailable 원래 의견은 그대로입니다/);
@@ -467,4 +468,9 @@ await test('사용 기록 상세: 저장된 결정·장부·교차 검토를 읽
   assert.match(env.all().find(n => n.className === 'cb-panel cb-history-detail').textContent, /저장된 교차 검토 \(읽기 전용\)/);
 });
 
+await test('100인 x 근거 8개 장부를 200개에서 조용히 자르지 않고 전부 유지한다', () => {
+  const evidenceClaims=Array.from({length:800},(_,i)=>({id:'claim-'+i,expertId:'x1',text:'claim '+i,references:[],status:'unlinked'}));
+  const p=core.normalizeProject(projectRaw({evidenceClaims}));
+  assert.equal(p.evidenceClaims.length,800);assert.equal(p.evidenceClaims[799].text,'claim 799');
+});
 console.log(`cloudbite-decision-ui: ${pass} passed`);

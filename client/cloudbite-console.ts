@@ -89,7 +89,7 @@ const DECISION_FIELDS: DecisionField[] = ['options', 'constraints', 'successCrit
 const DECISION = { items: 8, chars: 300 };
 /** 프로젝트 근거 파일(선택): 글자 파일만, 최대 6개·파일마다 8,000자·합계 24,000자. id 는 남은 순서대로 doc-1..doc-6 */
 const DOCS = { files: 6, chars: 8000, total: 24000 };
-const DOC_EXT = /\.(?:txt|md|markdown|csv|json)$/i;
+const DOC_EXT = /\.(?:txt|md|csv|json)$/i;
 /** 확장자가 맞아도 브라우저가 알려 준 형식이 글자가 아니면 받지 않는다 (Windows 는 .csv 를 vnd.ms-excel 로 알린다) */
 const DOC_TYPES = ['', 'application/json', 'application/vnd.ms-excel'];
 const VERDICTS: CrossReviewFinding['verdict'][] = ['supported', 'challenged', 'insufficient'];
@@ -231,7 +231,7 @@ const EN = {
   suggestCurrent: 'This is already your selection.',
   // Jev 경로 (bootstrap.configuration.routing 이 있을 때만)
   jevTitle: 'Jev selects your experts',
-  jevHelp: (max: number, model: string) => `When you run, the server uses TypeSafe Jev (${model}) to assess roles, assign needed perspectives and review overlapping contributions, then starts up to ${plural(max, 'expert')}. You can see assignments and gaps. Suitability is not answer quality; experts do not review each other's outputs.`,
+  jevHelp: (max: number, model: string) => `When you run, the server uses TypeSafe Jev (${model}) to assess roles, assign needed perspectives and review overlapping contributions, then starts up to ${plural(max, 'expert')}. You can see assignments and gaps. Suitability is not answer quality. The first pass is independent; optional cross-review is available after it finishes.`,
   jevDemoNote: 'Choosing the team is a real Jev call on the server even in browser demo mode; the demo run itself stays simulated, with no Daytona or Nosana calls.',
   jevRouting: 'Jev is choosing experts for this brief…',
   jevChosen: (n: number) => `Jev chose ${plural(n, 'expert')} for this brief`,
@@ -342,14 +342,14 @@ const EN = {
   refKnowledge: (id: string, available: boolean) => `Knowledge source ${id} — ${available ? 'listed in the knowledge pack (metadata only; not checked against the claim)' : 'not found in the knowledge pack'}`,
   demoNoLedger: 'Browser demo: no claim ledger or cross-review is produced. The documents stay with this simulated project in this tab.',
   reviewTitle: 'Cross-review',
-  reviewExplain: 'Optional server-side second pass on Nosana: reviewers read the other experts\' submitted evidence and mark items supported, challenged or insufficient. It makes up to 3 extra model calls, creates no sandbox and leaves the original opinions unchanged. Verdicts are model judgments, not verified facts.',
-  reviewBtn: 'Run cross-review', reviewRetry: 'Run cross-review again', reviewRunning: 'Cross-review running…',
+  reviewExplain: 'Optional server-side second pass on Nosana: up to 3 reviewers each read up to 3 other opinions and the supplied documents. This is a partial review, with up to 3 extra model calls. It creates no sandbox and leaves original opinions unchanged. Verdicts are model judgments, not verified facts.',
+  reviewBtn: 'Run cross-review', reviewRetry: 'Check or request cross-review', reviewRunning: 'Cross-review running…',
   reviewNeed: 'Cross-review needs a finished live run with at least 2 completed experts.',
   reviewServerRunning: 'The server reports a cross-review in progress.',
   reviewDone: (t: string) => `Cross-review completed at ${t}. The original opinions are unchanged.`,
   reviewFailed: (e: string) => `Cross-review failed${e ? `: ${e}` : '.'} The original opinions are unchanged. Each project gets one cross-review attempt.`,
-  reviewRequestFailed: (e: string) => `Could not run the cross-review: ${e} Nothing was changed.`,
-  reviewNetwork: 'Could not reach the server to run the cross-review. Nothing was changed.',
+  reviewRequestFailed: (e: string) => `Could not confirm the cross-review: ${e} Check its saved status before requesting it again.`,
+  reviewNetwork: 'Could not confirm the server response. The cross-review may still be running; check its saved status.',
   reviewInvalid: 'The server returned a cross-review this console cannot read, so it is not shown.',
   reviewPollStopped: 'Stopped checking the cross-review status. Reopen the project from History to see the result.',
   reviewSaved: 'Saved cross-review (read-only).',
@@ -629,7 +629,7 @@ const KO: Messages = {
   suggestApplied: (n) => `선택을 제안된 역할 ${n}명으로 바꿨습니다. 아무것도 시작하지 않았습니다.`,
   suggestCurrent: '이미 지금 선택과 같습니다.',
   jevTitle: 'Jev가 전문가를 고릅니다',
-  jevHelp: (max, model) => `실행하면 서버가 TypeSafe Jev(${model})로 역할 적합도·필요한 관점·기여 중복을 검토해 최대 ${max}명의 팀을 시작합니다. 담당 관점과 빈 곳도 확인할 수 있습니다. 선택 적합도는 답변 품질이 아니며, 전문가끼리 결과를 검증하지는 않습니다.`,
+  jevHelp: (max, model) => `실행하면 서버가 TypeSafe Jev(${model})로 역할 적합도·필요한 관점·기여 중복을 검토해 최대 ${max}명의 팀을 시작합니다. 담당 관점과 빈 곳도 확인할 수 있습니다. 선택 적합도는 답변 품질이 아닙니다. 첫 의견은 독립적으로 작성하며, 완료 후 교차 검토를 선택할 수 있습니다.`,
   jevDemoNote: '브라우저 데모에서도 팀 고르기는 서버의 실제 Jev 호출입니다. 데모 실행 자체는 시뮬레이션이며 Daytona·Nosana를 호출하지 않습니다.',
   jevRouting: 'Jev가 이 브리프에 맞는 전문가를 고르는 중…',
   jevChosen: (n) => `Jev가 이 브리프에 전문가 ${n}명을 골랐습니다`,
@@ -736,14 +736,14 @@ const KO: Messages = {
   refKnowledge: (id, available) => `지식 출처 ${id} — ${available ? '지식 자료 목록에 있음 (메타데이터만, 주장과 대조하지 않음)' : '지식 자료에서 찾지 못함'}`,
   demoNoLedger: '브라우저 데모: 주장 장부와 교차 검토를 만들지 않습니다. 자료는 이 탭의 시뮬레이션 프로젝트에만 남습니다.',
   reviewTitle: '교차 검토',
-  reviewExplain: '선택 사항인 서버 측 Nosana 2차 검토입니다. 검토자가 다른 전문가가 낸 근거를 읽고 항목마다 뒷받침됨·이의 있음·근거 부족으로 표시합니다. 모델 호출을 최대 3번 더 하고, 샌드박스는 만들지 않으며, 원래 의견은 바꾸지 않습니다. 판정은 모델의 판단이며 검증된 사실이 아닙니다.',
-  reviewBtn: '교차 검토 실행', reviewRetry: '교차 검토 다시 실행', reviewRunning: '교차 검토 중…',
+  reviewExplain: 'Nosana를 통한 선택적 2차 검토입니다. 검토자 최대 3명이 각각 다른 의견 최대 3개와 제공된 자료를 읽습니다. 전체가 아닌 부분 검토이며 모델을 최대 3번 더 호출합니다. 샌드박스를 추가하지 않고 원래 의견을 보존합니다. 판정은 모델의 판단이며 검증된 사실이 아닙니다.',
+  reviewBtn: '교차 검토 실행', reviewRetry: '교차 검토 확인·요청', reviewRunning: '교차 검토 중…',
   reviewNeed: '교차 검토는 완료된 전문가가 2명 이상인, 끝난 실제 실행에서만 할 수 있습니다.',
   reviewServerRunning: '서버가 교차 검토를 진행 중이라고 알렸습니다.',
   reviewDone: (t) => `${t}에 교차 검토를 마쳤습니다. 원래 의견은 그대로입니다.`,
   reviewFailed: (e) => `교차 검토가 실패했습니다${e ? `: ${e}` : '.'} 원래 의견은 그대로입니다. 교차 검토는 프로젝트마다 한 번만 시도합니다.`,
-  reviewRequestFailed: (e) => `교차 검토를 실행하지 못했습니다: ${e} 아무것도 바뀌지 않았습니다.`,
-  reviewNetwork: '교차 검토를 위해 서버에 연결하지 못했습니다. 아무것도 바뀌지 않았습니다.',
+  reviewRequestFailed: (e) => `교차 검토 응답을 확인하지 못했습니다: ${e} 다시 요청하기 전에 저장된 상태를 확인하세요.`,
+  reviewNetwork: '서버 응답을 확인하지 못했습니다. 교차 검토가 계속 실행 중일 수 있으니 저장된 상태를 확인하세요.',
   reviewInvalid: '서버가 이 콘솔에서 읽을 수 없는 교차 검토를 보내 보여 주지 않습니다.',
   reviewPollStopped: '교차 검토 상태 확인을 멈췄습니다. 사용 기록에서 프로젝트를 다시 열어 결과를 보세요.',
   reviewSaved: '저장된 교차 검토 (읽기 전용)',
@@ -1399,7 +1399,7 @@ function normalizeDocuments(raw: unknown): ProjectDocument[] | undefined {
 function normalizeClaims(raw: unknown): EvidenceClaim[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const claims: EvidenceClaim[] = [];
-  for (const [i, c] of raw.slice(0, 200).entries()) {
+  for (const [i, c] of raw.slice(0, PROJECT_MAX * 8).entries()) {
     if (!isObj(c)) continue;
     const text = str(c.text, 600).trim(), expertId = str(c.expertId, 80);
     if (!text || !expertId) continue;
