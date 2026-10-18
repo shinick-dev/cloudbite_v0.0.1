@@ -9,6 +9,7 @@ import { cbProjectId, isCbFail } from './cloudbite-project';
 import { CB_OPERATOR_PREFIX, verifyCloudbiteOperator } from './cloudbite-operator';
 import { boundedText } from './cloudbite-inference';
 import { isInvalid, PROJECT_ID, RUN_ID, validateBrief } from './cloudbite-validate';
+import { accessRoute, accessSession, visitorGrant, visitorRequestId } from './cloudbite-access-api';
 import type { Env, State } from './state';
 
 type Json = (data: unknown, status?: number) => Response;
@@ -71,8 +72,15 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
 
   if (path === '/api/cloudbite/bootstrap') {
     if (req.method !== 'GET') return json({ error: 'method not allowed' }, 405);
-    return json(cloudbiteBootstrap(env));
+    const access = await accessSession(req, env);
+    return json(access ? { ...cloudbiteBootstrap(env), access } : cloudbiteBootstrap(env));
   }
+
+  // cbo_ = temporary Cloudbite operator: checked against its own secrets only, never sent to State.
+  const isOwner = async (admin: string) => admin.startsWith(CB_OPERATOR_PREFIX) ? verifyCloudbiteOperator(env, admin)
+    : !!admin && !isCbFail(await state.adminList(admin));
+  const access = await accessRoute(req, env, path, isOwner, json);
+  if (access) return access;
 
   const strictOrigin = () => req.headers.get('origin') === env.ORIGIN;
 
@@ -83,26 +91,46 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     const b = await readJson(req, CB_CREATE_BODY_MAX);
     if ('error' in b) return json({ error: b.error }, b.status);
     const admin = req.headers.get('x-admin-token') ?? '';
-    // cbo_ = temporary Cloudbite operator: checked against its own secrets only, never sent to State.
-    const allowed = admin.startsWith(CB_OPERATOR_PREFIX) ? await verifyCloudbiteOperator(env, admin)
-      : !!admin && !isCbFail(await state.adminList(admin));
-    if (!allowed) return json({ error: 'admin session required' }, 401);
-    const brief = validateBrief(b.ok);
+    // An x-admin-token header always takes the owner path (no fallback to a visitor cookie when it is wrong).
+    // Without one, an owner-approved visitor cookie may create exactly one project of its own (docs/cloudbite/access-service.txt).
+    const visitor = admin ? null : await visitorGrant.check(req, env);
+    if (admin ? !await isOwner(admin) : !visitor) return json({ error: 'admin session required' }, 401);
+    const brief = validateBrief(b.ok, visitor ? CLOUDBITE_EXPERTS : undefined);
     if (isInvalid(brief)) return json({ error: brief.invalid }, 400);
     if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);
     if (brief.mode === 'live') {
       const missing = cloudbiteMissing(env, CLOUDBITE_EXPERTS.length);
       if (missing.length) return json({ error: `live execution is not configured; missing: ${missing.join(', ')}` }, 503);
     }
+    // Visitor: namespace the requestId by the grant, then atomically bind the grant's single project to it.
+    let hold: { id: string; scoped: string } | null = null;
+    if (visitor) {
+      brief.requestId = await visitorRequestId(visitor.id, brief.requestId);
+      const r = await visitorGrant.reserve(env, visitor.cred, brief.requestId, brief.expertIds.length);
+      if (isCbFail(r)) return json({ error: r.error }, r.status);
+      hold = { id: r.id, scoped: brief.requestId };
+    }
+    // Only a definite "nothing was created" result frees the visitor's reservation; a thrown call keeps it (conservative).
+    const refused = async (status: number, error: string) => {
+      if (hold) await visitorGrant.release(env, hold.id, hold.scoped);
+      return json({ error }, status);
+    };
     const id = await cbProjectId(brief.requestId);
     if (brief.mode === 'live') {
       const slot = await ns.getByName('registry').registryAcquire(id);
-      if (isCbFail(slot)) return json({ error: slot.error }, slot.status);
+      if (isCbFail(slot)) return refused(slot.status, slot.error);
     }
     const created = await ns.getByName(id).create(id, brief);
     // A failed first create must not hold a live slot. (Idempotent retries of an existing project return success.)
     if (isCbFail(created) && brief.mode === 'live' && created.status !== 409) await ns.getByName('registry').registryRelease(id);
-    return isCbFail(created) ? json({ error: created.error }, created.status) : json(created, 201);
+    if (isCbFail(created)) {
+      // 409 = the project already exists for this requestId: the binding stays.
+      if (created.status !== 409) return refused(created.status, created.error);
+      if (hold) await visitorGrant.confirm(env, hold.id, hold.scoped);
+      return json({ error: created.error }, created.status);
+    }
+    if (hold) await visitorGrant.confirm(env, hold.id, hold.scoped);
+    return json(created, 201);
   }
 
   const m = path.match(/^\/api\/cloudbite\/projects\/([^/]+)(\/cancel|\/artifact)?$/);

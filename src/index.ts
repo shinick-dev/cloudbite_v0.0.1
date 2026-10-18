@@ -26,6 +26,7 @@ import { isFail, sha, type Env, type State } from './state';
 
 export { State } from './state';
 export { CloudbiteProject } from './cloudbite-project';
+export { CloudbiteAccess } from './cloudbite-access-service';
 
 const SECURITY_HEADERS = {
   'cache-control': 'no-store',

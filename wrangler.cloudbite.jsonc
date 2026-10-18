@@ -34,10 +34,15 @@
   "durable_objects": {
     "bindings": [
       { "name": "STATE", "class_name": "State" },
-      { "name": "CLOUDBITE", "class_name": "CloudbiteProject" }
+      { "name": "CLOUDBITE", "class_name": "CloudbiteProject" },
+      { "name": "CLOUDBITE_ACCESS", "class_name": "CloudbiteAccess" }
     ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["State", "CloudbiteProject"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["State", "CloudbiteProject"] },
+    // Audience access inbox (src/cloudbite-access-service.ts). v1 is never edited.
+    { "tag": "v2", "new_sqlite_classes": ["CloudbiteAccess"] }
+  ],
   "observability": { "enabled": true, "traces": { "enabled": true, "head_sampling_rate": 1 } },
   "env": {
     "dev": {
@@ -50,7 +55,8 @@
       "durable_objects": {
         "bindings": [
           { "name": "STATE", "class_name": "State" },
-          { "name": "CLOUDBITE", "class_name": "CloudbiteProject" }
+          { "name": "CLOUDBITE", "class_name": "CloudbiteProject" },
+          { "name": "CLOUDBITE_ACCESS", "class_name": "CloudbiteAccess" }
         ]
       }
     }

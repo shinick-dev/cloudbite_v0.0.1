@@ -1,0 +1,78 @@
+Cloudbite audience access — backend (src/cloudbite-access-service.ts, src/cloudbite-access-api.ts)
+=================================================================================================
+
+Purpose: a visitor (QR at the event) asks Cloudbite itself for access; the owner approves in Cloudbite with the
+temporary cbo_ operator token or a Cloudbite State admin session; the approved browser may then create ONE
+Cloudbite project of its own. Nothing here touches gw-shinick, its admin, vault or studyroom routes.
+Wire shapes: src/cloudbite-access-contract.ts (CloudbiteAccessRequest, CloudbiteAccessSession).
+
+Routes (all on the Cloudbite Worker ORIGIN)
+  POST /api/cloudbite/access/requests              public. Body {name, purpose}, exact Origin, application/json,
+                                                   <= 8 KiB, no other fields. name 1-80 (no control chars),
+                                                   purpose 1-1000 (newline/tab allowed). Both trimmed and stored
+                                                   as PLAIN TEXT — any UI must render them as text, never HTML.
+                                                   201 + Set-Cookie for a new request; 200 and no new cookie when
+                                                   this browser already holds a pending/approved unexpired request.
+                                                   Response: CloudbiteAccessSession.
+  GET  /api/cloudbite/access/status                the cookie's CloudbiteAccessSession, or {request:null,canCreate:false}.
+  GET  /api/cloudbite/access/requests              owner only (x-admin-token). {requests: [...]} newest first, max 100.
+  POST /api/cloudbite/access/requests/<id>/approve owner only, exact Origin, JSON body exactly {}.
+  POST /api/cloudbite/access/requests/<id>/deny    "
+  POST /api/cloudbite/access/requests/<id>/revoke  "    Each returns CloudbiteAccessRequest.
+  GET  /api/cloudbite/bootstrap                    adds .access only when the binding exists AND a cookie is sent;
+                                                   otherwise byte-for-byte the previous bootstrap.
+  POST /api/cloudbite/projects                     unchanged for x-admin-token callers. With NO x-admin-token, an
+                                                   approved visitor cookie is accepted instead (see Quota). A wrong
+                                                   admin header is never rescued by a cookie.
+
+Owner check (x-admin-token): cbo_ prefix -> verifyCloudbiteOperator (never reaches State); anything else ->
+State.adminList. Only these Cloudbite paths use it; there is no new legacy bypass.
+
+Visitor credential
+  cbv_ + base64url(32 random bytes). Only its SHA-256 is stored (cred:<hash> index + record field); the plaintext
+  exists only in the Set-Cookie header. Never in JSON, lists, URLs, logs or browser storage.
+  Cookie: __Host-cb-access=<cbv_>; Path=/; Max-Age=5400; HttpOnly; SameSite=Strict; Secure
+  Local http dev only (CLOUDBITE_ALLOW_HTTP=1 AND ORIGIN starts with http:): cb-access-dev, same attributes without
+  Secure (a __Host- cookie requires Secure). Each mode reads only its own cookie name.
+  Request ids authenticate nothing: status/bootstrap/create look up the cookie hash only.
+
+Lifecycle (server clock)
+  pending  -> approved   approve; grant lasts 1 h from approval (expiresAt updated)
+  pending  -> denied     deny
+  approved -> revoked    revoke
+  pending/approved past expiresAt read as "expired" (pending window 30 min).
+  Re-applying the current action is idempotent (200, same view). Every other transition is 409: nothing revives an
+  expired, denied or revoked request. A new submit from that browser then creates a new request + new cookie.
+  maxExperts 5, maxProjects 1, usedProjects 0/1.
+
+Storage: one CloudbiteAccess DO, getByName('hacksprint-2026-10-18'), SQLite-backed class (migration v2), KV API.
+  req:<id>       record (public fields, credHash, projectRequestId, holds, confirmed)
+  cred:<sha256>  -> id
+  rate:<sha256>  creation times within the last hour for a hashed source
+  Every method runs in one in-object serial queue and does storage I/O only; related keys are written in one put().
+  Bounds: 5 new requests per source per hour (source = SHA-256 of MASTER_KEY + cf-connecting-ip; the raw address is
+  never stored), 100 pending, 500 retained; records that ended (expired/denied/revoked) are deleted 8 h after
+  they ended, on the next submit. No provider, sandbox or paid resource is touched by request, approval or status.
+
+Quota and tenant isolation (POST /api/cloudbite/projects with a visitor cookie)
+  1. grant check (approved, unexpired) -> 401 otherwise.
+  2. validateBrief against the actual catalogue (1-5 experts), live configuration check — before any reservation.
+  3. brief.requestId := SHA-256('cloudbite-visitor-v1|' + access request id + '|' + raw requestId) (64 hex), so two
+     visitors (or a visitor and the owner) sending the same raw requestId get different project ids; idempotent
+     create can never hand a visitor a token for someone else's project. The project's brief.requestId is this
+     scoped value. Owner/operator creates are unchanged (raw requestId).
+  4. reserve(): atomically binds the grant's single project to that scoped requestId. Same id again = retry
+     (returns the same project with another cbt_ token, within the existing 4-token limit); a different id = 409.
+     Concurrent creates serialize in the DO, so one grant never yields two projects.
+  5. Definite refusal before anything was created (registry 429, create 400/503) -> release(): clears the binding
+     only if no other attempt for the same id is in flight and none succeeded. Success or 409 (project exists) ->
+     confirm(): binding is permanent. A thrown/indeterminate create keeps the binding (conservative: the visitor
+     may retry the same requestId but can never start a second project).
+  Revoked or expired grants cannot create or retry. Project cbt_ tokens already issued keep the existing 24 h
+  project policy (CB_RETENTION); revocation does not reach into an already-created project.
+
+Deploy notes (root): wrangler.cloudbite.jsonc adds binding CLOUDBITE_ACCESS (top level and env.dev) and migration
+  tag v2 new_sqlite_classes ["CloudbiteAccess"]; v1 is untouched. migrations are top-level and apply to env.dev too.
+  Without the binding the Worker behaves as before (access status null, submit 503, owner list 503).
+
+Checks: node test/cloudbite-access.mjs (real router + real DOs, memory storage, no network).
