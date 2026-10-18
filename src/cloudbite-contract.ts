@@ -58,5 +58,6 @@ export interface ProjectRun {
 export interface CloudbiteBootstrap {
   experts: ExpertDefinition[];
   configuration: { liveReady: boolean; missing: string[]; maxExperts: number };
+  access?: import('./cloudbite-access-contract').CloudbiteAccessSession;
 }
 export interface CloudbiteProjectCreated { project: ProjectRun; accessToken: string }
