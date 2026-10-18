@@ -1,0 +1,115 @@
+Cloudbite — collaborator persona branch: merge readiness
+=======================================================
+
+Status: READY FOR BRANCH. No collaborator branch identified yet; nothing merged.
+Prepared: 2026-10-18T16:08+09:00 (git fetch origin + ls-remote at that time).
+
+1. Ref baseline (origin = github.com/shinick-dev/cloudbite_v0.0.1)
+-------------------------------------------------------------------
+  origin/main                  22859ed3a442304cbad85126f7662ca319117060
+  origin/feat/expert-sandboxes 22859ed3a442304cbad85126f7662ca319117060  (== main)
+  origin/agent_chatbot         f8d380012aa8187e358ae14e0c4337c1d9de7a61  ("Initial import ..."; ancestor of main)
+  origin/HEAD                  -> main
+  current implementation base  593d6805eea5b7c4b836864e06ef2178d84f71d2  (this worktree's base)
+
+  593d680 is 7 commits AHEAD of origin/main, 0 behind (merge-base = 22859ed).
+  origin/main does NOT contain the Cloudbite runtime, DO, runner, validation, console or tests
+  (fc0c917..593d680). A persona branch cut from origin/main is therefore an OLD-BASE branch.
+
+  New branch vs coordinator baseline: NONE. The three refs above are exactly the baseline.
+  agent_chatbot is not a persona candidate: it is the root import already contained in main.
+
+2. Integration map: where incoming persona content must land
+-------------------------------------------------------------
+  incoming persona (prompt/markdown/assets/metadata)
+    -> keep authored files VERBATIM in a new data location (e.g. src/cloudbite-personas/<id>/ or a
+       generated TS module); never rewrite their text into the existing metadata-derived PROFILES.
+    -> adapter in src/cloudbite-personas.ts produces ExpertDefinition:
+         id      : must match /^[a-z0-9][a-z0-9-]{0,63}$/ (EXPERT_ID), unique across the catalogue
+         name, domain, summary : from the author's metadata
+         prompt  : author's text (+ the existing non-negotiable rules: AI role, no impersonation,
+                   no credentials claims, evidence/no-fabrication, confidence not calibrated)
+         tools   : capability LABELS only (see 3)
+         outputs : out/result.json + out/report.md + role artifacts matching
+                   ^out/[a-z0-9][a-z0-9_-]{0,47}(\.[a-z0-9_-]{1,16})?\.(md|txt|json|csv)$
+         source  : {repository, path, revision (40-hex pinned), license, basis}
+    -> buildExpertWorkspace(expert, brief) (catalogue authoritative; caller fields ignored) emits
+         INSTRUCTIONS.md, PERSONA.md, PROJECT.md, project.json, WORKORDER.md, RESULT.schema.json,
+         provenance.json (+ any persona asset files)
+    -> validateWorkspace (src/cloudbite-validate.ts): 1-24 files, <=3 path segments,
+         [A-Za-z0-9][A-Za-z0-9_.-]{0,63} per segment, no out/ .cloudbite/ work/ runner.py,
+         PERSONA.md+PROJECT.md+WORKORDER.md required, <=64 KB/file, <=256 KB total.
+         buildExpertWorkspace is stricter: <=48 KB/file, <=128 KB total.
+    -> CloudbiteProject 'uploading' phase (src/cloudbite-project.ts ~L399): files + runner.py +
+         .cloudbite/capability.json uploaded per sandbox; one sandbox per expert, CB_MAX_CONCURRENT=3,
+         CB_MAX_EXPERTS=5.
+    -> runner.py workspace_text(): reads every non-reserved file, 12000 chars/file, 40000 chars total,
+         root files first (sorted), subdirectories after. Richer personas/assets beyond that budget are
+         SILENTLY TRUNCATED from the model prompt — size the persona pack to fit, or decide explicitly
+         to raise the budget (runner + test change, separate reviewed step).
+    -> output contract unchanged: flat ExpertOpinion in out/result.json (direction enum, integer
+         confidence 0-100, summary <=2000, evidence/assumptions/nextActions 1-12 x <=600, no extra keys).
+         Personas must not introduce a different result shape; role-specific detail goes in out/*.md|csv.
+
+3. Boundaries the merge must keep
+---------------------------------
+  - Persona text is instructions to the model, nothing more. It grants no runtime capability: the
+    runner's actions are fixed (python stdlib in ./work, write under out/, final). `tools` entries are
+    labels rendered in PERSONA.md ("this file grants nothing"). A persona asking for network, shell,
+    credentials, env vars or files outside the workspace is ignored by design — and should be edited
+    with the author, not "enabled".
+  - Precedence stays INSTRUCTIONS.md > PERSONA.md/WORKORDER.md > PROJECT.md (untrusted data).
+    Persona files must not contain the "BEGIN/END UNTRUSTED PROJECT DATA" markers.
+  - No secrets, tokens, endpoints, personal contact data or real-person impersonation in persona files.
+  - Provenance: the contract type pins source.basis to the literal 'metadata-derived'. Authored
+    personas need a new basis value (e.g. 'authored' or 'adapted') with author/repo/path/revision/
+    license recorded; that is a deliberate contract change touching src/cloudbite-contract.ts,
+    provenance.json/PERSONA.md wording, docs/cloudbite/persona-provenance.md and the persona tests.
+    Existing 12 metadata-derived entries keep their pins (CLOUDBITE_REGISTRY 4a15bab..., agency-agents
+    4bce55a...) unless the user decides to replace them.
+  - Current tests encode today's catalogue: 10-12 experts, ids start with 'agency-', license MIT,
+    basis 'metadata-derived', prompt phrases. Changing those assertions is part of the integration
+    and must be visible in review, not a side effect.
+
+4. Merge sequence once the user names the branch
+------------------------------------------------
+  1. Get exact branch name + SHA from the user. git fetch origin; record the SHA; work only from that
+     immutable SHA (re-check before final merge that the branch did not move).
+  2. Inspect read-only: git log --format='%H %an %ad %s' 22859ed..<sha>; git diff --stat 22859ed <sha>;
+     merge-base vs main and vs 593d680. Check: changed paths (anything outside persona data?),
+     binary/oversized files, secrets/.dev.vars/tokens, path names that would fail validateWorkspace,
+     licences of any copied third-party prompt text.
+  3. List which root/shared files it changes on main (package.json, src/index.ts, wrangler*.jsonc,
+     src/cloudbite-*.ts). Because main is behind 593d680, a persona branch from main may touch files
+     that the current implementation rewrote; those conflicts are resolved toward the current
+     implementation, taking only the persona content.
+  4. In an isolated branch/worktree from the tested base (593d680 or its successor): bring the persona
+     content in (merge the branch, or copy its files with authorship preserved via merge/co-author),
+     then write the adapter in src/cloudbite-personas.ts. Preserve authored text byte-for-byte.
+  5. Run: npm run check (tsc + client + console bundle checks), node test/cloudbite-personas.mjs
+     (~308 checks), node test/cloudbite-console.mjs, node test/cloudbite-runtime.mjs (18 checks incl.
+     the two real-catalogue smoke checks running runner.py with fake providers). No live providers.
+  6. Prepare a reviewable merge to main (PR or merge commit) that brings main up to the tested
+     implementation + personas together. Never fast-forward or reset main to the old-base persona
+     branch: that drops the Cloudbite runtime/UI commits.
+
+5. Acceptance and rollback notes
+--------------------------------
+  - Duplicate ids: catalogue ids, names and role artifact paths must stay unique (tests assert).
+    Collision between an authored persona and an existing agency-* id = explicit user decision
+    (replace vs. new id), never silent override.
+  - Unknown output shape: any persona prompt describing a different result.json is rejected/adapted;
+    runner and server validation would fail those runs as 'invalid' anyway.
+  - Oversized fields: per-file 48 KB / pack 128 KB in buildExpertWorkspace; runner prompt budget
+    12000/40000 chars. Check each persona's built workspace size in the persona test.
+  - Path traversal: persona-provided paths go only through SAFE_PATH + validateWorkspace; reject '..',
+    absolute paths, backslashes, out/, work/, .cloudbite/, runner.py.
+  - Selection: first 5 catalogue entries are pre-selected in the console; catalogue order therefore
+    changes the default demo set — decide order explicitly.
+  - Pinned provenance migration: if authored personas replace metadata-derived ones, provenance.json
+    must say so (basis, author, pinned revision); do not relabel authored text as metadata-derived or
+    vice versa.
+  - Rollback: integration lives on its own branch; main changes only via one reviewable merge commit,
+    revertable with git revert -m 1 <merge>. No data migration (personas are code/static data;
+    project records store expertIds only — a removed id makes old projects show an unknown expert,
+    so prefer not deleting ids already used in demos).
