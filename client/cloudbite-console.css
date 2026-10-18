@@ -387,6 +387,11 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   .cb-row-kind { display: none; }
   .cb-row-msg { grid-column: 1 / -1; }
   .cb-stream-state { margin-left: 0; flex-basis: 100%; padding-left: 24px; }
+  /* with results: project summary -> decision/progress rail -> expert evidence */
+  .cb-home.has-rail > .cb-center { display: contents; }
+  .cb-home.has-rail > .cb-center > .cb-project { grid-row: 1; }
+  .cb-home.has-rail > .cb-aside { grid-row: 2; }
+  .cb-home.has-rail > .cb-center > .cb-workspace { grid-row: 3; }
 }
 @media (max-width: 480px) {
   .cb-word small { display: none; }

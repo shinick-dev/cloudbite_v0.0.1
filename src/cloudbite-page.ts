@@ -1,6 +1,6 @@
 // 만든 파일 — 직접 고치지 말 것. 소스: client/cloudbite-console.ts · client/cloudbite-console.css
 // 다시 만들기: node tools/build-cloudbite-console.mjs (--check 로 최신인지 확인)
-// esbuild 0.28.1 transform (ES2022, 묶지 않음) · ts sha256 84456e822375ab41947d0b84c2507493121f40e0afa8daebe7bbc4c16c629a00 · css sha256 42c9db26076604f474c6557d356bb7eae5ee73b46903f62e87b7562be243778f
+// esbuild 0.28.1 transform (ES2022, 묶지 않음) · ts sha256 84456e822375ab41947d0b84c2507493121f40e0afa8daebe7bbc4c16c629a00 · css sha256 071a21a0c64331f390a3674c427fd9976d3132da70b350f3414c2c64c0d622ac
 // 라우팅(런타임 담당): GET / 와 /cloudbite → CLOUDBITE_HTML, CLOUDBITE_JS_PATH → CLOUDBITE_JS (text/javascript),
 // CLOUDBITE_CSS_PATH → CLOUDBITE_CSS (text/css). CSP 는 script-src 'self'; style-src 'self' 면 충분하다 (인라인 없음).
 export const CLOUDBITE_JS_PATH = "/cloudbite/console.js";
@@ -411,6 +411,11 @@ export const CLOUDBITE_CSS = [
   "  .cb-row-kind { display: none; }",
   "  .cb-row-msg { grid-column: 1 / -1; }",
   "  .cb-stream-state { margin-left: 0; flex-basis: 100%; padding-left: 24px; }",
+  "  /* with results: project summary -> decision/progress rail -> expert evidence */",
+  "  .cb-home.has-rail > .cb-center { display: contents; }",
+  "  .cb-home.has-rail > .cb-center > .cb-project { grid-row: 1; }",
+  "  .cb-home.has-rail > .cb-aside { grid-row: 2; }",
+  "  .cb-home.has-rail > .cb-center > .cb-workspace { grid-row: 3; }",
   "}",
   "@media (max-width: 480px) {",
   "  .cb-word small { display: none; }",
