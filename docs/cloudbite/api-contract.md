@@ -5,6 +5,8 @@ Shared types: `src/cloudbite-contract.ts`. The coordinator owns this file; propo
 ## API
 
 - GET `/cloudbite` and new primary `/`: product console, rendered from `CLOUDBITE_HTML` in `src/cloudbite-page.ts`. UI exports `CLOUDBITE_JS` and `CLOUDBITE_CSS` separately if CSP needs same-origin script/style routes.
+- GET `/cloudbite/console.js` and `/cloudbite/console.css`: same-origin assets, using the exported paths from the console builder.
+- GET `/cloudbite/access`, `/cloudbite/access.css`, `/cloudbite/access-qr.svg`: public QR guide/assets bridging to the existing participant request URL. These routes grant no execution authority and do not provision resources.
 - GET `/api/cloudbite/bootstrap`: `CloudbiteBootstrap`, public catalogue and configuration presence (names only; never values).
 - POST `/api/cloudbite/projects`: `ProjectBrief` JSON. Live creation requires the existing admin session (`x-admin-token` using State authorization), strict same-origin and size/count limits. Returns `CloudbiteProjectCreated`. Start execution as part of creation; no extra start endpoint needed.
 - GET `/api/cloudbite/projects/:id`: `ProjectRun`, with `Authorization: Bearer <accessToken>`.

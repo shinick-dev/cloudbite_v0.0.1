@@ -7,7 +7,7 @@
   //   CLOUDBITE_DAYTONA_API_KEY, CLOUDBITE_NOSANA_API_KEY. Missing settings are reported by name in /api/cloudbite/bootstrap.
   "name": "cloudbite-v001",
   "main": "src/index.ts",
-  "build": { "command": "node tools/build-lab-renderer.mjs --check && node tools/build-lab-dom-capture.mjs --check && node tools/build-lab-demo-broadcast.mjs --check" },
+  "build": { "command": "node tools/build-lab-renderer.mjs --check && node tools/build-lab-dom-capture.mjs --check && node tools/build-lab-demo-broadcast.mjs --check && node tools/build-cloudbite-console.mjs --check && node tools/build-cloudbite-access.mjs --check" },
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
   "rules": [{ "type": "Text", "globs": ["**/*.ps1"], "fallthrough": true }],

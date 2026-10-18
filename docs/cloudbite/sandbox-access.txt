@@ -1,0 +1,54 @@
+CLOUDBITE - PARTICIPANT SANDBOX ACCESS
+
+Public request URL (encoded in the QR)
+https://k.shinick.dev/lab/request
+
+Owner inbox
+https://k.shinick.dev/lab/requests
+
+Artifacts
+- demo/cloudbite-sandbox-request.png (888px, scan/print/share)
+- demo/cloudbite-sandbox-request.svg (vector)
+- demo/access-qr.html (offline English presentation/handout; embeds the QR)
+- GET /cloudbite/access (same presentation in the local/new Cloudbite Worker)
+
+The QR is usable without deploying the new Cloudbite Worker: it goes directly
+to the existing public request service. The request form and owner service
+retain their existing interface/language and authentication. No production
+code, DNS, secrets, admin session policy or security-key enrollment was changed.
+
+PARTICIPANT
+1. Scan or open the public request URL.
+2. Enter a name and task. Choose the personal practice workspace option.
+3. Keep the same browser/request confirmation. The pending request creates no
+   cloud resources. Wait for host approval and sandbox provisioning.
+4. When ready, open the personal seat link shown on the request page.
+
+HOST
+1. Open the owner inbox and sign in with the configured owner account.
+2. Select the personal sandbox's allowed duration, budget and resources.
+3. Approve this request with the enrolled security key. The assertion is bound
+   to this request and its exact plan. Email login alone cannot approve compute.
+4. If provisioning is pending, resume the same approved operation; do not create
+   another request. The participant's private seat link is returned only to them.
+
+BOUNDARIES
+This is an independent participant workspace, not access to an expert's running
+workspace. The QR contains only the public URL, no admin/provider credentials,
+request secret or preapproved capability. Participant experience is separate
+from the scripted expert pitch preview.
+
+VERIFIED LOCALLY
+- QR PNG decoded to exactly the public URL with OpenCV.
+- Actual public request page opened read-only in Aside.
+- English QR guide, download and no overflow checked at1536px and390px.
+- lab-open-api:21 checks; request-service:16; lab-open-state:51.
+  State checks use signed test authenticator assertions and fake providers:
+  request-bound limits, user verification, anti-replay, one provision operation,
+  requester-only seat link, owner identity alone cannot approve.
+- No real participant request was submitted and no physical security-key touch
+  or new paid sandbox was performed by the coordinator in this task.
+
+REGENERATE
+node tools/build-cloudbite-access.mjs
+node tools/build-cloudbite-access.mjs --check

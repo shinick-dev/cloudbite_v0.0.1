@@ -23,6 +23,14 @@
 
 이 HTML은 모든 결과와 활동을 합성한 피치 목업입니다. 실제 실행 콘솔과 별개이며, 실서비스 연결이나 통계적 정확도를 증명하지 않습니다.
 
+## 참가자 체험용 QR
+
+[QR PNG](demo/cloudbite-sandbox-request.png) · [SVG](demo/cloudbite-sandbox-request.svg) · [영문 QR 안내 화면](demo/access-qr.html)
+
+QR은 기존 공개 신청 주소 `https://k.shinick.dev/lab/request`를 엽니다. 참가자는 개인 체험실을 신청하고, 모임지기는 `https://k.shinick.dev/lab/requests`에서 해당 요청의 조건을 보안키로 승인합니다. 준비가 끝나면 요청자에게만 개별 입장 링크가 나옵니다. 새 Cloudbite Worker를 배포하지 않아도 QR은 사용할 수 있습니다.
+
+Cloudbite 로컬 콘솔에서는 `/cloudbite/access`에 같은 안내 화면이 있습니다. 기존 신청 서비스의 화면과 인증은 유지합니다. [운영·검증 메모](docs/cloudbite/sandbox-access.txt)를 참고하세요.
+
 ## 로컬 실행
 
 ```powershell
