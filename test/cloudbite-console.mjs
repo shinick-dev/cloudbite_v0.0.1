@@ -1262,4 +1262,254 @@ await test('개선 리포트: 운영자만 탭 표시, 실측 집계와 데모 �
   assert.ok(env.requests.every(r => r.init.method !== 'POST'));
 });
 
+// ───────── 역할 카탈로그 (bootstrap.pool, 선택 필드) · 규칙 기반 팀 제안 — 런타임 계약이 들어오기 전까지 명시적 고정값으로
+const POOL_EXPERTS = ['Product Manager', 'Business Strategist', 'Pricing Analyst', 'FP&A Analyst', 'UX Architect', 'Software Architect', 'AI Engineer', 'Security Architect', 'Privacy Engineer']
+  .map((name, i) => ({ id: `e${i}`, name, domain: 'd', summary: `${name} summary`, prompt: 'p', tools: [], outputs: [], source: i === 6 ? { basis: 'curated-knowledge' } : {} }));
+const POOL_MAP = { 1: 'e0', 4: 'e1', 61: 'e2', 62: 'e3', 14: 'e4', 21: 'e5', 31: 'e6', 51: 'e7', 57: 'e8' };
+const POOL_NAME = { 1: 'Product Manager', 4: 'Business Strategist', 61: 'Pricing Analyst', 62: 'FP&A Analyst', 14: 'Interaction Designer', 21: 'Software Architect', 31: 'AI Engineer', 51: 'Security Architect', 57: 'Privacy Engineer', 2: 'Customer Discovery Researcher' };
+const POOL_KW = { 1: ['mvp', 'roadmap', '출시'], 4: ['strategy', '전략'], 61: ['pricing', '가격'], 62: ['budget', '예산'], 14: ['onboarding', 'ux flow'], 21: ['architecture', '아키텍처'],
+  31: ['llm', 'retrieval'], 51: ['security', 'threat', '보안'], 57: ['privacy', 'personal data', '개인정보'], 2: ['interview', 'pricing'] };
+const poolEntry = (n, over = {}) => ({
+  id: `pool-${String(n).padStart(3, '0')}`, catalogNumber: n, name: POOL_NAME[n] ?? `Role ${n}`, domain: 'd',
+  category: n <= 10 ? 'strategy' : n <= 20 ? 'ux' : 'other', categoryLabel: n <= 10 ? { en: 'Strategy', ko: '전략' } : n <= 20 ? { en: 'UX', ko: 'UX 분야' } : { en: 'Other', ko: '기타' },
+  mission: `Mission ${n}`, evaluation: 'unvalidated', priority: !!POOL_MAP[n], keywords: POOL_KW[n] ?? [`kw${n}`],
+  ...(POOL_MAP[n] ? { expertId: POOL_MAP[n], availability: 'available', knowledge: 'metadata-derived' } : { availability: 'planned', knowledge: 'none' }), ...over,
+});
+const POOL = { version: 'test-1', entries: Array.from({ length: 100 }, (_, i) => poolEntry(i + 1)), priorityNumbers: [1, 4, 999] };
+const POOL_BOOT = { experts: POOL_EXPERTS, configuration: { liveReady: true, missing: [], maxExperts: 5 }, pool: POOL };
+const POOL_BRIEF = 'Set pricing and a first-year budget, review security threats and privacy of personal data, and plan the MVP roadmap and architecture';
+/** 지금 선택: 기본 6개(x:)와 All experts 의 나머지(xa:, 검색어 없을 때) 상자를 합친다 */
+const selectedIds = (env) => env.all().filter(n => /^xa?:/.test(n.getAttribute('data-fk') || '') && n.checked).map(n => n.getAttribute('data-fk').replace(/^xa?:/, '')).sort();
+const poolDetailsOf = (env) => env.all().find(n => n.tagName === 'DETAILS' && /cb-pool/.test(n.className));
+const suggestOf = (env) => env.all().find(n => n.className === 'cb-suggest');
+const poolBoxes = (env) => env.all().filter(n => /^xp:/.test(n.getAttribute('data-fk') || ''));
+const setObjective = (env, v) => { const o = env.all().find(n => n.id === 'cb-objective'); o.value = v; o.dispatch('input'); };
+
+await test('pool 정리: 깨진 pool 은 무시하고 bootstrap 은 산다, 중복 id·번호·형식 오류는 버리고 100개 상한, 화면은 권한을 만들지 않는다', () => {
+  for (const bad of [null, 'x', 7, { entries: 'no' }, { entries: [] }, { entries: [1, null, { id: 'pool-001' }] }]) {
+    const b = core.normalizeBootstrap({ ...POOL_BOOT, pool: bad });
+    assert.equal(b.pool, undefined, JSON.stringify(bad)); assert.equal(b.experts.length, 9);
+  }
+  assert.equal(core.normalizeBootstrap({ experts: POOL_EXPERTS, configuration: {} }).pool, undefined, 'legacy bootstrap has no pool');
+  const raw = { version: 'v', priorityNumbers: [1, 1, 3, 'x', 500], entries: [
+    poolEntry(1),
+    poolEntry(1, { id: 'pool-101' }), // 번호 중복
+    poolEntry(3, { id: 'pool-001' }), // id 중복
+    poolEntry(4, { id: 'POOL-4' }), poolEntry(5, { catalogNumber: 0 }), poolEntry(6, { catalogNumber: 2.5 }), poolEntry(7, { name: '' }),
+    poolEntry(8, { expertId: 'ghost', availability: 'available' }), // 실제 카탈로그에 없는 역할
+    poolEntry(9, { expertId: 'e0', availability: 'available' }), // 같은 실행 역할을 두 번째로 가져감
+    poolEntry(10, { expertId: 'e1', availability: 'planned' }), // 계획 중인데 expertId 가 있음
+    poolEntry(31, { knowledge: 'curated-knowledge', evaluation: 'validated', name: EVIL, keywords: Array.from({ length: 40 }, (_, i) => `k${i}`), category: 'Bad Cat!' }),
+    poolEntry(51, { knowledge: 'curated-knowledge', availability: 'yes', mappingNote: 'related scope' }),
+    poolEntry(57, { knowledge: 'curated-knowledge' }),
+    ...Array.from({ length: 150 }, (_, i) => poolEntry(i + 100, { id: `pool-${100 + i}` })),
+  ] };
+  const p = core.normalizePool(raw, POOL_EXPERTS);
+  const by = (n) => p.entries.find(e => e.catalogNumber === n);
+  assert.deepEqual(p.entries.map(e => e.catalogNumber), [1, 8, 9, 10, 31, 51, 57, 100], 'only valid, unique, numbered 1–100, sorted');
+  assert.equal(new Set(p.entries.map(e => e.id)).size, p.entries.length);
+  assert.equal(by(8).availability, 'planned'); assert.equal(by(8).expertId, undefined, 'unknown expertId is not runnable');
+  assert.equal(by(9).availability, 'planned', 'second mapping of the same expert is not runnable');
+  assert.equal(by(10).availability, 'planned'); assert.equal(by(10).expertId, undefined, 'planned never carries a submittable id');
+  assert.equal(by(31).evaluation, 'unvalidated', 'client never marks validated');
+  assert.equal(by(31).name, EVIL, 'kept as data; rendering is textContent-only');
+  assert.equal(by(31).knowledge, 'curated-knowledge', 'kept when the actual expert is curated');
+  assert.equal(by(57).knowledge, 'metadata-derived', 'not raised above the actual expert definition');
+  assert.equal(by(51).availability, 'planned', 'only the literal available counts');
+  assert.equal(by(51).mappingNote, 'related scope');
+  assert.equal(by(31).keywords.length, 24); assert.equal(by(31).category, 'other');
+  assert.deepEqual(p.priorityNumbers, [1], 'priority numbers must be accepted catalogue numbers');
+  const many = core.normalizePool({ entries: Array.from({ length: 140 }, (_, i) => poolEntry((i % 100) + 1, { id: `pool-${String(i).padStart(3, '0')}` })) }, POOL_EXPERTS);
+  assert.ok(many.entries.length <= 100);
+  const full = core.normalizeBootstrap(POOL_BOOT).pool;
+  assert.equal(full.entries.length, 100);
+  assert.equal(full.entries.filter(e => e.availability === 'available').length, 9);
+  assert.ok(full.entries.every(e => e.evaluation === 'unvalidated'));
+});
+
+await test('팀 제안 규칙: 브리프 키워드만, 실행 가능한 실제 역할만, 최대 5명, 결정적이며 근거 키워드를 돌려준다', () => {
+  const pool = core.normalizeBootstrap(POOL_BOOT).pool;
+  const ids = POOL_EXPERTS.map(e => e.id);
+  const picks = core.suggestTeam(POOL_BRIEF, pool.entries, ids, 5);
+  assert.deepEqual(picks.map(p => p.entryId), ['pool-001', 'pool-051', 'pool-057', 'pool-021', 'pool-061'], 'more matched keywords first, then priority and number');
+  assert.deepEqual(picks.find(p => p.entryId === 'pool-051').matched, ['security', 'threat'], 'threats matches threat by word prefix');
+  assert.deepEqual(picks.find(p => p.entryId === 'pool-057').matched, ['privacy', 'personal data']);
+  assert.ok(!picks.some(p => p.entryId === 'pool-002'), 'planned roles never suggested even when keywords match');
+  assert.deepEqual(core.suggestTeam(POOL_BRIEF, pool.entries, ids, 5), picks, 'deterministic');
+  assert.equal(core.suggestTeam(POOL_BRIEF, pool.entries, ids, 9).length, 5, 'never more than five');
+  assert.equal(core.suggestTeam(POOL_BRIEF, pool.entries, ids, 2).length, 2, 'respects a lower session limit');
+  assert.deepEqual(core.suggestTeam(POOL_BRIEF, pool.entries, ['e0'], 5).map(p => p.expertId), ['e0'], 'only roles in the current catalogue');
+  assert.deepEqual(core.suggestTeam('가격과 첫해 예산을 검토', pool.entries, ids, 5).map(p => p.entryId), ['pool-061', 'pool-062'], 'Korean keywords match with particles');
+  assert.deepEqual(core.suggestTeam('Weather on the moon', pool.entries, ids, 5), [], 'no match → no suggestion');
+  assert.deepEqual(core.suggestTeam('a ux flow', pool.entries, ids, 5).map(p => p.entryId), ['pool-014']);
+  assert.deepEqual(core.suggestTeam('luxury llms', pool.entries, ids, 5), [], 'short keywords match whole words only');
+  for (const p of picks) assert.deepEqual(Object.keys(p).sort(), ['entryId', 'expertId', 'matched'], 'no score or confidence');
+});
+
+await test('옛 bootstrap (pool 없음): 카탈로그·제안은 숨고 기존 6개·All experts 고르기가 그대로다', async () => {
+  const env = fakeEnv({ fetchImpl: () => json(200, BIG) });
+  await env.flush();
+  assert.equal(poolDetailsOf(env).hidden, true); assert.equal(suggestOf(env).hidden, true);
+  assert.equal(poolBoxes(env).length, 0);
+  assert.equal(env.all().filter(n => /^x:/.test(n.getAttribute('data-fk') || '')).length, 6);
+  assert.ok(env.fk('xa:r6'));
+});
+
+await test('역할 카탈로그: 접힌 채로 시작, 기본 6개는 그대로, 계획 역할은 잠겨 고를 수 없고 실행 가능 역할만 선택, 최대 5명', async () => {
+  const env = fakeEnv({ fetchImpl: () => json(200, POOL_BOOT) });
+  await env.flush();
+  const det = poolDetailsOf(env);
+  assert.equal(det.hidden, false); assert.equal(det.open, false, 'catalogue folded on the first screen');
+  assert.match(det.textContent, /Browse the role catalogue \(100 entries · 9 runnable now\)/);
+  assert.deepEqual(env.all().filter(n => /^x:/.test(n.getAttribute('data-fk') || '')).map(n => n.getAttribute('data-fk')), ['x:e0', 'x:e1', 'x:e2', 'x:e3', 'x:e4', 'x:e5']);
+  assert.equal(poolBoxes(env).length, 24 + selectedIds(env).length, 'selected roles plus one page, not 100 boxes');
+  assert.ok(det.textContent.includes(EN.poolNote));
+  const planned = env.fk('xp:pool-002');
+  assert.equal(planned.disabled, true);
+  assert.ok(planned.parent.textContent.includes(EN.poolPlanned) && planned.parent.textContent.includes(EN.poolUnvalidated));
+  const before = selectedIds(env);
+  assert.equal(before.length, 4, 'default demo selection unchanged');
+  planned.checked = true; planned.dispatch('change'); await env.flush();
+  assert.deepEqual(selectedIds(env), before, 'planned role cannot be selected');
+  assert.ok(env.fk('xp:pool-014').parent.textContent.includes('runs as UX Architect'), 'plan name kept, runtime name shown');
+  const more = env.fk('pool-more');
+  for (let i = 0; i < 4 && !more.hidden; i++) { more.click(); await env.flush(); }
+  assert.equal(more.hidden, true);
+  assert.equal(poolBoxes(env).length, 100);
+  const free = ['pool-031', 'pool-051', 'pool-057'];
+  const first = env.fk(`xp:${free[0]}`); first.checked = true; first.dispatch('change'); await env.flush();
+  assert.equal(selectedIds(env).length, 5);
+  assert.match(env.root.textContent, /5 selected · up to 5/);
+  const locked = env.fk(`xp:${free[1]}`);
+  assert.equal(locked.disabled, true, 'others lock at the limit');
+  locked.checked = true; locked.dispatch('change'); await env.flush();
+  assert.equal(selectedIds(env).length, 5, 'a sixth is refused even if the event fires');
+  // 검색으로 좁혀도 고른 역할은 맨 위에 남는다
+  assert.ok(env.all().some(n => n.tagName === 'LABEL' && n.attrs.for === 'cb-pool-q'), 'search has a label');
+  const q = env.all().find(n => n.id === 'cb-pool-q');
+  q.value = 'customer discovery'; q.dispatch('input');
+  const visible = poolBoxes(env).map(n => n.getAttribute('data-fk'));
+  assert.ok(visible.includes('xp:pool-002'));
+  assert.equal(visible.filter(k => k !== 'xp:pool-002').length, 5, 'all five selected roles stay visible');
+  assert.ok(poolBoxes(env).slice(0, 5).every(n => n.checked), 'selected first');
+  q.value = '#61'; q.dispatch('input');
+  assert.ok(env.fk('xp:pool-061'), 'search by number');
+  q.value = 'zzz-nothing'; q.dispatch('input');
+  assert.ok(det.textContent.includes(EN.poolNoMatch));
+  q.value = ''; q.dispatch('input');
+  const show = env.all().find(n => n.id === 'cb-pool-show'); show.value = 'planned'; show.dispatch('change');
+  assert.ok(poolBoxes(env).every(n => n.disabled || n.checked), 'planned view: only locked rows besides the selection');
+  const cat = env.all().find(n => n.id === 'cb-pool-cat');
+  assert.deepEqual(cat.children.map(o => o.textContent), ['All categories', 'Strategy', 'UX', 'Other']);
+  // 데모 실행은 고른 실행 역할 5명으로만 돈다
+  startBtnOf(env).click(); await env.flush();
+  assert.equal(cards(env), 5);
+  assert.ok(poolBoxes(env).length && poolBoxes(env).every(n => n.disabled), 'catalogue locked while running');
+});
+
+await test('팀 제안: 적용 전에는 보여 주기만, 직접 고친 선택은 그대로, Apply 는 선택만 바꾸고 실행·요청·타이머가 없다', async () => {
+  const env = fakeEnv({ fetchImpl: () => json(200, POOL_BOOT) });
+  await env.flush();
+  setObjective(env, POOL_BRIEF);
+  const before = selectedIds(env);
+  const fetches = env.requests.length, timers = env.pendingTimers();
+  env.fk('pool-suggest').click(); await env.flush();
+  const box = suggestOf(env);
+  assert.ok(box.textContent.includes('Matched keywords: security, threat'));
+  assert.ok(box.textContent.includes(EN.suggestHelp(5)), 'explained as rules, not model judgement');
+  assert.ok(!/%|confidence|score \d/i.test(box.textContent.replace(EN.suggestHelp(5), '')), 'no invented confidence');
+  assert.deepEqual(selectedIds(env), before, 'suggestion alone changes nothing');
+  // 사용자가 직접 바꾼 선택은 제안으로 덮이지 않는다
+  const manual = env.fk('x:e3'); manual.checked = !manual.checked; manual.dispatch('change'); await env.flush();
+  const edited = selectedIds(env);
+  assert.notDeepEqual(edited, before);
+  assert.ok(suggestOf(env).textContent.includes('Matched keywords'), 'suggestion still shown');
+  assert.deepEqual(selectedIds(env), edited);
+  env.fk('pool-apply').click(); await env.flush();
+  assert.deepEqual(selectedIds(env), ['e0', 'e2', 'e5', 'e7', 'e8']);
+  assert.equal(env.requests.length, fetches, 'apply sends nothing');
+  assert.equal(env.pendingTimers(), timers, 'apply schedules nothing');
+  assert.equal(cards(env), 0, 'nothing runs');
+  assert.equal(setupOf(env).hidden, false);
+  assert.equal(env.fk('pool-apply').disabled, true, 'already the selection');
+  assert.ok(suggestOf(env).textContent.includes(EN.suggestCurrent));
+  assert.equal(env.all().find(n => n.getAttribute('aria-live') === 'polite' && n.className === 'cb-sr').textContent, EN.suggestApplied(5));
+  // 브리프를 고치면 오래된 제안이라고 알린다
+  setObjective(env, 'Something else entirely');
+  assert.ok(suggestOf(env).textContent.includes(EN.suggestStale));
+  env.fk('pool-suggest').click(); await env.flush();
+  assert.ok(suggestOf(env).textContent.includes(EN.suggestEmpty), 'clear fallback when nothing matches');
+  assert.equal(env.fk('pool-apply'), undefined);
+  setObjective(env, ''); env.all().find(n => n.id === 'cb-title').value = ''; env.all().find(n => n.id === 'cb-context').value = '';
+  env.fk('pool-suggest').click(); await env.flush();
+  assert.ok(suggestOf(env).textContent.includes(EN.suggestBriefEmpty));
+  assert.deepEqual(selectedIds(env), ['e0', 'e2', 'e5', 'e7', 'e8'], 'selection untouched by later suggestions');
+});
+
+await test('팀 제안·카탈로그 KO/EN: 입력한 브리프·검색어·분야·보기·제안·선택이 언어 전환 뒤에도 남는다', async () => {
+  const env = fakeEnv({ fetchImpl: () => json(200, POOL_BOOT) });
+  await env.flush();
+  setObjective(env, POOL_BRIEF);
+  env.fk('pool-suggest').click(); await env.flush();
+  const q = env.all().find(n => n.id === 'cb-pool-q'); q.value = 'architect'; q.dispatch('input');
+  const cat = env.all().find(n => n.id === 'cb-pool-cat'); cat.value = 'other'; cat.dispatch('change');
+  const show = env.all().find(n => n.id === 'cb-pool-show'); show.value = 'available'; show.dispatch('change');
+  const det = poolDetailsOf(env); det.open = true;
+  const sel = selectedIds(env);
+  langBtn(env, 'ko').click(); await env.flush();
+  assert.equal(env.all().find(n => n.id === 'cb-objective').value, POOL_BRIEF);
+  assert.equal(q.value, 'architect'); assert.equal(cat.value, 'other'); assert.equal(show.value, 'available'); assert.equal(det.open, true);
+  assert.deepEqual(cat.children.map(o => o.textContent), [KO.poolCategoryAll, '전략', 'UX 분야', '기타']);
+  assert.deepEqual(poolBoxes(env).map(n => n.getAttribute('data-fk')).filter(k => !sel.includes(POOL_MAP[Number(k.slice(8))])), ['xp:pool-021', 'xp:pool-051'].filter(k => !sel.includes(POOL_MAP[Number(k.slice(8))])), 'same filtered rows');
+  assert.deepEqual(selectedIds(env), sel);
+  const box = suggestOf(env);
+  assert.ok(box.textContent.includes('찾은 키워드: security, threat'), 'suggestion kept and redrawn in Korean');
+  assert.ok(!box.textContent.includes(KO.suggestStale), 'switching language is not a brief edit');
+  assert.ok(det.textContent.includes(KO.poolNote) && det.textContent.includes(KO.poolUnvalidated));
+  assert.ok(env.fk('pool-apply').textContent.includes('적용'));
+  // 고치지 않은 예시 브리프로 받은 제안도 번역 때문에 오래됐다고 하지 않는다
+  const env2 = fakeEnv({ fetchImpl: () => json(200, POOL_BOOT) });
+  await env2.flush();
+  env2.fk('pool-suggest').click(); await env2.flush();
+  langBtn(env2, 'ko').click(); await env2.flush();
+  assert.ok(!suggestOf(env2).textContent.includes(KO.suggestStale));
+});
+
+await test('실제 실행 + 카탈로그: 제안 적용은 요청을 보내지 않고, 시작하면 실행 가능한 역할 id 만 보낸다', async () => {
+  let created = null;
+  const env = fakeEnv({ fetchImpl: (url, init) => {
+    if (url === '/api/cloudbite/bootstrap') return json(200, POOL_BOOT);
+    if (url === '/api/cloudbite/projects' && init.method === 'POST') { created = JSON.parse(init.body); return json(500, { error: 'stop here' }); }
+    return json(404, {});
+  } });
+  await goLive(env);
+  setObjective(env, POOL_BRIEF);
+  env.fk('pool-suggest').click(); await env.flush();
+  const n = env.requests.length;
+  env.fk('pool-apply').click(); await env.flush();
+  assert.equal(env.requests.length, n, 'no request on apply');
+  assert.equal(created, null);
+  startBtnOf(env).click(); await env.flush();
+  assert.deepEqual([...created.expertIds].sort(), ['e0', 'e2', 'e5', 'e7', 'e8']);
+  assert.ok(created.expertIds.every(id => POOL_EXPERTS.some(e => e.id === id)), 'no pool ids or planned roles submitted');
+});
+
+await test('방문자 + 카탈로그: 제안은 세션 한도(3명)까지만, 적용해도 요청·한도 변화 없이 직접 시작해야 실행된다', async () => {
+  const access = accessOf({ maxProjects: 10, usedProjects: 2 });
+  const env = visitorEnv(access, () => json(404, {}), { bootstrap: () => json(200, { ...POOL_BOOT, access }) });
+  await env.flush();
+  setObjective(env, POOL_BRIEF);
+  assert.deepEqual(selectedIds(env), [], 'visitor starts with no hidden selection');
+  const left = EN.visitorLeft(8, 10);
+  assert.ok(env.root.textContent.includes(left));
+  const n = env.requests.length, boots = env.boots();
+  env.fk('pool-suggest').click(); await env.flush();
+  assert.ok(suggestOf(env).textContent.includes(EN.suggestHelp(3)));
+  env.fk('pool-apply').click(); await env.flush();
+  assert.deepEqual(selectedIds(env), ['e0', 'e7', 'e8'], 'capped at the visitor limit');
+  assert.equal(env.requests.length, n); assert.equal(env.boots(), boots);
+  assert.ok(env.root.textContent.includes(left), 'visitor allowance unchanged');
+  assert.equal(cards(env), 0);
+});
+
 console.log(`cloudbite-console: ${pass} passed`);

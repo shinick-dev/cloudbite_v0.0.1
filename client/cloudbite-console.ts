@@ -31,6 +31,19 @@ interface Aggregate {
   actions: Array<{ text: string; count: number; names: string[] }>;
   headline: string;
 }
+type PoolShow = 'all' | 'available' | 'planned';
+type PoolKnowledge = 'curated-knowledge' | 'metadata-derived' | 'none';
+/** bootstrap.pool 항목. 런타임 계약(ExpertPoolEntry)과 같은 모양이며, 통합 전에도 화면이 따로 타입 검사되도록 여기에 둔다 */
+interface PoolEntry {
+  id: string; catalogNumber: number; name: string; domain: string; category: string; categoryLabel: { ko: string; en: string };
+  mission: string; expertId?: string; availability: 'available' | 'planned'; knowledge: PoolKnowledge; evaluation: 'unvalidated';
+  priority: boolean; keywords: string[]; mappingNote?: string;
+}
+interface Pool { version: string; entries: PoolEntry[]; priorityNumbers: number[] }
+/** pool 은 선택 필드다 — 없는 옛 bootstrap 이면 화면은 예전 역할 고르기만 보인다 */
+type ConsoleBootstrap = CloudbiteBootstrap & { pool?: Pool };
+/** 규칙 기반 팀 제안의 한 줄: 브리프에서 찾은 카탈로그 키워드가 근거다 (모델 판단·점수 아님) */
+interface PoolPick { entryId: string; expertId: string; matched: string[] }
 
 const DIRECTIONS: OpinionDirection[] = ['support', 'conditional', 'concern', 'abstain'];
 const DIRECTION_LABEL: Record<OpinionDirection, string> = { support: 'Support', conditional: 'Conditional', concern: 'Concern', abstain: 'Abstain' };
@@ -49,6 +62,8 @@ const LIMIT = { title: 120, objective: 1500, context: 3000 };
 const STREAM_ROWS = 400;
 /** 편집 영역에 처음부터 보이는 역할 수. 나머지는 All experts 접기 상자에서 찾는다 */
 const CORE_ROLES = 6;
+/** 역할 카탈로그를 펼쳤을 때 한 번에 보이는 줄 수 (Show more 로 늘린다) */
+const POOL_PAGE = 24;
 
 // ───────────────────────── 화면 문구 (KO / EN) ─────────────────────────
 // 사전은 이 파일 안에 둔다 (빌드는 묶지 않는 변환이라 런타임 import 가 없다). KO 는 EN 과 같은 모양이어야 타입 검사를 통과한다.
@@ -148,6 +163,38 @@ const EN = {
   catalogueEmptyLive: 'The server catalogue is empty, so a live run is not possible.',
   noRoles: 'No roles available.',
   noMatch: 'No roles match your search.',
+  // 역할 카탈로그 (서버 bootstrap.pool 이 있을 때만)
+  poolSummary: (n: number, avail: number) => `Browse the role catalogue (${n} entries · ${avail} runnable now)`,
+  poolNote: 'Numbers come from the planning list. Only roles marked Available run today; planned roles cannot be selected or run. No role has been evaluated yet, and the size of the catalogue is not evidence of expertise.',
+  poolSearchLabel: 'Search the catalogue',
+  poolSearchPlaceholder: 'Role, number or keyword',
+  poolCategoryLabel: 'Category',
+  poolCategoryAll: 'All categories',
+  poolShowLabel: 'Show',
+  poolShow: { all: 'All roles', available: 'Available now', planned: 'Planned only' } as Record<PoolShow, string>,
+  poolListAria: 'Role catalogue',
+  poolAvailable: 'Available',
+  poolPlanned: 'Planned — not runnable yet',
+  poolKnowledge: { 'curated-knowledge': 'Curated knowledge', 'metadata-derived': 'Metadata-derived', none: 'No knowledge pack' } as Record<PoolKnowledge, string>,
+  poolUnvalidated: 'Unvalidated',
+  poolRunsAs: (name: string) => `runs as ${name}`,
+  poolSelectedGroup: 'Selected (kept visible while filtering)',
+  poolCount: (shown: number, total: number) => `${shown} of ${total} matching roles shown`,
+  poolShowMore: (n: number) => `Show ${n} more`,
+  poolNoMatch: 'No catalogue roles match these filters.',
+  // 규칙 기반 팀 제안
+  suggestTitle: 'Team suggestion',
+  suggestBtn: 'Suggest a team from the brief',
+  suggestHelp: (max: number) => `Rule-based: matches catalogue keywords in your objective, name and context, and picks up to ${plural(max, 'available role')}. It is not a model judgement or a quality score. Your selection changes only when you press Apply.`,
+  suggestEmpty: 'No catalogue keyword appears in the brief, so there is no suggestion. Choose roles yourself or describe the objective in more detail.',
+  suggestBriefEmpty: 'Write the objective first — the suggestion reads only the brief.',
+  suggestListAria: 'Suggested roles',
+  suggestMatched: (words: string) => `Matched keywords: ${words}`,
+  suggestStale: 'The brief or catalogue changed after this suggestion. Suggest again to refresh it.',
+  suggestApply: (n: number) => `Apply — replace selection with ${plural(n, 'role')}`,
+  suggestDismiss: 'Dismiss',
+  suggestApplied: (n: number) => `Selection replaced with ${plural(n, 'suggested role')}. Nothing has started.`,
+  suggestCurrent: 'This is already your selection.',
   needExpert: 'Choose at least one expert to run.',
   nextDemo: 'Next run: browser demo, simulated in this tab.',
   nextLive: 'Next run: live run on server sandboxes.',
@@ -410,6 +457,36 @@ const KO: Messages = {
   catalogueEmptyLive: '서버 카탈로그가 비어 있어 실제 실행을 할 수 없습니다.',
   noRoles: '사용할 수 있는 역할이 없습니다.',
   noMatch: '검색과 맞는 역할이 없습니다.',
+  poolSummary: (n, avail) => `역할 카탈로그 보기 (${n}개 항목 · 지금 실행 가능 ${avail}개)`,
+  poolNote: '번호는 계획 목록의 번호입니다. 실행 가능으로 표시된 역할만 지금 실행되며, 계획 중인 역할은 고르거나 실행할 수 없습니다. 아직 평가를 거친 역할은 없으며, 카탈로그의 규모가 전문성을 증명하지 않습니다.',
+  poolSearchLabel: '카탈로그 검색',
+  poolSearchPlaceholder: '역할·번호·키워드',
+  poolCategoryLabel: '분야',
+  poolCategoryAll: '모든 분야',
+  poolShowLabel: '보기',
+  poolShow: { all: '모든 역할', available: '지금 실행 가능', planned: '계획 중만' },
+  poolListAria: '역할 카탈로그',
+  poolAvailable: '실행 가능',
+  poolPlanned: '계획 중 — 아직 실행 불가',
+  poolKnowledge: { 'curated-knowledge': '정리된 지식 자료', 'metadata-derived': '메타데이터 기반', none: '지식 자료 없음' },
+  poolUnvalidated: '평가 전',
+  poolRunsAs: (name) => `실행 역할: ${name}`,
+  poolSelectedGroup: '선택한 역할 (검색·필터와 관계없이 보임)',
+  poolCount: (shown, total) => `조건에 맞는 역할 ${total}개 중 ${shown}개 표시`,
+  poolShowMore: (n) => `${n}개 더 보기`,
+  poolNoMatch: '이 조건에 맞는 카탈로그 역할이 없습니다.',
+  suggestTitle: '팀 제안',
+  suggestBtn: '브리프로 팀 제안 받기',
+  suggestHelp: (max) => `규칙 기반: 목표·이름·맥락에 나오는 카탈로그 키워드를 찾아 실행 가능한 역할을 최대 ${max}명 고릅니다. 모델의 판단이나 품질 점수가 아닙니다. 적용을 누르기 전에는 선택이 바뀌지 않습니다.`,
+  suggestEmpty: '브리프에 카탈로그 키워드가 없어 제안이 없습니다. 역할을 직접 고르거나 목표를 더 자세히 적어 주세요.',
+  suggestBriefEmpty: '먼저 목표를 적어 주세요 — 제안은 브리프만 읽습니다.',
+  suggestListAria: '제안된 역할',
+  suggestMatched: (words) => `찾은 키워드: ${words}`,
+  suggestStale: '이 제안 뒤에 브리프나 카탈로그가 바뀌었습니다. 다시 제안을 받아 새로 고치세요.',
+  suggestApply: (n) => `적용 — 선택을 ${n}명으로 바꾸기`,
+  suggestDismiss: '닫기',
+  suggestApplied: (n) => `선택을 제안된 역할 ${n}명으로 바꿨습니다. 아무것도 시작하지 않았습니다.`,
+  suggestCurrent: '이미 지금 선택과 같습니다.',
   needExpert: '실행하려면 전문가를 한 명 이상 고르세요.',
   nextDemo: '다음 실행: 브라우저 데모, 이 탭 안에서 시뮬레이션합니다.',
   nextLive: '다음 실행: 서버 샌드박스에서 실제 실행합니다.',
@@ -733,7 +810,74 @@ function approvedVisitor(a: CloudbiteAccessSession | undefined, now: number): Cl
   return r && r.status === 'approved' && r.expiresAt > now ? r : null;
 }
 
-function normalizeBootstrap(raw: unknown): CloudbiteBootstrap {
+const POOL_MAX = 100;
+const POOL_KNOWLEDGE: PoolKnowledge[] = ['curated-knowledge', 'metadata-derived', 'none'];
+/** bootstrap.pool 정리. 서버 값이라도 의심한다: 항목 100개까지, id(pool-NNN)·번호(1–100)는 처음 것만, 이름 없는 항목은 버린다.
+ *  실행 가능은 서버가 available 이라 하고 expertId 가 실제 카탈로그 역할이며 다른 항목이 먼저 가져가지 않았을 때뿐이다 — 아니면 계획 중.
+ *  화면은 권한을 만들지 않는다: 평가는 늘 unvalidated, 지식 깊이는 실행 역할의 정의보다 높게 적지 않는다. 쓸 항목이 없으면 null */
+function normalizePool(raw: unknown, experts: ExpertDefinition[]): Pool | null {
+  if (!isObj(raw) || !Array.isArray(raw.entries)) return null;
+  const byId = new Map(experts.map(e => [e.id, e]));
+  const ids = new Set<string>(), nums = new Set<number>(), mapped = new Set<string>();
+  const entries: PoolEntry[] = [];
+  for (const r of raw.entries.slice(0, 500)) {
+    if (entries.length >= POOL_MAX) break;
+    if (!isObj(r)) continue;
+    const id = typeof r.id === 'string' && /^pool-\d{3}$/.test(r.id) ? r.id : '';
+    const n = num(r.catalogNumber), name = str(r.name, 120).trim();
+    if (!id || n === null || !Number.isInteger(n) || n < 1 || n > POOL_MAX || !name || ids.has(id) || nums.has(n)) continue;
+    ids.add(id); nums.add(n);
+    const def = typeof r.expertId === 'string' ? byId.get(r.expertId) : undefined;
+    const available = r.availability === 'available' && !!def && !mapped.has(def.id);
+    if (available) mapped.add(def!.id);
+    let knowledge = POOL_KNOWLEDGE.find(k => k === r.knowledge) ?? 'none';
+    if (available && knowledge === 'curated-knowledge' && def!.source.basis !== 'curated-knowledge') knowledge = 'metadata-derived';
+    const category = typeof r.category === 'string' && /^[a-z0-9][a-z0-9-]{0,39}$/.test(r.category) ? r.category : 'other';
+    const label = isObj(r.categoryLabel) ? r.categoryLabel : {};
+    const en = str(label.en, 60).trim() || category;
+    const note = str(r.mappingNote, 200).trim();
+    entries.push({
+      id, catalogNumber: n, name, domain: str(r.domain, 120), category, categoryLabel: { en, ko: str(label.ko, 60).trim() || en },
+      mission: str(r.mission, 400), ...(available ? { expertId: def!.id } : {}), availability: available ? 'available' : 'planned',
+      knowledge, evaluation: 'unvalidated', priority: r.priority === true, keywords: strList(r.keywords, 40, 24), ...(note ? { mappingNote: note } : {}),
+    });
+  }
+  if (!entries.length) return null;
+  entries.sort((a, b) => a.catalogNumber - b.catalogNumber);
+  const pri = Array.isArray(raw.priorityNumbers) ? raw.priorityNumbers.filter((x): x is number => typeof x === 'number' && nums.has(x)) : [];
+  return { version: str(raw.version, 80), entries, priorityNumbers: [...new Set(pri)] };
+}
+
+/** 검색·키워드 비교용: 소문자·NFKC, 글자·숫자·+·# 밖은 공백, 앞뒤에 공백 하나 */
+function poolText(s: string): string { return ` ${s.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}+#]+/gu, ' ').trim()} `; }
+/** 키워드가 브리프에 나오는가. 영문은 낱말 단위(4자 이상은 앞부분 일치 — pricing·prices), 한글 등은 조사가 붙으므로 부분 일치 */
+function keywordHit(text: string, kw: string): boolean {
+  const k = poolText(kw).trim();
+  if (k.length < 2) return false;
+  if (!/^[\x20-\x7e]+$/.test(k)) return text.includes(k);
+  return text.includes(` ${k} `) || (k.length >= 4 && text.includes(` ${k}`));
+}
+/** 규칙 기반 팀 제안: 브리프에 나온 서로 다른 키워드 수가 많은 실행 가능 역할부터 (같으면 우선 역할·번호 순), 최대 max 명.
+ *  지금 카탈로그(runnable)에 있는 역할만, 같은 실행 역할은 한 번만. 맞는 키워드가 없으면 빈 목록이다 — 무작위·점수 없음 */
+function suggestTeam(brief: string, entries: PoolEntry[], runnable: string[], max: number): PoolPick[] {
+  const text = poolText(brief), ok = new Set(runnable), seen = new Set<string>();
+  const scored: Array<PoolPick & { entry: PoolEntry }> = [];
+  for (const e of entries) {
+    if (e.availability !== 'available' || !e.expertId || !ok.has(e.expertId)) continue;
+    const matched = [...new Set(e.keywords.filter(k => keywordHit(text, k)).map(k => k.trim()))];
+    if (matched.length) scored.push({ entryId: e.id, expertId: e.expertId, matched: matched.slice(0, 6), entry: e });
+  }
+  scored.sort((a, b) => b.matched.length - a.matched.length || Number(b.entry.priority) - Number(a.entry.priority) || a.entry.catalogNumber - b.entry.catalogNumber);
+  const out: PoolPick[] = [];
+  for (const s of scored) {
+    if (out.length >= Math.max(0, Math.min(5, max))) break;
+    if (seen.has(s.expertId)) continue;
+    seen.add(s.expertId); out.push({ entryId: s.entryId, expertId: s.expertId, matched: s.matched });
+  }
+  return out;
+}
+
+function normalizeBootstrap(raw: unknown): ConsoleBootstrap {
   if (!isObj(raw) || !Array.isArray(raw.experts) || !isObj(raw.configuration)) throw new Error('The catalogue response has an invalid format');
   const seen = new Set<string>();
   const experts: ExpertDefinition[] = [];
@@ -744,6 +888,8 @@ function normalizeBootstrap(raw: unknown): CloudbiteBootstrap {
   const c = raw.configuration;
   const max = num(c.maxExperts);
   const access = normalizeAccess(raw.access);
+  // 깨진 pool 은 bootstrap 전체를 실패시키지 않는다 — 없는 것으로 보고 예전 역할 고르기를 쓴다
+  const pool = raw.pool === undefined ? null : normalizePool(raw.pool, experts);
   return {
     experts,
     configuration: {
@@ -752,6 +898,7 @@ function normalizeBootstrap(raw: unknown): CloudbiteBootstrap {
       ...(c.historyRetentionDays === 30 ? { historyRetentionDays: 30 } : {}),
     },
     ...(access ? { access } : {}),
+    ...(pool ? { pool } : {}),
   };
 }
 
@@ -1290,12 +1437,17 @@ function boot(): void {
 
   const S = {
     gen: 0,
-    boot: { status: 'loading' as 'loading' | 'ready' | 'error', data: null as CloudbiteBootstrap | null, error: null as Text | null },
+    boot: { status: 'loading' as 'loading' | 'ready' | 'error', data: null as ConsoleBootstrap | null, error: null as Text | null },
     /** 소유자 로그인 (서버 HttpOnly 쿠키). 서버 /owner/session 응답만 믿는다 — 쿠키가 있는지는 JS 가 모른다 */
     owner: { status: 'loading' as 'loading' | 'ready' | 'error', authenticated: false, hasCredentials: false, error: null as Text | null, busy: false, message: null as Text | null },
     mode: (link.present ? 'live' : 'demo') as Mode,
     adminToken: link.token,
     selected: new Set<string>(),
+    /** 역할 카탈로그 필터(검색어는 입력란에 있다)·보이는 줄 수와 규칙 기반 팀 제안. 제안은 Apply 전에는 선택을 바꾸지 않는다 */
+    poolCat: '',
+    poolShow: 'all' as PoolShow,
+    poolLimit: POOL_PAGE,
+    suggest: null as null | { brief: string; picks: PoolPick[]; empty: 'none' | 'brief' | null },
     failSim: false,
     run: null as null | {
       mode: Mode; phase: 'starting' | 'running' | 'cancelling' | 'done' | 'error'; project: ConsoleProject | null;
@@ -1410,6 +1562,8 @@ function boot(): void {
     return c;
   };
   for (const inp of [titleIn, objectiveIn]) inp.addEventListener('input', () => { if (!active()) renderControls(); });
+  // 제안 뒤에 브리프를 고치면 제안이 오래됐다고 알린다 (선택은 그대로)
+  for (const inp of [titleIn, objectiveIn, contextIn]) inp.addEventListener('input', () => { if (S.suggest) renderSuggest(); });
   const tokenIn = attr(h('input', { id: 'cb-token', type: 'password', autocomplete: 'off', spellcheck: 'false' }), 'placeholder', m => m.tokenPlaceholder);
   tokenIn.value = S.adminToken;
   tokenIn.addEventListener('input', () => { S.adminToken = tokenIn.value; clearHistoryAuthority(); renderControls(); renderProgress(); });
@@ -1433,6 +1587,30 @@ function boot(): void {
   const moreLabel = h('span');
   const moreDetails = h('details', { class: 'cb-disclosure cb-more' },
     h('summary', null, icon('chevron'), moreLabel), h('div', { class: 'cb-disclosure-body' }, filterIn, moreBox));
+  // 역할 카탈로그 (bootstrap.pool 이 있을 때만): 접힌 채로 시작하고, 펼치면 검색·분야·실행 가능 여부로 좁혀 몇 줄씩 본다
+  const poolSearch = attr(h('input', { id: 'cb-pool-q', type: 'search', autocomplete: 'off', 'data-fk': 'pool-q' }), 'placeholder', m => m.poolSearchPlaceholder);
+  const poolCat = h('select', { id: 'cb-pool-cat', 'data-fk': 'pool-cat' });
+  const poolShow = h('select', { id: 'cb-pool-show', 'data-fk': 'pool-show' });
+  poolSearch.addEventListener('input', () => { S.poolLimit = POOL_PAGE; renderPool(); });
+  poolCat.addEventListener('change', () => { S.poolCat = poolCat.value; S.poolLimit = POOL_PAGE; keepFocus(renderPool); });
+  poolShow.addEventListener('change', () => { S.poolShow = (['all', 'available', 'planned'] as PoolShow[]).find(v => v === poolShow.value) ?? 'all'; S.poolLimit = POOL_PAGE; keepFocus(renderPool); });
+  const poolList = attr(h('div', { class: 'cb-catalogue cb-pool-list', role: 'group' }), 'aria-label', m => m.poolListAria);
+  const poolCount = h('p', { class: 'cb-help', 'aria-live': 'polite' });
+  const poolMore = h('button', { type: 'button', class: 'cb-ghost', 'data-fk': 'pool-more', onclick: () => { S.poolLimit += POOL_PAGE; keepFocus(renderPool); } });
+  const poolLabel = h('span');
+  const poolField = (id: string, f: Text, input: HTMLElement) => h('div', { class: 'cb-field' }, tx('label', { for: id, class: 'cb-label' }, f), input);
+  const poolDetails = h('details', { class: 'cb-disclosure cb-more cb-pool' },
+    h('summary', null, icon('chevron'), poolLabel),
+    h('div', { class: 'cb-disclosure-body' }, tx('p', { class: 'cb-help' }, m => m.poolNote),
+      h('div', { class: 'cb-pool-filters' }, poolField('cb-pool-q', m => m.poolSearchLabel, poolSearch),
+        poolField('cb-pool-cat', m => m.poolCategoryLabel, poolCat), poolField('cb-pool-show', m => m.poolShowLabel, poolShow)),
+      poolCount, poolList, poolMore));
+  // 규칙 기반 팀 제안: 보여 주기만 하고, Apply 를 눌러야 선택(S.selected)만 바뀐다 — 실행·요청·방문자 한도와 무관
+  const suggestBtn = tx('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'pool-suggest', onclick: () => suggest() }, m => m.suggestBtn);
+  const suggestHelp = h('p', { class: 'cb-help' });
+  const suggestBody = h('div', { class: 'cb-suggest-body' });
+  const suggestBox = h('div', { class: 'cb-suggest', role: 'group', 'aria-labelledby': 'cb-suggest-h' },
+    h('div', { class: 'cb-label-row' }, tx('span', { id: 'cb-suggest-h', class: 'cb-label' }, m => m.suggestTitle), suggestBtn), suggestHelp, suggestBody);
   const alsoSel = h('p', { class: 'cb-alsosel' });
   const catalogueNote = h('p', { class: 'cb-help' });
   const selCount = h('span', { class: 'cb-selcount' });
@@ -1458,7 +1636,7 @@ function boot(): void {
     staExampleBtn, projDetails,
     h('div', { class: 'cb-team', role: 'group', 'aria-labelledby': 'cb-cat-label' },
       h('div', { class: 'cb-label-row' }, tx('span', { id: 'cb-cat-label', class: 'cb-label' }, m => m.chooseExperts), selCount),
-      coreBox, alsoSel, moreDetails, catalogueNote),
+      coreBox, alsoSel, suggestBox, moreDetails, poolDetails, catalogueNote),
     h('div', { class: 'cb-form-foot' }, formMsg, startNote,
       historyNotice,
       h('div', { class: 'cb-start-row' }, startBtn,
@@ -1744,10 +1922,7 @@ function boot(): void {
       const on = S.selected.has(e.id);
       const id = `cb-${prefix}-${e.id}`;
       const cb = h('input', { type: 'checkbox', id, 'data-fk': `${prefix}:${e.id}`, checked: on, disabled: busy || (!on && full) });
-      cb.addEventListener('change', () => {
-        if (cb.checked) S.selected.add(e.id); else S.selected.delete(e.id);
-        S.formErrors = []; keepFocus(() => { renderCatalogue(); renderControls(); renderProgress(); });
-      });
+      cb.addEventListener('change', () => toggleExpert(e.id, cb.checked));
       return h('label', { class: `cb-expert-opt${on ? ' is-on' : ''}`, for: id }, cb,
         h('span', { class: 'cb-opt-text' }, h('span', { class: 'cb-opt-name' }, e.name), h('span', { class: 'cb-opt-desc' }, roleBlurb(e))));
     };
@@ -1765,6 +1940,114 @@ function boot(): void {
     alsoSel.textContent = hiddenSel.length ? m.alsoSelected(hiddenSel.join(', ')) : '';
     alsoSel.hidden = !hiddenSel.length;
     catalogueNote.textContent = catalogueIsBuiltin() ? m.builtinRoles : full ? m.maxReached(limits().max) : m.recommended;
+    renderPool();
+  }
+
+  /** 역할 하나를 고르거나 뺀다. 한도를 넘는 선택은 받지 않는다 (상자도 잠겨 있다) */
+  function toggleExpert(id: string, on: boolean): void {
+    if (active()) return;
+    if (on && !S.selected.has(id) && S.selected.size >= limits().max) { keepFocus(renderCatalogue); return; }
+    if (on) S.selected.add(id); else S.selected.delete(id);
+    S.formErrors = []; keepFocus(() => { renderCatalogue(); renderControls(); renderProgress(); });
+  }
+
+  const pool = (): Pool | null => S.boot.data?.pool ?? null;
+  /** 실행 가능 = 정리된 pool 이 available 이라 하고 그 역할이 지금 카탈로그에 있다 (데모 내장 역할로 바뀌면 실행 가능 아님) */
+  const poolRunnable = (e: PoolEntry): e is PoolEntry & { expertId: string } => e.availability === 'available' && !!e.expertId && catalogue().some(x => x.id === e.expertId);
+  const briefText = () => [titleIn.value, objectiveIn.value, contextIn.value].join('\n');
+
+  function renderPool(): void {
+    const m = M, pl = pool();
+    poolDetails.hidden = suggestBox.hidden = !pl;
+    if (!pl) return;
+    const busy = active(), full = S.selected.size >= limits().max;
+    poolLabel.textContent = m.poolSummary(pl.entries.length, pl.entries.filter(poolRunnable).length);
+    // 분야·보기 목록은 언어마다 다시 만들되 고른 값은 상태(S)에서 되살린다
+    const cats = new Map<string, PoolEntry['categoryLabel']>();
+    for (const e of pl.entries) if (!cats.has(e.category)) cats.set(e.category, e.categoryLabel);
+    if (S.poolCat && !cats.has(S.poolCat)) S.poolCat = '';
+    poolCat.replaceChildren(h('option', { value: '' }, m.poolCategoryAll), ...[...cats].map(([c, l]) => h('option', { value: c }, l[lang])));
+    poolCat.value = S.poolCat;
+    poolShow.replaceChildren(...(['all', 'available', 'planned'] as PoolShow[]).map(v => h('option', { value: v }, m.poolShow[v])));
+    poolShow.value = S.poolShow;
+    const q = poolText(poolSearch.value).trim();
+    const hay = (e: PoolEntry) => poolText([`${e.catalogNumber}`, `#${e.catalogNumber}`, e.name, e.domain, e.mission, e.categoryLabel.en, e.categoryLabel.ko,
+      e.mappingNote ?? '', ...e.keywords, e.expertId ? findDef(e.expertId)?.name ?? '' : ''].join(' '));
+    const isSel = (e: PoolEntry) => poolRunnable(e) && S.selected.has(e.expertId);
+    const match = (e: PoolEntry) => (!S.poolCat || e.category === S.poolCat)
+      && (S.poolShow === 'all' || (S.poolShow === 'available') === poolRunnable(e)) && (!q || hay(e).includes(q));
+    // 고른 역할은 필터와 관계없이 맨 위에 남는다
+    const chosen = pl.entries.filter(isSel), hits = pl.entries.filter(e => !isSel(e) && match(e));
+    const shown = hits.slice(0, S.poolLimit);
+    const row = (e: PoolEntry) => {
+      const ok = poolRunnable(e), on = isSel(e), id = `cb-xp-${e.id}`;
+      // 계획 중인 역할은 늘 잠긴 상자다 — 고를 수도, 제출될 수도 없다
+      const cb = h('input', { type: 'checkbox', id, 'data-fk': `xp:${e.id}`, checked: on, disabled: !ok || busy || (!on && full) });
+      if (ok) cb.addEventListener('change', () => toggleExpert(e.expertId!, cb.checked));
+      const def = ok ? findDef(e.expertId!) : undefined;
+      const meta = [e.categoryLabel[lang], def && def.name !== e.name ? m.poolRunsAs(def.name) : ''].filter(Boolean).join(' · ');
+      return h('label', { class: `cb-expert-opt cb-pool-opt${on ? ' is-on' : ''}${ok ? '' : ' is-planned'}`, for: id }, cb,
+        h('span', { class: 'cb-opt-text' },
+          h('span', { class: 'cb-opt-name' }, h('span', { class: 'cb-pool-n' }, `#${e.catalogNumber}`), ' ', e.name),
+          h('span', { class: 'cb-pool-meta' }, meta),
+          e.mission ? h('span', { class: 'cb-opt-desc' }, e.mission) : null,
+          h('span', { class: 'cb-pool-tags' },
+            h('span', { class: `cb-tag ${ok ? 'is-avail' : 'is-planned'}` }, ok ? m.poolAvailable : m.poolPlanned),
+            h('span', { class: 'cb-tag' }, m.poolKnowledge[e.knowledge]), h('span', { class: 'cb-tag is-unval' }, m.poolUnvalidated))));
+    };
+    fill(poolList, chosen.length ? h('p', { class: 'cb-pool-group' }, m.poolSelectedGroup) : null, ...chosen.map(row),
+      chosen.length && shown.length ? h('hr', { class: 'cb-pool-sep' }) : null, ...shown.map(row),
+      hits.length ? null : h('p', { class: 'cb-empty' }, m.poolNoMatch));
+    poolCount.textContent = m.poolCount(shown.length, hits.length);
+    const left = hits.length - shown.length;
+    poolMore.hidden = left <= 0;
+    poolMore.textContent = m.poolShowMore(Math.min(POOL_PAGE, Math.max(0, left)));
+    renderSuggest();
+  }
+
+  /** 제안 상자. 제안은 데이터(항목 id·찾은 키워드)로 두어 언어를 바꿔도 그대로 다시 그린다 */
+  function renderSuggest(): void {
+    const m = M, pl = pool(), sg = S.suggest, busy = active();
+    suggestBtn.disabled = busy || !pl;
+    suggestHelp.textContent = m.suggestHelp(limits().max);
+    if (!pl || !sg) { fill(suggestBody); return; }
+    if (sg.empty) { fill(suggestBody, h('p', { class: 'cb-help' }, sg.empty === 'brief' ? m.suggestBriefEmpty : m.suggestEmpty)); return; }
+    const valid = sg.picks.filter(p => pl.entries.some(e => e.id === p.entryId && poolRunnable(e) && e.expertId === p.expertId)).slice(0, limits().max);
+    const stale = sg.brief !== briefText() || valid.length !== sg.picks.length;
+    const same = valid.length === S.selected.size && valid.every(p => S.selected.has(p.expertId));
+    const apply = h('button', { type: 'button', class: 'cb-primary', 'data-fk': 'pool-apply', disabled: busy || !valid.length || same, onclick: () => applySuggestion() },
+      m.suggestApply(valid.length));
+    const dismiss = h('button', { type: 'button', class: 'cb-ghost', 'data-fk': 'pool-dismiss', onclick: () => { S.suggest = null; renderSuggest(); suggestBtn.focus(); } }, m.suggestDismiss);
+    const item = (p: PoolPick) => {
+      const e = pl.entries.find(x => x.id === p.entryId)!;
+      return h('li', null, h('span', { class: 'cb-opt-name' }, h('span', { class: 'cb-pool-n' }, `#${e.catalogNumber}`), ' ', e.name),
+        h('span', { class: 'cb-opt-desc' }, m.suggestMatched(p.matched.join(', '))));
+    };
+    fill(suggestBody, h('ol', { class: 'cb-suggest-list', 'aria-label': m.suggestListAria }, ...valid.map(item)),
+      stale ? h('p', { class: 'cb-warn' }, m.suggestStale) : null, same ? h('p', { class: 'cb-help' }, m.suggestCurrent) : null,
+      h('div', { class: 'cb-suggest-actions' }, apply, dismiss));
+  }
+
+  function suggest(): void {
+    const pl = pool();
+    if (!pl || active()) return;
+    const brief = briefText();
+    const picks = brief.trim() ? suggestTeam(brief, pl.entries, catalogue().map(e => e.id), limits().max) : [];
+    S.suggest = { brief, picks, empty: !brief.trim() ? 'brief' : picks.length ? null : 'none' };
+    keepFocus(renderSuggest);
+  }
+
+  /** 제안을 적용: 선택만 제안된 실행 역할로 바꾼다. 실행·요청·타이머 없음 */
+  function applySuggestion(): void {
+    const pl = pool(), sg = S.suggest;
+    if (!pl || !sg || active()) return;
+    const next = sg.picks.filter(p => pl.entries.some(e => e.id === p.entryId && poolRunnable(e) && e.expertId === p.expertId)).map(p => p.expertId).slice(0, limits().max);
+    if (!next.length) return;
+    S.selected.clear();
+    for (const id of next) S.selected.add(id);
+    S.formErrors = [];
+    keepFocus(() => { renderCatalogue(); renderControls(); renderProgress(); });
+    live.textContent = M.suggestApplied(next.length);
   }
 
   function statusDot(s: ExpertStatus): HTMLElement { return h('span', { class: `cb-dot s-${s}`, 'aria-hidden': 'true' }); }
@@ -2140,7 +2423,10 @@ function boot(): void {
     const prev = M;
     lang = l; M = DICT[l];
     // 예시 브리프는 사용자가 고치지 않은 칸만 새 언어로 바꾼다. 사용자가 쓴 글은 건드리지 않는다
+    const fresh = !!S.suggest && S.suggest.brief === briefText();
     for (const [inp, k] of [[titleIn, 'sampleTitle'], [objectiveIn, 'sampleObjective'], [contextIn, 'sampleContext']] as const) if (inp.value === prev[k]) inp.value = M[k];
+    // 예시가 번역되어 바뀐 것은 사용자가 고친 것이 아니다: 그 전에 최신이던 제안은 그대로 최신으로 둔다
+    if (fresh && S.suggest) S.suggest = { ...S.suggest, brief: briefText() };
     for (const f of recount) f();
     applyLang();
     renderAll();
@@ -2557,7 +2843,7 @@ function boot(): void {
   void first.then(() => { if (!S.run && recheckable() && !accessTimer) accessTimer = setTimeout(() => refreshAccess(true), ACCESS_RECHECK_MS) as unknown as number; });
 }
 
-const CloudbiteCore = { normalizeBootstrap, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, artifactContent, domainLabel, DEMO_EXPERTS,
+const CloudbiteCore = { normalizeBootstrap, normalizePool, suggestTeam, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, artifactContent, domainLabel, DEMO_EXPERTS,
   pickLang, withLang, normalizeOwnerSession, DICT, ROLE_KO };
 const hook = (globalThis as { __cloudbiteTestHook?: (core: typeof CloudbiteCore) => void }).__cloudbiteTestHook;
 if (typeof hook === 'function') hook(CloudbiteCore);
