@@ -6,6 +6,8 @@
 //   GET  /snapshots/{id}                           "Snapshot ID or name"
 //   GET  /sandbox/{sandboxIdOrName}/ports/{port}/preview-url -> {sandboxId,url,token}
 //   POST <toolboxProxyUrl>/{id}/computeruse/start  (daytona_toolbox_api_client 0.214 ComputerUseApi.start, no body)
+//   POST /sandbox/{sandboxIdOrName}/resize         ResizeSandbox {cpu,memory} -> Sandbox (state 'resizing' until applied).
+//        Hot resize on a running sandbox accepts only CPU/memory increases (daytona 0.214 Sandbox.resize); disk is never sent.
 // Errors carry only an HTTP status (0 = no answer: outcome unknown). Provider messages never reach clients.
 import { dt, DtError, type Dt } from './lab';
 import { COMPUTER_DESKTOP_PATH, COMPUTER_DESKTOP_PORT } from './cloudbite-computer-contract';
@@ -18,7 +20,8 @@ export interface ComputerSnapshotInfo { id?: string; name?: string; state?: stri
 export interface ComputerPreview { url: string; token: string }
 
 export class ComputerDaytonaError extends Error {
-  constructor(public status: number, public op: string) { super(`Daytona ${op} ${status ? `HTTP ${status}` : 'unreachable'}`); }
+  /** quota: a definite refusal whose provider message names a quota/limit (the message itself never leaves this module). */
+  constructor(public status: number, public op: string, public reason?: 'quota') { super(`Daytona ${op} ${status ? `HTTP ${status}` : 'unreachable'}`); }
   /** The provider may or may not have applied the change. */
   get uncertain() { return this.status === 0 || this.status >= 500 || this.status === 408 || this.status === 429; }
 }
@@ -38,6 +41,8 @@ export interface ComputerDaytona {
   spawn(c: Dt, sb: ComputerSandbox, sessionId: string, command: string): Promise<void>;
   /** Base image X/VNC stack (Xvfb, xfce, …) that the Selkies launcher attaches to. */
   computerUseStart(c: Dt, sb: ComputerSandbox): Promise<void>;
+  /** Hot CPU/RAM increase of a running sandbox. Optional so fakes without it stay valid; absent = resize_unavailable. */
+  resize?(c: Dt, id: string, body: { cpu: number; memory: number }): Promise<ComputerSandbox | null>;
 }
 
 const signal = (ms: number) => AbortSignal.timeout(ms);
@@ -75,6 +80,14 @@ export const restDaytona: ComputerDaytona = {
     try { await dt(box, 'POST', `/${enc(sb.id)}/process/session`, { sessionId }, signal(20_000)); }
     catch (e) { if (!(e instanceof DtError) || e.status >= 500) throw new ComputerDaytonaError(e instanceof DtError ? e.status : 0, 'session'); }
     await call('spawn', () => dt(box, 'POST', `/${enc(sb.id)}/process/session/${enc(sessionId)}/exec`, { command, runAsync: true }, signal(20_000)));
+  },
+  async resize(c, id, body) {
+    try { return await dt<ComputerSandbox>(c, 'POST', `/sandbox/${enc(id)}/resize`, { cpu: body.cpu, memory: body.memory }, signal(60_000)); }
+    catch (e) {
+      const status = e instanceof DtError ? e.status : 0;
+      const quota = status >= 400 && status < 500 && status !== 408 && status !== 429 && /quota|limit|exceed/i.test(e instanceof Error ? e.message : '');
+      throw new ComputerDaytonaError(status, 'resize', quota ? 'quota' : undefined);
+    }
   },
   async computerUseStart(c, sb) {
     const box: Dt = { ...c, api: sb.toolboxProxyUrl ?? 'https://proxy.app.daytona.io/toolbox' };

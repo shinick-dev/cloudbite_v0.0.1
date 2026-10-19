@@ -40,7 +40,15 @@ export function fakeDaytona() {
       const e = err('createSnapshot'); if (e?.landed) f.snapshots.set(name, landed); if (e) throw new M.ComputerDaytonaError(e.status, 'snapshot'); f.snapshots.set(name, landed); },
     async getSnapshot(c, name) { f.calls.push(['getSnapshot', name]); const e = err('getSnapshot'); if (e) throw new M.ComputerDaytonaError(e.status, 'snapshot-get'); return f.snapshots.get(name) ?? null; },
     async preview(c, id, port) { f.calls.push(['preview', id, port]); if (f.previewGate) await f.previewGate; return { url: f.previewUrl ?? `https://${port}-${id}.proxy.daytona.works`, token: 'preview-secret' }; },
-    async exec(c, sb, command) { f.calls.push(['exec', command]); if (command.startsWith('curl')) return { exitCode: f.health ? 0 : 7, result: '' }; if (command.startsWith('test -x')) return { exitCode: f.script ? 0 : 1, result: '' };
+    async resize(c, id, body) { f.calls.push(['resize', id, body]); f.onResize?.(); if (f.hang.resize) return hang('resize');
+      const sb = byId(id), e = err('resize');
+      if (!e || e.landed) { sb.state = 'resizing'; f.applying = { sb, body }; }
+      if (e) throw new M.ComputerDaytonaError(e.status, 'resize', e.reason); return { ...sb }; },
+    /** Daytona finishes the hot resize: the new allocation becomes visible to GET. */
+    applyResize() { const a = f.applying; if (a) { a.sb.cpu = a.body.cpu; a.sb.memory = a.body.memory; a.sb.state = 'started'; f.applying = null; } },
+    async exec(c, sb, command) { f.calls.push(['exec', command]);
+      if (command.includes('/sys/fs/cgroup')) { if (f.metricsFail) throw new M.ComputerDaytonaError(0, 'exec'); return { exitCode: 0, result: f.metrics ?? '' }; }
+      if (command.startsWith('curl')) return { exitCode: f.health ? 0 : 7, result: '' }; if (command.startsWith('test -x')) return { exitCode: f.script ? 0 : 1, result: '' };
       if (command.includes('probe')) return f.probe ? { exitCode: 0, result: f.probe } : { exitCode: 1, result: '' }; return { exitCode: 1, result: '' }; },
     async computerUseStart() { f.calls.push(['computerUseStart']); },
     async spawn(c, sb, sid, command) { f.calls.push(['spawn', command]); assert.equal(f.calls.at(-2)[0], 'computerUseStart'); f.health = true; },
@@ -404,12 +412,187 @@ await test('machine() gives root the owner-checked identity only, no provider se
   await ready(w);
   const m = await w.svc.machine(OWNER);
   assert.equal(m.ok, true);
-  assert.deepEqual(Object.keys(m.machine).sort(), ['account', 'id', 'labels', 'name', 'status']);
+  assert.deepEqual(Object.keys(m.machine).sort(), ['account', 'id', 'labels', 'name', 'region', 'status']);
+  assert.equal(m.machine.region, 'us', 'actual provider region for root');
   assert.deepEqual(m.machine.labels, { 'cloudbite-computer': OWNER, 'cloudbite-computer-account': 'primary' });
   assert.equal(m.machine.name, `cloudbite-computer-primary-${OWNER}`);
   assert.ok(!JSON.stringify(m).includes('preview-secret') && !JSON.stringify(m).includes('k1'));
   assert.equal((await w.svc.machine('other0001tag')).error.code, 'bad_request');
   assert.equal((await w.svc.machine('BAD')).error.code, 'bad_request');
+});
+
+const GIB = 1024 ** 3;
+/** One fixed-command sample: 4 CPUs (cgroup v2 quota), 1.5 CPU-seconds over 1 s, 3 GiB used of an 8 GiB cgroup. */
+const sampleOut = (o = {}) => `noise\n${JSON.stringify({ v: 1, u0: 10_000_000, u1: 11_500_000, dt: 1, cpuMax: '400000 100000', cfsQuota: null, cfsPeriod: null,
+  memCurrent: String(4 * GIB), memMax: String(8 * GIB), inactiveFile: GIB, hostTotal: 256 * GIB, hostAvailable: 200 * GIB, load: '0.50 0.40 0.30 1/200 99', ncpu: 64, ...o })}\n`;
+const resizeOps = (w) => ops(w.fake, 'resize');
+const perfReady = async () => { const w = world(); await ready(w); w.fake.metrics = sampleOut(); return w; };
+const RES = (o = {}) => ({ requestId: randomUUID(), cpu: 8, memoryGiB: 16, acknowledgeCost: true, ...o });
+
+await test('P1 performance: cgroup metrics, estimated costs and increase-only plans; unknown sample is null, never zero', async () => {
+  const w = world();
+  assert.equal((await w.svc.performance(OWNER)).error.code, 'absent');
+  await ready(w); w.fake.metrics = sampleOut();
+  const p = await w.svc.performance(OWNER);
+  assert.equal(p.ok, true); assert.equal(p.machineId, w.kv.get('computer').machine.id);
+  assert.deepEqual(p.metrics, { cpuPercent: 37.5, memoryUsedGiB: 3, memoryLimitGiB: 8, memoryPercent: 37.5, load1: 0.5 });
+  assert.equal(p.sampledAt, new Date(w.now).toISOString());
+  assert.deepEqual(p.current, { cpu: 4, memoryGiB: 8, diskGiB: 10, usdPerHour: 0.33174 });
+  assert.deepEqual(p.plans, [{ cpu: 8, memoryGiB: 16, usdPerHour: 0.66294, deltaUsdPerHour: 0.3312 }, { cpu: 16, memoryGiB: 32, usdPerHour: 1.32534, deltaUsdPerHour: 0.9936 }]);
+  assert.deepEqual(p.resize, { status: 'idle' });
+  assert.deepEqual(p.pricing, { asOf: '2026-10-19', url: 'https://www.daytona.io/pricing', estimated: true });
+  assert.ok(!JSON.stringify(p).includes('preview-secret') && !JSON.stringify(p).includes('k1'));
+  // A failing or unparsable sample is unknown (null), not zeros.
+  const w2 = await perfReady(); w2.fake.metricsFail = true;
+  const q = await w2.svc.performance(OWNER);
+  assert.equal(q.metrics, null); assert.equal(q.sampledAt, null); assert.equal(q.current.cpu, 4);
+  const w3 = await perfReady(); w3.fake.metrics = 'Traceback (most recent call last)';
+  assert.equal((await w3.svc.performance(OWNER)).metrics, null);
+  // Stopped: allocation and cost stay visible, no sample and no plans (increases apply only to a running machine).
+  await w3.svc.stop(OWNER, { requestId: randomUUID() }); w3.tick(10_000);
+  const s = await w3.svc.performance(OWNER);
+  assert.equal(s.metrics, null); assert.deepEqual(s.plans, []);
+  assert.equal(w3.fake.calls.filter((c) => c[0] === 'exec' && c[1].includes('/sys/fs/cgroup')).length, 1, 'no sample of a stopped machine');
+  assert.equal((await w.svc.performance('other0001tag')).error.code, 'bad_request');
+});
+
+await test('P2 performance reads the provider at most once per 10 s; bursts share one sample', async () => {
+  const w = await perfReady();
+  const samples = () => w.fake.calls.filter((c) => c[0] === 'exec' && c[1].includes('/sys/fs/cgroup')).length;
+  const gets0 = ops(w.fake, 'get').length;
+  const burst = await Promise.all([1, 2, 3, 4, 5].map(() => w.svc.performance(OWNER)));
+  assert.ok(burst.every((x) => x.ok)); assert.equal(samples(), 1); assert.equal(ops(w.fake, 'get').length, gets0 + 1);
+  w.tick(9_999); await w.svc.performance(OWNER); assert.equal(samples(), 1, 'cached');
+  w.tick(1); await w.svc.performance(OWNER); assert.equal(samples(), 2, 'refreshed after 10 s');
+  w.fake.metricsFail = true; w.tick(10_000); await w.svc.performance(OWNER); w.tick(5_000); await w.svc.performance(OWNER);
+  assert.equal(samples(), 3, 'a failed sample is cached too');
+  const cmd = w.fake.calls.find((c) => c[0] === 'exec' && c[1].includes('/sys/fs/cgroup'))[1];
+  assert.match(cmd, /^\/usr\/bin\/python3 -I -S -B -c '/);
+});
+
+await test('R5 resize: ledger first, one POST to the owned machine, pending until GET observes it; processes and desktop kept', async () => {
+  const w = await perfReady();
+  const cookie = await desktopCookie(w);
+  const id = w.kv.get('computer').machine.id;
+  w.fake.onResize = () => assert.equal(w.kv.get('computer').resize.state, 'requesting', 'ledger written before the provider call');
+  const req = RES();
+  const r = await w.svc.resize(OWNER, req);
+  assert.equal(r.ok, true); assert.equal(r.status, 'running'); assert.equal(r.ready, true);
+  assert.deepEqual(resizeOps(w), [['resize', id, { cpu: 8, memory: 16 }]], 'exact target, CPU/RAM only, no disk');
+  let p = await w.svc.performance(OWNER);
+  assert.deepEqual(p.resize, { status: 'pending', cpu: 8, memoryGiB: 16 }); assert.deepEqual(p.current, { cpu: 4, memoryGiB: 8, diskGiB: 10, usdPerHour: 0.33174 }, 'not claimed yet');
+  assert.equal((await w.svc.resize(OWNER, req)).ok, true, 'same id + args replays state');
+  assert.equal(resizeOps(w).length, 1);
+  const conflict = await w.svc.resize(OWNER, { ...req, cpu: 16, memoryGiB: 32 });
+  assert.equal(conflict.error.code, 'request_conflict'); assert.equal(conflict.status, 409);
+  for (const op of [() => w.svc.stop(OWNER, { requestId: randomUUID() }), () => w.svc.snapshot(OWNER, { requestId: randomUUID(), name: 'during-resize' }),
+    () => w.svc.start(OWNER, { requestId: randomUUID(), account: 'primary' }), () => w.svc.resize(OWNER, RES({ cpu: 16, memoryGiB: 32 }))]) {
+    assert.equal((await op()).error.code, 'busy');
+  }
+  await w.svc.alarm();
+  assert.equal((await w.svc.state(OWNER)).status, 'running', "'resizing' keeps the machine running");
+  w.fake.api.applyResize();
+  await w.svc.alarm();
+  w.tick(1_000);
+  p = await w.svc.performance(OWNER);
+  assert.deepEqual(p.resize, { status: 'idle' }); assert.equal(p.current.cpu, 8); assert.equal(p.current.memoryGiB, 16);
+  assert.deepEqual(p.plans.map((x) => x.cpu), [16]);
+  assert.equal(w.fake.calls.filter((c) => c[0] === 'exec' && c[1].includes('/sys/fs/cgroup')).length, 2, 'the new limits are sampled again');
+  assert.equal(resizeOps(w).length, 1);
+  assert.equal(ops(w.fake, 'stop').length + ops(w.fake, 'start').length + ops(w.fake, 'create').length - 1, 0, 'no stop, restart or re-create');
+  assert.equal((await w.svc.desktopUpstream(cookie)).ok, true, 'desktop session survives');
+  assert.equal((await w.svc.state(OWNER)).ready, true);
+  assert.equal((await w.svc.machine(OWNER)).machine.id, id);
+});
+
+await test('R6 an unanswered resize is reconciled by GET, never re-sent; a new request waits for it', async () => {
+  for (const landed of [true, false]) {
+    const w = await perfReady();
+    w.fake.fail.resize = [{ status: 0, landed }];
+    const first = RES();
+    const r = await w.svc.resize(OWNER, first);
+    assert.equal(r.ok, true, 'state, not success claimed'); assert.equal((await w.svc.performance(OWNER)).resize.status, 'pending');
+    assert.equal((await w.svc.resize(OWNER, first)).ok, true);
+    const gets = ops(w.fake, 'get').length;
+    assert.equal((await w.svc.resize(OWNER, RES())).error.code, 'busy');
+    assert.equal(ops(w.fake, 'get').length, gets + 1, 'a new request first reconciles by GET');
+    if (landed) {
+      w.fake.api.applyResize(); await w.svc.alarm();
+      assert.equal((await w.svc.state(OWNER)).machine.cpu, 8);
+      w.tick(10_000); assert.deepEqual((await w.svc.performance(OWNER)).resize, { status: 'idle' });
+    } else {
+      let alarms = 0;
+      while (w.kv.get('computer').resize.state !== 'failed' && alarms < 100) { w.tick(10_000); await w.svc.alarm(); alarms++; }
+      assert.ok(alarms <= 30, `bounded (${alarms})`);
+      w.tick(10_000);
+      assert.deepEqual((await w.svc.performance(OWNER)).resize, { status: 'failed', cpu: 8, memoryGiB: 16, error: 'unknown_outcome' });
+      assert.equal(w.alarm === null || w.alarm > w.now, true);
+      assert.equal((await w.svc.resize(OWNER, RES())).ok, true, 'a new request may follow the settled one');
+      assert.equal(resizeOps(w).length, 2);
+      continue;
+    }
+    assert.equal(resizeOps(w).length, 1, 'never re-sent');
+  }
+});
+
+await test('R7 a persisted mid-request resize after eviction is reconciled, not resent; the session stop waits for it', async () => {
+  const a = await perfReady();
+  a.fake.hang.resize = true;
+  a.svc.resize(OWNER, RES()); await settle();
+  assert.equal(a.kv.get('computer').resize.state, 'requesting');
+  const b = world(ENV, { kv: a.kv, clock: a.clock, fake: a.fake }); a.fake.hang.resize = false;
+  b.tick(2 * 3600_000 + 1); // past the session deadline
+  await b.svc.alarm();
+  assert.equal(b.kv.get('computer').resize.state, 'unknown'); assert.equal(ops(a.fake, 'stop').length, 0, 'stop deferred while resizing');
+  assert.ok(b.alarm - b.now >= 10_000, 'no 1 s polling while deferred');
+  for (let i = 0; i < 40 && b.kv.get('computer').resize.state !== 'failed'; i++) { b.tick(10_000); await b.svc.alarm(); }
+  assert.equal(resizeOps(b).length, 1);
+  await b.svc.alarm();
+  assert.equal(ops(a.fake, 'stop').length, 1, 'the deferred session stop runs once settled');
+});
+
+await test('R8 definite refusals: quota is a fixed safe code replayed for the id; nothing else changes', async () => {
+  const w = await perfReady();
+  w.fake.fail.resize = [{ status: 403, reason: 'quota' }];
+  const req = RES({ cpu: 16, memoryGiB: 32 });
+  const r = await w.svc.resize(OWNER, req);
+  assert.deepEqual(r.error, { code: 'quota_exceeded', message: M.COMPUTER_ERRORS.quota_exceeded }); assert.equal(r.status, 409);
+  assert.equal((await w.svc.resize(OWNER, req)).error.code, 'quota_exceeded', 'replay, no second POST');
+  assert.equal(resizeOps(w).length, 1);
+  const p = await w.svc.performance(OWNER);
+  assert.deepEqual(p.resize, { status: 'failed', cpu: 16, memoryGiB: 32, error: 'quota_exceeded' }); assert.equal(p.current.cpu, 4);
+  assert.equal((await w.svc.state(OWNER)).ready, true);
+  w.fake.fail.resize = [{ status: 400 }];
+  const other = await w.svc.resize(OWNER, RES());
+  assert.equal(other.error.code, 'provider_error'); assert.equal(other.status, 502);
+});
+
+await test('R9 resize validation: explicit cost ack, fixed increase plans only, owner machine only, running only', async () => {
+  const w = await perfReady();
+  for (const bad of [RES({ acknowledgeCost: undefined }), RES({ acknowledgeCost: 'true' }), RES({ cpu: 6, memoryGiB: 12 }), RES({ cpu: 8, memoryGiB: 32 }),
+    RES({ cpu: 4, memoryGiB: 8 }), RES({ sandboxId: 'sb-other' }), RES({ account: 'secondary' }), RES({ diskGiB: 50 }), RES({ requestId: 'nope' }), null]) {
+    const r = await w.svc.resize(OWNER, bad);
+    assert.equal(r.error.code, 'bad_request', JSON.stringify(bad)); assert.equal(r.status, 400);
+  }
+  assert.equal((await w.svc.resize('other0001tag', RES())).error.code, 'bad_request');
+  assert.equal(resizeOps(w).length, 0);
+  // A same-named sandbox that lost our labels is never resized.
+  const sb = [...w.fake.sandboxes.values()][0]; sb.labels = { 'cloudbite-computer': 'someoneelse' };
+  assert.equal((await w.svc.resize(OWNER, RES())).error.code, 'not_running');
+  assert.equal(resizeOps(w).length, 0);
+  const w2 = await perfReady();
+  await w2.svc.stop(OWNER, { requestId: randomUUID() });
+  assert.equal((await w2.svc.resize(OWNER, RES())).error.code, 'not_running');
+  const w3 = world(); assert.equal((await w3.svc.resize(OWNER, RES())).error.code, 'absent');
+  // No fresh owner-checked read: nothing is sent and the same id stays usable once Daytona answers.
+  const w5 = await perfReady(); const rid = RES();
+  w5.fake.fail.get = [{ status: 0 }];
+  const u = await w5.svc.resize(OWNER, rid);
+  assert.equal(u.error.code, 'unknown_outcome'); assert.equal(resizeOps(w5).length, 0);
+  assert.equal((await w5.svc.resize(OWNER, rid)).ok, true); assert.equal(resizeOps(w5).length, 1);
+  const w4 = await perfReady(); delete w4.fake.api.resize;
+  assert.equal((await w4.svc.resize(OWNER, RES())).error.code, 'resize_unavailable');
+  assert.equal(resizeOps(w2).length + resizeOps(w4).length, 0);
 });
 
 console.log(`${passed} cloudbite-computer-service tests passed`);

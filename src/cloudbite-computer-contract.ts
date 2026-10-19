@@ -6,9 +6,11 @@
 //   POST extend   {requestId}          -> ComputerState            (session ends at most SESSION_MS from now)
 //   POST snapshot {requestId,name}     -> ComputerState            (private cold filesystem capture; stops first, no RAM)
 //   POST launch   {}                   -> {url}                    (gateway URL with a single-use short ticket)
+//   GET  performance                   -> ComputerPerformance      (cgroup sample cached >=10 s, estimated costs, hot-increase plans)
+//   POST resize   {requestId,cpu,memoryGiB,acknowledgeCost:true} -> ComputerState (running CPU/RAM increase; pending until observed)
 // requestId replays: same id + same arguments -> current state, or the original definite error; same id + other arguments
 // -> request_conflict. Root-only RPCs: redeemTicket, desktopUpstream (cookie -> {origin,token,maxAge}; read-only fast path),
-// desktopPreviewRejected (upstream 401/403 drops the cached preview) and machine(ownerTag) -> {id,account,name,labels,status}.
+// desktopPreviewRejected (upstream 401/403 drops the cached preview) and machine(ownerTag) -> {id,account,name,labels,status,region}.
 // Responses: {ok:true,...} or {error:{code,message}} with the fixed codes below. Provider URLs, tokens and keys never leave the DO.
 
 export const COMPUTER_ACCOUNTS = ['primary', 'secondary', 'tertiary'] as const;
@@ -31,6 +33,8 @@ export const COMPUTER_ERRORS = {
   snapshot_name: 'Use 3-63 lowercase letters, digits or dashes for the snapshot name.',
   snapshot_exists: 'A snapshot with that name already exists. Choose a new name; nothing was captured.',
   ticket_invalid: 'This desktop link is no longer valid. Open the computer again from CloudBite.',
+  quota_exceeded: 'Daytona refused the increase: a resource quota or limit is reached. Nothing was changed.',
+  resize_unavailable: 'Live resource increases are not available for this computer.',
 } as const;
 export type ComputerErrorCode = keyof typeof COMPUTER_ERRORS;
 
@@ -53,7 +57,15 @@ export interface ComputerState {
   tools?: readonly { id: string; status: string; version: string | null }[];
 }
 /** Internal identity for root RPC only (nested-compute setup); never contains provider URLs, tokens or keys. */
-export interface ComputerMachineRef { id: string; account: ComputerAccount; name: string; labels: Record<string, string>; status: ComputerStatus }
+export interface ComputerMachineRef { id: string; account: ComputerAccount; name: string; labels: Record<string, string>; status: ComputerStatus; region?: string | null }
+export interface ComputerPerformance {
+  machineId: string; sampledAt: string | null;
+  metrics: null | { cpuPercent: number | null; memoryUsedGiB: number; memoryLimitGiB: number; memoryPercent: number; load1: number };
+  current: { cpu: number; memoryGiB: number; diskGiB: number; usdPerHour: number };
+  plans: Array<{ cpu: number; memoryGiB: number; usdPerHour: number; deltaUsdPerHour: number }>;
+  resize: { status: 'idle' | 'pending' | 'failed'; cpu?: number; memoryGiB?: number; error?: ComputerErrorCode };
+  pricing: { asOf: string; url: string; estimated: true };
+}
 
 export const COMPUTER_DESKTOP_PATH = '/p/_cloudbite/computer/desktop';
 export const COMPUTER_DESKTOP_PORT = 8082;
