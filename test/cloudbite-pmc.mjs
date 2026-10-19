@@ -114,7 +114,15 @@ test('missing, unsupported or conflicting licence and non-open records are sourc
   ];
   for(const body of cases){const r=await M.importPmc('PMC123456',opts(mock(()=>xml(body))));assert.equal(r.error,'source_unavailable',body.slice(0,80)+JSON.stringify(r));assert.equal(r.documents,undefined)}
   const nc=await M.importPmc('PMC123456',opts(mock(()=>xml(oai({article:jats({license:'<license xlink:href="http://creativecommons.org/licenses/by-nc/3.0/legalcode"/>'})})))));
-  assert.equal(nc.article.license,'CC BY-NC 3.0 (https://creativecommons.org/licenses/by-nc/3.0/)');
+  assert.equal(nc.error,'source_unavailable');
+  assert.equal(nc.documents,undefined);
+  for (const licence of ['by-sa','by-nd','by-nc-sa','by-nc-nd']) {
+    const restricted=await M.importPmc('PMC123456',opts(mock(()=>xml(oai({article:jats({license:`<license xlink:href="https://creativecommons.org/licenses/${licence}/4.0/"/>`})})))));
+    assert.equal(restricted.error,'source_unavailable');
+    assert.equal(restricted.documents,undefined);
+  }
+  const zero=await M.importPmc('PMC123456',opts(mock(()=>xml(oai({article:jats({license:'<license xlink:href="https://creativecommons.org/publicdomain/zero/1.0/"/>'})})))));
+  assert.equal(zero.article.license,'CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/)');
   const embargo=await M.importPmc('10.1234/abc.5',opts(mock(()=>conv('10.1234/abc.5','PMC123456',{live:'false','release-date':'2027-01-01'}))));
   assert.equal(embargo.error,'source_unavailable');
 });

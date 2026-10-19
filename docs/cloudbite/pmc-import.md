@@ -43,13 +43,14 @@ other record it returns `cannotDisseminateFormat`, which this module reports as 
 The import succeeds only when both of these hold:
 
 1. the OAI header lists `setSpec` `pmc-open`;
-2. the article-level `front/article-meta/permissions/license` names exactly one Creative Commons licence (BY, BY-SA, BY-ND,
-   BY-NC, BY-NC-SA, BY-NC-ND, or CC0). The licence can appear in `ali:license_ref`, `@xlink:href`, or a licence `ext-link`.
+2. the article-level `front/article-meta/permissions/license` names exactly one licence supported by this importer's
+   initial product policy: CC BY or CC0. The licence can appear in `ali:license_ref`, `@xlink:href`, or a licence `ext-link`.
 
 Otherwise the result is `source_unavailable`. That covers a missing licence, publisher-specific "open access" wording,
 conflicting licences, and figure or table permissions with no article licence. The module does not assume that a public
-article is reusable. `article.license` and each document header give the licence and its URL. NC and ND terms still apply
-to anyone who uses the excerpts.
+article is reusable. `article.license` and each document header give the licence and its URL. Other Creative Commons
+variants are explicitly unavailable under this product policy pending separate review; this is not a legal judgment
+about every possible use of those variants. Attribution obligations remain applicable to CC BY excerpts.
 
 ## Retrieval bounds
 

@@ -453,6 +453,9 @@ function licenceOf(meta: XmlElement): { label: string; url: string } {
   if (found.size === 0) throw new Fail('source_unavailable', 'The PMC record licence is not an established Creative Commons reuse licence; not imported');
   if (found.size > 1) throw new Fail('source_unavailable', 'The PMC record has conflicting licence metadata; not imported');
   const [label, url] = [...found][0];
+  // Product import policy, not a legal judgment about every possible use of the other licences.
+  if (label !== 'CC0 1.0' && !/^CC BY [0-9]\.[0-9]$/.test(label))
+    throw new Fail('source_unavailable', 'This importer currently supports CC0 or CC BY only; other licence terms require separate review');
   return { label, url };
 }
 
