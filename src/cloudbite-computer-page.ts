@@ -1,6 +1,6 @@
 // Generated file — do not edit. Sources: client/cloudbite-computer.ts · client/cloudbite-computer.css
 // Rebuild: node tools/build-cloudbite-computer.mjs (--check verifies it is current)
-// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 5b315f337df04ad1668c820c4e6113faa717bc5b0be45f3f3b4bc7fe26bb5cf9 · css sha256 74a353592822179dd9cd7b9fc9c7538a655bfba439bffdd1c132bfa98781179e
+// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 b243b715126bd01d242b2884b9da158a344bc46e187d682bb63aa83af2aa9a0e · css sha256 74a353592822179dd9cd7b9fc9c7538a655bfba439bffdd1c132bfa98781179e
 // Routing (runtime): GET CLOUDBITE_COMPUTER_PATH → CLOUDBITE_COMPUTER_HTML, CLOUDBITE_COMPUTER_JS_PATH → CLOUDBITE_COMPUTER_JS (text/javascript),
 // CLOUDBITE_COMPUTER_CSS_PATH → CLOUDBITE_COMPUTER_CSS (text/css). CSP script-src 'self'; style-src 'self' suffices (no inline).
 // The script calls /api/cloudbite/computer/* (sign-in under /api/cloudbite/computer/auth/*) same-origin and links out only to the gateway and k.shinick.dev.
@@ -387,7 +387,7 @@ export const CLOUDBITE_COMPUTER_JS = [
   "      not_requested: \"Environment backup: waits until the stop is confirmed.\",",
   "      pending: \"Environment backup: in progress.\",",
   "      active: \"Environment backup: done. Private copy of the disk; open programs and memory (RAM) are not included.\",",
-  "      coalesced: \"Environment backup: no new copy this time; the recent backup is kept.\",",
+  "      coalesced: \"Environment backup: no new copy this time — the earlier recovery point is reused. Changes since then are only on the kept disk, not in a backup. Take a snapshot when you need a fresh copy.\",",
   "      failed: \"Environment backup: failed. The disk is kept.\",",
   "      blocked: \"Environment backup: paused by the backup limits. The disk is kept.\",",
   "      unknown: \"Environment backup: not confirmed.\"",
@@ -670,7 +670,7 @@ export const CLOUDBITE_COMPUTER_JS = [
   "      not_requested: \"환경 백업: 정지가 확인되면 시작합니다.\",",
   "      pending: \"환경 백업: 진행 중.\",",
   "      active: \"환경 백업: 완료. 디스크의 비공개 사본이며 열린 프로그램과 메모리(RAM)는 포함되지 않습니다.\",",
-  "      coalesced: \"환경 백업: 이번에는 새 사본을 만들지 않았고 최근 백업을 유지합니다.\",",
+  "      coalesced: \"환경 백업: 이번에는 새 사본을 만들지 않고 이전 복구 지점을 그대로 씁니다. 그 뒤의 변경은 남아 있는 디스크에만 있고 백업에는 없습니다. 새 사본이 필요하면 스냅샷을 만드세요.\",",
   "      failed: \"환경 백업: 실패. 디스크는 남아 있습니다.\",",
   "      blocked: \"환경 백업: 백업 한도 때문에 멈췄습니다. 디스크는 남아 있습니다.\",",
   "      unknown: \"환경 백업: 확인되지 않았습니다.\"",

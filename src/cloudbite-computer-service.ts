@@ -90,6 +90,8 @@ interface EndRec {
   files: ComputerEndFiles; filesVerifiedAt: number | null; report: ComputerDrainReport | null; drains: number; drainAt: number | null;
   stopAt: number | null; flushed: boolean | null; stops: number; polls: number; machineStopped: boolean;
   backup: ComputerEndBackup; backupName: string | null; error: ComputerErrorCode | null; startedAt: number; updatedAt: number;
+  /** The manager still has work (e.g. retention after a new backup turned active); ticked after `done`, at most workPolls. */
+  backupWork?: boolean; workPolls?: number;
 }
 interface Rec {
   ownerTag: string | null;
@@ -362,7 +364,7 @@ export class ComputerService {
     const now = this.d.now();
     const pending = r.status === 'starting' || r.status === 'stopping' || r.status === 'unknown' || r.status === 'snapshotting'
       || (r.status === 'running' && r.desktop === 'starting')
-      || (!!r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state)) || this.probeDue(r) || this.resizing(r) || this.ending(r);
+      || (!!r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state)) || this.probeDue(r) || this.resizing(r) || this.ending(r) || !!r.end?.backupWork;
     const fast = r.status === 'starting' || (r.status === 'running' && r.desktop === 'starting');
     // The alarm defers the session stop while a resize is pending; the deadline must not become a 1 s poll meanwhile.
     const deadline = r.status === 'running' && r.sessionEndsAt ? (this.resizing(r) ? Math.max(r.sessionEndsAt, now + COMPUTER_POLL_MS) : r.sessionEndsAt) : null;
@@ -654,6 +656,7 @@ export class ComputerService {
         else if (r.machine?.created === 'owned' && r.status === 'running' && r.sessionEndsAt && r.sessionEndsAt <= now && !this.resizing(r)) {
           try { await this.stopMachine(r); } catch { /* recorded on r */ }
         }
+        if (!this.ending(r) && r.end?.backupWork) await this.tickBackupWork(r);
         if (r.status !== 'running') { r.desktopLaunches = 0; r.desktopLaunchAt = null; }
         if (r.machine?.created === 'owned' && r.snapshot) await this.pollSnapshot(r);
         if (r.machine?.created === 'owned' && r.status === 'running' && r.desktop === 'starting') await this.pollDesktop(r);
@@ -825,12 +828,25 @@ export class ComputerService {
           ? await b.begin(r.ownerTag!, { requestId: e.requestId, machine: { id: r.machine.id, account: r.machine.account, status: r.status }, environmentRevision: null })
           : await b.tick(r.ownerTag!);
       } catch { st = null; } // begin is idempotent per requestId: the next alarm asks the same request again
-      if (st && ['pending', 'active', 'coalesced', 'failed', 'blocked', 'unknown'].includes(st.state)) {
-        e.backup = st.state; if (typeof st.name === 'string') e.backupName = st.name;
-      }
+      this.mirrorBackup(e, st);
       if (BACKUP_DONE.includes(e.backup)) e.phase = 'done';
       else if (++e.polls >= END_BACKUP_MAX_POLLS) { e.phase = 'done'; e.backup = 'unknown'; }
     }
+  }
+
+  private mirrorBackup(e: EndRec, st: ComputerBackupStatus | null) {
+    if (!st || !['pending', 'active', 'coalesced', 'failed', 'blocked', 'unknown'].includes(st.state)) return;
+    e.backup = st.state; e.backupWork = st.work === true;
+    if (typeof st.name === 'string') e.backupName = st.name;
+  }
+
+  /** Manager work left after the end finished (retention cleanup): alarm-only ticks, bounded like the backup itself. */
+  private async tickBackupWork(r: Rec) {
+    const e = r.end!, b = this.d.end?.backup;
+    if (!b || (e.workPolls = (e.workPolls ?? 0) + 1) > END_BACKUP_MAX_POLLS) { e.backupWork = false; return; }
+    let st: ComputerBackupStatus | null = null;
+    try { st = await b.tick(r.ownerTag!); } catch { st = null; }
+    this.mirrorBackup(e, st);
   }
 
   /**
@@ -1078,6 +1094,20 @@ type EndHooksFactory = (env: ComputerEnv, storage: DurableObjectStorage) => Comp
 let endHooks: EndHooksFactory | null = null;
 /** Root wires the files drain and the backups manager once at module load; without it files_verified stays unavailable. */
 export function setComputerEndHooks(f: EndHooksFactory | null) { endHooks = f; }
+
+/**
+ * Snapshot names the backups manager must never remove: every configured prepared image, the selected template, the template
+ * the current machine came from, the current manual capture and the manual history. Storage read only (no queue, no provider),
+ * so it is safe inside end hooks. Fails closed: a record bound to another owner or a bad tag throws, so the caller removes nothing.
+ */
+export async function computerBackupProtectedNames(env: ComputerEnv, store: { get<T>(key: string): Promise<T | undefined> }, ownerTag: string): Promise<readonly string[]> {
+  if (!COMPUTER_OWNER_TAG.test(ownerTag)) throw new ComputerError('bad_request', 400);
+  const r = await store.get<Rec>(KEY);
+  if (r?.ownerTag && r.ownerTag !== ownerTag) throw new ComputerError('bad_request', 403);
+  const names = new Set(computerAccounts(env).filter((a) => a.prepared).map((a) => a.snapshot));
+  for (const n of [r?.template?.name, r?.machine?.template, r?.snapshot?.name, ...(r?.snapshots ?? []).map((h) => h.name)]) if (n) names.add(n);
+  return Object.freeze([...names]);
+}
 
 const sha256 = async (s: string) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)))].map((b) => b.toString(16).padStart(2, '0')).join('');
 

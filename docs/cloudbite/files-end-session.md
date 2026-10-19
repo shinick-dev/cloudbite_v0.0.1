@@ -30,6 +30,10 @@
 5. 정지 확인 뒤 `backup.begin`(같은 requestId, `environmentRevision: null`)을 부르고 이후 alarm마다 `tick`.
    `active/coalesced/failed/blocked`면 `done`, `pending/unknown`은 최대 360회(약 1시간) 후 `unknown`으로 끝낸다.
    begin이 응답하지 않으면 다음 alarm에 같은 requestId로 다시 묻는다(관리자는 requestId에 대해 멱등).
+6. 관리자 상태의 `work: true`(예: 새 백업 active 뒤 보관 정리)는 `done` 이후에도 alarm마다 `tick`을 부르게 한다.
+   `work`가 거짓이 되거나 360회(약 1시간)에 닿으면 멈춘다. 이 service는 삭제·재시작을 하지 않으며 tick 안의 정리는 관리자 몫이다.
+7. `coalesced`는 새 백업이 아니다: 이전 복구 지점을 재사용하고, 그 뒤 변경은 남아 있는 디스크에만 있다. 화면도 그렇게 말하고
+   디스크 보존(단계 줄)과 백업 상태(백업 줄)를 따로 보여 준다. 새 사본이 필요하면 수동 스냅샷을 쓴다.
 
 ## 기한·강제 정지
 
@@ -51,6 +55,9 @@
 - `uploadsFrozen`(draining/stopping)이 참이면 파일 런타임은 새 관리 업로드를 받지 않는다.
 - `setComputerEndHooks((env, storage) => ({ drain, resume, backup }))`를 모듈 로드 시 한 번 호출한다.
   hook은 DO의 직렬 큐 안에서 돌므로 큐를 쓰는 ComputerService/DO 메서드를 다시 부르면 안 된다(`computerMachine`은 큐 밖 읽기).
+- `computerBackupProtectedNames(env, storage, ownerTag): Promise<readonly string[]>`(service 모듈 export): 설정된 prepared image 전부,
+  선택된 template, 현재 머신의 template, 현재 수동 스냅샷과 수동 이력 이름. 저장소 읽기만 하며 큐·provider를 쓰지 않는다.
+  다른 소유자에 묶인 기록이나 잘못된 태그면 throw한다(fail closed — 호출자는 아무것도 지우지 않는다).
 - `drain`은 watcher+agent 결합 prepare-end 보고가 실제로 있을 때만 연결한다. 그 전에는 `files_verified`가
   `files_not_configured`로 거절되고 `disk_backup`은 R2 없이도 동작한다.
 - drain 이후에도 외부 앱은 디스크에 쓸 수 있다: `verified`는 “확인 시점 기준”이며 앱 정지·RPO 0이 아니다.

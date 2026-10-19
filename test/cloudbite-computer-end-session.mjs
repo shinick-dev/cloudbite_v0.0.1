@@ -67,7 +67,7 @@ function fakeDrain(kv, answers) {
 /** Fake backups manager: begin/tick answers from queues; status is storage only. */
 function fakeBackup(states = ['pending', 'active']) {
   const b = { begins: [], ticks: 0, statusCalls: 0, q: [...states], last: null, beginFail: 0 };
-  const next = () => { const s = b.q.length > 1 ? b.q.shift() : b.q[0]; b.last = { state: s, name: 'cb-auto-1' }; return b.last; };
+  const next = () => { const s = b.q.length > 1 ? b.q.shift() : b.q[0]; b.last = typeof s === 'string' ? { state: s, name: 'cb-auto-1' } : { name: 'cb-auto-1', ...s }; return b.last; };
   b.hook = {
     async begin(owner, req) { b.begins.push(structuredClone(req)); if (b.beginFail-- > 0) throw new Error('timeout'); return next(); },
     async tick() { b.ticks++; return next(); },
@@ -315,6 +315,43 @@ await test('end on a stopped machine goes straight to the backup; endStatus make
   const s = await w.svc.endStatus(OWNER);
   assert.equal(s.ok, true); assert.equal(w.fake.calls.length, n);
   assert.equal((await w.svc.endStatus('other0001tag')).error.code, 'bad_request');
+});
+
+await test('backup work after done: bounded alarm ticks while work is true, stop when it clears, nothing deleted by the service', async () => {
+  const w = world({ backup: ['pending', { state: 'active', work: true }, { state: 'active', work: true }, { state: 'active', work: false }] }); await running(w);
+  await w.svc.end(OWNER, { requestId: randomUUID(), mode: 'disk_backup' });
+  await alarms(w, 3);
+  assert.equal(rec(w).end.phase, 'done'); assert.equal(rec(w).end.backupWork, true);
+  assert.ok(w.clock.alarm !== null, 'work keeps the alarm scheduled after done');
+  const t0 = w.b.ticks; await alarms(w, 4);
+  assert.ok(w.b.ticks > t0, 'ticked after done'); assert.equal(rec(w).end.backupWork, false); assert.equal(rec(w).end.backup, 'active');
+  const t1 = w.b.ticks; await alarms(w, 3);
+  assert.equal(w.b.ticks, t1, 'no ticks once work is false');
+  assert.equal(ops(w.fake, 'removeSnapshot').length, 0); assert.equal(ops(w.fake, 'start').length, 0, 'no restart');
+  const c = world({ backup: [{ state: 'coalesced', work: true }] }); await running(c);
+  await c.svc.end(OWNER, { requestId: randomUUID(), mode: 'disk_backup' });
+  await alarms(c, 400);
+  assert.equal(rec(c).end.phase, 'done'); assert.equal(rec(c).end.backup, 'coalesced'); assert.equal(rec(c).end.backupWork, false, 'bounded');
+  assert.ok(c.b.ticks <= 362); assert.equal(ops(c.fake, 'stop').length, 1);
+});
+
+await test('computerBackupProtectedNames: storage only, prepared images + template + machine template + manual captures, fails closed', async () => {
+  const w = world(); await running(w);
+  const kv = { async get(k) { return structuredClone(w.kv.get(k)); } };
+  const env = { ...ENV, CLOUDBITE_DAYTONA_SECONDARY_API_KEY: 'k2', CLOUDBITE_COMPUTER_SECONDARY_SNAPSHOT: 'cloudbite-computer-v1-b' };
+  const n = w.fake.calls.length;
+  assert.deepEqual([...await M.computerBackupProtectedNames(env, kv, OWNER)].sort(), ['cloudbite-computer-v1', 'cloudbite-computer-v1-b']);
+  const r = w.kv.get('computer');
+  r.template = { account: 'primary', name: 'my-template', requestedAt: 1 }; r.machine.template = 'old-template';
+  r.snapshot = { name: 'manual-now', state: 'snapshotting', polls: 0 }; r.snapshots = [{ name: 'manual-old', account: 'primary', sourceId: 'x', requestedAt: 1, state: 'active', error: null, checkedAt: null }];
+  w.kv.set('computer', r);
+  const got = await M.computerBackupProtectedNames(env, kv, OWNER);
+  assert.ok(Object.isFrozen(got));
+  for (const x of ['cloudbite-computer-v1', 'cloudbite-computer-v1-b', 'my-template', 'old-template', 'manual-now', 'manual-old']) assert.ok(got.includes(x), x);
+  await assert.rejects(M.computerBackupProtectedNames(env, kv, 'other0001tag'));
+  await assert.rejects(M.computerBackupProtectedNames(env, kv, 'BAD'));
+  assert.deepEqual(await M.computerBackupProtectedNames(ENV, { async get() { return undefined; } }, OWNER), ['cloudbite-computer-v1']);
+  assert.equal(w.fake.calls.length, n, 'no provider call');
 });
 
 // ───────────────────────── main page (generated CLOUDBITE_COMPUTER_JS in a tiny fake DOM; not browser evidence) ─────────────────────────

@@ -103,8 +103,14 @@ export interface ComputerEndView {
   machineStopped: boolean; environmentBackup: ComputerEndBackup; backupName: string | null;
   error: ComputerErrorCode | null; startedAt: string; updatedAt: string;
 }
-/** Backups manager answer (src/cloudbite-computer-backups.ts adapter). active/coalesced/failed/blocked end the backing_up phase. */
-export interface ComputerBackupStatus { state: 'pending' | 'active' | 'coalesced' | 'failed' | 'blocked' | 'unknown'; name?: string | null }
+/**
+ * Backups manager answer (src/cloudbite-computer-backups.ts). active/coalesced/failed/blocked end the backing_up phase;
+ * work = retention/capture still needs tick() after that (the alarm keeps ticking, bounded). coalesced = the previous
+ * recovery point is reused: newer changes are only on the kept disk, not in a fresh backup.
+ */
+export interface ComputerBackupStatus {
+  state: 'pending' | 'active' | 'coalesced' | 'failed' | 'blocked' | 'unknown'; name?: string | null; reason?: string | null; work?: boolean;
+}
 export interface ComputerEndState {
   end: ComputerEndView | null;
   /** Latest backups manager status (storage read); null when no manager is wired or it did not answer. */
