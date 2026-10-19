@@ -19,6 +19,7 @@ backups.begin(ownerTag, { requestId, machine: { id, account, status }, environme
 backups.tick(ownerTag)    // alarm only; the only provider caller, at most 8 provider calls per tick
 backups.status(ownerTag)  // storage only, last begin's answer or null
 backups.summary(ownerTag) // storage only: owned items, owned count, block reason, usage:'unknown'
+backups.reconcile(ownerTag) // explicit owner/root action only (never the alarm): re-reads 'unconfirmed' creates by name
 // -> { state: 'pending'|'active'|'coalesced'|'failed'|'blocked'|'unknown', name, reason, work }
 ```
 
@@ -35,7 +36,15 @@ backups.summary(ownerTag) // storage only: owned items, owned count, block reaso
 `pending`/`unknown` keep the lifecycle's `backing_up` phase ticking; `active`, `coalesced`, `failed`, `blocked` end it.
 Reasons: `not_stopped`, `busy` (another machine's capture in flight), `recent`, `unchanged`, `daily_limit`,
 `retention_blocked`, `cleanup_blocked`, `ownership_unproven`, `foreign`, `name_collision`, `provider_refused`,
-`provider_error`, `not_applied`, `timeout`, `bad_request`, `request_conflict`, `no_backup`.
+`provider_error`, `create_unconfirmed`, `timeout`, `bad_request`, `request_conflict`, `no_backup` (`not_applied` only
+appears in ledgers written before this rule; it is no longer produced).
+
+**Unconfirmed create (lifecycle peer note).** A create whose answer was lost (no answer, 5xx, 408/429, or a restart
+while `requested`) and that then reads 404 by exact name 5 times answers `{ state: 'unknown', reason:
+'create_unconfirmed', work: false }`. The lifecycle keeps its own bounded `backing_up` poll and then ends as
+`unknown`; ticks in that state make no provider call. Every new `begin` answers `blocked/create_unconfirmed` until
+`reconcile()` proves the resource ours (it then continues as a normal capture) or contrary evidence marks it
+`foreign`/`unproven`. The original `requestId` keeps replaying `unknown`, never `failed`.
 
 ## Rules
 
@@ -44,10 +53,17 @@ Reasons: `not_stopped`, `busy` (another machine's capture in flight), `recent`, 
 - **Coalescing.** A verified backup of the same account+machine younger than 6 h answers `coalesced/recent`. A known
   `environmentRevision` equal to the latest verified backup's answers `coalesced/unchanged`. An unknown (null)
   revision never claims unchanged; it only gets time coalescing. At most 4 new captures per 24 h, failed ones included.
-- **Create.** Generated name `cbak-<ownerTag>-<base36 seconds>-<6 random>`. The tick preflights the exact name (an
-  existing one is a collision: never adopted, never deleted), persists `requested`, then sends one create. An
-  unanswered create (or a persisted `requested` after a restart) is reconciled by exact name, never resubmitted;
-  after 5 consecutive 404s it is closed as `not_applied`.
+- **Create.** Generated name `cbak-<first 16 of ownerTag>-<base36 seconds>-<6 random>`: at most 38 characters for
+  every valid owner tag (8–32) and timestamp, inside the restore UI's 3–48 rule and `COMPUTER_SNAPSHOT_NAME`, so a
+  backup is selectable for restore. The ledger record and provenance keep the full owner tag. The tick preflights the
+  exact name (an existing one is a collision: never adopted, never deleted), persists `requested`, then sends one
+  create. A definite 4xx refusal (not 408/429) releases the intent: the provider said no. An unanswered create (or a
+  persisted `requested` after a restart) is reconciled by exact name, never resubmitted. Finite 404s do not prove an
+  old create cannot still land, so after 5 consecutive 404s it becomes `unconfirmed`: still counted as an owned slot,
+  never deleted or dropped, automatic reads stop, and it blocks every new capture (so repeated daily ends cannot pile
+  up unaccounted snapshots). Only an explicit `reconcile()` re-reads it; strict ownership proof (exact name, id,
+  source machine, `general === false`) recovers it, a 404/error leaves it unconfirmed, contrary evidence marks it
+  `foreign`.
 - **Ownership proof.** `active` requires the provider DTO to show the exact name, an id (not used by another ledger
   item), `sourceSandboxId === recorded machine id` and `general === false`. Missing evidence → `ownership_unproven`;
   contrary evidence → `foreign`. Both preserve the resource, are never deleted, and block new captures.
@@ -59,7 +75,8 @@ Reasons: `not_stopped`, `busy` (another machine's capture in flight), `recent`, 
   later GET 404; `removing` is in progress. If the snapshot is still present and not removing, the DELETE is re-sent
   (2 sends in total, each after fresh ownership and protection checks); then `delete_blocked`. A definite refusal is
   `delete_blocked` at once. `delete_blocked` items are only re-read; a 404 clears them.
-- **Blocking.** `stale` (a capture still unconfirmed after 120 reads), `delete_blocked`, `unproven`, `foreign` block
+- **Blocking.** `stale` (a capture still unconfirmed after 120 reads), `unconfirmed` (5 × 404 after an unknown
+  create), `delete_blocked`, `unproven`, `foreign` block
   every new capture. They stay counted as owned resources (deleting/unknown included); history is not a resource.
   Expiry or a stale entry never causes a blind create.
 - **Bounds.** Owned items ≤ 4 (+ blocked anomalies, which stop growth), 32 begin receipts, 32 removal receipts,
@@ -69,8 +86,10 @@ Reasons: `not_stopped`, `busy` (another machine's capture in flight), `recent`, 
 ## Known limits
 
 - Verified backups are not re-read for out-of-band disappearance; the owned count can then be conservative (too high).
-- A create closed as `not_applied` after repeated 404s could in theory appear later; it would not be in the ledger and
-  so would never be deleted by this module (preserved, not leaked into deletion).
+- An `unconfirmed` create blocks all automatic backups for that owner until someone calls `reconcile()` (the root's
+  wiring of that explicit action is not part of this module). This is deliberate: blocking is preferred to an
+  unaccounted snapshot. Ledgers written before this rule may hold `not_applied` history entries whose late resource is
+  not tracked; nothing here deletes it.
 - No live Daytona run: field presence of `sourceSandboxId`/`general` on `GET /snapshots/{id}` must be confirmed live
   by the root; without them every backup is `ownership_unproven` (safe, but blocks).
 

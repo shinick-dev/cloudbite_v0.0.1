@@ -10,7 +10,9 @@
 // Missing or unknown ownership preserves the resource and blocks new captures; a name prefix alone never proves it.
 //
 // Invariants: intent is persisted before every provider create/delete; an unanswered create/delete is reconciled by exact
-// name/id and never blindly resubmitted; every op uses the item's own account (no substitution); the newest verified
+// name/id and never blindly resubmitted (a create whose outcome stays unknown is never closed as 'not applied': finite 404s
+// do not prove an old create cannot still land, so it stays owned and blocks new captures until an explicit reconcile()
+// proves it); every op uses the item's own account (no substitution); the newest verified
 // backup is kept until a newer one is verified; old backups are deleted only after a replacement is active+verified.
 // begin() and status() are storage only; tick() is the only provider caller (alarm). Callers serialise calls per
 // owner (the DO input queue); this module never calls back into the computer service.
@@ -22,7 +24,7 @@ export const BACKUP_LIMITS = {
   minIntervalMs: 6 * 3600_000,
   maxNewPerDay: 4,
   createPolls: 120,         // reads of a pending capture before it is 'stale' (still owned + re-read, blocks new ones)
-  reconcileAbsent: 5,       // 404 reads of an unanswered create before it is 'not_applied'
+  reconcileAbsent: 5,       // 404 reads of an unanswered create before automatic reads stop: 'unconfirmed' (owned, blocks)
   intentPolls: 30,          // ticks an intent may wait for retention room before it gives up
   deletePolls: 60,          // reads of a deleting snapshot before 'delete_blocked'
   deleteSends: 2,           // DELETE requests per snapshot, each after a fresh ownership/protection check
@@ -34,8 +36,10 @@ const OWNER_TAG = /^[a-z0-9]{8,32}$/;
 const REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ACCOUNT = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const MACHINE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-/** Same rule as COMPUTER_SNAPSHOT_NAME. Generated: cbak-<ownerTag>-<base36 time>-<6 random>. */
-const SNAPSHOT_NAME = /^[a-z0-9][a-z0-9-]{2,62}$/;
+/** The restore UI's 3–48 rule (inside COMPUTER_SNAPSHOT_NAME). Generated: cbak-<ownerTag[0,16)>-<base36 s>-<6 random>,
+ *  at most 5+16+1+9+1+6 = 38 for any valid owner tag and timestamp; the ledger keeps the full owner tag. */
+const SNAPSHOT_NAME = /^[a-z0-9][a-z0-9-]{1,46}[a-z0-9]$/;
+const NAME_OWNER = 16;
 const KEY = (ownerTag: string) => `computer-backups:v1:${ownerTag}`;
 
 // ---- public contract (compatible with the lifecycle ComputerBackupHook) ----
@@ -44,7 +48,7 @@ export type ComputerBackupState = 'pending' | 'active' | 'coalesced' | 'failed' 
 export type ComputerBackupReason =
   | 'bad_request' | 'request_conflict' | 'not_stopped' | 'busy' | 'recent' | 'unchanged' | 'daily_limit'
   | 'retention_blocked' | 'cleanup_blocked' | 'ownership_unproven' | 'foreign' | 'name_collision'
-  | 'provider_refused' | 'provider_error' | 'not_applied' | 'timeout' | 'no_backup';
+  | 'provider_refused' | 'provider_error' | 'not_applied' | 'create_unconfirmed' | 'timeout' | 'no_backup';
 export interface ComputerBackupStatus {
   state: ComputerBackupState;
   /** The backup this answer is about (the new one, the in-flight one joined, or the one coalesced into). */
@@ -97,12 +101,13 @@ export interface BackupDeps {
 
 type ItemState =
   | 'intent' | 'requested' | 'unknown' | 'snapshotting' | 'active' | 'failed_resource' | 'stale'
-  | 'deleting' | 'delete_blocked' | 'unproven' | 'foreign';
+  | 'deleting' | 'delete_blocked' | 'unproven' | 'foreign' | 'unconfirmed';
 interface Item {
   name: string; id: string | null; account: string; machineId: string; requestId: string; revision: string | null;
   state: ItemState; intentAt: number; requestedAt: number | null; activeAt: number | null;
   polls: number; absent: number; deletes: number; deleteAt: number | null; why: ComputerBackupReason | null;
 }
+/** 'not_applied' is read from older ledgers only; an unknown create is never closed that way any more. */
 type DoneOutcome = 'removed' | 'not_applied' | 'refused' | 'collision' | 'skipped';
 interface Done { name: string; id: string | null; outcome: DoneOutcome; why: ComputerBackupReason | null; at: number }
 interface Receipt { requestId: string; key: string; at: number; item: string | null; result: ComputerBackupStatus; final: boolean }
@@ -122,7 +127,7 @@ export interface ComputerBackupSummary {
 }
 
 const INFLIGHT: ItemState[] = ['intent', 'requested', 'unknown', 'snapshotting'];
-const BLOCKING: ItemState[] = ['stale', 'delete_blocked', 'unproven', 'foreign'];
+const BLOCKING: ItemState[] = ['stale', 'delete_blocked', 'unproven', 'foreign', 'unconfirmed'];
 const status = (state: ComputerBackupState, name: string | null = null, reason: ComputerBackupReason | null = null): ComputerBackupStatus =>
   ({ state, name, reason });
 const definite = (e: unknown) => {
@@ -210,6 +215,21 @@ export class ComputerBackups implements ComputerBackupHook {
     return r ? this.view(l, r) : status('blocked', null, 'no_backup');
   }
 
+  /** Explicit owner/root action only, never the alarm: one read by exact name per 'unconfirmed' create. Strict ownership
+   *  proof recovers it; a 404 or an error keeps it owned and blocking. Never creates, deletes or drops anything. */
+  async reconcile(ownerTag: string): Promise<ComputerBackupStatus> {
+    const l = OWNER_TAG.test(ownerTag ?? '') ? await this.load(ownerTag) : null;
+    if (!l) return status('blocked', null, 'no_backup');
+    const ops = { n: 0 };
+    for (const i of l.items.filter((x) => x.state === 'unconfirmed')) {
+      if (ops.n >= BACKUP_LIMITS.tickOps) break;
+      await this.reconcileCreate(l, i, ops);
+    }
+    await this.save(l);
+    const r = l.begins.at(-1);
+    return r ? this.view(l, r) : status('blocked', null, 'no_backup');
+  }
+
   // ---- create ----
 
   private async create(l: Ledger, i: Item, ops: { n: number }) {
@@ -241,15 +261,18 @@ export class ComputerBackups implements ComputerBackupHook {
     i.polls++;
     if (info === undefined) { if (i.polls >= BACKUP_LIMITS.createPolls && INFLIGHT.includes(i.state)) this.mark(i, 'stale', 'timeout'); return; }
     if (info === null) {
-      // Never created (or already gone): only an answer-less create may be closed this way, after repeated 404s.
       if (i.state === 'active' || i.id) { this.mark(i, 'unproven', 'ownership_unproven'); return; }
-      if (++i.absent >= BACKUP_LIMITS.reconcileAbsent) this.drop(l, i, 'not_applied', 'not_applied');
+      // Absent so far is not proof an old create cannot still land: stop automatic reads, keep it owned and blocking.
+      if (i.state !== 'unconfirmed' && ++i.absent >= BACKUP_LIMITS.reconcileAbsent) this.mark(i, 'unconfirmed', 'create_unconfirmed');
       return;
     }
     i.absent = 0;
     const own = this.ownership(l, i, info);
     if (own === 'foreign') return this.mark(i, 'foreign', 'foreign');
-    if (own === 'ours') i.id = info.id!;
+    if (own === 'ours') {
+      i.id = info.id!;
+      if (i.state === 'unconfirmed') { i.state = 'snapshotting'; i.why = null; i.polls = 0; } // proven: normal reads resume
+    }
     if (info.state === 'active') return own === 'ours' ? this.mark(i, 'active', null, true) : this.mark(i, 'unproven', 'ownership_unproven');
     if (info.state === 'error' || info.state === 'build_failed') return own === 'ours' ? this.mark(i, 'failed_resource', 'provider_error') : this.mark(i, 'unproven', 'ownership_unproven');
     if (i.polls >= BACKUP_LIMITS.createPolls && INFLIGHT.includes(i.state)) this.mark(i, 'stale', 'timeout');
@@ -340,12 +363,13 @@ export class ComputerBackups implements ComputerBackupHook {
 
   private blocked(l: Ledger): ComputerBackupReason | null {
     const b = l.items.find((i) => BLOCKING.includes(i.state));
-    return !b ? null : b.state === 'foreign' ? 'foreign' : b.state === 'unproven' ? 'ownership_unproven' : 'cleanup_blocked';
+    return !b ? null : b.state === 'foreign' ? 'foreign' : b.state === 'unproven' ? 'ownership_unproven'
+      : b.state === 'unconfirmed' ? 'create_unconfirmed' : 'cleanup_blocked';
   }
 
   private work(l: Ledger) {
     const active = l.items.filter((i) => i.state === 'active').length;
-    return l.items.some((i) => !['active', 'foreign', 'delete_blocked'].includes(i.state)) || active > BACKUP_LIMITS.retainVerified;
+    return l.items.some((i) => !['active', 'foreign', 'delete_blocked', 'unconfirmed'].includes(i.state)) || active > BACKUP_LIMITS.retainVerified;
   }
 
   private itemStatus(l: Ledger, name: string): ComputerBackupStatus {
@@ -354,6 +378,7 @@ export class ComputerBackups implements ComputerBackupHook {
       switch (i.state) {
         case 'intent': case 'requested': case 'snapshotting': return status('pending', name);
         case 'unknown': return status('unknown', name);
+        case 'unconfirmed': return status('unknown', name, 'create_unconfirmed');
         case 'active': case 'deleting': case 'delete_blocked': return status('active', name);
         case 'failed_resource': return status('failed', name, 'provider_error');
         case 'stale': return status('failed', name, 'timeout');
@@ -373,11 +398,13 @@ export class ComputerBackups implements ComputerBackupHook {
   }
 
   private newName(ownerTag: string, now: number, l: Ledger) {
-    for (;;) {
+    const time = Math.max(0, Math.floor(now / 1000)).toString(36);
+    for (let k = 0; k < 16; k++) {
       let rnd = ''; while (rnd.length < 6) rnd += Math.floor(this.d.random() * 36).toString(36);
-      const name = `${BACKUP_PREFIX}-${ownerTag}-${Math.floor(now / 1000).toString(36)}-${rnd.slice(0, 6)}`;
+      const name = `${BACKUP_PREFIX}-${ownerTag.slice(0, NAME_OWNER)}-${time}-${rnd.slice(0, 6)}`;
       if (SNAPSHOT_NAME.test(name) && !l.items.some((i) => i.name === name) && !l.done.some((d) => d.name === name)) return name;
     }
+    throw new Error('backup name generation failed');
   }
 
   private async load(ownerTag: string): Promise<Ledger | null> {

@@ -1,7 +1,8 @@
 // CloudBite computer automatic backups (src/cloudbite-computer-backups.ts) against a small in-memory fake provider and
 // store. These are test doubles: nothing here is live persistence, a live Daytona snapshot or a quota/cost measurement.
-// Pins: stopped-only, storage-only begin/status, intent before mutation, unknown create applied/not applied, restart
-// without resubmit, ownership proof (missing/mismatch/duplicate id), latest + protected guards, delete 404 confirmation
+// Pins: stopped-only, storage-only begin/status, intent before mutation, unknown create applied / unconfirmed after 404s
+// (owned, blocking, late appearance recovered only by explicit reconcile, never resubmitted), restart without resubmit,
+// generated names inside the restore UI's 3-48 rule for every owner tag, ownership proof (missing/mismatch/duplicate id), latest + protected guards, delete 404 confirmation
 // and bounded re-sends, retention to 3 verified + 1 replacement, min interval / daily cap, unchanged vs unknown revision.
 //   node test/cloudbite-computer-backups.mjs
 import assert from 'node:assert/strict';
@@ -24,6 +25,9 @@ const test = async (name, fn) => { await fn(); passed++; console.log('ok', name)
 const OWNER = 'owner0001tag';
 const H = 3600_000;
 const L = M.BACKUP_LIMITS;
+/** The restore UI's rule (src/cloudbite-computer-page.ts SNAPSHOT_NAME) and the shared COMPUTER_SNAPSHOT_NAME. */
+const UI_SNAPSHOT_NAME = /^[a-z0-9](?:[a-z0-9-]{1,46})[a-z0-9]$/;
+const COMPUTER_SNAPSHOT_NAME = /^[a-z0-9][a-z0-9-]{2,62}$/;
 const err = (status) => Object.assign(new Error(`HTTP ${status}`), { status });
 
 class MemStore {
@@ -107,7 +111,7 @@ await test('stopped end -> intent persisted, tick preflights + one create (inclu
   provider.onCreate = () => { ledgerAtCreate = [...store.m.values()][0]; };
   const s = await begin(b);
   assert.equal(s.state, 'pending'); assert.match(s.name, /^cbak-owner0001tag-[a-z0-9]+-[a-z0-9]{6}$/);
-  assert.ok(s.name.length <= 63);
+  assert.match(s.name, UI_SNAPSHOT_NAME);
   assert.equal(provider.calls.length, 0, 'begin is storage only');
   assert.deepEqual(await b.status(OWNER), s);
   assert.equal(provider.calls.length, 0, 'status is storage only');
@@ -142,15 +146,120 @@ await test('unknown create that was applied reconciles by exact name to active, 
   assert.equal(provider.count('create'), 1);
 });
 
-await test('unknown create that was not applied closes as not_applied after repeated 404s, no resubmit', async () => {
+await test('unknown create + repeated 404s is unconfirmed, never not_applied: owned, blocking, automatic reads stop', async () => {
   const { b, provider } = rig();
   provider.createFault = { status: 503, applied: false };
-  await begin(b);
+  const first = await begin(b);
   await b.tick(OWNER);
   let s; for (let k = 0; k < L.reconcileAbsent + 1; k++) s = await b.tick(OWNER);
-  assert.equal(s.state, 'failed'); assert.equal(s.reason, 'not_applied');
+  assert.equal(s.state, 'unknown'); assert.equal(s.reason, 'create_unconfirmed'); assert.equal(s.work, false);
+  assert.equal(s.name, first.name);
   assert.equal(provider.count('create'), 1);
-  assert.equal((await b.summary(OWNER)).owned, 0);
+  assert.equal(provider.count('get'), 1 + L.reconcileAbsent, 'preflight + the bounded 404 reads only');
+  const sum = await b.summary(OWNER);
+  assert.equal(sum.owned, 1, 'the possibly-landing create keeps its slot'); assert.equal(sum.blocked, 'create_unconfirmed');
+});
+
+await test('regression: 5x404 after unknown create, 24h+ and restarts, then late appearance -> no second create, no unaccounted slot', async () => {
+  const { b, provider, deps, clock } = rig();
+  provider.createFault = { status: 0, applied: false };
+  const rid = randomUUID();
+  const first = await begin(b, stopped(), null, rid);
+  for (let k = 0; k < L.reconcileAbsent + 2; k++) await b.tick(OWNER);
+  assert.equal((await b.status(OWNER)).reason, 'create_unconfirmed');
+  // daily intents for days: every one is blocked while the old outcome is ambiguous; restarts never resubmit or read
+  let store = deps.store;
+  for (let day = 0; day < 3; day++) {
+    clock.t += 25 * H;
+    store = store.clone();
+    const bx = new M.ComputerBackups({ ...deps, store });
+    const n = await bx.begin(OWNER, { requestId: randomUUID(), machine: stopped(), environmentRevision: null });
+    assert.equal(n.state, 'blocked'); assert.equal(n.reason, 'create_unconfirmed');
+    const gets = provider.count('get');
+    for (let k = 0; k < 4; k++) await bx.tick(OWNER);
+    assert.equal(provider.count('get'), gets, 'no automatic reads after the budget');
+    assert.equal((await bx.summary(OWNER)).owned, 1);
+  }
+  const bLate = new M.ComputerBackups({ ...deps, store });
+  // the old create lands late
+  provider.add('primary', { id: 'late-1', name: first.name, state: 'active', sourceSandboxId: 'sb-1', general: false, reads: 0, rreads: 0 });
+  await bLate.tick(OWNER);
+  assert.equal((await bLate.summary(OWNER)).blocked, 'create_unconfirmed', 'the alarm alone never adopts it');
+  assert.equal((await bLate.summary(OWNER)).owned, 1, 'the landed resource is the accounted slot');
+  // the original request replays honestly (still unknown, never failed/not_applied)
+  const replay = await bLate.begin(OWNER, { requestId: rid, machine: stopped(), environmentRevision: null });
+  assert.equal(replay.state, 'unknown'); assert.equal(replay.name, first.name);
+  const rec = await bLate.reconcile(OWNER);
+  assert.equal(rec.state, 'blocked', 'last begin (a blocked daily intent) is unchanged');
+  const sum = await bLate.summary(OWNER);
+  assert.equal(sum.blocked, null); assert.equal(sum.owned, 1);
+  assert.equal(sum.items[0].state, 'active'); assert.equal(sum.items[0].name, first.name);
+  const again = await bLate.begin(OWNER, { requestId: rid, machine: stopped(), environmentRevision: null });
+  assert.equal(again.state, 'active', 'the original request now answers active');
+  assert.equal(provider.count('create'), 1, 'never resent');
+  assert.equal(provider.count('remove'), 0, 'old request/disk untouched');
+  assert.equal(provider.snaps('primary').size, 1);
+});
+
+await test('explicit reconcile: 404 or error keeps unconfirmed; foreign/unproven late appearance is preserved, never adopted', async () => {
+  for (const [late, want] of [[null, 'create_unconfirmed'], ['error', 'create_unconfirmed'],
+    [{ sourceSandboxId: 'sb-other', general: false }, 'foreign'], [{ sourceSandboxId: null, general: false }, 'ownership_unproven']]) {
+    const { b, provider } = rig();
+    provider.createFault = { status: 502, applied: false };
+    const first = await begin(b);
+    for (let k = 0; k < L.reconcileAbsent + 1; k++) await b.tick(OWNER);
+    if (late === 'error') provider.getFault = 500;
+    else if (late) provider.add('primary', { id: 'late-x', name: first.name, state: 'active', ...late, reads: 0, rreads: 0 });
+    await b.reconcile(OWNER);
+    const sum = await b.summary(OWNER);
+    assert.equal(sum.blocked, want); assert.equal(sum.owned, want === 'foreign' ? 0 : 1);
+    assert.equal(sum.items.length, 1, 'never dropped');
+    assert.equal(provider.count('create'), 1); assert.equal(provider.count('remove'), 0);
+  }
+});
+
+await test('explicit reconcile of a late but still-building owned capture resumes normal reads to active', async () => {
+  const { b, provider } = rig();
+  provider.createFault = { status: 429, applied: false };
+  const first = await begin(b);
+  for (let k = 0; k < L.reconcileAbsent + 1; k++) await b.tick(OWNER);
+  provider.buildReads = 3;
+  provider.add('primary', { id: 'late-2', name: first.name, state: 'pending', sourceSandboxId: 'sb-1', general: false, reads: 0, rreads: 0 });
+  await b.reconcile(OWNER);
+  assert.equal((await b.status(OWNER)).state, 'pending');
+  const s = await untilSettled(b);
+  assert.equal(s.state, 'active'); assert.equal(provider.count('create'), 1);
+});
+
+await test('definite 4xx create refusal releases the intent (known refused), not unconfirmed', async () => {
+  const { b, provider, clock } = rig();
+  provider.createFault = { status: 422, applied: false };
+  await begin(b);
+  const s = await b.tick(OWNER);
+  assert.equal(s.state, 'failed'); assert.equal(s.reason, 'provider_refused');
+  const sum = await b.summary(OWNER);
+  assert.equal(sum.owned, 0); assert.equal(sum.blocked, null);
+  clock.t += 1 * H;
+  assert.equal((await begin(b)).state, 'pending');
+});
+
+await test('generated names fit the restore UI rule (<=48) for 32-char owner tags and extreme timestamps; ledger keeps the full owner', async () => {
+  const owners = ['a'.repeat(32), 'z9'.repeat(16), '0'.repeat(32), 'abcdefgh'];
+  for (const t of [0, 1, Date.UTC(2026, 9, 19), 8.64e15, -1e12]) {
+    for (const owner of owners) {
+      const r = rig();
+      r.clock.t = t;
+      const s = await r.b.begin(owner, { requestId: randomUUID(), machine: stopped(), environmentRevision: null });
+      assert.equal(s.state, 'pending', `${owner} @ ${t}`);
+      assert.ok(s.name.length <= 48, `${s.name} (${s.name.length})`);
+      assert.match(s.name, UI_SNAPSHOT_NAME); assert.match(s.name, COMPUTER_SNAPSHOT_NAME);
+      assert.ok(s.name.startsWith(`cbak-${owner.slice(0, 16)}-`));
+      const raw = r.store.m.get(`computer-backups:v1:${owner}`);
+      assert.equal(raw.owner, owner, 'provenance keeps the full owner tag');
+      assert.equal((await r.b.tick(owner)).state, 'pending');
+      assert.equal(r.provider.calls.find((c) => c[0] === 'create')[3], s.name);
+    }
+  }
 });
 
 await test('restart after intent persisted but before the create answered: reconcile, no second create', async () => {
