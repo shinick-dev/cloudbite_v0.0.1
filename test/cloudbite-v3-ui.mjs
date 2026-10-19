@@ -450,6 +450,116 @@ await test('응답 모름 + 다시 읽기 실패: 상태를 모른다고 밝히�
   assert.match(KO.p3.provAdoptUnreconciled, /알 수 없습니다/); assert.match(KO.p3.provAdoptUnreconciled, /새로 고치세요/);
 });
 
+// 두 프로젝트: A (ID) 와 B (ID2). 모름은 프로젝트마다 따로 남고, 그 프로젝트의 읽힌 상세 GET 만 푼다
+const ID2 = 'cb' + 'c'.repeat(32), ROW_B = { ...ROW, id: ID2 };
+const projectB = (adopted = []) => projectRaw({ id: ID2, provenance: { ledger: { ...LEDGER(BASE_CLAIMS), projectId: ID2 }, state: { ...STATE(), projectId: ID2, adoptions: adopted.map(c => ({ ...adoption(c), projectId: ID2 })) } } });
+/** A 는 a.get / a.post 로 정하고, B 는 늘 읽히며 채택 POST 가 성공한다. 실제 실행 만들기는 끝난 A 를 돌려준다 */
+function twoProjectServer(a) {
+  let savedB = projectB();
+  return (url, init) => {
+    if (url.startsWith('/api/cloudbite/history?')) return json(200, { rows: [ROW, ROW_B], next: null, owner: false, retentionDays: 30 });
+    if (url === `/api/cloudbite/history/${ID}/adopt`) return a.post(init);
+    if (url === `/api/cloudbite/history/${ID}`) return a.get(init);
+    if (url === `/api/cloudbite/history/${ID2}/adopt`) { savedB = projectB([BASE_CLAIMS.find(c => c.id === JSON.parse(init.body).claimId)]); return json(200, detailOf(savedB)); }
+    if (url === `/api/cloudbite/history/${ID2}`) return json(200, detailOf(savedB));
+    if (url === '/api/cloudbite/projects' && init.method === 'POST') return json(201, { project: projectRaw(), accessToken: 'proj-bearer' });
+    return json(404, { error: 'not found' });
+  };
+}
+const inside = (node, k) => node && [...node.walk()].find(n => n.getAttribute('data-fk') === k);
+const adoptButtons = (node) => node ? [...node.walk()].filter(n => /^adopt(-yes)?:/.test(n.getAttribute('data-fk') || '')) : [];
+const openGroupIn = async (env, node, k) => { const box = [...node.walk()].find(n => n.tagName === 'DETAILS' && n.className.includes(`cb-prov-group is-${k}`)); box.open = true; box.dispatch('toggle'); await env.flush(); };
+const postsTo = (env, id) => env.requests.filter(r => r.init.method === 'POST' && r.url === `/api/cloudbite/history/${id}/adopt`);
+const UNKNOWN = /it is unknown whether this claim was adopted/;
+
+await test('모름은 프로젝트마다 남는다: 지금 실행 A 가 모름일 때 사용 기록 B 를 채택해도 A 는 다시 읽기(GET)만 있고, A 의 GET 성공만 풀며 B 는 그대로다', async () => {
+  let savedA = projectRaw(), readsFail = false, foreign = false;
+  const env = fakeEnv(twoProjectServer({
+    post: () => { savedA = projectRaw({ provenance: { ledger: LEDGER(BASE_CLAIMS), state: STATE([adoption(BASE_CLAIMS[1])]) } }); readsFail = true; return json(503, { error: 'response failed after a durable write' }); },
+    get: () => readsFail ? (foreign ? json(200, detailOf(projectB())) : json(503, {})) : json(200, detailOf(savedA)),
+  }));
+  const ev = () => env.all().find(n => n.className === 'cb-panel cb-evidence');
+  await startLive(env); await openGroupIn(env, ev(), 'hinted');
+  inside(ev(), `adopt:${cid(2)}`).click(); await env.flush();
+  inside(ev(), `adopt-yes:${cid(2)}`).click(); await env.flush();
+  assert.match(ev().textContent, UNKNOWN); assert.ok(inside(ev(), 'adopt-reread')); assert.equal(adoptButtons(ev()).length, 0); assert.equal(postsTo(env, ID).length, 1);
+  // 사용 기록 화면으로 옮겨 다른 프로젝트 B 를 연다: B 의 상세 GET 은 A 의 모름을 풀지 않는다
+  env.fk('nav:history').click(); await env.flush();
+  env.fk('hist-record:' + ID2).click(); await env.flush();
+  assert.match(ev().textContent, UNKNOWN); assert.equal(adoptButtons(ev()).length, 0);
+  // B 의 채택이 전역 adopt 칸을 덮어도 (확인 → POST 성공) A 는 모름 그대로, A 에 확인·POST 가 없다
+  await openGroupIn(env, env.detail(), 'hinted');
+  inside(env.detail(), `adopt:${cid(2)}`).click(); await env.flush();
+  assert.ok(inside(env.detail(), `adopt-yes:${cid(2)}`), 'B has its own confirm step');
+  assert.match(ev().textContent, UNKNOWN); assert.equal(adoptButtons(ev()).length, 0);
+  inside(env.detail(), `adopt-yes:${cid(2)}`).click(); await env.flush();
+  assert.equal(postsTo(env, ID2).length, 1); assert.match(env.detail().textContent, /Adopted by a user \(1\)/);
+  env.fk('nav:home').click(); await env.flush();
+  assert.match(ev().textContent, UNKNOWN); assert.ok(inside(ev(), 'adopt-reread')); assert.equal(adoptButtons(ev()).length, 0);
+  assert.equal(postsTo(env, ID).length, 1, 'no second POST for A');
+  // 전역 칸이 B 여도 A 의 다시 읽기는 동작하고 GET 만 한다: 실패면 모름 유지, 성공이면 이미 채택됨
+  const getsA = () => env.requests.filter(r => r.url === `/api/cloudbite/history/${ID}` && r.init.method === 'GET').length, before = getsA();
+  inside(ev(), 'adopt-reread').click(); await env.flush();
+  assert.equal(getsA(), before + 1); assert.match(ev().textContent, UNKNOWN); assert.equal(adoptButtons(ev()).length, 0);
+  // 같은 프로젝트 상세를 열어도 실패하거나 다른 프로젝트의 본문이면 풀리지 않는다
+  env.fk('nav:history').click(); await env.flush();
+  env.fk('hist-record:' + ID).click(); await env.flush();
+  foreign = true; env.fk('hist-record:' + ID).click(); await env.flush();
+  env.fk('nav:home').click(); await env.flush();
+  await openGroupIn(env, ev(), 'proposals'); // 지금 실행을 다시 그린다
+  assert.match(ev().textContent, UNKNOWN); assert.equal(adoptButtons(ev()).length, 0);
+  readsFail = false; inside(ev(), 'adopt-reread').click(); await env.flush();
+  assert.match(ev().textContent, /The saved project already shows this adoption/); assert.ok(!inside(ev(), 'adopt-reread'));
+  assert.equal(postsTo(env, ID).length, 1); assert.equal(postsTo(env, ID2).length, 1);
+  // B 는 영향 없다 (다시 열어도 채택된 그대로, 모름 없음)
+  env.fk('nav:history').click(); await env.flush(); env.fk('hist-record:' + ID2).click(); await env.flush();
+  assert.match(env.detail().textContent, /Adopted by a user \(1\)/); assert.doesNotMatch(env.detail().textContent, UNKNOWN);
+});
+
+await test('모름 + 보통 새로 읽기: 목록 새로 고침·다른 프로젝트 상세는 풀지 않고, 같은 프로젝트 상세를 다시 열어 읽히면 풀려 새 장부로 고른다', async () => {
+  let savedA = projectRaw(), aGet = 'ok';
+  const env = fakeEnv(twoProjectServer({
+    post: () => Promise.reject(new Error('net')),
+    get: () => aGet === 'fail' ? json(503, {}) : aGet === 'foreign' ? json(200, detailOf(projectB())) : json(200, detailOf(savedA)),
+  }));
+  await env.flush(); env.fk('hist-record:' + ID).click(); await env.flush(); await openGroupIn(env, env.detail(), 'hinted');
+  aGet = 'fail';
+  env.fk(`adopt:${cid(2)}`).click(); await env.flush(); env.fk(`adopt-yes:${cid(2)}`).click(); await env.flush();
+  assert.match(env.detail().textContent, UNKNOWN); assert.equal(adoptButtons(env.detail()).length, 0);
+  // 목록 새로 고침은 상세를 읽지 않으므로 풀지 않는다
+  env.fk('hist-refresh').click(); await env.flush();
+  assert.match(env.detail().textContent, UNKNOWN); assert.equal(adoptButtons(env.detail()).length, 0);
+  // B 를 열면 B 는 보통으로 그려지고 (A 의 모름이 B 로 번지지 않는다), 실패한 A 다시 열기는 A 를 그리지 않는다
+  env.fk('hist-record:' + ID2).click(); await env.flush();
+  assert.doesNotMatch(env.detail().textContent, UNKNOWN); assert.ok(!env.fk('adopt-reread'));
+  for (const mode of ['fail', 'foreign']) { aGet = mode; env.fk('hist-record:' + ID).click(); await env.flush(); assert.ok(!env.fk(`adopt:${cid(2)}`), mode); }
+  // 같은 프로젝트 상세가 다시 읽히면 그 프로젝트만 풀리고, 재시도는 새로 읽은 스냅숏을 쓴다
+  savedA = projectRaw({ provenance: { ledger: LEDGER(BASE_CLAIMS, 'ps-' + '4'.repeat(16)), state: STATE() } });
+  aGet = 'ok'; env.fk('hist-record:' + ID).click(); await env.flush();
+  assert.doesNotMatch(env.detail().textContent, UNKNOWN, 'a successful read of the same project resolves it'); assert.ok(!env.fk('adopt-reread'));
+  await openGroupIn(env, env.detail(), 'hinted');
+  env.fk(`adopt:${cid(2)}`).click(); await env.flush(); env.fk(`adopt-yes:${cid(2)}`).click(); await env.flush();
+  assert.equal(postsTo(env, ID).length, 2); assert.equal(JSON.parse(postsTo(env, ID)[1].init.body).snapshot, 'ps-' + '4'.repeat(16));
+});
+
+await test('모름이 생기기 전에 보낸 상세 GET 이 뒤늦게 성공해도 모름을 풀지 않는다 (오래된 응답)', async () => {
+  let savedA = projectRaw(), n = 0, release;
+  const late = new Promise(r => { release = r; });
+  const env = fakeEnv(twoProjectServer({
+    post: () => json(503, {}),
+    get: () => ++n === 1 ? late.then(() => json(200, detailOf(projectRaw()))) : n === 2 ? json(200, detailOf(savedA)) : json(503, {}),
+  }));
+  const ev = () => env.all().find(n => n.className === 'cb-panel cb-evidence');
+  await startLive(env);
+  env.fk('nav:history').click(); await env.flush(); env.fk('hist-record:' + ID).click(); await env.flush();
+  env.fk('nav:home').click(); await env.flush(); await openGroupIn(env, ev(), 'hinted');
+  inside(ev(), `adopt:${cid(2)}`).click(); await env.flush(); inside(ev(), `adopt-yes:${cid(2)}`).click(); await env.flush();
+  assert.match(ev().textContent, UNKNOWN);
+  release(); await env.flush();
+  assert.match(ev().textContent, UNKNOWN, 'a read sent before the unknown outcome does not resolve it'); assert.equal(adoptButtons(ev()).length, 0);
+  assert.equal(postsTo(env, ID).length, 1);
+});
+
 await test('채택 버튼은 진행 중인 검토·메모가 있으면 없고, 읽을 수 없는 출처는 채택 없이 그렇다고만 밝힌다 (KO 전환)', async () => {
   const env = fakeEnv(historyServer(() => projectRaw({ memo: { version: 'cloudbite-memo/v1', status: 'running', attempts: 1, execution: 'server-nosana' } }), () => json(500, {})));
   await openDetail(env); await openGroup(env, 'hinted');

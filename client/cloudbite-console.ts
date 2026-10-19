@@ -4206,15 +4206,17 @@ function boot(): void {
     H.busy = false; paintHistory();
   }
   async function openHistory(id: string): Promise<void> {
-    const gen = ++H.detailGen;
+    const gen = ++H.detailGen, asked = ++readSeq;
     H.detailBusy = true; H.detail = null; H.error = 0; H.message = ''; H.deleteId = ''; paintHistory();
     const r = await historyRequest('/' + encodeURIComponent(id));
     if (gen !== H.detailGen) return;
     const detail = r.data as HistoryDetail | null;
-    const shown = r.status === 200 && detail && Array.isArray(detail.feedback) ? normalizeProject(detail.project) : null;
-    if (shown && detail) { H.detail = detail; noteOwn(shown, detail); }
+    // 같은 프로젝트의 읽힌 상세만 받는다 (지금 실행에도 반영하고, 그 프로젝트의 채택 모름을 푼다)
+    const shown = r.status === 200 ? acceptHistoryDetail(id, detail, asked) : null;
+    if (shown && detail) H.detail = detail;
     else historyDenied(r.status);
-    H.detailBusy = false; paintHistory();
+    H.detailBusy = false;
+    if (shown) adoptPaint(); else paintHistory();
   }
   async function saveHistoryFeedback(id: string, draft: Omit<HistoryFeedback, 'at'>): Promise<void> {
     if (H.mutation) return;
@@ -4676,8 +4678,11 @@ function boot(): void {
   // ── 주장 출처와 채택. 묶음은 펼칠 때만 그리고 PROV_PAGE 개씩 늘려 수천 개를 한꺼번에 그리지 않는다
   const PROV_PAGE = 50;
   const provShown = new Map<string, number>();
-  // unknown: 보낸 채택의 결과도, 그 뒤 저장된 상태도 모른다 → 이 프로젝트의 채택 버튼 대신 GET 만 하는 다시 읽기만 낸다
-  let adopt: null | { projectId: string; claimId: string; phase: 'confirm' | 'posting' | 'reading' | 'done' | 'failed' | 'unknown'; note: Text | null } = null;
+  let adopt: null | { projectId: string; claimId: string; phase: 'confirm' | 'posting' | 'reading' | 'done' | 'failed'; note: Text | null } = null;
+  // 모름: 보낸 채택의 결과도, 그 뒤 저장된 상태도 모른다 (프로젝트 id → claimId). 전역 adopt 칸과 따로 두어 다른 프로젝트의 채택·화면 전환·로그인 변화로 잊지 않는다.
+  // 그 프로젝트의 읽힌 상세 GET (acceptHistoryDetail) 중 모름이 생긴 뒤에 보낸 것만 지운다 (readSeq: 상세 요청을 보낸 순서). 그때까지 채택 버튼 대신 GET 만 하는 다시 읽기만 낸다
+  const unreconciled = new Map<string, { claimId: string; since: number }>();
+  let readSeq = 0;
   let adoptGen = 0;
   const adoptBusy = () => adopt?.phase === 'posting' || adopt?.phase === 'reading';
   function adoptPaint(): void { paintHistory(); keepFocus(renderEvidence); }
@@ -4695,16 +4700,17 @@ function boot(): void {
     if (p.invalidProvenance) return [h('p', { class: 'cb-warn' }, t.provInvalid)];
     const pv = p.provenance;
     if (!pv) return [];
-    const own = H.own.get(p.id), mine = adopt?.projectId === p.id ? adopt : null;
+    const own = H.own.get(p.id), mine = adopt?.projectId === p.id ? adopt : null, lost = unreconciled.get(p.id);
     // 남의 기록(소유자의 전체 보기 포함)은 채택이 없다. 모르면 (지금 실행) 누를 때 먼저 사용 기록을 GET 으로 확인한다
-    const view = provenanceView(pv), groups = provenanceGroups(pv), can = adoptable(p) && own !== false && mine?.phase !== 'unknown';
+    const view = provenanceView(pv), groups = provenanceGroups(pv), can = adoptable(p) && own !== false && lost === undefined;
     const kids: Kid[] = [h('p', { class: 'cb-help' }, t.provNote), h('ul', { class: 'cb-prov-summary' }, ...provenanceLines(pv, m).map(x => h('li', null, x))),
       h('p', { class: 'cb-help' }, t.provMemoNote)];
     const open = groups.hinted.length + groups.proposals.length;
     if (open && own === false) kids.push(h('p', { class: 'cb-help' }, t.provAdoptNotOwn));
     else if (open && !adoptable(p)) kids.push(h('p', { class: 'cb-help' }, t.provAdoptWait));
-    if (mine?.note) kids.push(h('p', { class: mine.phase === 'done' ? 'cb-ok' : 'cb-warn', role: 'status' }, mine.note(m)));
-    if (mine?.phase === 'unknown') kids.push(h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'adopt-reread', onclick: () => { void rereadAdoption(p.id, mine.claimId); } }, t.provReread));
+    if (lost !== undefined && mine?.phase !== 'reading') kids.push(h('p', { class: 'cb-warn', role: 'status' }, t.provAdoptUnreconciled),
+      h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'adopt-reread', disabled: adoptBusy(), onclick: () => { void rereadAdoption(p.id); } }, t.provReread));
+    else if (mine?.note) kids.push(h('p', { class: mine.phase === 'done' ? 'cb-ok' : 'cb-warn', role: 'status' }, mine.note(m)));
     const item = (c: LedgerClaim) => {
       const st = view.standing.get(c.id) ?? 'generated-proposal', hint = c.numericThresholdHint && st === 'generated-proposal';
       const here = mine?.claimId === c.id ? mine : null;
@@ -4750,11 +4756,12 @@ function boot(): void {
     return kids;
   }
   /** 저장된 상세를 받아 지금 실행과 사용 기록 화면에 같이 반영한다. 읽을 수 없으면 아무것도 바꾸지 않는다 */
-  function acceptHistoryDetail(id: string, data: unknown): ConsoleProject | null {
+  function acceptHistoryDetail(id: string, data: unknown, asked: number): ConsoleProject | null {
     const d = data as HistoryDetail | null;
     const next = isObj(d) && Array.isArray(d.feedback) ? normalizeProject(d.project) : null;
     if (!next || next.id !== id) return null;
     noteOwn(next, d!);
+    if ((unreconciled.get(id)?.since ?? Infinity) < asked) unreconciled.delete(id);
     if (H.detail?.project.id === id) { H.detail = d!; H.dirty = true; }
     const cur = S.run?.project;
     if (cur && cur.id === id) {
@@ -4765,12 +4772,12 @@ function boot(): void {
   }
   /** 채택: 정확한 글·장부 스냅숏·claimId 만 보낸다 (누가·언제는 서버가 정한다). 실패하거나 응답을 모르면 다시 보내기 전에 저장된 상태를 읽는다 */
   async function adoptClaim(p: ConsoleProject, c: LedgerClaim, snapshot: string): Promise<void> {
-    if (adoptBusy() || !adoptable(p) || c.textTruncated || H.own.get(p.id) !== true || adopt?.phase === 'unknown') return;
-    const id = p.id, gen = ++adoptGen;
+    if (adoptBusy() || !adoptable(p) || c.textTruncated || H.own.get(p.id) !== true || unreconciled.has(p.id)) return;
+    const id = p.id, gen = ++adoptGen, posted = ++readSeq;
     adopt = { projectId: id, claimId: c.id, phase: 'posting', note: null }; adoptPaint();
     const r = await historyRequest('/' + encodeURIComponent(id) + '/adopt', 'POST', { claimId: c.id, text: c.text, snapshot });
     if (gen !== adoptGen) return;
-    if (r.status === 200 && acceptHistoryDetail(id, r.data)) { adopt = { projectId: id, claimId: c.id, phase: 'done', note: m => m.p3.provAdopted }; adoptPaint(); return; }
+    if (r.status === 200 && acceptHistoryDetail(id, r.data, posted)) { adopt = { projectId: id, claimId: c.id, phase: 'done', note: m => m.p3.provAdopted }; adoptPaint(); return; }
     const server = isObj(r.data) && typeof r.data.error === 'string' ? clip(r.data.error, 300) : '';
     // A server failure can occur after the adoption write (for example while reading the response); it is not proof of rejection.
     const unknown = r.status === 0 || r.status === 200 || r.status >= 500;
@@ -4778,23 +4785,24 @@ function boot(): void {
     const why: Text = unknown ? m => m.p3.provAdoptUnknown : r.status === 404 ? m => m.p3.provAdoptFailed(m.p3.provAdoptForeign)
       : r.status === 401 ? m => m.p3.provAdoptSignedOut : r.status === 403 ? m => m.p3.provAdoptFailed(m.p3.provAdoptNotOwn) : m => m.p3.provAdoptFailed(server || String(r.status));
     adopt = { projectId: id, claimId: c.id, phase: 'reading', note: null }; adoptPaint();
-    const g = await historyRequest('/' + encodeURIComponent(id));
+    const asked = ++readSeq, g = await historyRequest('/' + encodeURIComponent(id));
     if (gen !== adoptGen) return;
-    const next = g.status === 200 ? acceptHistoryDetail(id, g.data) : null;
-    if (!next && unknown) { adopt = { projectId: id, claimId: c.id, phase: 'unknown', note: m => m.p3.provAdoptUnreconciled }; adoptPaint(); return; }
+    const next = g.status === 200 ? acceptHistoryDetail(id, g.data, asked) : null;
+    if (!next && unknown) { unreconciled.set(id, { claimId: c.id, since: readSeq }); adopt = null; adoptPaint(); return; }
     const seen = !!next?.provenance && provenanceView(next.provenance).active.some(a => a.claimId === c.id && a.text === c.text);
     adopt = { projectId: id, claimId: c.id, phase: seen ? 'done' : 'failed', note: seen ? m => m.p3.provAdoptedSeen : why };
     adoptPaint();
   }
   /** 응답을 모를 때 사용자가 누르는 다시 읽기: GET 만 한다. 읽을 때까지 채택 버튼은 돌아오지 않고, 읽으면 새 장부로 다시 고를 수 있다 */
-  async function rereadAdoption(id: string, claimId: string): Promise<void> {
-    if (adoptBusy() || adopt?.projectId !== id || adopt.phase !== 'unknown') return;
+  async function rereadAdoption(id: string): Promise<void> {
+    const claimId = unreconciled.get(id)?.claimId;
+    if (adoptBusy() || claimId === undefined) return;
     const gen = ++adoptGen, text = adoptText(id, claimId);
     adopt = { projectId: id, claimId, phase: 'reading', note: null }; adoptPaint();
-    const g = await historyRequest('/' + encodeURIComponent(id));
+    const asked = ++readSeq, g = await historyRequest('/' + encodeURIComponent(id));
     if (gen !== adoptGen) return;
-    const next = g.status === 200 ? acceptHistoryDetail(id, g.data) : null;
-    if (!next) { adopt = { projectId: id, claimId, phase: 'unknown', note: m => m.p3.provAdoptUnreconciled }; adoptPaint(); return; }
+    const next = g.status === 200 ? acceptHistoryDetail(id, g.data, asked) : null;
+    if (!next) { adopt = null; adoptPaint(); return; }
     const seen = !!next.provenance && provenanceView(next.provenance).active.some(a => a.claimId === claimId && (text === null || a.text === text));
     adopt = { projectId: id, claimId, phase: seen ? 'done' : 'failed', note: seen ? m => m.p3.provAdoptedSeen : m => m.p3.provAdoptReread };
     adoptPaint();
@@ -4807,12 +4815,12 @@ function boot(): void {
   }
   /** 자기 기록인지 모르는 채로 (지금 실행) 채택을 누르면 먼저 사용 기록 상세를 GET 한다. canFeedback 이 참일 때만 확인 단계로 간다 */
   async function checkOwnAdopt(p: ConsoleProject, c: LedgerClaim): Promise<void> {
-    if (adoptBusy() || !adoptable(p) || c.textTruncated) return;
+    if (adoptBusy() || !adoptable(p) || c.textTruncated || unreconciled.has(p.id)) return;
     const id = p.id, gen = ++adoptGen;
     adopt = { projectId: id, claimId: c.id, phase: 'reading', note: null }; adoptPaint();
-    const g = await historyRequest('/' + encodeURIComponent(id));
+    const asked = ++readSeq, g = await historyRequest('/' + encodeURIComponent(id));
     if (gen !== adoptGen) return;
-    const next = g.status === 200 ? acceptHistoryDetail(id, g.data) : null;
+    const next = g.status === 200 ? acceptHistoryDetail(id, g.data, asked) : null;
     const fail = (note: Text) => { adopt = { projectId: id, claimId: c.id, phase: 'failed', note }; adoptPaint(); };
     if (!next) return fail(g.status === 401 ? m => m.p3.provAdoptSignedOut : g.status === 403 ? m => m.p3.provAdoptNotOwn : g.status === 404 ? m => m.p3.provAdoptForeign : m => m.p3.provAdoptCheckFailed);
     if (H.own.get(id) !== true) return fail(m => m.p3.provAdoptNotOwn);
