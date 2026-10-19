@@ -10,6 +10,7 @@ Cloudbite's target is a useful project decision: professionally grounded review,
 - The existing runner exposes knowledge search, bounded Python, output-file writing and final opinion. The six-field opinion schema, actual call budget and server-side credentials remain unchanged.
 - Generated reports and analysis files can contribute bounded excerpts to the optional project-improvement memo. They are labelled AI-generated/unverified, not independent source material or proof of execution.
 - A follow-up references only its authorized, unexpired parent. Proposed fixes stay proposals. Explicit user adoption is distinct from factual verification. No recursive import of all ancestors.
+- New history prompt hashes use expert-instructions/v2: persona, both rendered playbook languages/knowledge variants, and the runner code (including lexical retrieval). Old stored hashes remain unchanged. This is a creation-time static-instruction signature, not a per-step execution attestation or a frozen runtime across intervening deployments.
 
 ## Artifact-to-memo integration
 

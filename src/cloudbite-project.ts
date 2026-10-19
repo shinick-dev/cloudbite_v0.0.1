@@ -53,6 +53,7 @@ import {
 } from './cloudbite-memo';
 import { buildExpertAssignments } from './cloudbite-workorders';
 import { selectMemoArtifacts, memoArtifactPackets } from './cloudbite-memo-artifacts';
+import { expertInstructionHash } from './cloudbite-instruction-identity';
 import { defaultResponseLanguage } from './cloudbite-workflow';
 import { previousRoundWorkOrderRules, previousRoundWorkspaceFiles, ROUND_VERSION, type ProjectPreviousRound } from './cloudbite-revision';
 import { artifactPacketsFor, buildArtifactPacket, type StoredArtifact } from './cloudbite-artifact-review';
@@ -436,7 +437,7 @@ export class CloudbiteProject extends DurableObject<Env> {
       actor: historyActor, model: brief.mode === 'live' ? this.config()!.nosana.model : 'server-demo', revision: 1, published: 0, nextAt: 0,
       roles: await Promise.all(brief.expertIds.map(async id => {
         const def = catalogue.find(x => x.id === id)!;
-        return { id, basis: def.source.basis, revision: def.source.revision, promptHash: await cbHash(def.prompt) };
+        return { id, basis: def.source.basis, revision: def.source.revision, promptHash: expertInstructionHash(def) };
       })),
     } : undefined;
     // From here: storage only, no other awaits — concurrent duplicate creates serialize on the input gate.
