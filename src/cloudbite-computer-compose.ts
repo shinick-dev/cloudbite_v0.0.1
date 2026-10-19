@@ -1,6 +1,9 @@
 // CloudBite personal computer: local compose widget for the separate desktop origin (Selkies page).
 // Root serves COMPUTER_COMPOSE_JS at COMPUTER_COMPOSE_JS_PATH and COMPUTER_COMPOSE_CSS at COMPUTER_COMPOSE_CSS_PATH and puts
 // COMPUTER_COMPOSE_HEAD first in <head>, before any Selkies script, so the window capture guards run before Selkies listeners.
+// The same guard maps a standalone Right Alt on the remote keyboard sink (#overlayInput, #videoCanvas, #stream) to the
+// HangulMode/Lang1 key in place (same trusted event, default prevented, still delivered to Selkies) so it reaches the desktop
+// as XK_Hangul; its keyup follows, auto-repeat is dropped, and the pairing is forgotten on blur.
 // The draft is volatile local DOM: nothing leaves the page until Send. Send is one POST to COMPUTER_COMPOSE_INPUT_PATH
 // {requestId,text,enter} with the HttpOnly desktop cookie (same-origin); {ok:true,outcome:'sent'} clears the draft, an unknown
 // outcome keeps the draft and the same requestId for the same payload (no automatic retry), a definite error keeps the draft.
@@ -39,7 +42,18 @@ function reset(){if(pending)return;last=null;say('idle','');render();}
 function act(t){for(;t&&t!==root;t=t.parentNode){var a=t.getAttribute&&t.getAttribute('data-cloudbite-compose-action');if(a){if(t.disabled)return;if(a==='open')open();else if(a==='close')close();else if(a==='paste')send(false);else if(a==='send')send(true);else if(a==='reset')reset();return;}}}
 function key(e){if(e.target!==ta)return;if(e.key==='Escape'&&!composing&&!e.isComposing){close();return;}
 if(e.key!=='Enter'||e.isComposing||e.keyCode===229||composing||e.shiftKey||e.ctrlKey||e.altKey||e.metaKey)return;e.preventDefault();if(!e.repeat)send(true);}
-function guard(e){if(!root||!inside(e.target))return;e.stopImmediatePropagation();var t=e.type;
+var REMOTE={overlayInput:1,videoCanvas:1,stream:1},held={},own=Object.prototype.hasOwnProperty,HK=['key','code','location','keyCode','which','altKey','isComposing'];
+function remote(t){return !!t&&typeof t.id==='string'&&own.call(REMOTE,t.id);}
+function norm(e){try{if(!Object.isExtensible(e))return false;for(var i=0;i<HK.length;i++){var o=Object.getOwnPropertyDescriptor(e,HK[i]);if(o&&!o.configurable)return false;}
+var v=function(x){return{value:x,configurable:true,enumerable:true};};Object.defineProperties(e,{key:v('HangulMode'),code:v('Lang1'),location:v(0),keyCode:v(21),which:v(21),altKey:v(false),isComposing:v(false)});}catch(_){return false;}
+if(e.key!=='HangulMode'||e.code!=='Lang1'||e.keyCode!==21||e.altKey!==false)return false;e.preventDefault();return true;}
+function hangul(e){if(!remote(e.target))return;var c=e.code;
+if(e.type==='keyup'){if(own.call(held,c)){delete held[c];norm(e);}return;}
+var hit=c==='AltRight'||(c==='Lang1'&&e.key==='HangulMode');
+if(e.repeat&&(own.call(held,c)||(hit&&!e.ctrlKey&&!e.metaKey&&!e.shiftKey))){e.preventDefault();e.stopImmediatePropagation();return;}
+if(!hit||e.ctrlKey||e.metaKey||e.shiftKey)return;if(norm(e))held[c]=true;}
+w.addEventListener('blur',function(){held={};},true);
+function guard(e){if(!root||!inside(e.target)){if(e.type==='keydown'||e.type==='keyup')hangul(e);return;}e.stopImmediatePropagation();var t=e.type;
 if(t==='compositionstart')composing=true;else if(t==='compositionend'){composing=false;render();}else if(t==='keydown')key(e);else if(t==='input')render();else if(t==='click')act(e.target);}
 ['keydown','keyup','keypress','beforeinput','input','textInput','compositionstart','compositionupdate','compositionend','paste','copy','cut','select','selectstart','focusin','focusout','mousedown','mouseup','mousemove','mouseover','mouseout','click','dblclick','auxclick','contextmenu','wheel','pointerdown','pointerup','pointermove','pointercancel','pointerover','pointerout','gotpointercapture','lostpointercapture','touchstart','touchmove','touchend','touchcancel'].forEach(function(t){w.addEventListener(t,guard,true);});
 function build(){if(root)return;

@@ -31,9 +31,9 @@ function makePage({lang='en-US',loading=true}={}){
   fetch:(url,opts)=>new Promise((resolve,reject)=>fetches.push({url,opts,body:JSON.parse(opts.body),resolve,reject}))};
  for(const k of ['localStorage','sessionStorage','indexedDB','console','parent','top','opener'])Object.defineProperty(win,k,{get(){touched.push(k);return undefined}});
  win.window=win;vm.createContext(win);
- const dispatch=(target,type,props={})=>{const e={type,target,key:undefined,keyCode:0,isComposing:false,shiftKey:false,ctrlKey:false,altKey:false,metaKey:false,repeat:false,...props,
+ const dispatch=(target,type,props={},prep)=>{const e={type,target,key:undefined,keyCode:0,isComposing:false,shiftKey:false,ctrlKey:false,altKey:false,metaKey:false,repeat:false,...props,
    defaultPrevented:false,stopped:false,preventDefault(){this.defaultPrevented=true},stopPropagation(){this.stopped=true},stopImmediatePropagation(){this.stopped=this.imm=true}};
-  if(type==='click'&&target.disabled)return e;
+  if(prep)prep(e);if(type==='click'&&target.disabled)return e;
   for(const l of winCap)if(l.t===type){l.f(e);if(e.imm)break}
   if(!e.stopped)for(const l of winBub)if(l.t===type)l.f(e);return e};
  return {win,doc,html,El,winCap,touched,fetches,dispatch,loadBody(){doc.body=html.appendChild(new El('body'));ready='interactive';for(const f of docListeners.DOMContentLoaded??[])f()}};
@@ -118,4 +118,42 @@ const kr=byId(ko,'cloudbite-compose-root');assert.equal(kr.attrs.lang,'ko');asse
 const kta=byId(ko,'cloudbite-compose-text');kta.value='한글 입력';ko.dispatch(find(kr,n=>n.attrs['data-cloudbite-compose-action']==='send'),'click');
 assert.equal(ko.fetches[0].body.text,'한글 입력');ko.fetches[0].reject(Error('x'));await tick();
 assert.match(byId(ko,'cloudbite-compose-status').textContent,/원격 화면을 확인하세요\. 이미 도착했을 수 있습니다\./);assert.equal(kta.value,'한글 입력');
+
+// Right Alt on the remote keyboard sink reaches Selkies as the same event, normalized to HangulMode/Lang1.
+const hk=makePage({loading:false});hk.doc.body=hk.html.appendChild(new hk.El('body'));vm.runInContext(JS,hk.win);
+const hroot=byId(hk,'cloudbite-compose-root'),hta=byId(hk,'cloudbite-compose-text');
+const sink=hk.doc.body.appendChild(new hk.El('input'));sink.setAttribute('id','overlayInput');
+const vcan=hk.doc.body.appendChild(new hk.El('canvas'));vcan.setAttribute('id','videoCanvas');
+const other=hk.doc.body.appendChild(new hk.El('input'));other.setAttribute('id','keyboard-input-assist');
+const KF=['key','code','location','keyCode','which','altKey','isComposing','isTrusted','ctrlKey','shiftKey'];
+const seen=[];for(const t of ['keydown','keyup']){hk.win.addEventListener(t,e=>seen.push({e,type:t,...Object.fromEntries(KF.map(k=>[k,e[k]])),prevented:e.defaultPrevented}),true);hk.win.addEventListener(t,e=>seen.push({e,type:'bubble-'+t}),false)}
+const RA={key:'Alt',code:'AltRight',location:2,keyCode:18,which:18,altKey:true,isTrusted:true};
+const HG={key:'HangulMode',code:'Lang1',location:0,keyCode:21,which:21,altKey:false,isComposing:false};
+const pick=s=>Object.fromEntries(Object.keys(HG).map(k=>[k,s[k]]));
+let ev=hk.dispatch(sink,'keydown',RA);
+assert.equal(seen.length,2,'Selkies capture and bubble listeners both receive it');assert.equal(seen[0].e,ev,'same event object, no replay');assert.equal(seen[1].e,ev);
+assert.deepEqual(pick(seen[0]),HG);assert.equal(seen[0].isTrusted,true);assert.equal(seen[0].prevented,true,'local toggle suppressed');assert.equal(ev.stopped,false);seen.length=0;
+for(let i=0;i<3;i++){ev=hk.dispatch(sink,'keydown',{...RA,repeat:true});assert.equal(ev.defaultPrevented,true);assert.equal(ev.code,'AltRight')}
+assert.deepEqual(seen,[],'auto-repeat never reaches Selkies');
+ev=hk.dispatch(sink,'keyup',{...RA,altKey:false,shiftKey:true});
+assert.equal(seen[0].e,ev);assert.deepEqual(pick(seen[0]),HG,'paired keyup normalized even with other modifiers');assert.equal(seen[0].shiftKey,true);assert.equal(seen[0].prevented,true);assert.equal(seen[1].type,'bubble-keyup');seen.length=0;
+ev=hk.dispatch(sink,'keyup',{...RA,altKey:false});assert.equal(seen[0].code,'AltRight','an unpaired keyup is untouched');assert.equal(seen[0].prevented,false);seen.length=0;
+// A browser that already reports HangulMode/Lang1 gets the canonical keyCode; #videoCanvas is also a sink.
+hk.dispatch(vcan,'keydown',{key:'HangulMode',code:'Lang1',keyCode:229,which:229});assert.deepEqual(pick(seen[0]),HG);assert.equal(seen[0].prevented,true);
+hk.dispatch(vcan,'keyup',{key:'HangulMode',code:'Lang1',keyCode:229});assert.deepEqual(pick(seen[2]),HG);seen.length=0;
+// Left Alt, Ctrl/Shift/Meta+Right Alt chords, other editable controls and the compose widget are untouched.
+const unchanged=(target,props,label)=>{seen.length=0;const e=hk.dispatch(target,'keydown',props);assert.equal(e.defaultPrevented,false,label);assert.equal(e.code,props.code,label);assert.equal(e.key,props.key,label);
+ hk.dispatch(target,'keyup',{...props,ctrlKey:false,shiftKey:false,metaKey:false});assert.equal(seen.filter(s=>s.type==='keyup').every(s=>s.code===props.code&&!s.prevented),true,label)};
+unchanged(sink,{...RA,code:'AltLeft',location:1},'left Alt');assert.equal(seen[0].code,'AltLeft');
+unchanged(sink,{...RA,ctrlKey:true},'Ctrl+AltRight');unchanged(sink,{...RA,shiftKey:true},'Shift+AltRight');unchanged(sink,{...RA,metaKey:true},'Meta+AltRight');
+unchanged(sink,{...RA,ctrlKey:true,repeat:true},'held AltGr chord repeats pass');
+unchanged(other,RA,'keyboard-input-assist');assert.equal(seen[0].code,'AltRight');
+unchanged(hk.doc.body,RA,'body');
+seen.length=0;let te=hk.dispatch(hta,'keydown',RA);assert.equal(te.code,'AltRight');assert.equal(te.defaultPrevented,false);assert.deepEqual(seen,[],'compose widget keys stay local');
+// Blur forgets the pairing.
+hk.dispatch(sink,'keydown',RA);hk.dispatch(hk.win,'blur');seen.length=0;hk.dispatch(sink,'keyup',{...RA,altKey:false});assert.equal(seen[0].code,'AltRight');assert.equal(seen[0].prevented,false);
+// If the event cannot be redefined it is delivered unchanged, not swallowed.
+for(const prep of [e=>Object.defineProperty(e,'code',{value:'AltRight',enumerable:true,configurable:false}),e=>Object.preventExtensions(e)]){seen.length=0;ev=hk.dispatch(sink,'keydown',RA,prep);
+ assert.equal(seen[0].e,ev);assert.equal(seen[0].key,'Alt');assert.equal(seen[0].keyCode,18);assert.equal(seen[0].prevented,false);hk.dispatch(sink,'keyup',{...RA,altKey:false});assert.equal(seen[2].key,'Alt','no pairing after a failed redefine')}
+assert.deepEqual(hk.fetches,[]);assert.deepEqual(hk.touched,[]);assert.ok(hroot);
 console.log('cloudbite-computer-compose: ok');
