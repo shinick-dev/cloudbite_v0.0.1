@@ -12,6 +12,7 @@ import { applicationPack, evidenceReferences, type EvidencePacket, type TextAvai
 import { artifactSnapshotEntries, type ArtifactPacket } from './cloudbite-artifact-review';
 import { LANGUAGE_FAILURE_CATEGORY, languageIntegrity, languageMismatchMessage, responseLanguageRule } from './cloudbite-language';
 import { defaultResponseLanguage, projectStage } from './cloudbite-workflow';
+import { buildClaimSupportContext, checkClaimSupport, CLAIM_SUPPORT_SYSTEM, type ClaimSupportContext } from './cloudbite-claim-support';
 
 export const CB_CROSS_REVIEW_MAX_REVIEWERS = 3;
 export const CB_CROSS_REVIEW_MAX_PEERS = 3;
@@ -174,8 +175,13 @@ const ARTIFACT_SYSTEM = [
   'Reading code is not running it, and a CSV or table shown as text was not parsed or checked by anyone: do not state that code works, results were reproduced, or numbers are correct. You may compare an evidence claim with the artifact text and cite it in the rationale as path:Lstart-Lend; evidenceIndex still refers to the peer\'s opinion evidence array.',
 ].join('\n');
 
-/** packets/artifacts (optional) are matched to peers by expertId; a reviewer never receives its own packet. */
-export function reviewMessages(reviewer: CompletedOpinion, peers: CompletedOpinion[], brief: ProjectBrief, definition?: ExpertDefinition, packets?: readonly EvidencePacket[], artifacts?: readonly ArtifactPacket[]): ChatMessage[] {
+/**
+ * packets/artifacts (optional) are matched to peers by expertId; a reviewer never receives its own packet.
+ * claimSupport: with packets present and claimSupport undefined, buildClaimSupportContext(brief, peers, packets) is
+ * added and every finding must carry claimSupport; pass the same context to parseReviewReply. null disables it.
+ */
+export function reviewMessages(reviewer: CompletedOpinion, peers: CompletedOpinion[], brief: ProjectBrief, definition?: ExpertDefinition, packets?: readonly EvidencePacket[], artifacts?: readonly ArtifactPacket[], claimSupport?: ClaimSupportContext | null): ChatMessage[] {
+  const support = claimSupport === undefined ? (packets ? buildClaimSupportContext(brief, peers, packets) : null) : claimSupport;
   const peerPackets = packets ? peers.flatMap((p) => packets.filter((x) => x.expertId === p.expertId && x.expertId !== reviewer.expertId).slice(0, 1)) : [];
   const peerArtifacts = artifacts ? peers.flatMap((p) => artifacts.filter((x) => x.binding.expertId === p.expertId && x.binding.expertId !== reviewer.expertId).slice(0, 1)) : [];
   const data = {
@@ -186,9 +192,11 @@ export function reviewMessages(reviewer: CompletedOpinion, peers: CompletedOpini
     ...(packets ? { peerEvidence: peerPackets.map((x) => ({ expertId: x.expertId, binding: x.binding, bindingNote: x.bindingNote, cards: x.cards, sources: x.sources,
       references: x.references, omitted: x.omitted, originalSourceTextFetched: x.originalSourceTextFetched, packetSha256: x.sha256 })) } : {}),
     ...(artifacts ? { peerArtifacts: peerArtifacts.map((x) => ({ binding: x.binding, files: x.files, omitted: x.omitted, selection: x.selection, packetSha256: x.sha256 })) } : {}),
+    ...(support ? { claimSupport: support } : {}),
   };
   return [
-    { role: 'system', content: SYSTEM + (packets ? '\n' + PACKET_SYSTEM : '') + (artifacts ? '\n' + ARTIFACT_SYSTEM : '') + '\n' + responseLanguageRule(defaultResponseLanguage(brief), 'summary and every rationale') + '\nAssigned reviewer lens (application catalogue): ' + JSON.stringify({
+    { role: 'system', content: SYSTEM + (packets ? '\n' + PACKET_SYSTEM : '') + (artifacts ? '\n' + ARTIFACT_SYSTEM : '') + (support ? '\n' + CLAIM_SUPPORT_SYSTEM : '')
+      + '\n' + responseLanguageRule(defaultResponseLanguage(brief), support ? 'summary, every rationale and every claimSupport rationale (quotes stay verbatim)' : 'summary and every rationale') + '\nAssigned reviewer lens (application catalogue): ' + JSON.stringify({
       name: definition?.name ?? reviewer.name, domain: definition?.domain ?? 'Project evidence review',
       scope: definition?.summary ?? 'Review the provided evidence and disclose missing information.',
     }) },
@@ -208,26 +216,40 @@ export type ReviewReplyInvalid = { invalid: string; category?: typeof LANGUAGE_F
  * Strict reply parsing. Any deviation rejects the whole report; the reply text is never echoed back.
  * With opts.language (defaultResponseLanguage of the reviewed brief), a reply whose summary + rationales are clearly
  * in the other script is rejected with category 'language'; short/ambiguous text is accepted (status unknown).
+ * With opts.claimSupportContext (the context given to reviewMessages), every finding must carry claimSupport, checked
+ * by checkClaimSupport, and a slot may be assessed once. Without it a claimSupport key is discarded unchecked, so a
+ * legacy parse never stores an assessment.
  */
-export function parseReviewReply(reply: string, reviewer: CompletedOpinion, peers: CompletedOpinion[], opts: { language?: ResponseLanguage } = {}): CrossReviewReport | ReviewReplyInvalid {
+export function parseReviewReply(reply: string, reviewer: CompletedOpinion, peers: CompletedOpinion[], opts: { language?: ResponseLanguage; claimSupportContext?: ClaimSupportContext } = {}): CrossReviewReport | ReviewReplyInvalid {
   let j: unknown;
   try { j = JSON.parse(reply.trim()); } catch { return { invalid: 'reviewer reply was not JSON' }; }
   if (typeof j !== 'object' || j === null || Array.isArray(j) || !exactKeys(j, ['summary', 'findings'])) return { invalid: 'reviewer reply did not match the cross-review schema' };
   const { summary, findings } = j as { summary: unknown; findings: unknown };
   if (!text(summary, CB_CROSS_REVIEW_LIMITS.summary)) return { invalid: 'reviewer summary is missing or too long' };
   if (!Array.isArray(findings) || findings.length < 1 || findings.length > CB_CROSS_REVIEW_LIMITS.findings) return { invalid: `reviewer must give 1-${CB_CROSS_REVIEW_LIMITS.findings} findings` };
-  const out: CrossReviewFinding[] = [];
+  const out: CrossReviewFinding[] = [], ctx = opts.claimSupportContext, assessed = new Set<string>();
+  const keys = ['targetExpertId', 'evidenceIndex', 'verdict', 'rationale'];
   for (const f of findings) {
-    if (typeof f !== 'object' || f === null || Array.isArray(f) || !exactKeys(f, ['targetExpertId', 'evidenceIndex', 'verdict', 'rationale'])) return { invalid: 'finding did not match the cross-review schema' };
+    if (typeof f !== 'object' || f === null || Array.isArray(f)
+      || !(ctx ? exactKeys(f, [...keys, 'claimSupport']) : exactKeys(f, keys) || exactKeys(f, [...keys, 'claimSupport']))) return { invalid: 'finding did not match the cross-review schema' };
     const { targetExpertId, evidenceIndex, verdict, rationale } = f as Record<string, unknown>;
     const peer = peers.find((p) => p.expertId === targetExpertId);
     if (typeof targetExpertId !== 'string' || targetExpertId === reviewer.expertId || !peer) return { invalid: 'finding targets an expert that was not supplied for review' };
     if (!Number.isInteger(evidenceIndex) || (evidenceIndex as number) < 0 || (evidenceIndex as number) >= peer.opinion.evidence.length) return { invalid: 'finding references an evidence slot that does not exist' };
     if (!CB_CROSS_REVIEW_VERDICTS.includes(verdict as never)) return { invalid: 'finding verdict is not supported/challenged/insufficient' };
     if (!text(rationale, CB_CROSS_REVIEW_LIMITS.rationale)) return { invalid: 'finding rationale is missing or too long' };
-    out.push({ targetExpertId, evidenceIndex: evidenceIndex as number, verdict: verdict as CrossReviewFinding['verdict'], rationale: clean(rationale as string, CB_CROSS_REVIEW_LIMITS.rationale) });
+    const finding: CrossReviewFinding = { targetExpertId, evidenceIndex: evidenceIndex as number, verdict: verdict as CrossReviewFinding['verdict'], rationale: clean(rationale as string, CB_CROSS_REVIEW_LIMITS.rationale) };
+    if (ctx) {
+      const slot = targetExpertId + '\u0000' + evidenceIndex;
+      if (assessed.has(slot)) return { invalid: 'claimSupport assesses the same evidence slot twice' };
+      assessed.add(slot);
+      const cs = checkClaimSupport((f as Record<string, unknown>).claimSupport, targetExpertId, evidenceIndex as number, ctx);
+      if ('invalid' in cs) return { invalid: cs.invalid };
+      finding.claimSupport = cs.ok;
+    }
+    out.push(finding);
   }
-  if (opts.language && languageIntegrity([summary as string, ...out.map((f) => f.rationale)], opts.language).status === 'mismatch')
+  if (opts.language && languageIntegrity([summary as string, ...out.flatMap((f) => [f.rationale, ...(f.claimSupport ? [f.claimSupport.rationale] : [])])], opts.language).status === 'mismatch')
     return { invalid: languageMismatchMessage('reviewer reply', opts.language), category: LANGUAGE_FAILURE_CATEGORY };
   return { reviewerExpertId: reviewer.expertId, findings: out, summary: clean(summary as string, CB_CROSS_REVIEW_LIMITS.summary) };
 }

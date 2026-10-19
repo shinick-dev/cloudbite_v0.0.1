@@ -74,6 +74,32 @@ export interface EvidenceClaim {
 export interface CrossReviewFinding {
   targetExpertId: string; evidenceIndex: number; verdict: 'supported' | 'challenged' | 'insufficient';
   rationale: string;
+  /** Present only when the reply was parsed against a server claim-support packet; absent = not assessed. */
+  claimSupport?: ClaimSupportAssessment;
+}
+/** A reviewer model's reading of cited text against one claim; never truth verification or calibrated accuracy. */
+export type ClaimSupportStatus = 'supported' | 'partial' | 'contradicted' | 'insufficient';
+/**
+ * Where a passage's text came from. curated-card is a project-authored paraphrase, never the original source;
+ * imported-original-excerpt is a user-imported PMC excerpt (original wording, still user-supplied, not re-fetched);
+ * user-document and workspace-field are user statements.
+ */
+export type ClaimSupportTextOrigin = 'user-document' | 'imported-original-excerpt' | 'workspace-field' | 'curated-card';
+/** Cited text the server put in front of the reviewer for one slot, independent of what the model said. */
+export type ClaimSupportCitedText = 'available' | 'partial' | 'unavailable' | 'uncited' | 'not-in-packet';
+/** A quotation the server found verbatim in a known passage bound to the finding's evidence slot. */
+export interface ClaimSupportQuote {
+  passageId: string; ref: string; textOrigin: ClaimSupportTextOrigin; quote: string;
+  /** sha256 of the full passage source text; offsets are UTF-16 code units into it, lines 1-based. */
+  sourceSha256: string; startOffset: number; endOffset: number; startLine: number; endLine: number;
+}
+export interface ClaimSupportAssessment {
+  status: ClaimSupportStatus; quotes: ClaimSupportQuote[]; rationale: string;
+  basis: 'model-assessment';
+  /** Server check performed: each quote is an exact substring of a passage bound to this slot. Not a truth check. */
+  quoteCheck: 'exact-substring';
+  citedText: ClaimSupportCitedText;
+  packetSha256: string;
 }
 export interface CrossReviewReport { reviewerExpertId: string; findings: CrossReviewFinding[]; summary: string }
 export interface ProjectCrossReview {
