@@ -7,6 +7,7 @@ import { knowledgeDigest, knowledgeWorkspaceFiles, PEER_REVIEW_STATEMENT, REVIEW
 import { decisionWorkOrderRules, decisionWorkspaceFiles, validateDecisionData } from './cloudbite-decision';
 import { decisionOptionIds, defaultResponseLanguage, projectStage, validateExpertAssignment, validateWorkflowData } from './cloudbite-workflow';
 import { assignmentWorkOrderSection, PERSPECTIVE_IDS } from './cloudbite-workorders';
+import { playbookFor, playbookProvenance, playbookWorkOrderSection } from './cloudbite-expert-playbooks';
 
 // Cloudbite expert personas and per-expert workspace packs.
 //
@@ -945,6 +946,9 @@ export function buildExpertWorkspace(expert: ExpertDefinition, brief: ProjectBri
     if ('invalid' in checked) throw new Error(checked.invalid);
     section = assignmentWorkOrderSection(checked, defaultResponseLanguage(clean));
   }
+  // Trusted, code-constant operating playbook, appended after the existing work order text.
+  const language = defaultResponseLanguage(clean);
+  const playbook = (knowledge: boolean) => playbookWorkOrderSection(known.id, language, { knowledge });
 
   if (known.id === STA_EXPERT.id) {
     const knowledge = staKnowledgeFiles(`${clean.title}\n${clean.objective}\n${clean.context}`);
@@ -953,14 +957,14 @@ export function buildExpertWorkspace(expert: ExpertDefinition, brief: ProjectBri
       { path: 'PERSONA.md', content: known.prompt },
       { path: 'PROJECT.md', content: projectFile(clean) },
       { path: 'project.json', content: JSON.stringify(projectJson(clean)) },
-      { path: 'WORKORDER.md', content: staDecisionRules(clean, section, '# STA work order\nApply PERSONA.md to PROJECT.md. Read KNOWLEDGE.md; search further using the knowledge action. Explain the answer first, then evidence, missing inputs, minimal edits and verification. Use [source:ID] in evidence. Never claim a PrimeTime run or signoff. Write supporting analysis to out/timing-review.md if useful. The runner writes out/knowledge.json as an audit of retrieved references; do not write it yourself.') },
+      { path: 'WORKORDER.md', content: withPlaybook(staDecisionRules(clean, section, '# STA work order\nApply PERSONA.md to PROJECT.md. Read KNOWLEDGE.md; search further using the knowledge action. Explain the answer first, then evidence, missing inputs, minimal edits and verification. Use [source:ID] in evidence. Never claim a PrimeTime run or signoff. Write supporting analysis to out/timing-review.md if useful. The runner writes out/knowledge.json as an audit of retrieved references; do not write it yourself.'), playbook(true)) },
       { path: 'RESULT.schema.json', content: JSON.stringify(expertOpinionSchema()) },
       ...knowledge,
       ...decisionWorkspaceFiles(clean),
     ]);
   }
   const pack = PACK_BY_ID.get(known.id);
-  if (pack) return checkWorkspaceFiles(knowledgeWorkspace(known, pack, clean, section));
+  if (pack) return checkWorkspaceFiles(knowledgeWorkspace(known, pack, clean, section, playbook(true)));
   const profile = PROFILE_BY_ID.get(known.id)!;
 
   const files = [
@@ -968,13 +972,15 @@ export function buildExpertWorkspace(expert: ExpertDefinition, brief: ProjectBri
     { path: 'PERSONA.md', content: personaFile(known, profile) },
     { path: 'PROJECT.md', content: projectFile(clean) },
     { path: 'project.json', content: JSON.stringify(projectJson(clean), null, 2) + '\n' },
-    { path: 'WORKORDER.md', content: workOrderFile(known, profile, clean, [], section) },
+    { path: 'WORKORDER.md', content: withPlaybook(workOrderFile(known, profile, clean, [], section), playbook(false)) },
     { path: 'RESULT.schema.json', content: JSON.stringify(expertOpinionSchema(), null, 2) + '\n' },
-    { path: 'provenance.json', content: JSON.stringify({ expertId: known.id, ...provenance(profile) }, null, 2) + '\n' },
+    { path: 'provenance.json', content: JSON.stringify({ expertId: known.id, ...provenance(profile), playbook: playbookProvenance(playbookFor(known.id)) }, null, 2) + '\n' },
     ...decisionWorkspaceFiles(clean),
   ];
   return checkWorkspaceFiles(files);
 }
+
+const withPlaybook = (order: string, playbook: string) => `${order.replace(/\n+$/, '')}\n\n${playbook}`;
 
 /** The STA work order is a single paragraph; assignment and decision rules are appended only when present. */
 function staDecisionRules(brief: ProjectBrief, assignment: string, order: string): string {
@@ -983,7 +989,7 @@ function staDecisionRules(brief: ProjectBrief, assignment: string, order: string
   return rules.length ? `${base}\n\n## Decision and evidence rules\n\n${bullets(rules)}\n` : base;
 }
 
-function knowledgeWorkspace(expert: ExpertDefinition, pack: PhaseOneKnowledgePack, brief: ProjectBrief, assignment = '') {
+function knowledgeWorkspace(expert: ExpertDefinition, pack: PhaseOneKnowledgePack, brief: ProjectBrief, assignment: string, playbook: string) {
   const profile = PROFILE_BY_ID.get(pack.expertId);
   const reviewer = REVIEW_ROLE_IDS.has(pack.expertId);
   const rules = [
@@ -998,9 +1004,9 @@ function knowledgeWorkspace(expert: ExpertDefinition, pack: PhaseOneKnowledgePac
     { path: 'PERSONA.md', content: knowledgePersonaFile(expert, pack, profile) },
     { path: 'PROJECT.md', content: projectFile(brief) },
     { path: 'project.json', content: JSON.stringify(projectJson(brief), null, 2) + '\n' },
-    { path: 'WORKORDER.md', content: workOrderFile(expert, pack, brief, rules, assignment) },
+    { path: 'WORKORDER.md', content: withPlaybook(workOrderFile(expert, pack, brief, rules, assignment), playbook) },
     { path: 'RESULT.schema.json', content: JSON.stringify(expertOpinionSchema(), null, 2) + '\n' },
-    { path: 'provenance.json', content: JSON.stringify({ expertId: expert.id, ...knowledgeProvenance(pack, profile) }, null, 2) + '\n' },
+    { path: 'provenance.json', content: JSON.stringify({ expertId: expert.id, ...knowledgeProvenance(pack, profile), playbook: playbookProvenance(playbookFor(expert.id)) }, null, 2) + '\n' },
     ...knowledgeWorkspaceFiles(pack, `${brief.title}\n${brief.objective}\n${brief.context}`, reviewer),
     ...decisionWorkspaceFiles(brief),
   ];

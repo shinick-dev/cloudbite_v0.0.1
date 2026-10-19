@@ -34,7 +34,7 @@ await test('canonical project workspace references are present without being upl
 
 const hex = (c, len) => c.repeat(len);
 /** Builds a schema-valid HistoryDetail for a case with the supplied per-role outputs. */
-function exportFor(caseId, roles, { model = 'test/model-a', mode = 'demo', stage, documents, promptChar = 'a' } = {}) {
+function exportFor(caseId, roles, { model = 'test/model-a', mode = 'demo', stage, documents, promptChar = 'a', instruction } = {}) {
   const c = cases.get(caseId), brief = structuredClone(c.brief);
   if (stage !== undefined) brief.stage = stage;
   if (documents !== undefined) brief.documents = documents;
@@ -44,7 +44,7 @@ function exportFor(caseId, roles, { model = 'test/model-a', mode = 'demo', stage
     project: { id: 'p-quality-test', brief, status: 'completed', createdAt: 1, updatedAt: 2, evidenceClaims: claims,
       experts: roles.map((r, i) => ({ id: `e${i}`, expertId: r.id, name: r.id, status: 'completed', activity: [], artifacts: [], updatedAt: 2,
         opinion: { direction: 'conditional', confidence: r.confidence ?? 50, summary: r.summary ?? '', evidence: (r.claims ?? []).map((x) => x.text), assumptions: r.assumptions ?? [], nextActions: r.nextActions ?? [] } })) },
-    model, roles: roles.map((r) => ({ id: r.id, basis: 'curated-knowledge', revision: hex('1', 40), promptHash: hex(promptChar, 64) })),
+    model, roles: roles.map((r) => ({ id: r.id, basis: 'curated-knowledge', revision: hex('1', 40), promptHash: hex(promptChar, 64), ...(instruction ? { instructionHash: hex(instruction, 64), instructionHashSchema: 'expert-instructions/v2' } : {}) })),
     reports: Object.fromEntries(roles.map((r) => [r.id, r.report ?? ''])),
   };
 }
@@ -244,6 +244,29 @@ await test('CLI: credentials, URLs, --live and private data are refused; output 
   const stored = JSON.parse(readFileSync(join(dir, 'report.json'), 'utf8'));
   assert.equal(stored.input.sha256, sha(raw)); assert.equal(stored.provenance.declared, 'test-synthetic'); assert.equal(stored.human.status, Q.NOT_SCORED);
   assert.throws(() => Q.runCli(['evaluate', '--input', input, '--case', 'q-eda-signoff-scope', '--out', out], { log: quiet }), /refusing to overwrite/);
+});
+
+await test('instruction identity is a separate fingerprint; legacy records without metadata are unavailable, not the same', () => {
+  const run = (o) => evaluate('q-eda-signoff-scope', exportFor('q-eda-signoff-scope', [{ id: 'r', report: RELEVANT_EDA }], o));
+  const legacy = run({}), legacy2 = run({ model: 'test/model-b' }), v2 = run({ instruction: 'c' }), v2b = run({ instruction: 'd', model: 'test/model-b' }), v2same = run({ instruction: 'c', model: 'test/model-b' });
+  assert.equal(legacy.fingerprint.instructionSetHash, null); assert.equal(legacy.fingerprint.instructionIdentity, 'unavailable');
+  assert.match(v2.fingerprint.instructionSetHash, /^[0-9a-f]{64}$/); assert.equal(v2.fingerprint.instructionIdentity, 'expert-instructions/v2');
+  // promptSetHash keeps its persona-prompt meaning: identical persona prompts, different instruction sets.
+  assert.equal(v2.fingerprint.promptSetHash, legacy.fingerprint.promptSetHash);
+  const both = Q.compareRuns(v2, v2b);
+  assert.equal(both.variables.instructionSetHash.same, false); assert.equal(both.variables.promptSetHash.same, true);
+  assert.equal(Q.compareRuns(v2, v2same).variables.instructionSetHash.same, true);
+  for (const [a, b] of [[legacy, legacy2], [legacy, v2b]]) {
+    const v = Q.compareRuns(a, b).variables.instructionSetHash;
+    assert.equal(v.same, null); assert.equal(v.status, 'unavailable');
+  }
+  // The schema is bound into the set hash; a malformed or unknown-schema record is a schema error, never accepted.
+  const bad = exportFor('q-eda-signoff-scope', [{ id: 'r', report: RELEVANT_EDA }], { instruction: 'c' });
+  bad.roles[0].instructionHashSchema = 'expert-instructions/v1';
+  const rb = evaluate('q-eda-signoff-scope', bad);
+  assert.equal(rb.observed.schema, 'INVALID'); assert.ok(rb.observed.schemaErrors.some((e) => /instructionHash/.test(e)));
+  assert.equal(rb.fingerprint.instructionSetHash, null);
+  assert.match(Q.toMarkdown(v2), /instruction set [0-9a-f]{64}/); assert.match(Q.toMarkdown(legacy), /instruction set unavailable/);
 });
 
 await test('sample invocation against the recorded unified-release production run (synthetic QA case, not a benchmark win)', () => {

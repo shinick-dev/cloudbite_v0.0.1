@@ -142,6 +142,7 @@ export function validateDetail(detail) {
   if (detail.model !== undefined) str(detail.model, L.model, 'model');
   if (detail.roles !== undefined) list(detail.roles, L.brief.maxExperts, 'roles').forEach((r, i) => {
     if (!isRecord(r) || typeof r.id !== 'string' || !HEX40.test(r.revision ?? '') || !HEX64.test(r.promptHash ?? '')) e.push(`roles[${i}] needs id, 40-hex revision and 64-hex promptHash`);
+    else if ((r.instructionHash !== undefined || r.instructionHashSchema !== undefined) && !validInstruction(r)) e.push(`roles[${i}] instructionHash needs a 64-hex value with instructionHashSchema ${INSTRUCTION_SCHEMA}`);
   });
   if (detail.reports !== undefined) {
     if (!isRecord(detail.reports)) e.push('reports must be an object');
@@ -152,6 +153,8 @@ export function validateDetail(detail) {
 
 // ---------- fingerprints ----------
 
+const INSTRUCTION_SCHEMA = 'expert-instructions/v2';
+const validInstruction = (r) => r.instructionHashSchema === INSTRUCTION_SCHEMA && HEX64.test(r.instructionHash ?? '');
 const questionOf = (b) => ({ title: b.title, objective: b.objective, context: b.context, decision: b.decision ?? null });
 const stageOf = (b) => (b.stage && b.stage !== 'unspecified') ? b.stage : 'unspecified';
 const materialOf = (b) => (b.documents ?? []).map((d) => ({ id: d.id, name: d.name, content: d.content }));
@@ -160,12 +163,17 @@ const materialOf = (b) => (b.documents ?? []).map((d) => ({ id: d.id, name: d.na
 export function fingerprint(detail, inputBytes) {
   const b = detail.project.brief, roles = Array.isArray(detail.roles) ? detail.roles : [];
   const roleIds = [...roles].map((r) => ({ id: r.id, revision: r.revision, promptHash: r.promptHash, basis: r.basis })).sort((x, y) => x.id < y.id ? -1 : 1);
+  // Composite creation-time instruction identity: only when every role carries valid metadata. Legacy records (persona
+  // prompt hash only) are reported as unavailable, never as the same instruction set.
+  const instructed = roles.length && roles.every((r) => isRecord(r) && validInstruction(r))
+    ? [...roles].sort((x, y) => x.id < y.id ? -1 : 1).map((r) => [r.id, r.instructionHashSchema, r.instructionHash]) : null;
   return {
     inputSha256: inputBytes === undefined ? undefined : sha256(inputBytes),
     questionHash: sha256(canonical(questionOf(b))), stage: stageOf(b), materialHash: sha256(canonical(materialOf(b))),
     expertIds: [...(b.expertIds ?? [])].sort(),
     model: typeof detail.model === 'string' ? detail.model : null,
     roles: roleIds, promptSetHash: roleIds.length ? sha256(canonical(roleIds.map((r) => [r.id, r.promptHash]))) : null,
+    instructionSetHash: instructed ? sha256(canonical(instructed)) : null, instructionIdentity: instructed ? INSTRUCTION_SCHEMA : 'unavailable',
     knowledgeRevisionHash: roleIds.length ? sha256(canonical(roleIds.map((r) => [r.id, r.revision]))) : null,
     crossReviewSnapshotHash: detail.project.crossReview?.snapshotHash ?? null,
   };
@@ -423,12 +431,14 @@ export function compareRuns(a, b, { documentedDifference } = {}) {
   const documented = typeof documentedDifference === 'string' && documentedDifference.trim().length >= 10;
   const blocking = problems.filter((p) => !(documented && inputsDiffer && p.startsWith('different ') && p !== 'different case IDs'));
   const delta = (k) => ({ a: fa[k], b: fb[k], same: canonical(fa[k]) === canonical(fb[k]) });
+  const instructionDelta = fa.instructionSetHash && fb.instructionSetHash ? delta('instructionSetHash')
+    : { a: fa.instructionSetHash ?? null, b: fb.instructionSetHash ?? null, same: null, status: 'unavailable', note: 'A run lacks expert-instructions/v2 metadata (legacy record); instruction identity is not compared.' };
   const flagsOf = (r) => Object.fromEntries((r.heuristics.experts ?? []).map((e) => [e.expertId, e.flags]));
   return {
     evaluator: EVALUATOR_VERSION, caseId: a.caseId, status: blocking.length ? 'FAIL' : documented && inputsDiffer ? 'COMPARED_WITH_DOCUMENTED_INPUT_DIFFERENCE' : 'COMPARED',
     problems, ...(documented ? { documentedDifference: documentedDifference.trim() } : {}),
     inputs: { a: { name: a.input.name, sha256: fa.inputSha256, provenance: a.provenance.declared }, b: { name: b.input.name, sha256: fb.inputSha256, provenance: b.provenance.declared } },
-    variables: { model: delta('model'), promptSetHash: delta('promptSetHash'), knowledgeRevisionHash: delta('knowledgeRevisionHash'), expertIds: delta('expertIds') },
+    variables: { model: delta('model'), promptSetHash: delta('promptSetHash'), instructionSetHash: instructionDelta, knowledgeRevisionHash: delta('knowledgeRevisionHash'), expertIds: delta('expertIds') },
     heuristicFlags: blocking.length ? 'NOT_COMPARED' : { a: flagsOf(a), b: flagsOf(b) },
     human: { a: a.human.status, b: b.human.status },
     note: 'No winner is declared. Heuristic flag differences are prompts for human review, not quality deltas.',
@@ -462,7 +472,7 @@ export function toMarkdown(report) {
     `- Provenance: **${report.provenance.declared}** (brief.mode=${report.provenance.observedMode}). ${report.provenance.note}`,
     ...report.provenance.conflicts.map((c) => `- **Provenance conflict:** ${c}`),
     `- Case: ${report.suite} / ${report.caseType} (${report.caseProvenance}); binding **${report.caseBinding.status}**`,
-    `- Model: ${report.fingerprint.model ?? 'not recorded'}; prompt set ${report.fingerprint.promptSetHash ?? 'n/a'}; knowledge revisions ${report.fingerprint.knowledgeRevisionHash ?? 'n/a'}`, '',
+    `- Model: ${report.fingerprint.model ?? 'not recorded'}; prompt set ${report.fingerprint.promptSetHash ?? 'n/a'}; instruction set ${report.fingerprint.instructionSetHash ?? 'unavailable'}; knowledge revisions ${report.fingerprint.knowledgeRevisionHash ?? 'n/a'}`, '',
     '## 1. Observed structure', '', `Schema: **${report.observed.schema}**`];
   for (const e of report.observed.schemaErrors) L.push(`- ${e}`);
   if (report.observed.note) L.push('', report.observed.note);

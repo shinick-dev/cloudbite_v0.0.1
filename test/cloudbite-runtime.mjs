@@ -39,7 +39,7 @@ const stubs = (fixture) => ({ name: 'stubs', setup(b) {
     b.onLoad({ filter: /^personas$/, namespace: 'stub' }, () => ({ contents: PERSONAS, loader: 'js', resolveDir: process.cwd() }));
   }
 } });
-const entry = `export { default, CloudbiteProject } from './src/index.ts'; export * from './src/cloudbite-config.ts'; export * from './src/cloudbite-validate.ts'; export { CB_RUNNER_PY } from './src/cloudbite-runner.ts'; export { CLOUDBITE_OPINION_LIMITS, CLOUDBITE_BRIEF_LIMITS, phaseOnePack } from './src/cloudbite-personas.ts';`;
+const entry = `export { default, CloudbiteProject } from './src/index.ts'; export * from './src/cloudbite-config.ts'; export * from './src/cloudbite-validate.ts'; export { CB_RUNNER_PY } from './src/cloudbite-runner.ts'; export { CLOUDBITE_OPINION_LIMITS, CLOUDBITE_BRIEF_LIMITS, phaseOnePack } from './src/cloudbite-personas.ts'; export { expertInstructionHash, expertInstructionComponents } from './src/cloudbite-instruction-identity.ts';`;
 const tmp = mkdtempSync(join(tmpdir(), 'cloudbite-runtime-'));
 async function load(fixture) {
   const bundle = await build({ stdin: { contents: entry, resolveDir: process.cwd(), loader: 'ts' }, bundle: true, write: false, format: 'esm', platform: 'node', plugins: [stubs(fixture)], loader: { '.ps1': 'text' } });
@@ -989,7 +989,14 @@ await check('phase-one knowledge: role-bound packs, unknown citation and missing
   for (const role of final.roles) {
     const def = boot.j.experts.find((e) => e.id === role.id);
     assert.equal(role.revision, def.source.revision); assert.match(role.revision, /^[0-9a-f]{40}$/);
+    // promptHash keeps its persona meaning (history revision accounting); the composite identity is stored beside it.
     assert.equal(role.promptHash, createHash('sha256').update(def.prompt).digest('hex'));
+    assert.equal(role.instructionHash, REAL.expertInstructionHash(def)); assert.equal(role.instructionHashSchema, 'expert-instructions/v2');
+    assert.notEqual(role.instructionHash, role.promptHash);
+    const components = REAL.expertInstructionComponents(def);
+    assert.equal(components.personaSha256, createHash('sha256').update(def.prompt).digest('hex'));
+    assert.equal(components.runnerSha256, createHash('sha256').update(REAL.CB_RUNNER_PY).digest('hex'));
+    assert.match(components.playbookSha256, /^[0-9a-f]{64}$/);
     assert.match(def.prompt, /Knowledge pack \S+ \(\d+ cards, \d+ source records; pack sha256 [0-9a-f]{64}; cards sha256 [0-9a-f]{64}\)/);
   }
 });

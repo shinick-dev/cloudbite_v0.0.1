@@ -4,6 +4,7 @@
 // network is a fake Nosana endpoint and a fake PMC host, and any other host fails the test.
 //   node test/cloudbite-backend-v2.mjs
 import assert from 'node:assert/strict';
+import { coachingFixture } from './fixtures/cloudbite-coaching.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -34,6 +35,7 @@ let N, P;
 const reset = () => { N = { calls: [], hold: null, reply: null, fail: false }; P = { calls: [], reply: null }; };
 reset();
 const memoReply = (ids) => JSON.stringify({
+  coaching: coachingFixture(ids[0]),
   summary: 'The finished opinions were read against both options; the first option is favoured with conditions.',
   recommendation: { status: 'recommend', optionIds: ['option-1'], rationale: 'The first option fits the stated objective.', expertIds: [ids[0]], refs: ['brief:objective'] },
   options: [{ optionId: 'option-1', benefits: [claim('Fits the objective', [ids[0]])], risks: [], conditions: [] },
@@ -389,14 +391,43 @@ await test('memo: every sealed source reaches the leaf cap with exact counts; re
   assert.ok(pk.every((p) => p.originalText === 'absent' && /original text not fetched/.test(p.originMetadata) && p.excerpt === undefined));
 });
 
-await test('memo: without decision options a deterministic needs-options record and no call; demo projects refuse', async () => {
+await test('memo: a rough brief gets an unadopted coaching proposal in one memo call; demo projects refuse', async () => {
   const w = world(), x = await finished(w, { b: brief({ decision: undefined }) });
+  N.memoIds = x.created.brief.expertIds;
+  N.reply = (kind) => {
+    assert.equal(kind, 'memo');
+    const reply = JSON.parse(memoReply(N.memoIds));
+    reply.recommendation = { status: 'no-recommendation', optionIds: [], rationale: 'No user-supplied options to compare; the coaching plan proposes a next step.', expertIds: [N.memoIds[0]], refs: ['brief:objective'] };
+    reply.options = [];
+    return JSON.stringify(reply);
+  };
+  const originalBrief = structuredClone(w.store(x.id).m.get('project').brief);
   const r = await memo(w, x);
-  assert.equal(r.status, 200, r.text); assert.equal(r.data.memo.status, 'needs-options'); assert.equal(N.calls.length, 0);
-  assert.equal(w.store(x.id).m.get('budget').memo, 0, 'nothing reserved');
-  assert.equal((await memo(w, x)).data.memo.status, 'needs-options');
+  assert.equal(r.status, 200, r.text); assert.equal(r.data.memo.status, 'completed'); assert.equal(N.calls.length, 1);
+  assert.equal(r.data.memo.memo.coaching.version, 'cloudbite-coaching/v1');
+  assert.equal(r.data.memo.memo.coaching.repairs[0].kind, 'unknown');
+  assert.deepEqual(r.data.memo.memo.recommendation.optionIds, []);
+  assert.deepEqual(r.data.memo.memo.comparison, []);
+  assert.deepEqual(w.store(x.id).m.get('project').brief, originalBrief, 'proposal never rewrites the brief');
+  assert.equal(w.store(x.id).m.get('budget').memo, 1, 'one existing memo reservation');
+  assert.equal((await memo(w, x)).data.memo.status, 'completed');
+  assert.equal(N.calls.length, 1, 'completed coaching is cached, never rerun');
   const d = await finished(w, { b: brief({ mode: 'demo' }) });
-  assert.equal((await memo(w, d)).status, 409); assert.equal(N.calls.length, 0);
+  assert.equal((await memo(w, d)).status, 409); assert.equal(N.calls.length, 1);
+});
+
+await test('memo: missing or malformed required coaching fails the single attempt without automatic retry', async () => {
+  for (const bad of [undefined, { version: 'cloudbite-coaching/v1', stance: 'cheerlead' }]) {
+    const w = world(), x = await finished(w);
+    N.memoIds = x.created.brief.expertIds;
+    N.reply = () => { const raw = JSON.parse(memoReply(N.memoIds)); if (bad === undefined) delete raw.coaching; else raw.coaching = bad; return JSON.stringify(raw); };
+    const start = N.calls.length;
+    const r = await memo(w, x);
+    assert.equal(r.status, 200); assert.equal(r.data.memo.status, 'failed');
+    assert.equal((await memo(w, x)).data.memo.status, 'failed');
+    assert.equal(N.calls.length - start, 1, 'malformed advice does not trigger hidden retries');
+    assert.equal(w.store(x.id).m.get('budget').memo, 1);
+  }
 });
 
 await test('memo: a delete during the call or a superseded claim discards the late result', async () => {
@@ -422,6 +453,71 @@ await test('memo: a delete during the call or a superseded claim discards the la
   offset += 10 * 60_000;
   const v = await read(w, y);
   assert.equal(v.data.memo.status, 'failed'); assert.equal(N.calls.length, 2);
+});
+
+await test('v7 memo: collected generated artifacts reach the real DO prompt, and an altered tail discards the paid result', async () => {
+  const w = world(), x = await finished(w);
+  N.memoIds = x.created.brief.expertIds;
+  const store = w.store(x.id), run = store.m.get('project').runs[0], record = store.m.get('expert:' + run);
+  const content = 'Generated proposed ECO check, not execution proof. '.repeat(150);
+  record.run.artifacts = [{ path: 'out/report.md', label: 'Expert report', bytes: Buffer.byteLength(content) },
+    { path: 'out/analysis.csv', label: 'Missing file', bytes: 30 }];
+  store.m.set('expert:' + run, record); store.m.set(`artifact:${run}:out/report.md`, content);
+  N.hold = gate(); const pending = memo(w, x);
+  await new Promise(r => setTimeout(r, 20));
+  assert.equal(N.calls.length, 1);
+  const data = JSON.parse(N.calls[0].req.messages[1].content.replace(/^[^\n]*\n/, ''));
+  const artifact = data.packets.find(p => p.kind === 'expert-artifact-excerpt');
+  assert.ok(artifact); assert.equal(artifact.expertId, record.run.expertId);
+  assert.match(artifact.excerpt, /proposed ECO/); assert.match(artifact.originMetadata, /sha256=/);
+  assert.equal(data.coverage.fullReportsReviewed, false);
+  assert.ok(data.packets.some(p => /selected but unavailable: 1/.test(p.label)));
+  assert.match(N.calls[0].req.messages[0].content, /not independent sources or proof that a tool ran/);
+  store.m.set(`artifact:${run}:out/report.md`, content + ' changed outside the excerpt');
+  N.hold.resolve(); const result = await pending;
+  assert.equal(result.status, 200, result.text); assert.equal(result.data.memo.status, 'failed');
+  assert.match(result.data.memo.error, /inputs changed/);
+  assert.equal(N.calls.length, 1); assert.equal(store.m.get('budget').memo, 1);
+  assert.equal((await memo(w, x)).data.memo.status, 'failed'); assert.equal(N.calls.length, 1);
+  const y = await finished(w); N.memoIds = y.created.brief.expertIds; N.hold = null;
+  const sy = w.store(y.id), ry = sy.m.get('project').runs[0], ey = sy.m.get('expert:' + ry);
+  ey.run.artifacts = [{ path: 'out/report.md', label: 'Expert report', bytes: 40 }]; sy.m.set('expert:' + ry, ey);
+  sy.m.set(`artifact:${ry}:out/report.md`, 'Generated proposed runtime measurement.');
+  const accepted = await memo(w, y);
+  assert.equal(accepted.status, 200, accepted.text); assert.equal(accepted.data.memo.status, 'completed');
+});
+
+await test('v7 memo: sealed disclosures and source records keep priority; generated artifacts never displace them from the cap', async () => {
+  const w = world(), x = await finished(w);
+  const ids = x.created.brief.expertIds; N.memoIds = ids;
+  const store = w.store(x.id), runs = store.m.get('project').runs;
+  const src = (id) => ({ id, title: `Title ${id}`, url: `https://example.org/${id}`, license: 'CC-BY', checkStatus: 'unchecked', checkedAt: '', originalText: 'not-fetched' });
+  const list = Array.from({ length: 20 }, (_, i) => `pmc-s-${i}`);
+  store.m.set('packets', [{ expertId: ids[0], binding: 'bound', bindingNote: '', pack: null, observed: { retrievals: 1, cardIds: [], sourceIds: list },
+    cards: [], references: [], originalSourceTextFetched: false, auditNotes: [], bytes: 0, sources: list.map(src), sha256: hash(ids[0] + list.join()),
+    omitted: { cards: 0, sources: 3, references: 0, observedIds: 0, unidentifiedIds: 0, truncatedSummaries: 0 } }]);
+  let files = 0;
+  for (const run of runs) {
+    const record = store.m.get('expert:' + run);
+    record.run.artifacts = ['out/report.md', 'out/analysis.csv', 'out/plan.txt'].map(path => ({ path, label: path, bytes: 60 }));
+    store.m.set('expert:' + run, record);
+    for (const a of record.run.artifacts) { store.m.set(`artifact:${run}:${a.path}`, `Generated proposal ${run} ${a.path}, not execution proof.`); files++; }
+  }
+  const r = await memo(w, x);
+  assert.equal(r.status, 200, r.text); assert.equal(r.data.memo.status, 'completed', r.text);
+  const data = JSON.parse(N.calls[0].req.messages[1].content.replace(/^[^\n]*\n/, ''));
+  const pk = data.packets;
+  // 1 sealed-packet disclosure + 20 distinct sources come first, all retained; artifacts fill only the remaining slots.
+  assert.match(pk[0].id, /^omit-/); assert.match(pk[0].label, /^3 observed source/);
+  assert.deepEqual(pk.slice(1, 21).map(p => p.label), list.map(id => `Title ${id}`));
+  assert.ok(pk.slice(0, 21).every(p => p.kind === 'source-metadata' && p.originalText === 'absent'));
+  const artifacts = pk.filter(p => p.kind === 'expert-artifact-excerpt');
+  assert.equal(artifacts.length, 3); assert.ok(pk.slice(21).every(p => p.kind === 'expert-artifact-excerpt'));
+  const generated = Math.min(files, 12) + (files > 12 ? 1 : 0);
+  assert.deepEqual(data.coverage.packets, { included: 24, total: 21 + generated, truncated: 0, omitted: generated - 3, invalid: 0, metadataOnly: 21 });
+  assert.deepEqual(r.data.memo.coverage.packets, data.coverage.packets, 'stored coverage equals what the model was told');
+  assert.equal(data.coverage.sourcePagesReviewed, false); assert.equal(data.coverage.fullReportsReviewed, false);
+  assert.match(N.calls[0].req.messages[0].content, /not independent sources or proof that a tool ran/);
 });
 
 // ── follow-up rounds ──
