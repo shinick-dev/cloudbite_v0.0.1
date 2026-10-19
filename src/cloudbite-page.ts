@@ -1,6 +1,6 @@
 // 만든 파일 — 직접 고치지 말 것. 소스: client/cloudbite-console.ts · client/cloudbite-console.css
 // 다시 만들기: node tools/build-cloudbite-console.mjs (--check 로 최신인지 확인)
-// esbuild 0.28.1 transform (ES2022, 묶지 않음) · ts sha256 1996560aae62109a02fb6820e4c7e5120363b9ef47886a3cd4bd62081ad4718b · css sha256 0195d1d3ad113019ae413741314f4014126f2910d2d2c5b60232c2d702503324
+// esbuild 0.28.1 transform (ES2022, 묶지 않음) · ts sha256 ffd9e952adfbd5dabcaeb723f89d5186937b82613af18e55ecca50cf8d5f4ac1 · css sha256 0195d1d3ad113019ae413741314f4014126f2910d2d2c5b60232c2d702503324
 // 라우팅(런타임 담당): GET / 와 /cloudbite → CLOUDBITE_HTML, CLOUDBITE_JS_PATH → CLOUDBITE_JS (text/javascript),
 // CLOUDBITE_CSS_PATH → CLOUDBITE_CSS (text/css). CSP 는 script-src 'self'; style-src 'self' 면 충분하다 (인라인 없음).
 export const CLOUDBITE_JS_PATH = "/cloudbite/console.js";
@@ -952,7 +952,7 @@ export const CLOUDBITE_JS = [
   "  provAdopted: \"Adopted. The saved project was read again.\",",
   "  provAdoptedSeen: \"The saved project already shows this adoption.\",",
   "  provAdoptFailed: (why) => `Not adopted: ${why}`,",
-  "  provAdoptUnknown: \"The server's answer did not arrive or could not be read. The saved state was read again; adopt again only if it still shows a proposal.\",",
+  "  provAdoptUnknown: \"The request was not confirmed. The saved state was read again; adopt again only if it still shows a proposal.\",",
   "  provAdoptUnreconciled: \"The server's answer did not arrive and the saved state could not be read again, so it is unknown whether this claim was adopted. Read the saved state again (or reload the page) before adopting again.\",",
   "  provReread: \"Read the saved state again\",",
   "  provAdoptReread: \"The saved state was read again and does not show this adoption. Adopt again only if it still shows a proposal.\",",
@@ -1034,7 +1034,7 @@ export const CLOUDBITE_JS = [
   "  provAdopted: \"채택했습니다. 저장된 프로젝트를 다시 읽었습니다.\",",
   "  provAdoptedSeen: \"저장된 프로젝트에 이미 이 채택이 있습니다.\",",
   "  provAdoptFailed: (why) => `채택하지 못했습니다: ${why}`,",
-  "  provAdoptUnknown: \"서버의 응답이 오지 않았거나 읽을 수 없었습니다. 저장된 상태를 다시 읽었으니, 여전히 제안으로 보일 때만 다시 채택하세요.\",",
+  "  provAdoptUnknown: \"요청 완료 여부를 확인하지 못했습니다. 저장된 상태를 다시 읽었으니, 여전히 제안으로 보일 때만 다시 채택하세요.\",",
   "  provAdoptUnreconciled: \"서버의 응답이 오지 않았고 저장된 상태도 다시 읽지 못해, 이 주장이 채택되었는지 알 수 없습니다. 다시 채택하기 전에 저장된 상태를 다시 읽거나 페이지를 새로 고치세요.\",",
   "  provReread: \"저장된 상태 다시 읽기\",",
   "  provAdoptReread: \"저장된 상태를 다시 읽었고 이 채택은 없습니다. 여전히 제안으로 보일 때만 다시 채택하세요.\",",
@@ -6649,7 +6649,7 @@ export const CLOUDBITE_JS = [
   "      return;",
   "    }",
   "    const server = isObj(r.data) && typeof r.data.error === \"string\" ? clip(r.data.error, 300) : \"\";",
-  "    const unknown = r.status === 0 || r.status === 200;",
+  "    const unknown = r.status === 0 || r.status === 200 || r.status >= 500;",
   "    const why = unknown ? (m) => m.p3.provAdoptUnknown : r.status === 404 ? (m) => m.p3.provAdoptFailed(m.p3.provAdoptForeign) : r.status === 401 ? (m) => m.p3.provAdoptSignedOut : r.status === 403 ? (m) => m.p3.provAdoptFailed(m.p3.provAdoptNotOwn) : (m) => m.p3.provAdoptFailed(server || String(r.status));",
   "    adopt = { projectId: id, claimId: c.id, phase: \"reading\", note: null };",
   "    adoptPaint();",

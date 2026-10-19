@@ -387,7 +387,7 @@ const P3_EN = {
   provAdopted: 'Adopted. The saved project was read again.',
   provAdoptedSeen: 'The saved project already shows this adoption.',
   provAdoptFailed: (why: string) => `Not adopted: ${why}`,
-  provAdoptUnknown: 'The server\'s answer did not arrive or could not be read. The saved state was read again; adopt again only if it still shows a proposal.',
+  provAdoptUnknown: 'The request was not confirmed. The saved state was read again; adopt again only if it still shows a proposal.',
   provAdoptUnreconciled: 'The server\'s answer did not arrive and the saved state could not be read again, so it is unknown whether this claim was adopted. Read the saved state again (or reload the page) before adopting again.',
   provReread: 'Read the saved state again',
   provAdoptReread: 'The saved state was read again and does not show this adoption. Adopt again only if it still shows a proposal.',
@@ -460,7 +460,7 @@ const P3_KO: typeof P3_EN = {
   provAdopted: '채택했습니다. 저장된 프로젝트를 다시 읽었습니다.',
   provAdoptedSeen: '저장된 프로젝트에 이미 이 채택이 있습니다.',
   provAdoptFailed: (why: string) => `채택하지 못했습니다: ${why}`,
-  provAdoptUnknown: '서버의 응답이 오지 않았거나 읽을 수 없었습니다. 저장된 상태를 다시 읽었으니, 여전히 제안으로 보일 때만 다시 채택하세요.',
+  provAdoptUnknown: '요청 완료 여부를 확인하지 못했습니다. 저장된 상태를 다시 읽었으니, 여전히 제안으로 보일 때만 다시 채택하세요.',
   provAdoptUnreconciled: '서버의 응답이 오지 않았고 저장된 상태도 다시 읽지 못해, 이 주장이 채택되었는지 알 수 없습니다. 다시 채택하기 전에 저장된 상태를 다시 읽거나 페이지를 새로 고치세요.',
   provReread: '저장된 상태 다시 읽기',
   provAdoptReread: '저장된 상태를 다시 읽었고 이 채택은 없습니다. 여전히 제안으로 보일 때만 다시 채택하세요.',
@@ -4772,7 +4772,8 @@ function boot(): void {
     if (gen !== adoptGen) return;
     if (r.status === 200 && acceptHistoryDetail(id, r.data)) { adopt = { projectId: id, claimId: c.id, phase: 'done', note: m => m.p3.provAdopted }; adoptPaint(); return; }
     const server = isObj(r.data) && typeof r.data.error === 'string' ? clip(r.data.error, 300) : '';
-    const unknown = r.status === 0 || r.status === 200;
+    // A server failure can occur after the adoption write (for example while reading the response); it is not proof of rejection.
+    const unknown = r.status === 0 || r.status === 200 || r.status >= 500;
     // 403 은 로그인 문제가 아니라 남의 프로젝트다: 로그아웃하지 않고 로그인하라고도 하지 않는다
     const why: Text = unknown ? m => m.p3.provAdoptUnknown : r.status === 404 ? m => m.p3.provAdoptFailed(m.p3.provAdoptForeign)
       : r.status === 401 ? m => m.p3.provAdoptSignedOut : r.status === 403 ? m => m.p3.provAdoptFailed(m.p3.provAdoptNotOwn) : m => m.p3.provAdoptFailed(server || String(r.status));

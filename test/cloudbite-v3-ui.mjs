@@ -395,6 +395,23 @@ await test('지금 실행: 프로젝트 bearer 는 채택 근거가 아니다. �
   assert.equal(posts(e2).length, 0);
 });
 
+await test('서버 5xx도 저장 뒤 실패일 수 있다: 확인 전 재채택 없이 GET으로만 저장 상태를 확인한다', async () => {
+  for (const status of [500, 502, 503, 504]) {
+    let saved = projectRaw(), readsFail = false;
+    const env = fakeEnv(historyServer(() => saved, () => {
+      saved = projectRaw({ provenance: { ledger: LEDGER(BASE_CLAIMS), state: STATE([adoption(BASE_CLAIMS[1])]) } });
+      readsFail = true;
+      return json(status, { error: 'response failed after a durable write' });
+    }, { detailImpl: () => readsFail ? json(503, {}) : json(200, detailOf(saved)) }));
+    await openDetail(env); await openGroup(env, 'hinted');
+    env.fk(`adopt:${cid(2)}`).click(); await env.flush(); env.fk(`adopt-yes:${cid(2)}`).click(); await env.flush();
+    assert.match(env.detail().textContent, /it is unknown whether this claim was adopted/);
+    assert.ok(!env.fk(`adopt:${cid(2)}`)); assert.equal(posts(env).length, 1);
+    readsFail = false; env.fk('adopt-reread').click(); await env.flush();
+    assert.match(env.detail().textContent, /The saved project already shows this adoption/); assert.equal(posts(env).length, 1);
+  }
+});
+
 await test('응답 모름 + 다시 읽기 실패: 상태를 모른다고 밝히고 채택 버튼 대신 GET 만 하는 다시 읽기를 낸다. 읽으면 새 장부로 다시 고를 수 있다', async () => {
   // 1) POST 응답이 사라지고 (네트워크) 다시 읽기 GET 도 실패 → 모름, POST 1번뿐
   let saved = projectRaw(), getFails = 2;
