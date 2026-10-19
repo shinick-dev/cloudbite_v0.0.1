@@ -405,7 +405,7 @@ const SUBCLAUSES = /(?=\b(?:even (?:if|though)|if|though|although|unless|whether
 // ("다수가 찬성했는지는", "전원 동의 여부는", "동의했다고 보기는 불확실하다"). Still a heuristic, not a semantic guarantee.
 const POSITIVE_AGREEMENT_ALL = new RegExp(POSITIVE_AGREEMENT.source, 'gi');
 const UNCERTAIN_WORD = '(?:unclear|unknown|uncertain|unverified|unconfirmed|unestablished|undetermined|undecided|unsure|not (?:known|clear|certain|verified|established))';
-const GOVERNS_BEFORE = new RegExp(`(?:^\\s*hypothetically\\b.*|(?:^\\s*(?:if|suppose|assuming)\\b|^\\s*만약|\\bwhether\\b|\\b${UNCERTAIN_WORD}\\s+(?:that|if)\\b)[^,;]{0,60})$`, 'i');
+const GOVERNS_BEFORE = new RegExp(`(?:^\\s*hypothetically\\b.*|(?:^\\s*(?:if|suppose|assuming)\\b|^\\s*만약|\\bwhether\\b|\\b${UNCERTAIN_WORD}\\s+(?:that|if)\\b)(?:(?!${UNCERTAIN_WORD})[^,;]){0,60})$`, 'i');
 const GOVERNS_AFTER_EN = new RegExp(`^(?:consensus|unanimity|votes?)(?:\\s+(?:among|between|on|for|of|about|regarding|in|over)(?:\\s+[\\w-]+){1,3})?\\s+(?:is|was|remains|has been|seems|appears)\\s+(?:still\\s+)?${UNCERTAIN_WORD}\\b`, 'i');
 const GOVERNS_AFTER_KO = /^(?:[가-힣]{0,8}?(?:는|은)지(?![만도])|\s*(?:의\s*)?여부|[가-힣]{0,6}?(?:다고|라고)\s*(?:보기|하기|단정하기)[가-힣]{0,2}\s*(?:불분명|불확실|불명확|어렵|알 수 없)|(?:은|는|가|이)?\s*(?:불분명|불확실|불명확|미확인|미정|알 수 없|근거가 부족))/;
 function governedByUncertainty(c: string, m: RegExpMatchArray): boolean {

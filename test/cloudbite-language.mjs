@@ -354,7 +354,10 @@ await check('memo: uncertainty, quoted expert words and proposed future votes ar
   // R1 retained in KO and A2: uncertainty elsewhere, or an idiomatic "if", does not govern the asserted agreement.
   for (const d of ['All experts agreed on option-1, whose cost is unclear.', 'Unanimously, the experts chose option-1 despite uncertain costs.',
     'The decision was unanimous and the timeline is unclear.', 'If anything, all experts agreed on option-1.', 'If so, all experts agreed on option-1.',
-    'It is unclear whether costs rise, and all experts agreed on option-1.']) {
+    'It is unclear whether costs rise, and all experts agreed on option-1.',
+    // B1: a whether-clause closed by its own uncertainty word does not govern a later conjoined assertion.
+    'Whether costs rise is unclear and all experts agreed on option-1.', 'Whether the timeline slips is unknown and the decision was unanimous.',
+    'Whether exp-a voted for option-2 is unclear and the decision was unanimous.', 'Whether consensus exists is unknown and all experts agreed on option-1.']) {
     badEn({ dissent: d }, d); badEn({ summary: d }, d); assert.equal(MM.claimsUnsupportedAgreement(d), true, d);
   }
   for (const d of ['모든 전문가가 동의했고 비용은 미정이다.', '비용은 불확실하나 전원이 찬성했다.', '만장일치로 Plan B를 골랐으며 일정은 미정이다.',
