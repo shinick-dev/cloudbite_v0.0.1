@@ -14,6 +14,11 @@
 //                                    mint + revoke older; a retried requestId within 2h returns the same install
 //     revokeAll()                    -> { ok, revoked }
 //     ownerJobs()                    -> { ok, jobs: CbNestedJobView[] }
+//     ownerRun({ ownerMachineId, requestId, provider, image?, timeout?, command, files? }) -> { ok, job, replay? }
+//                                    browser run; the root bound the machine and checked cost/public acks. Nosana uses
+//                                    only that machine's stored GPU selection (409 selection_required, no market fallback).
+//                                    files: <= 3 flat names, <= 16 KiB decoded total; never echoed in a view
+//     ownerStop({ ownerMachineId?, requestId, jobId }) -> { ok, job }
 //   Gateway (stub.fetch(request) for /p/_cloudbite/computer/nested/*; terminal Bearer only, any Origin header is refused):
 //     POST run          Bearer capability  { requestId: UUID, provider: 'daytona'|'nosana', image?, timeout?, gpu?, country?, command: string[] }
 //                       gpu + country (Nosana only, both or neither): the job is created with requirements { name, country } and
@@ -91,6 +96,8 @@ interface NestedJob {
   id: string; requestId: string; capId: string; ownerMachineId: string;
   provider: CbNestedProvider; image: string; command: string[]; timeoutSec: number;
   requirements?: CbNestedRequirements; // Nosana GPU selection, fixed at admission; no market is ever substituted
+  filesHash?: string;           // replay fingerprint of input files
+  files?: CbNestedFile[];       // Nosana only (already public in its job definition); dropped once cleaned up
   status: CbNestedStatus; createdAt: number; deadline: number; finishedAt?: number;
   name: string;                 // deterministic provider resource name
   account?: CbAccountId;        // Daytona account the sandbox lives in
@@ -161,12 +168,47 @@ export function cbNestedTail(s: string, max = CBN_OUTPUT_MAX): { text: string; c
   return { text: new TextDecoder().decode(b.slice(b.byteLength - max)).replace(/^�+/, ''), cut: true };
 }
 
-export interface CbNestedRunInput { requestId: string; provider: CbNestedProvider; image: string; timeoutSec: number; command: string[]; requirements?: CbNestedRequirements }
-/** Validate a run body. Metadata must be plain; the command is the owner's own intentional remote command. */
-export function cbNestedParseRun(b: unknown): CbNestedRunInput | string {
+/** A small owner-chosen input file, written by the runner into a fresh temporary working directory. */
+export interface CbNestedFile { name: string; contentBase64: string }
+export const CBN_FILES_MAX = 3;
+export const CBN_FILES_BYTES = 16 * 1024; // total decoded bytes
+const FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+/** Validate input files: flat names, no duplicates, canonical base64, bounded count and decoded size. */
+export function cbNestedParseFiles(v: unknown): CbNestedFile[] | string {
+  if (!Array.isArray(v) || v.length > CBN_FILES_MAX) return `files must be at most ${CBN_FILES_MAX} entries`;
+  const seen = new Set<string>(); let total = 0; const out: CbNestedFile[] = [];
+  for (const f of v) {
+    if (!f || typeof f !== 'object' || Array.isArray(f)) return 'each file must be { name, contentBase64 }';
+    const o = f as Record<string, unknown>;
+    if (Object.keys(o).some((k) => k !== 'name' && k !== 'contentBase64')) return 'each file must be { name, contentBase64 }';
+    if (typeof o.name !== 'string' || !FILE_NAME.test(o.name)) return 'file names must be plain names (letters, digits, . _ -), no paths';
+    if (seen.has(o.name.toLowerCase())) return 'file names must be unique';
+    seen.add(o.name.toLowerCase());
+    const c = o.contentBase64;
+    // Length bound before decoding; then strict canonical base64 (no whitespace, URL alphabet or stray padding bits).
+    if (typeof c !== 'string' || c.length > Math.ceil(CBN_FILES_BYTES / 3) * 4 || !BASE64.test(c)) return 'file content must be standard base64';
+    let raw: string;
+    try { raw = atob(c); } catch { return 'file content must be standard base64'; }
+    if (btoa(raw) !== c) return 'file content must be standard base64';
+    total += raw.length;
+    if (total > CBN_FILES_BYTES) return `files may total at most ${CBN_FILES_BYTES} bytes`;
+    out.push({ name: o.name, contentBase64: c });
+  }
+  return out;
+}
+
+export interface CbNestedRunInput { requestId: string; provider: CbNestedProvider; image: string; timeoutSec: number; command: string[]; requirements?: CbNestedRequirements; files?: CbNestedFile[] }
+/**
+ * Validate a run body. Metadata must be plain; the command is the owner's own intentional remote command.
+ * web: the browser run (trusted owner RPC) may carry input files but never a GPU selection (the stored one applies).
+ */
+export function cbNestedParseRun(b: unknown, opts: { web?: boolean } = {}): CbNestedRunInput | string {
   if (!b || typeof b !== 'object' || Array.isArray(b)) return 'body must be a JSON object';
   const o = b as Record<string, unknown>;
-  for (const k of Object.keys(o)) if (!['requestId', 'provider', 'image', 'timeout', 'gpu', 'country', 'command'].includes(k)) return `unknown field ${k.slice(0, 32)}`;
+  const fields = opts.web ? ['requestId', 'provider', 'image', 'timeout', 'command', 'files'] : ['requestId', 'provider', 'image', 'timeout', 'gpu', 'country', 'command'];
+  for (const k of Object.keys(o)) if (!fields.includes(k)) return `unknown field ${k.slice(0, 32)}`;
   if (typeof o.requestId !== 'string' || !UUID.test(o.requestId)) return 'requestId must be a lowercase UUID';
   if (o.provider !== 'daytona' && o.provider !== 'nosana') return 'provider must be daytona or nosana';
   const image = o.image === undefined ? CBN_DEFAULT_IMAGE : o.image;
@@ -184,7 +226,19 @@ export function cbNestedParseRun(b: unknown): CbNestedRunInput | string {
     if (!sel) return 'gpu and country must be given together: a plain GPU model name and an ISO country code';
     requirements = sel;
   }
-  return { requestId: o.requestId, provider: o.provider, image, timeoutSec, command: c as string[], ...(requirements ? { requirements } : {}) };
+  let files: CbNestedFile[] | undefined;
+  if (o.files !== undefined) {
+    const f = cbNestedParseFiles(o.files);
+    if (typeof f === 'string') return f;
+    if (f.length) files = f;
+  }
+  return { requestId: o.requestId, provider: o.provider, image, timeoutSec, command: c as string[], ...(requirements ? { requirements } : {}), ...(files ? { files } : {}) };
+}
+
+/** Replay fingerprint of the input files (contents never appear in a view, log or error). */
+async function filesHash(files: CbNestedFile[] | undefined): Promise<string | undefined> {
+  if (!files) return undefined;
+  return hex(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(files.map((f) => [f.name, f.contentBase64]))))));
 }
 
 function view(j: NestedJob): CbNestedJobView {
@@ -260,7 +314,7 @@ async function nosanaDeploymentJob(key: string, deployment: string, job: string)
 
 /** The public job argument: the runner's job, base64url. Also the ownership stamp checked on a fetched job definition. */
 function nosanaJobArg(j: NestedJob) {
-  return b64u(new TextEncoder().encode(JSON.stringify({ jobId: j.id, command: j.command, timeout: j.timeoutSec })));
+  return b64u(new TextEncoder().encode(JSON.stringify({ jobId: j.id, command: j.command, timeout: j.timeoutSec, ...(j.files ? { files: j.files } : {}) })));
 }
 
 /** Deployment job body -> result, only when its market and its 'work' op command are exactly this job's. */
@@ -408,11 +462,47 @@ export class CbNestedService {
   async run(cap: Capability, body: unknown): Promise<Reply> {
     const p = cbNestedParseRun(body);
     if (typeof p === 'string') return err(400, 'bad_request', p);
+    return this.admit(cap, p, false);
+  }
+
+  /**
+   * Browser run (trusted DO RPC). The root has already checked the owner cookie, the sandbox's ownership and the
+   * cost/public acknowledgements, and passes only the bound machine id plus run fields. It uses a synthetic, non-secret
+   * owner scope instead of a capability, then the same ledger. A Nosana run needs that machine's stored GPU selection.
+   */
+  async ownerRun(input: unknown): Promise<Reply> {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return err(400, 'bad_request', 'body must be a JSON object');
+    const { ownerMachineId, ...rest } = input as Record<string, unknown>;
+    if (typeof ownerMachineId !== 'string' || !MACHINE.test(ownerMachineId)) return err(400, 'bad_request', 'ownerMachineId is invalid');
+    const p = cbNestedParseRun(rest, { web: true });
+    if (typeof p === 'string') return err(400, 'bad_request', p);
+    const scope: Capability = { id: 'web', ownerMachineId, scopes: ['nested:run'], createdAt: 0, expiresAt: Number.MAX_SAFE_INTEGER };
+    return this.admit(scope, p, true);
+  }
+
+  /** Browser stop (trusted DO RPC); with ownerMachineId, only that machine's job. */
+  async ownerStop(input: unknown): Promise<Reply> {
+    const o = input as Record<string, unknown> | null;
+    if (!o || typeof o !== 'object' || Array.isArray(o)) return err(400, 'bad_request', 'body must be a JSON object');
+    if (o.ownerMachineId !== undefined) {
+      if (typeof o.ownerMachineId !== 'string' || !MACHINE.test(o.ownerMachineId)) return err(400, 'bad_request', 'ownerMachineId is invalid');
+      if (typeof o.jobId === 'string' && JOB_ID.test(o.jobId)) {
+        const j = await this.s.get<NestedJob>(`job:${o.jobId}`);
+        if (j && j.ownerMachineId !== o.ownerMachineId) return err(404, 'not_found', 'no such job');
+      }
+    }
+    return this.stop({ requestId: o.requestId, jobId: o.jobId });
+  }
+
+  private async admit(cap: Capability, p: CbNestedRunInput, requireSelection: boolean): Promise<Reply> {
     if(p.provider==='nosana'&&!p.requirements){
       const prior=await this.s.get<string>('req:'+p.requestId);
       if(prior){const job=await this.s.get<NestedJob>('job:'+prior);if(job?.requirements)p.requirements={...job.requirements};}
       else{const saved=await this.s.get<{selection:CbNestedRequirements}>('gpu-selection:'+cap.ownerMachineId);if(saved?.selection)p.requirements={gpu:saved.selection.gpu,country:saved.selection.country};}
+      // The browser never falls back to the pinned market: a GPU run needs this machine's own stored selection.
+      if(!p.requirements&&requireSelection&&!prior)return err(409,'selection_required','choose a GPU and country for this computer first; nothing was started');
     }
+    const fh = await filesHash(p.files);
     if (p.provider === 'daytona' ? !this.d.daytona() : !this.d.nosanaKey()) return err(503, 'not_configured', `${p.provider} is not configured`);
     const gateway = this.d.gateway();
     if (!gateway) return err(503, 'not_configured', 'nested compute gateway is not configured');
@@ -430,7 +520,8 @@ export class CbNestedService {
         const j = await this.s.get<NestedJob>(`job:${prior}`);
         if (!j) return err(409, 'conflict', 'requestId was already used');
         const same = j.provider === p.provider && j.image === p.image && j.timeoutSec === p.timeoutSec && JSON.stringify(j.command) === JSON.stringify(p.command)
-          && j.requirements?.gpu === p.requirements?.gpu && j.requirements?.country === p.requirements?.country;
+          && j.requirements?.gpu === p.requirements?.gpu && j.requirements?.country === p.requirements?.country
+          && j.ownerMachineId === cap.ownerMachineId && j.filesHash === fh;
         return same ? ok({ job: view(j), replay: true }) : err(409, 'conflict', 'requestId was already used for a different run');
       }
       const all = await this.jobs();
@@ -442,6 +533,7 @@ export class CbNestedService {
         id, requestId: p.requestId, capId: cap.id, ownerMachineId: cap.ownerMachineId,
         provider: p.provider, image: p.image, command: p.command, timeoutSec: p.timeoutSec,
         ...(p.requirements ? { requirements: { ...p.requirements } } : {}),
+        ...(fh ? { filesHash: fh } : {}), ...(p.files && p.provider === 'nosana' ? { files: p.files } : {}),
         status: 'creating', createdAt: now,
         deadline: now + (p.provider === 'nosana' ? minutes * 60_000 : Math.min(CBN_MAX_SECONDS * 1000, p.timeoutSec * 1000 + 60_000)) + CBN_GRACE,
         name: `cbn-${id}`, ...(dy ? { account: dy.account } : {}),
@@ -457,11 +549,11 @@ export class CbNestedService {
     if ('body' in admitted) return admitted;
     const j = admitted;
     const callbackUrl = `${gateway}${CBN_GATEWAY_PREFIX}/result/${j.id}`;
-    const done = callback ? await this.createDaytona(j, callbackUrl, callback) : await this.createNosana(j);
+    const done = callback ? await this.createDaytona(j, callbackUrl, callback, p.files) : await this.createNosana(j);
     return ok({ job: view(done ?? j) }, 202);
   }
 
-  private async createDaytona(j: NestedJob, callbackUrl: string, callback: string) {
+  private async createDaytona(j: NestedJob, callbackUrl: string, callback: string, files?: CbNestedFile[]) {
     const dy = this.d.daytona();
     if (!dy || dy.account !== j.account) return this.patch(j.id, (x) => { x.status = 'error'; x.error = 'account_changed'; });
     const labels = { [CBN_LABEL_JOB]: j.id, [CBN_LABEL_OWNER]: j.ownerMachineId };
@@ -481,15 +573,16 @@ export class CbNestedService {
       });
     }
     const after = await this.patch(j.id, (x) => { x.resourceId = sb.id; x.status = 'running'; });
-    if (sb.state === 'started') await this.launchDaytona(after ?? j, sb, callbackUrl, callback);
-    else await this.s.put({ [`launch:${j.id}`]: { callbackUrl, callback } }); // per-job secret held until launch, deleted then
+    // The per-job secret (and private input files) are held until launch, deleted then.
+    if (sb.state === 'started') await this.launchDaytona(after ?? j, sb, callbackUrl, callback, files);
+    else await this.s.put({ [`launch:${j.id}`]: { callbackUrl, callback, ...(files ? { files } : {}) } });
     return this.s.get<NestedJob>(`job:${j.id}`);
   }
 
-  private async launchDaytona(j: NestedJob, sb: Sandbox, callbackUrl: string, callback: string) {
+  private async launchDaytona(j: NestedJob, sb: Sandbox, callbackUrl: string, callback: string, files?: CbNestedFile[]) {
     const dy = this.d.daytona();
     if (!dy || dy.account !== j.account) return;
-    const job = { jobId: j.id, command: j.command, timeout: j.timeoutSec, callback: callbackUrl, token: callback };
+    const job = { jobId: j.id, command: j.command, timeout: j.timeoutSec, callback: callbackUrl, token: callback, ...(files ? { files } : {}) };
     const t: Dt = { ...dy.c, api: sb.toolboxProxyUrl ?? 'https://proxy.app.daytona.io/toolbox' };
     const sessionId = `cbn-${j.id}`;
     try {
@@ -665,7 +758,7 @@ export class CbNestedService {
   }
 
   private async tryLaunch(j: NestedJob) {
-    const pending = await this.s.get<{ callbackUrl: string; callback: string }>(`launch:${j.id}`);
+    const pending = await this.s.get<{ callbackUrl: string; callback: string; files?: CbNestedFile[] }>(`launch:${j.id}`);
     const dy = this.d.daytona();
     if (!pending || !dy || dy.account !== j.account || (j.launchTries ?? 0) >= 5) {
       await this.patch(j.id, (x) => { x.status = 'error'; x.error = 'launch_failed'; x.finishedAt = this.d.now(); x.cleanup = 'pending'; });
@@ -674,7 +767,7 @@ export class CbNestedService {
     let sb: CbSandbox;
     try { sb = await cbGetSandbox(dy.c, j.resourceId!); } catch { return; }
     if (sb.labels?.[CBN_LABEL_JOB] !== j.id) { await this.patch(j.id, (x) => { x.status = 'error'; x.error = 'ownership_mismatch'; x.cleanup = 'failed'; }); return; }
-    if (sb.state === 'started') await this.launchDaytona(j, sb, pending.callbackUrl, pending.callback);
+    if (sb.state === 'started') await this.launchDaytona(j, sb, pending.callbackUrl, pending.callback, pending.files);
     else if (sb.state === 'error' || sb.state === 'build_failed') await this.patch(j.id, (x) => { x.status = 'error'; x.error = 'sandbox_failed'; x.finishedAt = this.d.now(); x.cleanup = 'pending'; });
   }
 
@@ -740,7 +833,7 @@ export class CbNestedService {
   /** Stop/delete exactly the recorded resource after proving it is this job's. Never anything else. */
   private async cleanupOne(j: NestedJob) {
     const mark = async (c: Cleanup, code?: string) => {
-      await this.patch(j.id, (x) => { x.cleanup = c; x.cleanupTries++; if (code) x.error = code; });
+      await this.patch(j.id, (x) => { x.cleanup = c; x.cleanupTries++; if (code) x.error = code; if (c === 'done') delete x.files; });
       if (c === 'done') await this.s.delete([`launch:${j.id}`]);
     };
     if (!j.resourceId) return mark('done');
@@ -847,6 +940,8 @@ export class CloudbiteComputerNested extends DurableObject<Env> {
   revokeAll() { return this.service().revokeAll(); }
   ownerJobs() { return this.service().ownerJobs(); }
   async ownerJobsJson(): Promise<string> { return JSON.stringify(await this.service().ownerJobs()); }
+  async ownerRunJson(input: Record<string, unknown>): Promise<string> { return JSON.stringify(await this.service().ownerRun(input)); }
+  async ownerStopJson(input: Record<string, unknown>): Promise<string> { return JSON.stringify(await this.service().ownerStop(input)); }
   async ownerSelectGpuJson(input:Record<string,unknown>):Promise<string>{return JSON.stringify(await this.service().selectGpu(input));}
   async ownerGpuSelectionJson(ownerMachineId:string):Promise<string>{return JSON.stringify(await this.service().gpuSelection(ownerMachineId));}
   async configureJson(input: { ownerMachineId: string; requestId: string }): Promise<string> { return JSON.stringify(await this.service().configure(input)); }
@@ -856,8 +951,25 @@ export class CloudbiteComputerNested extends DurableObject<Env> {
 
 // Fixed runner (Daytona file or Nosana `python3 -I -c`). Runs the owner's command with a hard timeout, keeps the last
 // 64 KiB of combined output, posts it once to the HTTPS callback with the per-job token. No provider key is ever present.
-export const CBN_RUNNER_PY = String.raw`import base64, json, os, subprocess, sys, time, urllib.request
+// Input files (if any) are written into a fresh private temporary directory that becomes the command's cwd and is
+// removed afterwards; nothing outside it is written.
+export const CBN_RUNNER_PY = String.raw`import base64, json, os, re, shutil, subprocess, sys, tempfile, time, urllib.request
 MAX = 65536
+def inputs(files):
+    if not isinstance(files, list) or len(files) > 3: raise ValueError
+    d = tempfile.mkdtemp(prefix='cloudbite-job-'); total = 0; seen = set()
+    try:
+        for f in files:
+            name = f['name']
+            if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', name) or name.lower() in seen: raise ValueError
+            seen.add(name.lower())
+            data = base64.b64decode(f['contentBase64'], validate=True); total += len(data)
+            if total > 16384: raise ValueError
+            fd = os.open(os.path.join(d, name), os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+            with os.fdopen(fd, 'wb') as out: out.write(data)
+    except Exception:
+        shutil.rmtree(d, ignore_errors=True); raise
+    return d
 if len(sys.argv) >= 3 and sys.argv[1] == '--b64':
     s = sys.argv[2]; job = json.loads(base64.urlsafe_b64decode(s + '=' * (-len(s) % 4)))
     token = ''
@@ -873,9 +985,12 @@ else:
 env = {k: v for k, v in os.environ.items() if k != 'CLOUDBITE_JOB_TOKEN'}
 env.setdefault('PYTHONUNBUFFERED', '1')
 posix = os.name == 'posix'
-buf = bytearray(); cut = False; timed = False; code = -1
+buf = bytearray(); cut = False; timed = False; code = -1; cwd = None
 try:
-    p = subprocess.Popen(job['command'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env, start_new_session=posix)
+    if 'files' in job:
+        try: cwd = inputs(job['files'])
+        except Exception: raise RuntimeError('invalid input files')
+    p = subprocess.Popen(job['command'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env, cwd=cwd, start_new_session=posix)
     end = time.monotonic() + int(job['timeout'])
     os.set_blocking(p.stdout.fileno(), False)
     while True:
@@ -896,8 +1011,10 @@ try:
             p.wait(); break
     code = p.returncode if p.returncode is not None else -1
 except Exception as e:
-    buf += ('runner: could not start command: %s' % type(e).__name__).encode()
-body = json.dumps({'exitCode': int(code), 'timedOut': timed, 'output': buf.decode('utf-8', 'replace'), 'truncated': cut}, ensure_ascii=False).encode()
+    buf += ('runner: invalid input files' if str(e) == 'invalid input files' else 'runner: could not start command: %s' % type(e).__name__).encode()
+finally:
+    if cwd: shutil.rmtree(cwd, ignore_errors=True)
+body =json.dumps({'exitCode': int(code), 'timedOut': timed, 'output': buf.decode('utf-8', 'replace'), 'truncated': cut}, ensure_ascii=False).encode()
 if not job.get('callback'):
     sys.stdout.write('${RESULT_MARKER}' + body.decode() + '\n'); sys.stdout.flush(); sys.exit(0)
 req = urllib.request.Request(job['callback'], data=body, method='POST', headers={'authorization': 'Bearer ' + token, 'content-type': 'application/json', 'user-agent': 'CloudBiteCompute/1.0'})
