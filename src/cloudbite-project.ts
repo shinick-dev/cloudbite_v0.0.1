@@ -49,7 +49,7 @@ import {
 } from './cloudbite-budget';
 import {
   CB_MEMO_PACKET_LIMITS, completedMemo, failedMemo, isMemoSnapshotCurrent, memoMessages, memoSnapshotHash, needsOptionsMemo, parseMemoReply, runningMemo, settleStaleMemo,
-  validateMemoPacket, type DecisionMemo, type MemoCoverage, type MemoEvidencePacket, type MemoInputOptions, type ProjectMemo,
+  type DecisionMemo, type MemoCoverage, type MemoEvidencePacket, type MemoInputOptions, type ProjectMemo,
 } from './cloudbite-memo';
 import { buildExpertAssignments } from './cloudbite-workorders';
 import { defaultResponseLanguage } from './cloudbite-workflow';
@@ -761,16 +761,41 @@ export class CloudbiteProject extends DurableObject<Env> {
   private completed(s: Pick<Loaded, 'experts'>): CompletedOpinion[] {
     return s.experts.filter((e) => e.run.status === 'completed' && e.run.opinion).map((e) => ({ expertId: e.run.expertId, name: e.run.name, opinion: e.run.opinion! }));
   }
-  /** Memo inputs: the whole team (honest denominator), finished cross-review reports, and source metadata of the sealed packets. */
+  /**
+   * Memo inputs: the whole team (honest denominator), finished cross-review reports, and source metadata of the sealed
+   * packets. Every distinct source goes to the memo leaf, which applies CB_MEMO_PACKET_LIMITS.packets and counts what it
+   * leaves out; nothing is cut here. A source is one exact source ID (repeats across roles are one source); each gets a
+   * packet ID of its own, so IDs that slug alike never merge. Sources a sealed packet itself left out (unnamed, counted
+   * only) are disclosed first as one metadata record per packet, naming the packet hash.
+   */
   private memoOptions(s: Pick<Loaded, 'experts' | 'cr' | 'packets'>): MemoInputOptions {
-    const packets: MemoEvidencePacket[] = [], seen = new Set<string>();
-    for (const p of s.packets ?? []) for (const src of p.sources) {
-      const id = `src-${src.id.toLowerCase().replace(/[^a-z0-9-]+/g, '-')}`.slice(0, 64).replace(/-+$/, '');
-      const packet = validateMemoPacket({ id, kind: 'source-metadata', label: src.title || src.id, expertId: p.expertId,
-        origin: `${src.url} (${src.license}; original text not fetched)` });
-      if (!packet || seen.has(packet.id) || packets.length >= CB_MEMO_PACKET_LIMITS.packets) continue;
-      seen.add(packet.id); packets.push(packet);
+    const disclosures: MemoEvidencePacket[] = [], sources: MemoEvidencePacket[] = [], taken = new Set<string>(), seen = new Set<string>();
+    const fnv = (t: string) => { let h = 0x811c9dc5; for (let i = 0; i < t.length; i++) h = Math.imul(h ^ t.charCodeAt(i), 0x01000193); return (h >>> 0).toString(16).padStart(8, '0'); };
+    const unique = (prefix: string, raw: string) => {
+      const slug = raw.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-+$/, '');
+      let id = `${prefix}-${slug}`;
+      // Lossy (case, characters, length) or already used: suffix the exact identity's hash, then a counter.
+      if (slug !== raw || id.length > 64 || taken.has(id)) id = `${`${prefix}-${slug}`.slice(0, 55).replace(/-+$/, '')}-${fnv(raw)}`;
+      for (let n = 2; taken.has(id); n++) id = `${id.slice(0, 64 - String(n).length - 1).replace(/-+$/, '')}-${n}`;
+      taken.add(id);
+      return id;
+    };
+    for (const p of s.packets ?? []) {
+      if (p.omitted.sources > 0) {
+        disclosures.push({ id: unique('omit', p.expertId), kind: 'source-metadata', expertId: p.expertId,
+          label: `${p.omitted.sources} observed source(s) of ${p.expertId} left out by the sealed evidence packet bound; not listed`,
+          origin: `evidence packet sha256 ${p.sha256}; omitted.sources=${p.omitted.sources}; original text not fetched` });
+      }
+      for (const src of p.sources) {
+        if (seen.has(src.id)) continue;
+        seen.add(src.id);
+        const tail = ` (${src.license}; original text not fetched)`;
+        // Not pre-validated: a record the leaf rejects is counted there as invalid, never dropped silently.
+        sources.push({ id: unique('src', src.id), kind: 'source-metadata', label: (src.title || src.id).slice(0, CB_MEMO_PACKET_LIMITS.label), expertId: p.expertId,
+          origin: src.url.slice(0, Math.max(0, CB_MEMO_PACKET_LIMITS.origin - tail.length)) + tail });
+      }
     }
+    const packets = [...disclosures, ...sources];
     const reviews = s.cr && s.cr.review.status !== 'running' ? s.cr.review.reports : [];
     return { team: s.experts.map((e) => ({ expertId: e.run.expertId, name: e.run.name, status: e.run.status })),
       ...(reviews.length ? { reviews } : {}), ...(packets.length ? { packets } : {}) };

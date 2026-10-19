@@ -358,6 +358,37 @@ await test('memo: one paid claim persisted before the call, fixed max_tokens, st
   assert.equal((await call(w, 'GET', `/api/cloudbite/projects/${bad.id}/memo`, { headers: bad.auth })).status, 405);
 });
 
+await test('memo: every sealed source reaches the leaf cap with exact counts; repeats are one source, alike-slugging IDs never merge', async () => {
+  const w = world(), x = await finished(w);
+  const ids = x.created.brief.expertIds; N.memoIds = ids;
+  const src = (id) => ({ id, title: `Title ${id}`, url: `https://example.org/${encodeURIComponent(id)}`, license: 'CC-BY', checkStatus: 'unchecked', checkedAt: '', originalText: 'not-fetched' });
+  const sealed = (expertId, list, omittedSources = 0) => ({ expertId, binding: 'bound', bindingNote: '', pack: null, observed: { retrievals: 1, cardIds: [], sourceIds: list },
+    cards: [], references: [], originalSourceTextFetched: false, auditNotes: [], bytes: 0, sources: list.map(src), sha256: hash(expertId + list.join()),
+    omitted: { cards: 0, sources: omittedSources, references: 0, observedIds: 0, unidentifiedIds: 0, truncatedSummaries: 0 } });
+  const range = (p) => Array.from({ length: 12 }, (_, i) => `${p}-${i}`);
+  const long = 'L'.repeat(79);
+  // 3 x 12 distinct + 3 IDs slugging to src-coll-x + 2 IDs equal for the first 64 characters + 1 repeat of a-0
+  const packets = [sealed(ids[0], ['Coll_X', 'coll-x', 'COLL.X', long + 'a', long + 'b', ...range('pmc-a')]),
+    sealed(ids[1 % ids.length], [...range('pmc-b'), 'pmc-a-0']), sealed(ids[0], range('pmc-c'), 5)];
+  w.store(x.id).m.set('packets', packets);
+  const r = await memo(w, x);
+  assert.equal(r.status, 200, r.text); assert.equal(r.data.memo.status, 'completed', r.text);
+  const data = JSON.parse(N.calls[0].req.messages[1].content.replace(/^[^\n]*\n/, ''));
+  // 41 distinct sources + 1 disclosure of the sealed packet's own omissions; the leaf keeps 24 and counts the rest
+  assert.deepEqual(data.coverage.packets, { included: 24, total: 42, truncated: 0, omitted: 18, invalid: 0, metadataOnly: 24 });
+  assert.deepEqual(r.data.memo.coverage.packets, data.coverage.packets, 'stored coverage equals what the model was told');
+  assert.equal(data.coverage.sourcePagesReviewed, false);
+  const pk = data.packets, pid = pk.map((p) => p.id);
+  assert.equal(new Set(pid).size, pid.length, 'unique packet IDs');
+  assert.match(pk[0].id, /^omit-/); assert.match(pk[0].label, /^5 observed source/);
+  assert.match(pk[0].originMetadata, new RegExp(`sha256 ${hash(ids[0] + range('pmc-c').join())}; omitted\\.sources=5`));
+  const coll = pk.filter((p) => /^Title (Coll_X|coll-x|COLL\.X)$/.test(p.label));
+  assert.equal(coll.length, 3, 'three source identities, three packets'); assert.ok(coll.some((p) => p.id === 'src-coll-x'));
+  assert.equal(pk.filter((p) => p.label.startsWith('Title ' + long)).length, 2, 'IDs equal up to the slug length stay apart');
+  assert.ok(pid.every((id) => /^[a-z0-9][a-z0-9-]{0,63}$/.test(id)));
+  assert.ok(pk.every((p) => p.originalText === 'absent' && /original text not fetched/.test(p.originMetadata) && p.excerpt === undefined));
+});
+
 await test('memo: without decision options a deterministic needs-options record and no call; demo projects refuse', async () => {
   const w = world(), x = await finished(w, { b: brief({ decision: undefined }) });
   const r = await memo(w, x);
