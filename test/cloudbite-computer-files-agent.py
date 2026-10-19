@@ -1,0 +1,484 @@
+"""Files agent fault tests: synthetic temp directories and a fake transport only; no network."""
+import contextlib
+import hashlib
+import importlib.util
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import unicodedata
+from pathlib import Path
+
+AGENT_PATH = Path(__file__).resolve().parent.parent / "images/cloudbite-computer/files-agent.py"
+spec = importlib.util.spec_from_file_location("files_agent", AGENT_PATH)
+fa = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fa)
+SKIPS = []
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+class Fake:
+    """File-backed fake server so a crashed child process and the parent see the same remote state."""
+    configured = True
+
+    def __init__(self, store):
+        self.store = Path(store)
+        self.store.mkdir(exist_ok=True)
+        self.fetches = 0
+        self.corrupt = self.extra = False
+        self.reject = None
+        self.on_commit = None
+        self.lose_response = False
+        self.crash_in_fetch = self.crash_in_commit = False
+
+    def _load(self):
+        path = self.store / "state.json"
+        return json.loads(path.read_text()) if path.exists() else {"current": {}, "objects": {}, "ops": {}, "begins": {}}
+
+    def _save(self, state):
+        (self.store / "state.json").write_text(json.dumps(state))
+
+    def put(self, file_id, version, data, path, mode=0o644):
+        state = self._load()
+        state["objects"][file_id + "@" + version] = data.hex()
+        state["current"][file_id] = version
+        self._save(state)
+        return {"fileId": file_id, "path": path, "versionId": version, "size": len(data), "sha256": sha(data),
+                "mode": mode}
+
+    def body(self, file_id, version=None):
+        state = self._load()
+        return bytes.fromhex(state["objects"][file_id + "@" + (version or state["current"][file_id])])
+
+    def fetch_version(self, req):
+        self.fetches += 1
+        data = self.body(req["fileId"], req["versionId"])
+        if self.corrupt:
+            data = data[:-1] + bytes([data[-1] ^ 1])
+        if self.extra:
+            data += b"x" * 10
+        for i in range(0, len(data), 4):
+            if self.crash_in_fetch and i:
+                os._exit(9)
+            yield data[i:i + 4]
+
+    def begin_upload(self, req):
+        if self.reject:
+            raise fa.BackendError(self.reject)
+        state = self._load()
+        state["begins"][req["requestId"]] = state["begins"].get(req["requestId"], 0) + 1
+        state["ops"].setdefault(req["requestId"], {"req": req, "body": "", "receipt": None})
+        self._save(state)
+        return {"requestId": req["requestId"], "uploadId": "u_" + req["requestId"]}
+
+    def put_body(self, req, chunk):
+        state = self._load()
+        op = state["ops"][req["uploadId"][2:]]
+        op["body"] = (bytes.fromhex(op["body"])[:req["offset"]] + chunk).hex()
+        self._save(state)
+
+    def commit_upload(self, req):
+        state = self._load()
+        op = state["ops"][req["requestId"]]
+        body, upload = bytes.fromhex(op["body"]), op["req"]
+        file_id = upload["fileId"] or "f_" + upload["requestId"][:8]
+        if state["current"].get(file_id) != upload["baseVersion"]:
+            raise fa.BackendError("base_version_conflict")
+        assert sha(body) == upload["sha256"] and len(body) == upload["size"]
+        version = "v_%d" % (len(state["objects"]) + 1)
+        state["objects"][file_id + "@" + version] = body.hex()
+        state["current"][file_id] = version
+        op["receipt"] = {"requestId": upload["requestId"], "fileId": file_id, "versionId": version,
+                         "baseVersion": upload["baseVersion"], "size": len(body), "sha256": sha(body),
+                         "writerEpoch": upload["writerEpoch"], "canonical": True}
+        self._save(state)
+        if self.crash_in_commit:
+            os._exit(9)
+        if self.on_commit:
+            self.on_commit()
+        if self.lose_response:
+            raise ConnectionError("response lost")
+        return op["receipt"]
+
+    def get_operation(self, req):
+        op = self._load()["ops"].get(req["requestId"])
+        if not op:
+            return {"requestId": req["requestId"], "phase": "unknown_request"}
+        if not op["receipt"]:
+            return {"requestId": req["requestId"], "phase": "pending"}
+        return {"requestId": req["requestId"], "phase": "committed", "receipt": op["receipt"]}
+
+    def begins(self, request_id):
+        return self._load()["begins"].get(request_id, 0)
+
+
+class Env:
+    def __init__(self, base, **cfg):
+        self.base = Path(base)
+        self.root = self.base / "workspace"
+        self.state = self.base / "state"
+        self.root.mkdir(exist_ok=True)
+        self.fake = Fake(self.base / "remote")
+        self.free = 10 << 30
+        cfg.setdefault("reserve_bytes", 1000)
+        fa.FilesAgent.init(str(self.state), str(self.root), "w_test", "m_test", **cfg).close()
+        self.agent = self.reopen()
+
+    def reopen(self, backend=None):
+        if getattr(self, "agent", None):
+            self.agent.close()
+        self.agent = fa.FilesAgent(str(self.state), backend=backend or self.fake, disk_free=lambda _: self.free)
+        return self.agent
+
+    def staging(self):
+        return sorted(os.listdir(self.state / "staging"))
+
+    def touch(self, path):
+        self.agent.close_lease(self.agent.open(path=path)["leaseId"])
+
+    def entry(self, path):
+        for item in self.agent.list_local(0, 500)["items"]:
+            if item["path"] == path:
+                return item
+        raise AssertionError(path)
+
+
+def expect(code, fn, *args, **kwargs):
+    try:
+        fn(*args, **kwargs)
+    except fa.AgentError as err:
+        assert err.code == code, (err.code, code)
+        return
+    raise AssertionError("expected " + code)
+
+
+@contextlib.contextmanager
+def env(**cfg):
+    base = tempfile.mkdtemp(prefix="cb-files-agent-")
+    e = Env(base, **cfg)
+    try:
+        yield e
+    finally:
+        if e.agent:
+            e.agent.close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_paths_and_root_boundaries():
+    for bad in ("../x", "/abs", "a//b", "a\\b", "a/./b", "C:x", "a\x01b", "", "a/" + "n" * 256):
+        expect("path_invalid", fa.check_rel, bad)
+    for bad in (".ssh/id_ed25519", "proj/.aws/credentials", ".config/app.json", ".CACHE/x", "p/.git-credentials"):
+        expect("path_forbidden", fa.check_rel, bad)
+    assert fa.check_rel("proj/.config/ok.json")  # only top-level profile dirs are refused
+    with env() as e:
+        expect("path_forbidden", fa.FilesAgent.init, str(e.base / "s2"), str(e.base), "w", "m")  # state inside root
+        expect("path_forbidden", fa.FilesAgent.init, str(e.base / "s3"), os.path.expanduser("~/.."), "w", "m")
+        expect("path_invalid", e.agent.register, [e.fake.put("f_1", "v_1", b"x", "../escape")])
+        (e.root / "real").mkdir()
+        try:
+            os.symlink(e.root / "real", e.root / "link", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            SKIPS.append("symlink crossing (symlinks unavailable on this host)")
+        else:
+            expect("path_symlink", e.agent.register, [e.fake.put("f_1", "v_1", b"x", "link/a.txt")])
+            expect("path_symlink", e.agent.mark_dirty, "link/a.txt")
+        assert not (e.base / "escape").exists()
+
+
+def test_unicode_names_and_metadata_only():
+    nfd = unicodedata.normalize("NFD", "보고서/Café.txt")
+    with env() as e:
+        e.agent.register([e.fake.put("f_1", "v_1", b"hello", nfd), e.fake.put("f_2", "v_1", b"b" * 50, "big.bin")])
+        expect("path_collision", e.agent.register, [e.fake.put("f_3", "v_1", b"z", unicodedata.normalize("NFC", nfd).upper())])
+        listing, status = e.agent.list_local(0, 1), e.agent.status()
+        assert listing["nextCursor"] and len(listing["items"]) == 1
+        assert status["states"] == {"remote-only": 2}
+        assert e.fake.fetches == 0 and os.listdir(e.root) == [], "metadata queries never hydrate bodies"
+        e.agent.open(path=nfd)
+        on_disk = os.listdir(e.root / nfd.split("/")[0])
+        assert on_disk == [nfd.split("/")[1]], "name bytes preserved exactly"
+        assert (e.root / nfd).read_bytes() == b"hello"
+
+
+def test_open_verifies_before_activation():
+    with env(max_transfer_bytes=100) as e:
+        e.agent.register([e.fake.put("f_1", "v_1", b"version-one", "doc.txt", 0o640)])
+        e.fake.corrupt = True
+        expect("checksum_mismatch", e.agent.open, path="doc.txt")
+        assert not (e.root / "doc.txt").exists() and e.staging() == []
+        e.fake.corrupt, e.fake.extra = False, True
+        expect("size_mismatch", e.agent.open, path="doc.txt")
+        e.fake.extra = False
+        first = e.agent.open(path="doc.txt")
+        assert first["fetchedBytes"] == 11 and first["state"] == "clean"
+        if os.name != "nt":
+            assert stat.S_IMODE(os.stat(e.root / "doc.txt").st_mode) == 0o640
+        else:
+            SKIPS.append("POSIX mode preservation (Windows host)")
+        fetches = e.fake.fetches
+        assert e.agent.open(path="doc.txt")["fetchedBytes"] == 0 and e.fake.fetches == fetches, "cache hit"
+        # A newer version whose download is corrupt leaves the verified older copy in place.
+        e.agent.register([e.fake.put("f_1", "v_2", b"version-two!", "doc.txt")])
+        e.fake.corrupt = True
+        expect("checksum_mismatch", e.agent.open, path="doc.txt")
+        assert (e.root / "doc.txt").read_bytes() == b"version-one"
+        e.fake.corrupt = False
+        assert e.agent.open(path="doc.txt", version="v_2")["versionId"] == "v_2"
+        e.agent.register([e.fake.put("f_9", "v_1", b"y" * 101, "huge.bin")])
+        expect("transfer_too_large", e.agent.open, path="huge.bin")
+
+
+def test_unrecorded_local_edit_is_never_clobbered():
+    with env() as e:
+        e.agent.register([e.fake.put("f_1", "v_1", b"remote", "a.txt")])
+        lease = e.agent.open(path="a.txt")["leaseId"]
+        (e.root / "a.txt").write_bytes(b"edited by an app without telling the agent")
+        e.agent.register([e.fake.put("f_1", "v_2", b"remote two", "a.txt")])
+        expect("local_modified", e.agent.open, path="a.txt", version="v_2")
+        assert (e.root / "a.txt").read_bytes().startswith(b"edited")
+        assert e.entry("a.txt")["state"] == "dirty" and e.entry("a.txt")["baseVersion"] == "v_1"
+        # A pre-existing workspace file at a catalog path is adopted, not replaced.
+        (e.root / "mine.txt").write_bytes(b"my original")
+        e.agent.register([e.fake.put("f_2", "v_1", b"server copy", "mine.txt")])
+        expect("local_modified", e.agent.open, path="mine.txt")
+        assert (e.root / "mine.txt").read_bytes() == b"my original"
+        assert e.entry("mine.txt")["origin"] == "user"
+        e.agent.close_lease(lease)
+
+
+def test_upload_verified_receipt_and_change_during_upload():
+    with env() as e:
+        e.agent.register([e.fake.put("f_1", "v_1", b"one", "a.txt")])
+        e.touch("a.txt")
+        (e.root / "a.txt").write_bytes(b"two")
+        e.agent.mark_dirty("a.txt")
+        e.fake.on_commit = lambda: (e.root / "a.txt").write_bytes(b"three, typed during upload")
+        result = e.agent.sync()["results"][0]
+        assert result["phase"] == "committed" and result["state"] == "dirty"
+        assert e.fake.body("f_1") == b"two"
+        entry = e.entry("a.txt")
+        assert entry["state"] == "dirty" and entry["baseVersion"] == result["versionId"], "new revision on top"
+        e.fake.on_commit = None
+        second = e.agent.sync()["results"][0]
+        assert second["state"] == "clean" and e.fake.body("f_1") == b"three, typed during upload"
+        assert e.agent.prepare_end()["ready"] is True
+        # A brand-new local file goes up with no fileId and receives one from the receipt.
+        (e.root / "new.txt").write_bytes(b"new")
+        e.agent.mark_dirty("new.txt")
+        assert e.agent.sync()["results"][0]["state"] == "clean"
+        assert e.entry("new.txt")["fileId"] and e.entry("new.txt")["origin"] == "user"
+
+
+def test_stale_and_mismatched_acks():
+    with env() as e:
+        e.agent.register([e.fake.put("f_1", "v_1", b"one", "a.txt")])
+        e.touch("a.txt")
+        (e.root / "a.txt").write_bytes(b"two")
+        e.agent.mark_dirty("a.txt")
+        old = e.agent.sync()["results"][0]
+        old_receipt = e.fake._load()["ops"][old["requestId"]]["receipt"]
+        (e.root / "a.txt").write_bytes(b"three!")
+        e.agent.mark_dirty("a.txt")
+        e.fake.lose_response = True
+        pending = e.agent.sync()["results"][0]
+        assert pending["phase"] == "unknown"
+        late = e.agent.apply_ack(old_receipt)
+        assert late["applied"] is False and late["code"] == "stale_ack"
+        assert e.entry("a.txt")["state"] == "uploading"
+        forged = dict(e.fake._load()["ops"][pending["requestId"]]["receipt"], sha256="0" * 64)
+        assert e.agent.apply_ack(forged)["code"] == "receipt_mismatch"
+        assert e.entry("a.txt")["state"] == "uploading"
+        assert e.agent.prepare_end()["ready"] is False
+        e.fake.lose_response = False
+        assert e.agent.reconcile()["results"][0]["state"] == "clean"
+        assert e.fake.begins(pending["requestId"]) == 1
+        assert e.agent.prepare_end()["ready"] is True
+
+
+def test_rejections_keep_dirty_data():
+    with env() as e:
+        e.agent.register([e.fake.put("f_1", "v_1", b"one", "a.txt")])
+        e.agent.open(path="a.txt")
+        (e.root / "a.txt").write_bytes(b"local edit")
+        e.agent.mark_dirty("a.txt")
+        e.fake.reject = "quota_exceeded"
+        first = e.agent.sync()["results"][0]
+        assert first["phase"] == "prepared" and e.entry("a.txt")["state"] == "uploading"
+        e.fake.reject = None
+        retried = e.agent.sync()["results"][0]
+        assert retried["requestId"] == first["requestId"] and retried["state"] == "clean", "same request id on retry"
+        # Someone else advanced the canonical version: keep the local copy, flag a conflict.
+        e.fake.put("f_1", "v_other", b"other writer", "a.txt")
+        (e.root / "a.txt").write_bytes(b"mine again")
+        e.agent.mark_dirty("a.txt")
+        assert e.agent.sync()["results"][0]["phase"] == "conflict"
+        assert (e.root / "a.txt").read_bytes() == b"mine again" and e.entry("a.txt")["state"] == "conflict"
+        report = e.agent.prepare_end()
+        assert report["conflict"] == ["a.txt"] and not report["safeToDelete"] and not report["remoteSaved"]
+        assert e.agent.evict()["evicted"] == []
+
+
+def test_unconfigured_transport_never_claims_saved():
+    with env() as e:
+        (e.root / "a.txt").write_bytes(b"local only")
+        e.agent.mark_dirty("a.txt")
+        e.reopen(fa.UnconfiguredHttpBackend())
+        report = e.agent.prepare_end(flush=True)
+        assert report["ready"] is False and report["remoteSaved"] is False
+        assert "transport_not_configured" in report["errors"] and report["uploading"] == ["a.txt"]
+        assert e.agent.status()["transportConfigured"] is False
+        assert (e.root / "a.txt").read_bytes() == b"local only"
+
+
+def test_eviction_protects_dirty_pinned_open_and_user_files():
+    with env() as e:
+        names = ["clean.bin", "pinned.bin", "open.bin", "dirty.bin", "edited.bin"]
+        e.agent.register([e.fake.put("f_%d" % i, "v_1", b"%d" % i * 100, n) for i, n in enumerate(names)])
+        for n in names:
+            e.agent.open(path=n)
+        for lease in [r[0] for r in e.agent.db.execute(
+                "SELECT l.lease_id FROM leases l JOIN files f ON f.id=l.row WHERE f.path!='open.bin'")]:
+            e.agent.close_lease(lease)
+        e.agent.set_pinned("pinned.bin", True)
+        (e.root / "dirty.bin").write_bytes(b"changed")
+        e.agent.mark_dirty("dirty.bin")
+        (e.root / "edited.bin").write_bytes(b"changed silently, no journal entry")
+        (e.root / "user.txt").write_bytes(b"pre-existing")
+        e.agent.register([e.fake.put("f_u", "v_1", b"pre-existing", "user.txt")])
+        e.agent.open(path="user.txt")
+        result = e.agent.evict()
+        assert result["evicted"] == ["clean.bin"], result
+        for n in names[1:] + ["user.txt"]:
+            assert (e.root / n).exists(), n
+        assert e.entry("edited.bin")["state"] == "dirty", "silent edit is journaled, not deleted"
+        assert e.entry("clean.bin")["state"] == "remote-only"
+        assert e.agent.prepare_end()["open"] == ["open.bin", "user.txt"]
+
+
+def test_space_pressure_blocks_downloads_not_dirty_data():
+    with env(reserve_bytes=1000) as e:
+        e.agent.register([e.fake.put("f_1", "v_1", b"c" * 400, "cache.bin"), e.fake.put("f_2", "v_1", b"n" * 400, "next.bin")])
+        e.agent.close_lease(e.agent.open(path="cache.bin")["leaseId"])
+        (e.root / "work.txt").write_bytes(b"unsaved work")
+        e.agent.mark_dirty("work.txt")
+        e.free = 1200
+        expect("insufficient_space", e.agent.open, path="next.bin")
+        assert (e.root / "cache.bin").exists() and (e.root / "work.txt").exists() and not (e.root / "next.bin").exists()
+    with env(reserve_bytes=1000, auto_evict=True) as e:
+        e.agent.register([e.fake.put("f_1", "v_1", b"c" * 400, "cache.bin"), e.fake.put("f_2", "v_1", b"n" * 400, "next.bin")])
+        e.agent.close_lease(e.agent.open(path="cache.bin")["leaseId"])
+        (e.root / "work.txt").write_bytes(b"unsaved work")
+        e.agent.mark_dirty("work.txt")
+        real_evict = e.agent.evict
+        def evict(need):
+            result = real_evict(need)
+            e.free += result["freedBytes"]
+            return result
+        e.agent.evict = evict
+        e.free = 1200
+        e.agent.open(path="next.bin")
+        assert not (e.root / "cache.bin").exists() and (e.root / "work.txt").read_bytes() == b"unsaved work"
+        e.free = 100
+        expect("insufficient_space", e.agent.open, path="cache.bin")  # nothing clean left; dirty untouched
+        assert (e.root / "work.txt").exists()
+
+
+def test_drain_blocks_new_fetches():
+    with env() as e:
+        e.agent.register([e.fake.put("f_1", "v_1", b"a", "a.txt"), e.fake.put("f_2", "v_1", b"b", "b.txt")])
+        e.agent.open(path="a.txt")
+        report = e.agent.prepare_end()
+        assert report["ready"] is False and report["open"] == ["a.txt"]
+        expect("draining", e.agent.open, path="b.txt")
+        e.agent.open(path="a.txt")  # already-local copy still opens
+        e.reopen()
+        expect("draining", e.agent.open, path="b.txt")  # drain survives restart
+        e.agent.resume()
+        e.agent.open(path="b.txt")
+
+
+def child(kind, state, store):
+    fake = Fake(store)
+    setattr(fake, "crash_in_" + kind, True)
+    agent = fa.FilesAgent(state, backend=fake, disk_free=lambda _: 10 << 30)
+    agent.open(path="a.txt") if kind == "fetch" else agent.sync()
+    raise SystemExit("child survived")
+
+
+def run_child(e, kind):
+    e.agent.close()
+    e.agent = None
+    proc = subprocess.run([sys.executable, "-B", __file__, "--child", kind, str(e.state), str(e.fake.store)],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 9, proc.stderr
+    return e.reopen()
+
+
+def test_power_loss_and_restart_recovery():
+    with env() as e:
+        e.agent.register([e.fake.put("f_1", "v_1", b"first version", "a.txt"),
+                          e.fake.put("f_2", "v_1", b"b one", "b.txt")])
+        e.touch("a.txt")
+        e.touch("b.txt")
+        e.agent.register([e.fake.put("f_1", "v_2", b"second version!", "a.txt")])
+        run_child(e, "fetch")
+        assert e.staging() == [], "interrupted download temp removed on restart"
+        assert (e.root / "a.txt").read_bytes() == b"first version"
+        assert e.entry("a.txt")["baseVersion"] == "v_1" and e.entry("a.txt")["state"] == "clean"
+        (e.root / "b.txt").write_bytes(b"my edit before power loss")
+        e.agent.mark_dirty("b.txt")
+        run_child(e, "commit")  # server committed, agent died before seeing the receipt
+        assert e.entry("b.txt")["state"] == "uploading"
+        assert e.agent.prepare_end()["unconfirmedOps"], "unknown outcome blocks the end-of-session claim"
+        assert "b.txt" not in e.agent.evict()["evicted"] and (e.root / "b.txt").exists()
+        assert e.agent.reconcile()["results"][0]["state"] == "clean"
+        assert e.fake.body("f_2") == b"my edit before power loss"
+        assert e.agent.prepare_end()["ready"] is True and e.staging() == []
+
+
+def test_cli_json_protocol():
+    base = Path(tempfile.mkdtemp(prefix="cb-files-cli-"))
+    try:
+        (base / "ws").mkdir()
+        secret = b"CONTENT-MARKER-should-never-print"
+        (base / "ws" / "note.txt").write_bytes(secret)
+
+        def cli(*args):
+            proc = subprocess.run([sys.executable, "-B", str(AGENT_PATH), "--state", str(base / "st"), *args],
+                                  capture_output=True, timeout=60)
+            assert secret not in proc.stdout and secret not in proc.stderr
+            lines = proc.stdout.decode("utf-8").strip().splitlines()
+            return proc.returncode, (json.loads(lines[-1]) if lines else None)
+
+        assert subprocess.run([sys.executable, "-B", str(AGENT_PATH), "--help"], capture_output=True).returncode == 0
+        assert cli("status") == (2, {"ok": False, "code": "not_configured"})
+        assert cli("init", "--root", str(base / "ws"), "--workspace-id", "w1", "--machine-id", "m1")[0] == 0
+        assert cli("mark-dirty", "--path", "note.txt")[1]["state"] == "dirty"
+        assert cli("mark-dirty", "--path", "../x") == (2, {"ok": False, "code": "path_invalid"})
+        code, out = cli("sync")
+        assert code == 0 and out["results"][0]["code"] == "transport_not_configured"
+        code, out = cli("prepare-end", "--flush")
+        assert code == 0 and out["ready"] is False and out["uploading"] == ["note.txt"]
+        code, out = cli("list-local")
+        assert out["items"][0]["evictable"] is False and out["nextCursor"] is None
+        assert (base / "ws" / "note.txt").read_bytes() == secret
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--child":
+        child(*sys.argv[2:5])
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    for test in tests:
+        test()
+        print("ok", test.__name__)
+    for skip in SKIPS:
+        print("skip", skip)
+    print("cloudbite-computer-files-agent: %d tests passed, %d skips" % (len(tests), len(SKIPS)))
