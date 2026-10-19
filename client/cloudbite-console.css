@@ -400,6 +400,22 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .cb-history-feedback textarea { resize: vertical; }
 .cb-history-feedback button { justify-self: start; }
 .cb-history-feedback select:disabled { color: var(--muted); background: var(--sunk); }
+.cb-hr-form { margin-top: 12px; }
+.cb-core-claims { margin-top: 12px; }
+.cb-core-claims h5 { font-size: 14px; margin: 0 0 4px; }
+.cb-hr-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 14rem); gap: 6px 12px; align-items: center; }
+.cb-hr-grid label { margin-top: 0; }
+.cb-hr-issuebox { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 12px 12px; margin: 8px 0 0; display: grid; gap: 6px; }
+.cb-hr-issuebox legend { color: var(--muted); font-size: 13px; padding: 0 4px; }
+.cb-hr-issue { display: flex; gap: 8px; align-items: center; }
+.cb-hr-issue label { margin-top: 0; color: var(--ink); }
+.cb-hr-issue input[type=checkbox] { accent-color: var(--blue); }
+.cb-hr-issuebox input[type=text] { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); padding: 7px 10px; margin-left: 24px; max-width: calc(100% - 24px); }
+.cb-hr-hash { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.cb-hr-saved { border-left: 3px solid var(--blue); padding: 4px 0 4px 12px; margin: 8px 0; }
+.cb-hr-scores, .cb-hr-issues { list-style: none; padding: 0; margin: 6px 0; display: grid; gap: 4px; max-width: 65ch; }
+.cb-hr-scores li { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding: 4px 0; }
+@media (max-width: 560px) { .cb-hr-grid { grid-template-columns: minmax(0, 1fr); } }
 .cb-history-delete { padding-top: 12px; }
 .cb-history-delete button { margin: 0 8px 8px 0; }
 .cb-history-report { display: flex; flex-direction: column; gap: 12px; }

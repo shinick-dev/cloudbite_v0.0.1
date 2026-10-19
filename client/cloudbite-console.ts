@@ -23,12 +23,17 @@ import type { ClaimAdoption, ClaimStanding, LedgerClaim, ProvenanceLedger, Prove
 import type { AuthorResponseParsed, AuthorResponsePlan } from '../src/cloudbite-author-response';
 import type { ClaimSupportAssessment, QuantitativeCheckRecord } from '../src/cloudbite-contract';
 import type { QuantitativeRequest } from '../src/cloudbite-quantitative';
+import type { HumanDimension, HumanReviewDetail, HumanReviewIssue, HumanReviewPublic } from '../src/cloudbite-human-review';
 
 type Mode = 'demo' | 'live';
 type View = 'home' | 'guide' | 'help' | 'settings' | 'history';
 /** invalidAuthorResponse: 서버가 보낸 작성자 응답을 읽을 수 없다 (서버가 거부한 응답 { invalid } 와는 다르다) */
 type ConsoleExpert = ExpertRun & { invalidOpinion?: boolean; invalidAuthorResponse?: boolean };
-type ConsoleReview = ProjectCrossReview & { invalidArtifactCoverage?: boolean; invalidClaimSupport?: boolean };
+/** 핵심 주장 판정 (교차 검토 보고서의 선택 필드 report.claimFindings). 계약에 아직 없을 수 있으므로 콘솔이 구조를 직접 확인한다 */
+type ConsoleClaimFinding = { targetExpertId: string; target: { kind: 'summary' | 'assumption' | 'nextAction'; index: number; quote: string };
+  verdict: CrossReviewFinding['verdict']; issue: 'unsupported-premise' | 'causal-overreach' | 'missing-assumption' | 'other'; rationale: string };
+type ConsoleReport = CrossReviewReport & { claimFindings?: ConsoleClaimFinding[] };
+type ConsoleReview = Omit<ProjectCrossReview, 'reports'> & { reports: ConsoleReport[]; invalidArtifactCoverage?: boolean; invalidClaimSupport?: boolean; invalidClaimFindings?: boolean };
 type Provenance = { ledger: ProvenanceLedger; state: ProvenanceState };
 /** 서버가 저장한 결정 메모. 모양을 검사해 그대로 받으며, 원문 의견은 따로 그대로 남는다 */
 type ConsoleMemo = ProjectMemo;
@@ -521,6 +526,10 @@ const P4_EN = {
   supportTitle: 'Claim-to-text assessment', supportNote: 'Model assessment of the supplied passage; not factual verification. Curated cards are summaries, not original source pages.',
   supportStatus: { supported: 'Supports', partial: 'Partly supports', contradicted: 'Contradicts', insufficient: 'Cannot determine' } as Record<string, string>,
   supportInvalid: 'The claim-to-text assessment could not be read.',
+  coreTitle: 'Core-claim checks', coreNote: 'The reviewer model\'s reading of this role\'s summary, assumptions and next actions; not factual verification.',
+  coreTarget: { summary: 'summary', assumption: 'assumption', nextAction: 'next action' } as Record<string, string>,
+  coreIssue: { 'unsupported-premise': 'Unsupported premise', 'causal-overreach': 'Causal overreach', 'missing-assumption': 'Missing assumption', other: 'Other' } as Record<string, string>,
+  coreInvalid: 'Some core-claim checks could not be read, so they are not shown.',
   computed: 'Computed', calculationError: 'Calculation error', csvCounts: (a: number, b: number) => `${a} included rows · ${b} excluded rows`,
   textOrigin: { 'user-document': 'Supplied document', 'imported-original-excerpt': 'Imported original excerpt', 'workspace-field': 'User project statement', 'curated-card': 'Curated summary card' } as Record<string, string>,
 };
@@ -537,6 +546,10 @@ const P4_KO: typeof P4_EN = {
   supportTitle: '주장과 인용문 대조', supportNote: '제공된 문장에 대한 모델의 판단이며 사실 검증이 아닙니다. 지식 카드는 요약문이며 출처 원문과 다릅니다.',
   supportStatus: { supported: '지지', partial: '부분 지지', contradicted: '불일치', insufficient: '판단 불가' },
   supportInvalid: '주장과 인용문 대조 결과를 읽을 수 없습니다.',
+  coreTitle: '핵심 주장 점검', coreNote: '이 역할의 요약·가정·다음 행동에 대한 검토 모델의 판단이며 사실 검증이 아닙니다.',
+  coreTarget: { summary: '요약', assumption: '가정', nextAction: '다음 행동' },
+  coreIssue: { 'unsupported-premise': '근거 없는 전제', 'causal-overreach': '인과 과잉 해석', 'missing-assumption': '빠진 가정', other: '기타' },
+  coreInvalid: '일부 핵심 주장 점검 결과를 읽을 수 없어 보여 주지 않습니다.',
   computed: '계산 결과', calculationError: '계산 오류', csvCounts: (a: number, b: number) => `포함 ${a}행 · 제외 ${b}행`,
   textOrigin: { 'user-document': '제공된 문서', 'imported-original-excerpt': '가져온 원문 발췌', 'workspace-field': '사용자의 프로젝트 진술', 'curated-card': '요약 지식 카드' },
 };
@@ -2103,12 +2116,31 @@ function normalizeClaims(raw: unknown): EvidenceClaim[] | undefined {
   return claims;
 }
 const REVIEW_STATUSES: ProjectCrossReview['status'][] = ['running', 'completed', 'failed'];
+const CORE_TARGET_KINDS: ConsoleClaimFinding['target']['kind'][] = ['summary', 'assumption', 'nextAction'];
+const CLAIM_ISSUES: ConsoleClaimFinding['issue'][] = ['unsupported-premise', 'causal-overreach', 'missing-assumption', 'other'];
+/** 보고서마다 최대 6개. 하나라도 모르는 모양이면 null (그 보고서의 핵심 주장 판정 전체를 그리지 않는다) */
+function normalizeClaimFindings(raw: unknown): ConsoleClaimFinding[] | null {
+  if (!Array.isArray(raw) || raw.length > 6) return null;
+  const out: ConsoleClaimFinding[] = [];
+  for (const f of raw) {
+    if (!isObj(f) || !isObj(f.target) || !VERDICTS.includes(f.verdict as CrossReviewFinding['verdict']) || !CLAIM_ISSUES.includes(f.issue as ConsoleClaimFinding['issue'])
+      || !CORE_TARGET_KINDS.includes(f.target.kind as ConsoleClaimFinding['target']['kind']) || !isInt(f.target.index, 0, 40) || typeof f.target.quote !== 'string'
+      || typeof f.rationale !== 'string' || typeof f.targetExpertId !== 'string' || !f.targetExpertId) return null;
+    out.push({ targetExpertId: clip(f.targetExpertId, 80), target: { kind: f.target.kind as ConsoleClaimFinding['target']['kind'], index: f.target.index, quote: clip(f.target.quote, 600) },
+      verdict: f.verdict as CrossReviewFinding['verdict'], issue: f.issue as ConsoleClaimFinding['issue'], rationale: clip(f.rationale, 600) });
+  }
+  return out;
+}
+/** 대상 의견에 그 주장 칸이 실제로 있는가 (요약은 0번 하나) */
+function claimTargetExists(o: ExpertOpinion, t: ConsoleClaimFinding['target']): boolean {
+  return t.kind === 'summary' ? t.index === 0 && !!o.summary : t.index < (t.kind === 'assumption' ? o.assumptions : o.nextActions).length;
+}
 /** 교차 검토. 실행 위치·상태·판정 중 하나라도 모르는 값이면 전체를 null 로 돌려 그리지 않는다 (짐작해 그리지 않는다) */
 function normalizeCrossReview(raw: unknown): ConsoleReview | null {
   if (!isObj(raw) || raw.execution !== 'server-nosana' || !REVIEW_STATUSES.includes(raw.status as ProjectCrossReview['status'])) return null;
   if (raw.reports !== undefined && !Array.isArray(raw.reports)) return null;
-  const reports: CrossReviewReport[] = [];
-  let invalidClaimSupport = false;
+  const reports: ConsoleReport[] = [];
+  let invalidClaimSupport = false, invalidClaimFindings = false;
   for (const r of ((raw.reports as unknown[] | undefined) ?? []).slice(0, 8)) {
     if (!isObj(r) || !Array.isArray(r.findings)) return null;
     const reviewerExpertId = str(r.reviewerExpertId, 80);
@@ -2122,7 +2154,10 @@ function normalizeCrossReview(raw: unknown): ConsoleReview | null {
       if (support === null) invalidClaimSupport = true;
       findings.push({ targetExpertId, evidenceIndex, verdict: f.verdict as CrossReviewFinding['verdict'], rationale: str(f.rationale, 600), ...(support ? { claimSupport: support } : {}) });
     }
-    reports.push({ reviewerExpertId, findings, summary: str(r.summary, 1000) });
+    // 핵심 주장 판정은 선택 필드다: 모양이 틀리면 그 보고서의 핵심 주장 판정만 그리지 않는다 (근거 판정은 그대로)
+    const claimFindings = r.claimFindings === undefined ? undefined : normalizeClaimFindings(r.claimFindings);
+    if (claimFindings === null) invalidClaimFindings = true;
+    reports.push({ reviewerExpertId, findings, summary: str(r.summary, 1000), ...(claimFindings ? { claimFindings } : {}) });
   }
   const completedAt = num(raw.completedAt), error = str(raw.error, 400), disclosure = str(raw.disclosure, 1000);
   // 범위·글 확인은 선택 필드다: 모양이 틀리면 그 필드만 그리지 않는다 (판정은 그대로)
@@ -2144,7 +2179,7 @@ function normalizeCrossReview(raw: unknown): ConsoleReview | null {
     ...(completedAt !== null ? { completedAt } : {}), reports, ...(error ? { error } : {}), execution: 'server-nosana',
     ...(coverage ? { coverage } : {}), ...(disclosure ? { disclosure } : {}), ...(avail.length ? { textAvailability: avail } : {}),
     ...(art ? { artifactCoverage: art } : art === null ? { invalidArtifactCoverage: true } : {}),
-    ...(invalidClaimSupport ? { invalidClaimSupport: true } : {}),
+    ...(invalidClaimSupport ? { invalidClaimSupport: true } : {}), ...(invalidClaimFindings ? { invalidClaimFindings: true } : {}),
   };
 }
 
@@ -2325,8 +2360,15 @@ function authorResponseAffected(p: ConsoleProject): string[] {
   const hit = new Set<string>();
   for (const r of cr.reports) for (const f of r.findings) {
     const target = done.get(f.targetExpertId);
-    if ((f.verdict === 'challenged' || f.verdict === 'insufficient') && done.has(r.reviewerExpertId) && target && r.reviewerExpertId !== f.targetExpertId
+    // 판정이 '지지'여도 인용문 대조가 부분 지지·불일치·판단 불가이면 작성자가 답할 거리가 있다
+    const flagged = f.verdict === 'challenged' || f.verdict === 'insufficient' || (!!f.claimSupport && f.claimSupport.status !== 'supported');
+    if (flagged && done.has(r.reviewerExpertId) && target && r.reviewerExpertId !== f.targetExpertId
       && f.evidenceIndex < target.opinion!.evidence.length) hit.add(f.targetExpertId);
+  }
+  for (const r of cr.reports) for (const f of r.claimFindings ?? []) {
+    const target = done.get(f.targetExpertId);
+    if ((f.verdict === 'challenged' || f.verdict === 'insufficient') && done.has(r.reviewerExpertId) && target && r.reviewerExpertId !== f.targetExpertId
+      && claimTargetExists(target.opinion!, f.target)) hit.add(f.targetExpertId);
   }
   return p.experts.map(e => e.expertId).filter(id => hit.has(id));
 }
@@ -3046,6 +3088,12 @@ function phaseTwoMarkdown(p: ConsoleProject, m: Messages): string[] {
         for (const q of cs.quotes) out.push(`  - ${q.ref} · ${q.textOrigin} · L${q.startLine}–${q.endLine} · ${q.sourceSha256}`, `    > ${q.quote}`);
       }
     }
+    for (const rep of cr.reports) for (const f of rep.claimFindings ?? []) {
+      out.push(`- ${m.reviewBy(name(rep.reviewerExpertId))} · ${m.p4.coreTitle} · ${m.verdict[f.verdict]} · ${name(f.targetExpertId)} · ${m.p4.coreTarget[f.target.kind]} ${f.target.index + 1} · ${m.p4.coreIssue[f.issue]}${f.rationale ? ` — ${f.rationale}` : ''}`);
+      if (f.target.quote) out.push(`  > ${f.target.quote}`);
+    }
+    if (cr.reports.some(r => r.claimFindings?.length)) out.push(`- ${m.p4.coreNote}`);
+    if (cr.invalidClaimFindings) out.push(`- ${m.p4.coreInvalid}`);
   }
   if (p.quantitativeChecks?.length || p.invalidQuantitative) {
     out.push('', `## ${m.p4.records}`, m.p4.note);
@@ -3181,6 +3229,95 @@ const HISTORY_TEXT = {
   },
 };
 
+/** 사람 평가: 서버 HUMAN_DIMENSIONS·HUMAN_REVIEW_ISSUES 의 거울 (test/cloudbite-v5-human-review-ui.mjs 가 어긋남을 본다). 다르면 그리지 않는다 */
+const HR_DIMENSIONS: HumanDimension[] = ['relevance', 'evidence_traceability', 'facts_vs_assumptions', 'alternatives_tradeoffs', 'conditional_next_step', 'no_fabricated_signoff'];
+const HR_ISSUES: HumanReviewIssue[] = ['factual-error', 'unsupported-claim', 'missing-source', 'misread-material', 'missing-alternative', 'unsafe-next-step', 'fabricated-execution', 'too-generic', 'off-topic', 'other'];
+const HR_TEXT = {
+  en: {
+    title: 'Human review (your score)', savedChip: 'saved',
+    note: 'A person\'s 0–4 score of the answer shown above — not model truth, accuracy or a pass. It is saved with this exact answer\'s hash; the answer itself never changes. Not blind: you can see the role, model and self-reported confidence.',
+    material: (hash: string) => `Rated material: this role's summary, evidence, assumptions, next actions and full report above · output ${hash}`,
+    dims: { relevance: 'Answers the actual question', evidence_traceability: 'Claims trace to supplied material or sources', facts_vs_assumptions: 'Separates facts from assumptions',
+      alternatives_tradeoffs: 'Weighs alternatives and trade-offs', conditional_next_step: 'Gives a conditional next step', no_fabricated_signoff: 'No invented execution or sign-off' } as Record<HumanDimension, string>,
+    notScored: '— Not scored', scale: ['0 · missing or wrong', '1 · weak', '2 · partial', '3 · good', '4 · strong'],
+    issuesHead: 'Problems you found (optional)', issueNote: 'What exactly? (optional, up to 300 characters)',
+    issues: { 'factual-error': 'Factual error', 'unsupported-claim': 'Claim without support', 'missing-source': 'Missing source', 'misread-material': 'Misread the supplied material',
+      'missing-alternative': 'Missing alternative', 'unsafe-next-step': 'Unsafe or premature next step', 'fabricated-execution': 'Invented execution or sign-off', 'too-generic': 'Too generic', 'off-topic': 'Off topic', other: 'Other' } as Record<HumanReviewIssue, string>,
+    comment: 'Overall comment (optional, up to 1,000 characters)', regression: 'Mark as a regression candidate (re-check this question after changes)',
+    save: 'Save human review', retry: 'Retry the same save', download: 'Download regression JSON',
+    saving: 'Saving…', saved: (rev: number, at: string) => `Saved · revision ${rev} · ${at} (server time)`,
+    savedBy: (rev: number, at: string) => `Saved by the project's user · revision ${rev} · ${at}`, unscoredAll: 'No dimension scored yet: the evaluator keeps every dimension NOT_SCORED.',
+    unsaved: 'Unsaved changes in this browser tab.',
+    conflict: 'The saved review changed (another tab or an earlier save that did arrive). Your draft is kept; the saved values are shown above. Save again to replace them.',
+    stale: 'The saved answer is not the one you rated (stale output hash). Your draft is kept; reload the record before saving.',
+    unknown: 'The save was not confirmed (network or server). Your draft is kept. Retrying sends the same request, which the server saves at most once.',
+    signedOut: 'Your sign-in for saved records was not accepted. Your draft is kept; sign in again, then save.',
+    notOwn: 'Only the project\'s own user can review its answers. You can read this review, but not change it.',
+    gone: 'This record or answer no longer exists (deleted or expired). Nothing was saved.',
+    invalid: (why: string) => `Not saved: ${why}`, empty: 'Score at least one dimension, pick a problem or write a comment.',
+    readonly: 'Only the user who ran this project can save a human review here.', none: 'No human review saved for this answer.',
+    unreadable: 'The server sent human-review data this console cannot read, so it is not shown.',
+    downloadFailed: (s: number) => `Could not download the regression JSON (${s || 'network error'}).`,
+  },
+  ko: {
+    title: '사람 평가 (내 점수)', savedChip: '저장됨',
+    note: '위에 보이는 답변에 사람이 매긴 0–4 점수입니다. 모델의 정답·정확도·합격 판정이 아닙니다. 이 답변의 정확한 해시와 함께 저장되며 답변 자체는 바뀌지 않습니다. 블라인드가 아닙니다: 역할·모델·자체 확신도가 보입니다.',
+    material: (hash: string) => `평가 대상: 위의 이 역할 요약·근거·가정·다음 행동·전체 보고서 · 출력 ${hash}`,
+    dims: { relevance: '실제 질문에 답함', evidence_traceability: '주장이 제공 자료·출처로 이어짐', facts_vs_assumptions: '사실과 가정을 구분함',
+      alternatives_tradeoffs: '대안과 장단점을 비교함', conditional_next_step: '조건이 붙은 다음 단계를 제시함', no_fabricated_signoff: '실행·승인을 지어내지 않음' } as Record<HumanDimension, string>,
+    notScored: '— 평가 안 함', scale: ['0 · 없음·틀림', '1 · 약함', '2 · 부분적', '3 · 좋음', '4 · 충분함'],
+    issuesHead: '발견한 문제 (선택 사항)', issueNote: '구체적으로 무엇인가요? (선택 사항, 최대 300자)',
+    issues: { 'factual-error': '사실 오류', 'unsupported-claim': '근거 없는 주장', 'missing-source': '출처 누락', 'misread-material': '제공 자료를 잘못 읽음',
+      'missing-alternative': '대안 누락', 'unsafe-next-step': '위험하거나 성급한 다음 단계', 'fabricated-execution': '실행·승인을 지어냄', 'too-generic': '너무 일반적임', 'off-topic': '질문과 무관함', other: '기타' } as Record<HumanReviewIssue, string>,
+    comment: '전체 의견 (선택 사항, 최대 1,000자)', regression: '회귀 후보로 표시 (바꾼 뒤 이 질문을 다시 확인)',
+    save: '사람 평가 저장', retry: '같은 저장 다시 보내기', download: '회귀 JSON 내려받기',
+    saving: '저장하는 중…', saved: (rev: number, at: string) => `저장됨 · ${rev}번째 수정 · ${at} (서버 시각)`,
+    savedBy: (rev: number, at: string) => `프로젝트 사용자가 저장함 · ${rev}번째 수정 · ${at}`, unscoredAll: '아직 점수를 매긴 항목이 없습니다: 평가기는 모든 항목을 NOT_SCORED 로 둡니다.',
+    unsaved: '이 탭에 저장하지 않은 변경이 있습니다.',
+    conflict: '저장된 평가가 바뀌었습니다 (다른 탭, 또는 실제로는 도착한 이전 저장). 작성 중인 내용은 그대로 두었고 저장된 값은 위에 보입니다. 다시 저장하면 바꿉니다.',
+    stale: '저장된 답변이 평가한 답변과 다릅니다 (출력 해시가 오래됨). 작성 중인 내용은 그대로 두었습니다. 기록을 다시 연 뒤 저장하세요.',
+    unknown: '저장이 확인되지 않았습니다 (네트워크·서버). 작성 중인 내용은 그대로 두었습니다. 다시 보내면 같은 요청이 가며 서버는 많아야 한 번 저장합니다.',
+    signedOut: '저장된 기록의 로그인이 받아들여지지 않았습니다. 작성 중인 내용은 그대로 두었습니다. 다시 로그인한 뒤 저장하세요.',
+    notOwn: '프로젝트를 실행한 사용자만 답변을 평가할 수 있습니다. 이 평가를 읽을 수는 있지만 바꿀 수는 없습니다.',
+    gone: '이 기록이나 답변이 더 이상 없습니다 (삭제 또는 만료). 아무것도 저장하지 않았습니다.',
+    invalid: (why: string) => `저장하지 않음: ${why}`, empty: '항목 하나 이상에 점수를 매기거나, 문제를 고르거나, 의견을 쓰세요.',
+    readonly: '이 프로젝트를 실행한 사용자만 여기서 사람 평가를 저장할 수 있습니다.', none: '이 답변에 저장된 사람 평가가 없습니다.',
+    unreadable: '서버가 이 콘솔이 읽을 수 없는 사람 평가 자료를 보냈으므로 보여 주지 않습니다.',
+    downloadFailed: (s: number) => `회귀 JSON 을 내려받지 못했습니다 (${s || '네트워크 오류'}).`,
+  },
+};
+const HR_HEX64 = /^[0-9a-f]{64}$/;
+/** 서버가 준 사람 평가 자료. 모양·항목 목록이 이 콘솔과 다르면 null (짐작해 그리지 않는다) */
+function normalizeHumanReview(raw: unknown): HumanReviewDetail | null {
+  if (!isObj(raw) || raw.version !== 'cloudbite-human-review/v1' || !Array.isArray(raw.dimensions) || raw.dimensions.join() !== HR_DIMENSIONS.join()
+    || !Array.isArray(raw.issues) || raw.issues.join() !== HR_ISSUES.join() || !isObj(raw.outputs) || !isObj(raw.reviews) || typeof raw.canReview !== 'boolean') return null;
+  const outputs: HumanReviewDetail['outputs'] = {}, reviews: Record<string, HumanReviewPublic> = {};
+  for (const [k, o] of Object.entries(raw.outputs)) {
+    if (!isObj(o) || !HR_HEX64.test(String(o.outputSha256))) return null;
+    outputs[k] = { outputSha256: String(o.outputSha256), answerSha256: String(o.answerSha256), questionHash: String(o.questionHash), materialHash: String(o.materialHash), stage: String(o.stage) };
+  }
+  for (const [k, r] of Object.entries(raw.reviews)) {
+    if (!isObj(r) || r.expertId !== k || !HR_HEX64.test(String(r.outputSha256)) || !isInt(r.revision) || !isInt(r.updatedAt) || !isInt(r.createdAt) || !isObj(r.scores)
+      || typeof r.comment !== 'string' || typeof r.regressionCandidate !== 'boolean' || !Array.isArray(r.issues)) return null;
+    const scores = {} as Record<HumanDimension, number | null>;
+    for (const d of HR_DIMENSIONS) { const v = (r.scores as Record<string, unknown>)[d]; if (v !== null && !(isInt(v) && v >= 0 && v <= 4)) return null; scores[d] = v as number | null; }
+    const issues = r.issues.slice(0, 6).map(x => isObj(x) && HR_ISSUES.includes(x.category as HumanReviewIssue) && typeof x.comment === 'string' ? { category: x.category as HumanReviewIssue, comment: clip(x.comment, 300) } : null);
+    if (issues.includes(null)) return null;
+    reviews[k] = { version: 'cloudbite-human-review/v1', expertId: k, outputSha256: String(r.outputSha256), revision: r.revision as number, scores, issues: issues as HumanReviewPublic['issues'],
+      comment: clip(r.comment, 1000), regressionCandidate: r.regressionCandidate, recordedBy: 'project-user', createdAt: r.createdAt as number, updatedAt: r.updatedAt as number };
+  }
+  return { version: 'cloudbite-human-review/v1', rubric: 'cloudbite-quality/v1', dimensions: HR_DIMENSIONS, issues: HR_ISSUES, outputs, reviews, canReview: raw.canReview };
+}
+/** 작성 중인 사람 평가 (이 탭 메모리에만). requestId 는 보낸 내용(sig)에 묶여, 확인 못 한 저장을 다시 보내도 서버가 한 번만 저장한다 */
+type HumanDraft = { scores: Record<HumanDimension, number | null>; issues: Partial<Record<HumanReviewIssue, string>>; comment: string; regressionCandidate: boolean;
+  baseRevision: number; dirty: boolean; requestId: string | null; sentSig: string | null };
+type HumanPhase = 'saving' | 'saved' | 'conflict' | 'stale' | 'unknown' | 'signedOut' | 'notOwn' | 'gone' | 'invalid' | 'empty' | 'downloadFailed';
+const humanDraftFrom = (r: HumanReviewPublic | undefined): HumanDraft => ({
+  scores: Object.fromEntries(HR_DIMENSIONS.map(d => [d, r ? r.scores[d] : null])) as Record<HumanDimension, number | null>,
+  issues: Object.fromEntries((r?.issues ?? []).map(x => [x.category, x.comment])), comment: r?.comment ?? '', regressionCandidate: r?.regressionCandidate ?? false,
+  baseRevision: r?.revision ?? 0, dirty: false, requestId: null, sentSig: null });
+const humanRequestId = () => 'hr_' + [...crypto.getRandomValues(new Uint8Array(12))].map(x => x.toString(16).padStart(2, '0')).join('');
+
 function boot(): void {
   // 운영자 링크는 화면·요청보다 먼저 지운다. 링크가 있으면 실제 실행 모드로 열고 자동 데모·자동 실행은 하지 않는다
   const link = takeOperatorLink();
@@ -3282,12 +3419,15 @@ function boot(): void {
     list: null as HistoryList | null, detail: null as HistoryDetail | null, report: null as HistoryReport | null,
     deleteId: '', gen: 0, detailGen: 0, dirty: true, renderedLang: '',
     drafts: new Map<string, Omit<HistoryFeedback, 'at'>>(), opened: new Set<string>(),
+    /** 사람 평가 초안과 저장 상태 (프로젝트 id:expertId). 언어 전환·다시 그리기·상세 다시 읽기에도 남는다 */
+    reviews: new Map<string, HumanDraft>(), reviewState: new Map<string, { phase: HumanPhase; note?: string; status?: number }>(),
     /** 프로젝트 id → 서버가 사용 기록 상세에서 밝힌 자기 기록 여부 (canFeedback). 끝나지 않은 상세의 false 는 모름이라 적지 않는다 */
     own: new Map<string, boolean>(),
   };
   const HT = () => HISTORY_TEXT[lang];
   function clearHistoryAuthority(): void {
     H.gen++; H.detailGen++; H.list = null; H.detail = null; H.report = null; H.drafts.clear(); H.opened.clear(); H.own.clear(); H.owner = false; H.busy = false; H.detailBusy = false; H.dirty = true; H.tab = 'mine';
+    H.reviews.clear(); H.reviewState.clear();
   }
 
   const catalogue = (): ExpertDefinition[] => S.mode === 'live' ? S.boot.data?.experts ?? [] : (S.boot.data?.experts.length ? S.boot.data.experts : DEMO_EXPERTS);
@@ -4320,6 +4460,107 @@ function boot(): void {
     else historyDenied(r.status);
     paintHistory();
   }
+  const HRT = () => HR_TEXT[lang];
+  /** 사람 평가 저장. 실패·모름이어도 초안은 지우지 않는다. 409 는 서버의 저장본을 보여 주고 초안은 남긴다 */
+  async function saveHumanReview(id: string, expertId: string, outputSha256: string): Promise<void> {
+    const key = id + ':' + expertId, draft = H.reviews.get(key);
+    if (!draft || H.reviewState.get(key)?.phase === 'saving') return;
+    const issues = HR_ISSUES.filter(c => draft.issues[c] !== undefined).map(c => ({ category: c, comment: draft.issues[c]!.slice(0, 300) }));
+    const content = { expertId, outputSha256, baseRevision: draft.baseRevision, scores: { ...draft.scores }, issues, comment: draft.comment.slice(0, 1000), regressionCandidate: draft.regressionCandidate };
+    if (HR_DIMENSIONS.every(d => content.scores[d] === null) && !issues.length && !content.comment.trim()) { H.reviewState.set(key, { phase: 'empty' }); paintHistory(); return; }
+    const sig = JSON.stringify(content);
+    if (!draft.requestId || draft.sentSig !== sig) { draft.requestId = humanRequestId(); draft.sentSig = sig; }
+    H.reviewState.set(key, { phase: 'saving' }); paintHistory();
+    const r = await historyRequest('/' + encodeURIComponent(id) + '/human-review', 'POST', { ...content, requestId: draft.requestId });
+    if (H.reviews.get(key) !== draft) return; // 기록이 지워졌거나 신원이 바뀌었다
+    const data = isObj(r.data) ? r.data : {}, reviewIn = (v: unknown) => normalizeHumanReview({ version: 'cloudbite-human-review/v1', dimensions: HR_DIMENSIONS, issues: HR_ISSUES, outputs: {}, reviews: { [expertId]: v }, canReview: false })?.reviews[expertId];
+    const savedNow = (v: HumanReviewPublic | undefined) => { const hr = H.detail?.project.id === id ? H.detail.humanReview : undefined; if (v && isObj(hr) && isObj(hr.reviews)) hr.reviews[expertId] = v; };
+    if (r.status === 200) {
+      const v = reviewIn(data.review);
+      if (!v) { H.reviewState.set(key, { phase: 'unknown' }); paintHistory(); return; }
+      savedNow(v); draft.baseRevision = v.revision; draft.dirty = false; draft.requestId = null; draft.sentSig = null;
+      H.reviewState.set(key, { phase: 'saved' });
+    } else if (r.status === 409) {
+      const v = data.review ? reviewIn(data.review) : undefined;
+      if (v) { savedNow(v); draft.baseRevision = v.revision; }
+      draft.requestId = null; draft.sentSig = null;
+      H.reviewState.set(key, { phase: v && /changed|already used|saved earlier/.test(String(data.error)) ? 'conflict' : /stale/.test(String(data.error)) ? 'stale' : 'invalid', note: typeof data.error === 'string' ? data.error.slice(0, 300) : '' });
+    } else if (r.status === 400) { draft.requestId = null; draft.sentSig = null; H.reviewState.set(key, { phase: 'invalid', note: typeof data.error === 'string' ? data.error.slice(0, 300) : '' }); }
+    else if (r.status === 401) H.reviewState.set(key, { phase: 'signedOut' });
+    else if (r.status === 403) H.reviewState.set(key, { phase: 'notOwn' });
+    else if (r.status === 404) H.reviewState.set(key, { phase: 'gone' });
+    else H.reviewState.set(key, { phase: 'unknown' }); // 0·5xx: 쓰였을 수도 있다. 같은 requestId 로만 다시 보낸다
+    paintHistory();
+  }
+  async function downloadRegression(id: string, expertId: string): Promise<void> {
+    const key = id + ':' + expertId, r = await historyRequest('/' + encodeURIComponent(id) + '/human-review?expertId=' + encodeURIComponent(expertId));
+    if (r.status !== 200 || !isObj(r.data) || r.data.version !== 'cloudbite-regression-candidate/v1') { H.reviewState.set(key, { phase: 'downloadFailed', status: r.status }); paintHistory(); return; }
+    if (typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') return;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(r.data, null, 2) + '\n'], { type: 'application/json' }));
+    const a = h('a', { href: url, download: `cloudbite-regression-${id}-${expertId}.json` });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  /** 이력 상세 안의 접힌 사람 평가 칸: 평가 대상 답변·해시, 사람 점수라는 표시, 저장 상태, 저장본 다시 읽기 */
+  function humanReviewBox(d: HistoryDetail, projectId: string, expertId: string): HTMLElement | null {
+    if (d.humanReview === undefined) return null;
+    const t = HRT(), hr = normalizeHumanReview(d.humanReview);
+    if (!hr) return h('p', { class: 'cb-help' }, t.unreadable);
+    const out = hr.outputs[expertId], saved = hr.reviews[expertId], key = projectId + ':' + expertId, st = H.reviewState.get(key);
+    if (!out && !saved) return null;
+    const kids: Kid[] = [h('p', { class: 'cb-help' }, t.note), out ? h('p', { class: 'cb-help cb-hr-hash' }, t.material(out.outputSha256.slice(0, 16))) : null];
+    if (saved) kids.push(h('div', { class: 'cb-hr-saved' }, h('p', { class: 'cb-help' }, t.savedBy(saved.revision, historyDate(saved.updatedAt))),
+      h('ul', { class: 'cb-hr-scores' }, ...HR_DIMENSIONS.map(dim => h('li', null, h('span', null, t.dims[dim]), h('strong', null, saved.scores[dim] === null ? t.notScored : t.scale[saved.scores[dim]!])))),
+      HR_DIMENSIONS.every(dim => saved.scores[dim] === null) ? h('p', { class: 'cb-help' }, t.unscoredAll) : null,
+      saved.issues.length ? h('ul', { class: 'cb-hr-issues' }, ...saved.issues.map(x => h('li', null, t.issues[x.category], x.comment ? ' — ' + x.comment : ''))) : null,
+      saved.comment ? h('p', { class: 'cb-history-copy' }, saved.comment) : null,
+      saved.regressionCandidate ? h('p', { class: 'cb-tag' }, t.regression) : null));
+    else kids.push(h('p', { class: 'cb-help' }, t.none));
+    if (hr.canReview && out) {
+      let draft = H.reviews.get(key);
+      // 손대지 않은 초안은 저장본을 따라간다. 손댄 초안은 지우지 않는다 (다른 탭의 저장은 충돌로 알린다)
+      if (!draft || (!draft.dirty && (saved?.revision ?? 0) !== draft.baseRevision)) { draft = humanDraftFrom(saved); H.reviews.set(key, draft); }
+      const dr = draft, busy = st?.phase === 'saving', base = 'hr-' + projectId + '-' + expertId, touch = () => { dr.dirty = true; };
+      const grid = h('div', { class: 'cb-hr-grid' });
+      for (const dim of HR_DIMENSIONS) {
+        const sel = h('select', { id: `${base}-${dim}`, 'data-fk': `${key}:hr:${dim}`, disabled: busy },
+          h('option', { value: '', selected: dr.scores[dim] === null }, t.notScored), ...t.scale.map((label, i) => h('option', { value: String(i), selected: dr.scores[dim] === i }, label)));
+        sel.value = dr.scores[dim] === null ? '' : String(dr.scores[dim]);
+        sel.addEventListener('change', () => { dr.scores[dim] = sel.value === '' ? null : Number(sel.value); touch(); });
+        grid.append(h('label', { for: `${base}-${dim}` }, t.dims[dim]), sel);
+      }
+      const issues = h('fieldset', { class: 'cb-hr-issuebox' }, h('legend', null, t.issuesHead));
+      for (const c of HR_ISSUES) {
+        const on = dr.issues[c] !== undefined;
+        const box = h('input', { type: 'checkbox', id: `${base}-i-${c}`, 'data-fk': `${key}:hr:i:${c}`, checked: on, disabled: busy });
+        box.addEventListener('change', () => { if (box.checked) dr.issues[c] = dr.issues[c] ?? ''; else delete dr.issues[c]; touch(); paintHistory(); });
+        issues.append(h('div', { class: 'cb-hr-issue' }, box, h('label', { for: `${base}-i-${c}` }, t.issues[c])));
+        if (on) {
+          const note = h('input', { type: 'text', id: `${base}-n-${c}`, maxlength: 300, value: dr.issues[c], 'aria-label': `${t.issues[c]} — ${t.issueNote}`, placeholder: t.issueNote, 'data-fk': `${key}:hr:n:${c}`, disabled: busy });
+          note.addEventListener('input', () => { dr.issues[c] = note.value; touch(); });
+          issues.append(note);
+        }
+      }
+      const comment = h('textarea', { id: `${base}-comment`, maxlength: 1000, rows: 3, value: dr.comment, 'data-fk': `${key}:hr:comment`, disabled: busy });
+      comment.addEventListener('input', () => { dr.comment = comment.value; touch(); });
+      const flag = h('input', { type: 'checkbox', id: `${base}-flag`, 'data-fk': `${key}:hr:flag`, checked: dr.regressionCandidate, disabled: busy });
+      flag.addEventListener('change', () => { dr.regressionCandidate = flag.checked; touch(); });
+      const form = h('form', { class: 'cb-history-feedback cb-hr-form' }, grid, issues, h('label', { for: `${base}-comment` }, t.comment), comment,
+        h('div', { class: 'cb-hr-issue' }, flag, h('label', { for: `${base}-flag` }, t.regression)),
+        h('button', { type: 'submit', class: 'cb-secondary', disabled: busy, 'data-fk': `${key}:hr:save` }, st?.phase === 'unknown' ? t.retry : t.save));
+      form.addEventListener('submit', ev => { ev.preventDefault(); void saveHumanReview(projectId, expertId, out.outputSha256); });
+      kids.push(form);
+      if (dr.dirty && st?.phase !== 'saving') kids.push(h('p', { class: 'cb-help' }, t.unsaved));
+    } else kids.push(h('p', { class: 'cb-help' }, t.readonly));
+    if (st) {
+      const text = st.phase === 'saving' ? t.saving : st.phase === 'saved' && saved ? t.saved(saved.revision, historyDate(saved.updatedAt))
+        : st.phase === 'invalid' ? t.invalid(st.note || '') : st.phase === 'downloadFailed' ? t.downloadFailed(st.status ?? 0)
+        : st.phase === 'saved' ? '' : t[st.phase];
+      if (text) kids.push(h('p', { role: st.phase === 'saving' || st.phase === 'saved' ? 'status' : 'alert', class: st.phase === 'saved' ? 'cb-ok' : st.phase === 'saving' ? 'cb-help' : 'cb-warn', 'data-fk': `${key}:hr:state` }, text));
+    }
+    if (saved) kids.push(h('button', { type: 'button', class: 'cb-ghost', 'data-fk': `${key}:hr:download`, onclick: () => { void downloadRegression(projectId, expertId); } }, t.download));
+    return historyDisclosure(key + ':human', saved ? `${t.title} · ${t.savedChip}` : t.title, ...kids);
+  }
   async function deleteHistory(id: string): Promise<void> {
     if (H.mutation) return;
     H.mutation = true; H.error = 0; paintHistory();
@@ -4328,6 +4569,7 @@ function boot(): void {
     if (r.status === 200) {
       H.detailGen++; H.detail = null; H.deleteId = ''; H.message = '';
       for (const key of H.drafts.keys()) if (key.startsWith(id + ':')) H.drafts.delete(key);
+      for (const key of [...H.reviews.keys()]) if (key.startsWith(id + ':')) { H.reviews.delete(key); H.reviewState.delete(key); }
       for (const key of [...H.opened]) if (key.startsWith(id + ':')) H.opened.delete(key);
       if (S.followUp?.parentId === id) { dropFollowUp(); H.message = 'fu-cleared'; keepFocus(renderControls); }
       await loadHistory();
@@ -4828,8 +5070,16 @@ function boot(): void {
               h('p', { class: 'cb-help' }, m.p4.supportNote), h('p', null, f.claimSupport.rationale),
               ...f.claimSupport.quotes.map(q => h('figure', null, h('blockquote', null, q.quote), h('figcaption', null, `${q.ref} · ${m.p4.textOrigin[q.textOrigin]} · L${q.startLine}–${q.endLine}`))),
               h('p', { class: 'cb-help' }, `${f.claimSupport.citedText} · ${f.claimSupport.packetSha256}`)) : null);
-        })) : h('p', { class: 'cb-help' }, m.reviewNoFindings)));
+        })) : h('p', { class: 'cb-help' }, m.reviewNoFindings),
+        r.claimFindings?.length ? h('div', { class: 'cb-core-claims' }, h('h5', null, m.p4.coreTitle), h('p', { class: 'cb-help' }, m.p4.coreNote),
+          h('ol', { class: 'cb-findings' }, ...r.claimFindings.map(f => h('li', { class: 'cb-finding', 'data-core': `${f.targetExpertId}:${f.target.kind}:${f.target.index}` },
+            h('div', { class: 'cb-finding-head' }, h('span', { class: `cb-chip ${VERDICT_CHIP[f.verdict]}` }, m.verdict[f.verdict]),
+              h('strong', null, `${expertName(p, f.targetExpertId)} · ${m.p4.coreTarget[f.target.kind]} ${f.target.index + 1}`),
+              h('span', { class: 'cb-tag' }, m.p4.coreIssue[f.issue])),
+            f.target.quote ? h('blockquote', { class: 'cb-finding-evidence' }, f.target.quote) : null,
+            f.rationale ? h('p', null, f.rationale) : null)))) : null));
     }
+    if (cr?.invalidClaimFindings) kids.push(h('p', { class: 'cb-warn' }, m.p4.coreInvalid));
     if (cr) kids.push(...artifactKids(p, cr, opened, prefix));
     // 작성자 응답 요청: 끝난 실제 실행의 완료된 검토에서만, 누를 때 후속 초안만 연다 (실행·비용 없음)
     if (cr?.status === 'completed' && followUpEligible(p) && p.status !== 'cancelled') {
@@ -5375,6 +5625,8 @@ function boot(): void {
               h('button', { type: 'submit', class: 'cb-secondary', disabled: H.mutation, 'data-fk': key + '-save' }, t.save));
             form.addEventListener('submit', ev => { ev.preventDefault(); void saveHistoryFeedback(p.id, { ...draft }); }); article.append(historyDisclosure(key + ':feedback', t.feedback, form));
           } else if (prior) article.append(h('p', { class: 'cb-help' }, `${prior.rating === 'helpful' ? t.helpful : t.unhelpful}${prior.issue ? ' · ' + t.issues[prior.issue] : ''}`, prior.comment ? '\n' + prior.comment : ''));
+          const human = humanReviewBox(d, p.id, e.expertId);
+          if (human) article.append(human);
         } else if (e.error) article.append(h('p', { class: 'cb-warn' }, e.error));
         detail.append(article);
       }
@@ -5963,6 +6215,7 @@ function boot(): void {
     ownerPending = false;
     if (H.owner && next.status === 'ready' && !next.authenticated && !S.adminToken.trim()) {
       H.gen++; H.detailGen++; H.list = null; H.detail = null; H.report = null; H.drafts.clear(); H.own.clear(); H.owner = false; H.busy = false; H.detailBusy = false; H.dirty = true;
+      H.reviews.clear(); H.reviewState.clear();
     }
     Object.assign(S.owner, next);
     ownerIntro();
@@ -6003,7 +6256,7 @@ function boot(): void {
 }
 
 const CloudbiteCore = { normalizeProvenance, provenanceView, provenanceGroups, provenanceLines, normalizeAuthorPlan, normalizeAuthorResponse, normalizeArtifactCoverage, authorResponseAffected, authorResponseEligible, authorResponseLines, artifactLines, normalizeMemo, normalizeSignals, normalizeRound, phaseView, signalRows, signalSummary, memoCoverageLines, roundLines, draftRoundLines, followUpEligible, phaseTwoMarkdown, parseDecision, docProblem, docAccept, docsPayload, docsBytes, parseWorkflow, normalizePreview, normalizePmc, normalizeCrossReview, reviewEligible, projectMarkdown, normalizeBootstrap, normalizePool, normalizeRouting, normalizeRoute, suggestTeam, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, artifactContent, domainLabel, DEMO_EXPERTS,
-  pickLang, withLang, normalizeOwnerSession, DICT, ROLE_KO };
+  pickLang, withLang, normalizeOwnerSession, DICT, ROLE_KO, normalizeHumanReview, normalizeClaimFindings, HR_TEXT, HR_DIMENSIONS, HR_ISSUES };
 const hook = (globalThis as { __cloudbiteTestHook?: (core: typeof CloudbiteCore) => void }).__cloudbiteTestHook;
 if (typeof hook === 'function') hook(CloudbiteCore);
 if (typeof document !== 'undefined') {
