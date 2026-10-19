@@ -1,6 +1,6 @@
 // Generated file — do not edit. Sources: client/cloudbite-computer-costs.ts · client/cloudbite-computer-costs.css
 // Rebuild: node tools/build-cloudbite-computer-costs.mjs (--check verifies it is current)
-// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 c6e8bf5192c2ec8ad39c6eaf8811de29eb58cadd8d3b0ecf402c738351213f42 · css sha256 3157b42b46f248fea30b1f1f27c18d28d6e2b11ee03e7dc052fb56e507ffe58a
+// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 df3de80808ac7781c4ede9729ed2751f80484b0f880d3440f23e0c80ec677b2d · css sha256 3157b42b46f248fea30b1f1f27c18d28d6e2b11ee03e7dc052fb56e507ffe58a
 // Routing (runtime): GET CLOUDBITE_COMPUTER_COSTS_PATH → CLOUDBITE_COMPUTER_COSTS_HTML, CLOUDBITE_COMPUTER_COSTS_JS_PATH → CLOUDBITE_COMPUTER_COSTS_JS (text/javascript),
 // CLOUDBITE_COMPUTER_COSTS_CSS_PATH → CLOUDBITE_COMPUTER_COSTS_CSS (text/css). CSP script-src 'self'; style-src 'self' suffices (no inline).
 // The script calls only GET /api/cloudbite/computer/costs same-origin with the existing cookie; it links to /cloudbite/computer and fixed official pricing pages.
@@ -445,7 +445,8 @@ export const CLOUDBITE_COMPUTER_COSTS_JS = [
   "  function estimates(v, d) {",
   "    const card = h(\"section\", \"cc-card\", h(\"h2\", \"\", d.estTitle), h(\"p\", \"cc-fine\", d.estLead(v.asOf || \"?\")));",
   "    card.setAttribute(\"data-section\", \"estimates\");",
-  "    card.append(h(\"div\", \"cc-stats\", rateLine(d.running, v.totals.runningUsdPerHour, d), rateLine(d.stopped, v.totals.stoppedUsdPerHour, d)));",
+  "    const listed = v.accounts.some((a) => a.status !== \"unavailable\");",
+  "    card.append(h(\"div\", \"cc-stats\", rateLine(d.running, listed ? v.totals.runningUsdPerHour : null, d), rateLine(d.stopped, listed ? v.totals.stoppedUsdPerHour : null, d)));",
   "    if (v.totals.unknownRate) card.append(h(\"p\", \"cc-fine\", d.unknownRate(v.totals.unknownRate)));",
   "    card.append(h(\"p\", \"cc-fine\", d.excluded));",
   "    for (const a of v.accounts) card.append(accountBlock(a, d));",

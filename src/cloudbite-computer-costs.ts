@@ -113,7 +113,7 @@ function sandbox(r: unknown, ownerTag: string | null): (CostsSandbox & { org: st
   const cpu = size(r.cpu), memoryGiB = size(r.memory), diskGiB = size(r.disk), gpu = size(r.gpu);
   let usdPerHour: number | null = null, rateBasis: CostsRateBasis = 'unknown';
   // GPU sandboxes have no rate in COMPUTER_PRICING: unknown, never the CPU-only figure
-  if (!gpu) {
+  if (gpu === 0) {
     if (phase === 'running' && cpu !== null && memoryGiB !== null && diskGiB !== null) { usdPerHour = computerHourlyCost({ cpu, memoryGiB, diskGiB }); rateBasis = 'running_all'; }
     else if (phase === 'stopped' && diskGiB !== null) { usdPerHour = computerHourlyCost({ cpu: 0, memoryGiB: 0, diskGiB }); rateBasis = 'stopped_disk'; }
     else if (phase === 'archived') { usdPerHour = 0; rateBasis = 'archived_free'; }

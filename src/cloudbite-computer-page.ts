@@ -1,6 +1,6 @@
 // Generated file — do not edit. Sources: client/cloudbite-computer.ts · client/cloudbite-computer.css
 // Rebuild: node tools/build-cloudbite-computer.mjs (--check verifies it is current)
-// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 4ae16f9c0c2236abfc2a59d1cce5a0580df07d16d0641214645270413f4d2016 · css sha256 62187bac5bf4cc9c48f060e1c0aa99a72891eee6153e696c9713bee516e90e0c
+// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 f5c39c01c87704a4c7fd3071963df93993108f9d7c77df9eb299d89d4bf7107e · css sha256 62187bac5bf4cc9c48f060e1c0aa99a72891eee6153e696c9713bee516e90e0c
 // Routing (runtime): GET CLOUDBITE_COMPUTER_PATH → CLOUDBITE_COMPUTER_HTML, CLOUDBITE_COMPUTER_JS_PATH → CLOUDBITE_COMPUTER_JS (text/javascript),
 // CLOUDBITE_COMPUTER_CSS_PATH → CLOUDBITE_COMPUTER_CSS (text/css). CSP script-src 'self'; style-src 'self' suffices (no inline).
 // The script calls /api/cloudbite/computer/* (sign-in under /api/cloudbite/computer/auth/*) same-origin and links out only to the gateway and k.shinick.dev.
@@ -1158,7 +1158,7 @@ export const CLOUDBITE_COMPUTER_JS = [
   "  const loadMsg = h(\"p\", \"cc-msg\");",
   "  loadMsg.setAttribute(\"role\", \"status\");",
   "  const keepTitle = h(\"h3\"), keepText = h(\"p\", \"cc-muted\");",
-  "  const snapshotsLink = link(\"cc-btn\", \"#\"), latencyLink = link(\"cc-btn\", \"#\"), costsLink = link(\"cc-btn\", \"#\");",
+  "  const snapshotsLink = link(\"cc-btn\", \"#\", false), latencyLink = link(\"cc-btn\", \"#\", false), costsLink = link(\"cc-btn\", \"#\", false);",
   "  const manageNav = h(\"nav\", \"cc-actions\", snapshotsLink, latencyLink, costsLink);",
   "  const machineCard = h(",
   "    \"section\",",

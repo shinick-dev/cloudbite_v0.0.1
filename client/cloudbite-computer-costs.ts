@@ -235,7 +235,8 @@ function mount(root: HTMLElement): void {
   function estimates(v: View, d: Dict): HTMLElement {
     const card = h('section', 'cc-card', h('h2', '', d.estTitle), h('p', 'cc-fine', d.estLead(v.asOf || '?')));
     card.setAttribute('data-section', 'estimates');
-    card.append(h('div', 'cc-stats', rateLine(d.running, v.totals.runningUsdPerHour, d), rateLine(d.stopped, v.totals.stoppedUsdPerHour, d)));
+    const listed = v.accounts.some(a => a.status !== 'unavailable');
+    card.append(h('div', 'cc-stats', rateLine(d.running, listed ? v.totals.runningUsdPerHour : null, d), rateLine(d.stopped, listed ? v.totals.stoppedUsdPerHour : null, d)));
     if (v.totals.unknownRate) card.append(h('p', 'cc-fine', d.unknownRate(v.totals.unknownRate)));
     card.append(h('p', 'cc-fine', d.excluded));
     for (const a of v.accounts) card.append(accountBlock(a, d));

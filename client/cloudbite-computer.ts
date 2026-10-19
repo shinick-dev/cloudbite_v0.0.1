@@ -710,7 +710,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
   const loadMsg = h('p', 'cc-msg');
   loadMsg.setAttribute('role', 'status');
   const keepTitle = h('h3'), keepText = h('p', 'cc-muted');
-  const snapshotsLink = link('cc-btn', '#'), latencyLink = link('cc-btn', '#'), costsLink = link('cc-btn', '#');
+  const snapshotsLink = link('cc-btn', '#', false), latencyLink = link('cc-btn', '#', false), costsLink = link('cc-btn', '#', false);
   const manageNav = h('nav', 'cc-actions', snapshotsLink, latencyLink, costsLink);
   const machineCard = h('section', 'cc-card cc-machine',
     h('div', 'cc-machine-head', machineH, statusPill), statusLead, loadMsg, facts, sessionLine, sessionNote, sessionWarn, expiryMsg,

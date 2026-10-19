@@ -75,6 +75,13 @@ await test('unknown rates stay null: GPU, non-finite sizes and transitional stat
   assert.equal(a.sandboxes.find((s) => s.id === 'sandbox-nan-1').cpu, null);
 });
 
+await test('unknown GPU allocation cannot be priced as a proven CPU-only machine', async () => {
+  const f = fake([...daytonaOk([sb({gpu:null}), sb({id:'sandbox-bad-gpu',gpu:'unknown'}), sb({id:'sandbox-no-gpu',gpu:undefined})]), ...nosanaOk]);
+  const {body} = await m.computerCosts(env1,{deps:deps(f)});
+  assert.equal(body.daytona.totals.unknownRate,3);
+  assert.ok(body.daytona.accounts[0].sandboxes.every(s=>s.usdPerHour===null));
+});
+
 await test('Daytona 403 is unavailable (not zero) with a fixed code; another account still listed; partial', async () => {
   const f = fake([
     [/secondary\.invalid\/api\/sandbox\?/, () => res(403, { message: 'Forbidden for owner@example.com key dtn_secondary_SECRET' })],
@@ -258,6 +265,15 @@ await test('page: malformed server answer and non-finite balance are shown as un
   const nb = p.all().find((e) => e.getAttribute('data-nosana'));
   assert.equal(nb.getAttribute('data-nosana'), 'invalid_response'); assert.doesNotMatch(nb.textContent, /\$/);
   assert.match(p.all().find((e) => e.getAttribute('data-section') === 'estimates').textContent, /unknown/);
+});
+
+await test('page: no inventory observed means unknown total, not a zero-dollar estimate', async () => {
+  const f = fake([[/./,()=>res(403,{})]]);
+  const {body} = await m.computerCosts(env1,{deps:deps(f)});
+  const p = await page({route:()=>json(200,body)});
+  const est = p.all().find(e=>e.getAttribute('data-section')==='estimates');
+  assert.match(est.textContent,/unknown/);
+  assert.doesNotMatch(est.textContent,/\$0\.00/);
 });
 
 console.log(`cloudbite-computer-costs: ${pass} passed`);
