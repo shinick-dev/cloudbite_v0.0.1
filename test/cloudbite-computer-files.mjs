@@ -270,7 +270,9 @@ await test('crash between blob write and catalog: pending upload is listed, comm
   const ab = await svc.abortUpload(A, { uploadId: lost.uploadId });
   assert.equal(ab.upload.phase, 'aborted');
   await code(svc.commitUpload(A, { uploadId: lost.uploadId }), 'invalid_upload_state');
-  assert.equal((await svc.storageStatus(A)).status.reservedBytes, 0);
+  const after = (await svc.storageStatus(A)).status;
+  assert.equal(after.reservedBytes, lost.size, 'abort keeps the reservation until owned-object GC (body state unknown)');
+  assert.equal(after.pendingUploads, 0);
 });
 
 await test('stale base / out-of-order commit never overwrites: content preserved as conflict sibling', async () => {
@@ -349,13 +351,52 @@ await test('body bounds: longer, shorter, wrong hash rejected and nothing stored
   await code(svc.beginUpload(A, { requestId: R(), fileId: f.fileId, baseVersion: null, writerEpoch: 1, size: 40, sha256: sha('x') }), 'quota_exceeded');
   await svc.abortUpload(A, { uploadId: u.uploadId });
   const st = (await svc.storageStatus(A)).status;
-  assert.equal(st.reservedBytes, 60); assert.equal(st.quotaBytes, 100); assert.equal(st.maxFileBytes, 64);
+  assert.equal(st.reservedBytes, 70, 'aborted upload stays reserved'); assert.equal(st.quotaBytes, 100); assert.equal(st.maxFileBytes, 64);
+  await code(svc.beginUpload(A, { requestId: R(), fileId: f.fileId, baseVersion: null, writerEpoch: 1, size: 31, sha256: sha('x') }), 'quota_exceeded');
   const big = make({ quota: 1 << 20, max: 1 << 10 });
   const h = (await big.svc.create(A, { requestId: R(), parentId: 'root', name: 'h', kind: 'file' })).entry;
   for (let i = 0; i < 64; i++) await upload(big.svc, A, h.fileId, new Uint8Array(1), { write: false });
   await code(big.svc.beginUpload(A, { requestId: R(), fileId: h.fileId, baseVersion: null, writerEpoch: 1, size: 1, sha256: sha('x') }), 'too_many_uploads');
   const dir = (await svc.create(A, { requestId: R(), parentId: 'root', name: 'dir', kind: 'dir' })).entry;
   await code(svc.beginUpload(A, { requestId: R(), fileId: dir.fileId, baseVersion: null, writerEpoch: 1, size: 1, sha256: sha('x') }), 'is_a_directory');
+});
+
+await test('abort keeps quota reservation: repeated body+abort cannot exceed quota; late in-flight body stays accounted', async () => {
+  const { svc, blobs } = make({ quota: 100, max: 64 });
+  const f = (await svc.create(A, { requestId: R(), parentId: 'root', name: 'churn.bin', kind: 'file' })).entry;
+  const bytes = new Uint8Array(30).fill(7);
+  let aborted = 0;
+  for (let i = 0; i < 10; i++) {
+    let u;
+    try { u = await upload(svc, A, f.fileId, bytes); } catch (e) { assert.equal(e.code, 'quota_exceeded'); break; }
+    const ab = await svc.abortUpload(A, { uploadId: u.uploadId }); assert.equal(ab.upload.phase, 'aborted');
+    const again = await svc.abortUpload(A, { uploadId: u.uploadId }); assert.equal(again.upload.phase, 'aborted');
+    aborted++;
+  }
+  assert.equal(aborted, 3, 'only as many staged bodies as the quota allows');
+  let st = (await svc.storageStatus(A)).status;
+  assert.equal(st.reservedBytes, 90); assert.equal(st.pendingUploads, 0, 'repeated abort decrements pending once');
+  const staged = [...blobs.o.values()].reduce((a, b) => a + b.length, 0);
+  assert.ok(staged <= st.quotaBytes && staged <= st.usedBytes + st.reservedBytes, 'physical staged bytes never exceed the charged quota');
+
+  // a body that is still streaming when abort lands: the object arrives anyway and its bytes remain charged
+  const g = make({ quota: 100, max: 64 });
+  const h = (await g.svc.create(A, { requestId: R(), parentId: 'root', name: 'late.bin', kind: 'file' })).entry;
+  const late = new Uint8Array(40).fill(3);
+  const u = await upload(g.svc, A, h.fileId, late, { write: false });
+  let push; const body = new ReadableStream({ start(c) { push = c; } });
+  const writing = g.svc.writeUploadBody(A, u.uploadId, body);
+  push.enqueue(late.slice(0, 20));
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal((await g.svc.abortUpload(A, { uploadId: u.uploadId })).upload.phase, 'aborted');
+  push.enqueue(late.slice(20)); push.close();
+  assert.equal((await writing).upload.phase, 'aborted', 'late body does not revive the upload');
+  assert.equal(g.blobs.o.size, 1, 'staged object landed after abort');
+  st = (await g.svc.storageStatus(A)).status;
+  assert.equal(st.reservedBytes, 40, 'late in-flight body remains accounted'); assert.equal(st.pendingUploads, 0);
+  await code(g.svc.commitUpload(A, { uploadId: u.uploadId }), 'invalid_upload_state');
+  await code(g.svc.writeUploadBody(A, u.uploadId, streamOf(late)), 'invalid_upload_state');
+  await code(g.svc.beginUpload(A, { requestId: R(), fileId: h.fileId, baseVersion: null, writerEpoch: 1, size: 61, sha256: sha('x') }), 'quota_exceeded');
 });
 
 await test('dirty vs clean vs pinned: stale acks never erase dirty, clean needs canonical version', async () => {

@@ -147,7 +147,7 @@ export interface StorageStatusView {
   writerEpoch: number;
   writerMachine: string | null;
   usedBytes: number;          // committed version bytes, all retained versions
-  reservedBytes: number;      // bytes reserved by open uploads
+  reservedBytes: number;      // bytes reserved by open uploads plus aborted/expired ones held until owned-object GC
   quotaBytes: number;
   maxFileBytes: number;
   pendingUploads: number;

@@ -641,7 +641,9 @@ export class FilesService {
     return { result };
   }
 
-  /** Releases the reservation of an uncommitted upload. The staged object is left for a separate owned-object GC. */
+  /** Ends an uncommitted upload. Its staged object may exist (or still be landing from an in-flight body write) and is
+   *  left for a later owned-object GC, so the reservation is KEPT: reservedBytes stays charged against the quota until
+   *  that GC deletes a verified owned orphan. Only pendingUploads drops, once (a repeated abort is a no-op). */
   async abortUpload(ownerId: string, req: CommitRequest): Promise<UploadResponse> {
     const o = this.owner(ownerId), uploadId = str(req?.uploadId, UPLOAD_RE, 'uploadId'), uKey = this.k(o, 'u', uploadId);
     await this.tx<null>(async () => {
@@ -652,7 +654,7 @@ export class FilesService {
       const ws = await this.ws(o);
       return { result: null, batch: { expect: [[uKey, u.rev], [this.k(o, 'ws'), ws.rev]],
         put: [[uKey, { ...u, rev: u.rev + 1, phase: 'aborted' }],
-          [this.k(o, 'ws'), { ...ws, rev: ws.rev + 1, reservedBytes: Math.max(0, ws.reservedBytes - u.size), pendingUploads: Math.max(0, ws.pendingUploads - 1) }]],
+          [this.k(o, 'ws'), { ...ws, rev: ws.rev + 1, pendingUploads: Math.max(0, ws.pendingUploads - 1) }]],
         del: [] } };
     });
     return this.getUpload(o, { uploadId });

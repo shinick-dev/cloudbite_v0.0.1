@@ -42,7 +42,7 @@
 | `writeUploadBody` | `uploadId` + 바이트 스트림 → `{upload}` | 선언 크기 초과 즉시 중단, 크기·해시 불일치 거절. **commit이 아니다** |
 | `commitUpload` | `{uploadId}` → `{result}` | uploadId 단위 멱등. 아래 확정 규칙 |
 | `getUpload` / `listPendingUploads` | | 응답 유실·크래시 뒤 재조정 |
-| `abortUpload` | `{uploadId}` → `{upload}` | 예약 해제. 객체는 별도 GC 대상으로 남김 |
+| `abortUpload` | `{uploadId}` → `{upload}` | pending만 1회 감소(반복 abort는 no-op). **예약(reservedBytes)은 유지**: staged 객체가 있거나 진행 중 body가 늦게 도착할 수 있으므로, 검증된 소유 orphan을 지우는 GC 전에는 quota에서 풀지 않는다 |
 | `open` / `listVersions` | | 버전 descriptor만. 공급자 URL·object key 없음 |
 | `resolveManifest` | `{fileId, versionId?}` → `{manifest:{rootId, fileId, name, path, versionId, versionSeq, size, sha256, dirs:[{fileId, name, path}]}}` | 메타데이터만(BlobStore 호출 없음). 아래 manifest 규칙 |
 | `readVersion` | `{fileId, versionId, offset?, length?}` → stream | 범위 제한. 전송 경로는 root가 배선 |
@@ -94,6 +94,9 @@
 
 - 1,000 entry를 넘는 디렉터리는 더 깊은 곳으로 옮길 수 없다(위 이동 규칙).
 - 요청 기록(`r/`)·중단/만료 업로드·참조되지 않은 객체의 GC는 없다. 소유 객체 GC와 TTL 정리는 lifecycle 단계에서 다룬다.
+  그때까지 중단·만료된 업로드의 바이트는 `reservedBytes`로 계속 잡혀 있다("정리 대기 중 점유 용량"). 반복 upload+abort로
+  staged 객체가 2 GiB quota를 넘어 쌓일 수는 없지만, 이 용량은 GC 전까지 자동으로 돌아오지 않는다.
+  이 quota는 카탈로그(메타데이터) 회계이며 R2 버킷 자체의 물리적 상한이 아니다 — 버킷 수준 hard cap·lifecycle 규칙은 별도다.
 - 삭제/휴지통, 버전 보관 정책은 아직 없다.
 - R2 `put` 완료를 내구성 확인으로 보는 것은 R2 문서상의 의미론이며 live 측정은 하지 않았다.
 - `writeUploadBody`의 phase 갱신은 참고용이다. 크래시로 빠져도 commit이 공급자 객체를 직접 검증한다.
