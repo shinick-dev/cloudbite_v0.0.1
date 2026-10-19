@@ -116,3 +116,7 @@ It is **MOCK** evidence:
 - The https gateway is replaced by a loopback HTTP proxy, so TLS is not exercised.
 
 It is not live persistence, physical-phone or latency proof.
+
+## Long-running session gate (2026-10-19 delta review F1)
+
+The watcher and its capability last at most six hours. Only configure or the same machine's stop/start resume launches a run; extending a running computer session does not renew it. Configure while a prior run holds the lock does not extend that run's deadline. After the bound, local edits remain on disk but the remote copy can become stale. This is not continuous unlimited autosave. Before enabling production R2 file sync, add and verify renewal and observable expiry, and bound provider-induced Computer DO queue delay. R2 remains unconfigured by user choice; HTTP eviction and files_verified end remain disabled.

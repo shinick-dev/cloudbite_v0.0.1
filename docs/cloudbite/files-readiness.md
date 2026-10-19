@@ -10,7 +10,7 @@
 
 ## 2. 상태 매트릭스
 
-시험 수는 기준 커밋에서 루트가 accept한 모듈별 통과 수다. 모두 mock 또는 local loopback 시험이며 live 증거가 아니다. 일부 전체 스위트의 재실행은 아직 끝나지 않았다.
+시험 수는 기준 커밋에서 루트가 accept한 모듈별 통과 수다. 모두 mock 또는 local loopback 시험이며 live 증거가 아니다. 최신 v6/v7를 포함한 전체 `npm run check`와 `npm run test:cloudbite`가 `ca8a653`에서 통과했다.
 
 | 영역 | 구현 | 시험 (mock/local) | 게이트 / 미완 |
 |---|---|---|---|
@@ -27,7 +27,7 @@
 | 통합 경로 ([integration](files-integration.md)) | 배선 완료 | 13 (mock/local 체인) | DO·R2 in-memory, 가짜 VM, TLS 미검증 |
 
 - 로컬 workerd 3 MiB smoke는 위 시험과 별개다. 원격(remote) 증거가 아니다.
-- 네이티브 구현 후보는 accept됐다. **최종 리뷰와 릴리스 가드는 아직 끝나지 않았다.**
+- 네이티브 구현 후보는 accept됐다. **마지막 변경의 독립 검토는 끝났고, 아래 장시간 동기화 제약(F1)을 확인했다. 배포 가드는 아직 실행 전이다.**
 
 ## 3. 동작 정책 (현재 코드 기준)
 
@@ -68,6 +68,14 @@
 - `98605fd`에서 agent와 watcher 설치, bounded async 실행, 같은 writer의 명시적 설정 머신에 대한 재개를 통합했다. R2 bucket·files DO·정상 gateway가 없으면 resume hook 자체를 제공하지 않는다. 같은 머신을 stop/start할 때에만 기존 설치를 확인하고 capability를 갱신한다. GET은 실행하지 않는다.
 - `8b2d5f6`에서 CLI 명령 전체에 프로세스 간 잠금을 걸어 watcher와 사용자 파일 접근이 서로의 임시 파일을 복구 처리하지 않도록 했다. 이미 닫힌 lease의 재시도도 성공하는 no-op이다.
 - 설치 응답은 background command 제출만 뜻하며 실행 관측을 주장하지 않는다. 사용자의 개인 VM에는 설치하거나 실행하지 않았다. `files_verified` drain은 별도 재진입 검증 전까지 비활성이다.
+
+### 장시간 동기화 제약 — R2 실사용 전 해결 필요 (F1)
+
+- watcher 실행과 capability는 최대 6시간이다. 현재는 명시적 configure 또는 같은 머신의 stop/start 재개 때만 실행하며, 계속 연장한 running 세션의 자동 갱신은 구현되지 않았다. 6시간 이후 원격 사본은 갱신되지 않는다. 로컬 원본은 유지되며 cache eviction은 계속 OFF다.
+- 실행 중 configure를 다시 해도 기존 watcher가 lock을 보유하면 새 작업이 종료하므로 기존 실행 시간 상한이 연장되지 않는다. 자동 갱신이 된다고 안내하지 않는다.
+- R2 연결을 여는 acceptance에는 이 갱신과 상태 표시를 포함한다. hook의 느린 provider 응답이 Computer DO queue를 막는 시간, toolbox 초기 준비 실패 후 재시도, 동시 configure/grant 경쟁도 함께 검증한다.
+- 독립 검토: `delta-review-report.md` (로컬 artifact, CFDeltaReview). 마지막 startup/watcher/CLI lock 변경 외 범위의 재검토나 실제 R2 검증을 뜻하지 않는다.
+
 ## 6. 남은 acceptance 확인
 
 | 확인 | 상태 |
@@ -79,15 +87,15 @@
 | 실폰 파일 열기·종료·재접속 | 미실행 |
 | 복원 후 프로필·OAuth·앱 로그인 (restore-profile) | 미실행 |
 | 여러 백업에 걸친 보관 정책, 실제 provider 상대의 budget 초과 run | 미실행 |
-| 최종 리뷰와 릴리스 가드 | 진행 전 |
+| 최종 리뷰와 릴리스 가드 | 독립 delta 검토 완료. 전체 check/test 통과. 배포 가드 대기 |
 | 배포 | **주장하지 않음**. 가드 후 루트가 기입 |
 
 WorkBite 상태: T0087과 T0067은 started로 남아 있다. T0085(복원 acceptance)는 열려 있다.
 
 ## 7. 재개 순서
 
-1. 마지막 startup·watcher·프로세스 잠금 변경의 독립 검토를 마친다.
-2. 일부 남은 전체 스위트 재실행을 마친다. 이어서 최종 리뷰와 릴리스 가드를 돌린다. 그 결과로 배포 상태를 기입한다.
+1. 배포 가드를 실행하고 실제 결과와 배포 버전을 기록한다.
+2. R2 실사용을 열기 전에 장시간 watcher/capability 자동 갱신과 hook의 queue 지연을 보완하고 검증한다.
 3. R2를 활성화하기로 결정하면 테스트 bucket으로 P0-A 선택 게이트([files-storage-probe.md](files-storage-probe.md))를 먼저 통과시킨다. 그 뒤에 외부 저장 acceptance를 진행하고 eviction 게이트를 검토한다.
 4. `files_verified`는 watcher 설치·drain·재진입·admission이 실제로 증명된 뒤에만 연다.
 5. T0085: 새 임시 환경에서 프로필·OAuth를 복원하는 시나리오를 진행한다. 원래 VM은 건드리지 않는다.
