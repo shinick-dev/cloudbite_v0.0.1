@@ -82,6 +82,27 @@ await test('주장 출처 정리: 엄격히 받고 글은 자르지 않으며, �
   assert.equal(core.normalizeProject(projectRaw({ provenance: undefined })).invalidProvenance, undefined, 'absent is not invalid');
 });
 
+await test('주장 글 상한은 서버처럼 코드 포인트로 센다: 이모지·섞인 1000자 주장과 채택은 그대로 받고 (잘림 표시 포함), 1001자는 통째로 읽지 않는다', () => {
+  const emoji = '😀'.repeat(1000), mixed = 'a😀'.repeat(500), cjk = '𠀀'.repeat(999) + 'z';
+  assert.equal(emoji.length, 2000, 'UTF-16 length is twice the code points');
+  const SNAP = 'ps-' + 'a'.repeat(16);
+  const claims = [claim(1, { text: emoji }), claim(2, { text: mixed, textTruncated: true }), claim(3, { text: cjk })];
+  const p = core.normalizeProject(projectRaw({ provenance: { ledger: LEDGER(claims, SNAP), state: STATE([adoption(claims[0], SNAP), { ...adoption(claims[2], SNAP), text: cjk }]) } }));
+  assert.equal(p.invalidProvenance, undefined);
+  assert.deepEqual(plain(p.provenance.ledger.claims.map(c => [c.text, c.textTruncated])), [[emoji, false], [mixed, true], [cjk, false]], 'text kept exactly, truncated flag kept');
+  assert.equal(p.provenance.ledger.snapshot, SNAP, 'the raw snapshot is kept, not recomputed');
+  assert.deepEqual(plain(p.provenance.state.adoptions.map(a => a.text)), [emoji, cjk]);
+  const v = core.provenanceView(p.provenance);
+  assert.equal(v.standing.get(cid(1)), 'user-adopted'); assert.equal(v.standing.get(cid(2)), 'generated-proposal'); assert.equal(v.active.length, 2);
+  // 1001 코드 포인트: 주장이든 채택 글이든 통째로 읽지 않는다 (다른 상한은 그대로)
+  for (const prov of [{ ledger: LEDGER([claim(5, { text: '😀'.repeat(1001) })]), state: STATE() },
+    { ledger: LEDGER([claim(5, { text: 'x'.repeat(1001) })]), state: STATE() },
+    { ledger: LEDGER(claims, SNAP), state: STATE([{ ...adoption(claims[0], SNAP), text: '😀'.repeat(1001) }]) }]) {
+    const q = core.normalizeProject(projectRaw({ provenance: prov }));
+    assert.equal(q.provenance, undefined); assert.equal(q.invalidProvenance, true);
+  }
+});
+
 await test('산출물 범위: 파일·해시·줄 범위·잘림·빠진 이유를 지키고 보고서에 실행·검증 없음과 함께 적는다. 틀리면 그 필드만 읽을 수 없다고 밝힌다', () => {
   const p = core.normalizeProject(projectRaw());
   assert.deepEqual(plain(p.crossReview.artifactCoverage), REVIEW.artifactCoverage);
@@ -217,19 +238,31 @@ function fakeEnv(fetchImpl) {
   return { root, requests, previews, flush, all, fk, byId, detail };
 }
 const ROW = { id: ID, title: 'T', mode: 'live', status: 'completed', createdAt: 1, updatedAt: 1, expiresAt: Date.now() + 86400_000, expertCount: 3, feedbackCount: 0, model: 'test' };
-const detailOf = (project) => ({ project, model: 'test', roles: [], feedback: [], expiresAt: ROW.expiresAt, canFeedback: false });
-/** 사용 기록 서버: 목록, 상세 GET, 채택 POST (adoptImpl). 상세는 그때의 project() 를 돌려준다 */
-function historyServer(project, adoptImpl) {
-  return (url, init) => {
-    if (url.startsWith('/api/cloudbite/history?')) return json(200, { rows: [ROW], next: null, owner: false, retentionDays: 30 });
+// canFeedback 은 서버의 "자기 기록 && 끝남" (src/cloudbite-project.ts). 채택 권한의 유일한 근거다
+const detailOf = (project, canFeedback = true) => ({ project, model: 'test', roles: [], feedback: [], expiresAt: ROW.expiresAt, canFeedback });
+/** 사용 기록 서버: 목록, 상세 GET (detailImpl 이 있으면 그것), 채택 POST (adoptImpl), 실제 실행 만들기 (끝난 project() 를 바로 돌려준다) */
+function historyServer(project, adoptImpl, { detailImpl = null, canFeedback = true, owner = false } = {}) {
+  return (url, init, n) => {
+    if (url.startsWith('/api/cloudbite/history?')) return json(200, { rows: [ROW], next: null, owner, retentionDays: 30 });
     if (url === `/api/cloudbite/history/${ID}/adopt`) return adoptImpl(init);
-    if (url === `/api/cloudbite/history/${ID}`) return json(200, detailOf(project()));
+    if (url === `/api/cloudbite/history/${ID}`) return detailImpl ? detailImpl(init, n) : json(200, detailOf(project(), canFeedback));
+    if (url === '/api/cloudbite/projects' && init.method === 'POST') return json(201, { project: project(), accessToken: 'proj-bearer' });
     return json(404, { error: 'not found' });
   };
 }
 const openDetail = async (env) => { await env.flush(); env.fk('hist-record:' + ID).click(); await env.flush(); };
 const openGroup = async (env, k) => { const box = env.all().find(n => n.tagName === 'DETAILS' && n.className.includes(`cb-prov-group is-${k}`)); box.open = true; box.dispatch('toggle'); await env.flush(); };
-const posts = (env) => env.requests.filter(r => r.init.method === 'POST');
+const posts = (env) => env.requests.filter(r => r.init.method === 'POST' && r.url.endsWith('/adopt'));
+const historyGets = (env) => env.requests.filter(r => r.url === `/api/cloudbite/history/${ID}` && r.init.method === 'GET');
+/** 지금 실행: 실제 실행으로 바꾸고 계획 준비 → 이 계획으로 실행. 만들기 응답이 이미 끝난 프로젝트라 바로 증거 화면이 그려진다 (사용 기록 상세는 열지 않는다) */
+const startLive = async (env, token = 'adm-secret-123') => {
+  await env.flush();
+  env.all().find(n => n.tagName === 'BUTTON' && n.textContent.trim() === 'Live run').click(); await env.flush();
+  const tok = env.byId('cb-token'); tok.value = token; tok.dispatch('input'); await env.flush();
+  env.fk('start').click(); await env.flush();
+  if (env.fk('start')?.textContent.trim() === 'Run this plan') { env.fk('start').click(); await env.flush(); }
+  assert.ok(env.requests.some(r => r.url === '/api/cloudbite/projects' && r.init.method === 'POST'), 'the run was created');
+};
 
 await test('사용 기록 상세: 주장 출처는 묶음이 접혀 있고 펼칠 때만 50개씩 그리며, 숫자 제안을 제안으로 강조한다', async () => {
   const many = Array.from({ length: 120 }, (_, i) => claim(100 + i, { text: `Reach ${i}% retention`, numericThresholdHint: true }));
@@ -304,6 +337,100 @@ await test('채택 실패·미확인: 다시 보내기 전에 저장된 상태�
   await openDetail(env3); await openGroup(env3, 'hinted');
   env3.fk(`adopt:${cid(2)}`).click(); await env3.flush(); env3.fk(`adopt-yes:${cid(2)}`).click(); await env3.flush();
   assert.match(env3.detail().textContent, /Not adopted: This project was not found or is not yours\./);
+});
+
+await test('채택 권한: 소유자의 전체 보기에서 남의 기록(canFeedback false)은 채택이 없고, 자기 끝난 기록(canFeedback true)만 확인 후 보낸다', async () => {
+  const env = fakeEnv(historyServer(() => projectRaw(), () => json(200, {}), { canFeedback: false, owner: true }));
+  await openDetail(env); await openGroup(env, 'hinted'); await openGroup(env, 'proposals');
+  assert.ok(!env.fk(`adopt:${cid(2)}`)); assert.ok(!env.fk(`adopt:${cid(3)}`));
+  assert.match(env.detail().textContent, /Only the project's own user can adopt its claims/);
+  assert.doesNotMatch(env.detail().textContent, /sign in/i, 'not your project is not a sign-in problem');
+  assert.equal(posts(env).length, 0);
+  // 자기 기록은 그대로 된다
+  const env2 = fakeEnv(historyServer(() => projectRaw(), () => json(200, detailOf(projectRaw({ provenance: { ledger: LEDGER(BASE_CLAIMS), state: STATE([adoption(BASE_CLAIMS[1])]) } })))));
+  await openDetail(env2); await openGroup(env2, 'hinted');
+  env2.fk(`adopt:${cid(2)}`).click(); await env2.flush(); env2.fk(`adopt-yes:${cid(2)}`).click(); await env2.flush();
+  assert.equal(posts(env2).length, 1); assert.match(env2.detail().textContent, /Adopted\. The saved project was read again\./);
+  // 서버가 403 을 주면 로그인 문제가 아니라 남의 프로젝트라고 하고, 사용 기록을 비우지 않는다
+  const env3 = fakeEnv(historyServer(() => projectRaw(), () => json(403, { error: "only the project's own user can adopt its claims" })));
+  await openDetail(env3); await openGroup(env3, 'hinted');
+  env3.fk(`adopt:${cid(2)}`).click(); await env3.flush(); env3.fk(`adopt-yes:${cid(2)}`).click(); await env3.flush();
+  assert.match(env3.detail().textContent, /Not adopted: Only the project's own user can adopt its claims/);
+  assert.ok(env3.fk('hist-record:' + ID), 'the history list is kept (no sign-out)');
+});
+
+await test('지금 실행: 프로젝트 bearer 는 채택 근거가 아니다. 누르면 먼저 사용 기록을 GET 하고, 자기 기록일 때만 확인·POST 한다', async () => {
+  // 자기 실행: GET(canFeedback true) → 확인 → 정확한 본문 POST
+  let current = projectRaw();
+  const env = fakeEnv(historyServer(() => current, (init) => {
+    const b = JSON.parse(init.body);
+    current = projectRaw({ provenance: { ledger: LEDGER(BASE_CLAIMS), state: STATE([adoption(BASE_CLAIMS.find(c => c.id === b.claimId))]) } });
+    return json(200, detailOf(current));
+  }));
+  await startLive(env); await openGroup(env, 'hinted');
+  assert.equal(historyGets(env).length, 0, 'nothing is read before the user asks');
+  env.fk(`adopt:${cid(2)}`).click(); await env.flush();
+  assert.equal(historyGets(env).length, 1); assert.equal(posts(env).length, 0, 'the check is GET only');
+  assert.notEqual(historyGets(env)[0].init.headers?.authorization?.startsWith('Bearer'), true, 'the project bearer is not sent as history authority');
+  env.fk(`adopt-yes:${cid(2)}`).click(); await env.flush();
+  assert.deepEqual(JSON.parse(posts(env)[0].init.body), { claimId: cid(2), text: 'Task completion should be at least 80%', snapshot: 'ps-' + '1'.repeat(16) });
+  assert.match(env.root.textContent, /Adopted\. The saved project was read again\./);
+
+  // 자기 기록이 아니거나 (canFeedback false · 404), 로그인이 없으면 (401) POST 하지 않고 이유를 밝힌다
+  for (const [detailImpl, msg] of [[() => json(200, detailOf(projectRaw(), false)), /Only the project's own user can adopt/],
+    [() => json(404, { error: 'project not found' }), /This project was not found or is not yours/],
+    [() => json(401, { error: 'unauthorized' }), /did not accept your sign-in for saved records/],
+    [() => Promise.reject(new Error('net')), /could not be read to confirm this is your project, so nothing was sent/]]) {
+    const e = fakeEnv(historyServer(() => projectRaw(), () => json(200, {}), { detailImpl }));
+    await startLive(e); await openGroup(e, 'hinted');
+    e.fk(`adopt:${cid(2)}`).click(); await e.flush();
+    assert.equal(posts(e).length, 0); assert.ok(!e.fk(`adopt-yes:${cid(2)}`), 'no confirm step'); assert.match(e.root.textContent, msg);
+  }
+
+  // 명시한 (틀린) 관리자 토큰: 그 헤더로 한 번만 묻고, 헤더 없이 다시 묻지 않는다. 판단은 서버가 한다
+  const e2 = fakeEnv(historyServer(() => projectRaw(), () => json(200, {}), { detailImpl: () => json(401, { error: 'bad admin token' }) }));
+  await startLive(e2, 'wrong-token-999'); await openGroup(e2, 'hinted');
+  e2.fk(`adopt:${cid(2)}`).click(); await e2.flush();
+  assert.deepEqual(historyGets(e2).map(r => r.init.headers['x-admin-token']), ['wrong-token-999']);
+  assert.equal(posts(e2).length, 0);
+});
+
+await test('응답 모름 + 다시 읽기 실패: 상태를 모른다고 밝히고 채택 버튼 대신 GET 만 하는 다시 읽기를 낸다. 읽으면 새 장부로 다시 고를 수 있다', async () => {
+  // 1) POST 응답이 사라지고 (네트워크) 다시 읽기 GET 도 실패 → 모름, POST 1번뿐
+  let saved = projectRaw(), getFails = 2;
+  const env = fakeEnv(historyServer(() => saved, () => Promise.reject(new Error('net')), {
+    detailImpl: () => posts(env).length && getFails-- > 0 ? json(503, {}) : json(200, detailOf(saved)) }));
+  await openDetail(env); await openGroup(env, 'hinted');
+  env.fk(`adopt:${cid(2)}`).click(); await env.flush(); env.fk(`adopt-yes:${cid(2)}`).click(); await env.flush();
+  const text = () => env.detail().textContent;
+  assert.match(text(), /it is unknown whether this claim was adopted\. Read the saved state again \(or reload the page\)/);
+  assert.doesNotMatch(text(), /The saved state was read again/, 'it does not claim a re-read that failed');
+  assert.ok(!env.fk(`adopt:${cid(2)}`) && !env.fk(`adopt:${cid(3)}`), 'no adopt button from the unreconciled old state');
+  assert.equal(posts(env).length, 1);
+  // 2) 사용자가 다시 읽기 → 또 실패: 여전히 모름, POST 없음
+  env.fk('adopt-reread').click(); await env.flush();
+  assert.match(text(), /it is unknown whether this claim was adopted/); assert.ok(env.fk('adopt-reread')); assert.equal(posts(env).length, 1);
+  // 3) 다시 읽기 성공 (새 장부, 채택 없음) → 제안으로 다시 고를 수 있고 재시도는 새 스냅숏을 쓴다
+  saved = projectRaw({ provenance: { ledger: LEDGER(BASE_CLAIMS, 'ps-' + '3'.repeat(16)), state: STATE() } });
+  env.fk('adopt-reread').click(); await env.flush();
+  assert.match(text(), /The saved state was read again and does not show this adoption/); assert.ok(!env.fk('adopt-reread'));
+  assert.equal(posts(env).length, 1, 'reading again never POSTs');
+  env.fk(`adopt:${cid(2)}`).click(); await env.flush(); env.fk(`adopt-yes:${cid(2)}`).click(); await env.flush();
+  assert.equal(JSON.parse(posts(env)[1].init.body).snapshot, 'ps-' + '3'.repeat(16), 'the retry uses the freshly read snapshot');
+
+  // 4) 모름 → 다시 읽기 성공에 이미 채택이 있으면 그렇다고 하고 보내지 않는다. 다른 프로젝트의 응답은 버린다 (모름 유지)
+  let saved2 = projectRaw(), mode = 'fail';
+  const env2 = fakeEnv(historyServer(() => saved2, () => { saved2 = projectRaw({ provenance: { ledger: LEDGER(BASE_CLAIMS), state: STATE([adoption(BASE_CLAIMS[1])]) } }); return json(200, null); }, {
+    detailImpl: () => !posts(env2).length ? json(200, detailOf(saved2)) : mode === 'fail' ? Promise.reject(new Error('net')) : mode === 'foreign' ? json(200, detailOf({ ...saved2, id: PARENT })) : json(200, detailOf(saved2)) }));
+  await openDetail(env2); await openGroup(env2, 'hinted');
+  env2.fk(`adopt:${cid(2)}`).click(); await env2.flush(); env2.fk(`adopt-yes:${cid(2)}`).click(); await env2.flush();
+  assert.match(env2.detail().textContent, /it is unknown whether this claim was adopted/, '200 with an unreadable body is unknown too');
+  mode = 'foreign'; env2.fk('adopt-reread').click(); await env2.flush();
+  assert.match(env2.detail().textContent, /it is unknown whether this claim was adopted/, 'a response for another project is discarded');
+  mode = 'ok'; env2.fk('adopt-reread').click(); await env2.flush();
+  assert.match(env2.detail().textContent, /The saved project already shows this adoption\./); assert.equal(posts(env2).length, 1);
+  // KO 문구도 모름을 밝힌다
+  assert.match(KO.p3.provAdoptUnreconciled, /알 수 없습니다/); assert.match(KO.p3.provAdoptUnreconciled, /새로 고치세요/);
 });
 
 await test('채택 버튼은 진행 중인 검토·메모가 있으면 없고, 읽을 수 없는 출처는 채택 없이 그렇다고만 밝힌다 (KO 전환)', async () => {

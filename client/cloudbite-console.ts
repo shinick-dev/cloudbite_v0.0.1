@@ -387,8 +387,14 @@ const P3_EN = {
   provAdopted: 'Adopted. The saved project was read again.',
   provAdoptedSeen: 'The saved project already shows this adoption.',
   provAdoptFailed: (why: string) => `Not adopted: ${why}`,
-  provAdoptUnknown: 'The server could not be reached. The saved state was read again; adopt again only if it still shows a proposal.',
+  provAdoptUnknown: 'The server\'s answer did not arrive or could not be read. The saved state was read again; adopt again only if it still shows a proposal.',
+  provAdoptUnreconciled: 'The server\'s answer did not arrive and the saved state could not be read again, so it is unknown whether this claim was adopted. Read the saved state again (or reload the page) before adopting again.',
+  provReread: 'Read the saved state again',
+  provAdoptReread: 'The saved state was read again and does not show this adoption. Adopt again only if it still shows a proposal.',
   provAdoptForeign: 'This project was not found or is not yours.',
+  provAdoptNotOwn: 'Only the project\'s own user can adopt its claims. You can read this project, but it is not yours.',
+  provAdoptSignedOut: 'The server did not accept your sign-in for saved records (expired or missing). Nothing was adopted; sign in again, then adopt.',
+  provAdoptCheckFailed: 'The saved record could not be read to confirm this is your project, so nothing was sent. Try again.',
   provAdoptWait: 'Adoption is possible once the project has finished and no review or memo is running.',
   provMemoNote: 'The decision memo is a saved snapshot: adopting a claim later does not change or regenerate it.',
   mdProvTitle: 'Claim provenance',
@@ -454,8 +460,14 @@ const P3_KO: typeof P3_EN = {
   provAdopted: '채택했습니다. 저장된 프로젝트를 다시 읽었습니다.',
   provAdoptedSeen: '저장된 프로젝트에 이미 이 채택이 있습니다.',
   provAdoptFailed: (why: string) => `채택하지 못했습니다: ${why}`,
-  provAdoptUnknown: '서버에 닿지 못했습니다. 저장된 상태를 다시 읽었으니, 여전히 제안으로 보일 때만 다시 채택하세요.',
+  provAdoptUnknown: '서버의 응답이 오지 않았거나 읽을 수 없었습니다. 저장된 상태를 다시 읽었으니, 여전히 제안으로 보일 때만 다시 채택하세요.',
+  provAdoptUnreconciled: '서버의 응답이 오지 않았고 저장된 상태도 다시 읽지 못해, 이 주장이 채택되었는지 알 수 없습니다. 다시 채택하기 전에 저장된 상태를 다시 읽거나 페이지를 새로 고치세요.',
+  provReread: '저장된 상태 다시 읽기',
+  provAdoptReread: '저장된 상태를 다시 읽었고 이 채택은 없습니다. 여전히 제안으로 보일 때만 다시 채택하세요.',
   provAdoptForeign: '이 프로젝트를 찾을 수 없거나 사용자의 프로젝트가 아닙니다.',
+  provAdoptNotOwn: '이 프로젝트의 주장은 프로젝트를 만든 사용자만 채택할 수 있습니다. 읽을 수는 있지만 사용자의 프로젝트가 아닙니다.',
+  provAdoptSignedOut: '저장된 기록에 대한 로그인을 서버가 받아들이지 않았습니다(만료되었거나 없음). 채택된 것은 없습니다. 다시 로그인한 뒤 채택하세요.',
+  provAdoptCheckFailed: '사용자의 프로젝트인지 확인하려고 저장된 기록을 읽지 못해 아무것도 보내지 않았습니다. 다시 시도하세요.',
   provAdoptWait: '프로젝트가 끝나고 진행 중인 검토·메모가 없을 때 채택할 수 있습니다.',
   provMemoNote: '결정 메모는 저장된 시점의 기록입니다. 나중에 주장을 채택해도 메모는 바뀌거나 다시 만들어지지 않습니다.',
   mdProvTitle: '주장 출처',
@@ -2090,6 +2102,8 @@ const REF_AVAIL: LedgerClaim['refs'][number]['availability'][] = ['supplied-docu
 /** 100 역할 × (요약 + 3목록 × 12) + 브리프 + 넘어온 채택 64 를 넉넉히 덮는 상한. 넘으면 읽지 않는다 */
 const PROV_MAX_CLAIMS = 6000;
 const PROV_TEXT = 1000;
+/** 서버(cloudbite-provenance clipChars·parseCarried)는 글을 코드 포인트로 센다: UTF-16 길이로 재면 이모지 1000자가 2000이 된다 */
+const codePoints = (s: string) => { let n = 0; for (const _ of s) n++; return n; };
 const adoptedIn = (v: unknown) => isObj(v) && typeof v.projectId === 'string' && typeof v.actor === 'string' && isInt(v.at) ? { projectId: clip(v.projectId, 128), actor: clip(v.actor, 200), at: v.at } : null;
 function normalizeProvenance(raw: unknown, projectId: string): Provenance | null {
   if (!isObj(raw) || !isObj(raw.ledger) || !isObj(raw.state)) return null;
@@ -2100,7 +2114,7 @@ function normalizeProvenance(raw: unknown, projectId: string): Provenance | null
   const ids = new Set<string>();
   const claims = every(l.claims, PROV_MAX_CLAIMS, x => {
     if (!isObj(x) || typeof x.id !== 'string' || !CLAIM_ID.test(x.id) || ids.has(x.id) || !CLAIM_ORIGINS.includes(x.origin as LedgerClaim['origin'])
-      || !CLAIM_KINDS.includes(x.kind as LedgerClaim['kind']) || typeof x.field !== 'string' || !isInt(x.index) || typeof x.text !== 'string' || x.text.length > PROV_TEXT
+      || !CLAIM_KINDS.includes(x.kind as LedgerClaim['kind']) || typeof x.field !== 'string' || !isInt(x.index) || typeof x.text !== 'string' || codePoints(x.text) > PROV_TEXT
       || !isBool(x.textTruncated) || !isBool(x.numericThresholdHint) || (x.expertId !== undefined && typeof x.expertId !== 'string')) return null;
     const refs = every(x.refs, 8, r => isObj(r) && (r.kind === 'document' || r.kind === 'knowledge') && typeof r.id === 'string'
       && REF_AVAIL.includes(r.availability as LedgerClaim['refs'][number]['availability']) ? { kind: r.kind as 'document' | 'knowledge', id: clip(r.id, 120), availability: r.availability as LedgerClaim['refs'][number]['availability'] } : null);
@@ -2117,7 +2131,7 @@ function normalizeProvenance(raw: unknown, projectId: string): Provenance | null
   if (s.version !== 'cloudbite-provenance/v1' || s.projectId !== projectId) return null;
   const seen = new Set<string>();
   const adoptions = every(s.adoptions, 64, a => {
-    if (!isObj(a) || typeof a.claimId !== 'string' || !CLAIM_ID.test(a.claimId) || seen.has(a.claimId) || typeof a.text !== 'string' || typeof a.snapshot !== 'string'
+    if (!isObj(a) || typeof a.claimId !== 'string' || !CLAIM_ID.test(a.claimId) || seen.has(a.claimId) || typeof a.text !== 'string' || codePoints(a.text) > PROV_TEXT || typeof a.snapshot !== 'string'
       || !PROV_SNAPSHOT.test(a.snapshot) || a.projectId !== projectId || typeof a.actor !== 'string' || !isInt(a.at) || a.meaning !== 'user-adoption-not-verification') return null;
     seen.add(a.claimId);
     const out: ClaimAdoption = { claimId: a.claimId, text: a.text, snapshot: a.snapshot, projectId, actor: clip(a.actor, 200), at: a.at, meaning: 'user-adoption-not-verification' };
@@ -3175,10 +3189,12 @@ function boot(): void {
     list: null as HistoryList | null, detail: null as HistoryDetail | null, report: null as HistoryReport | null,
     deleteId: '', gen: 0, detailGen: 0, dirty: true, renderedLang: '',
     drafts: new Map<string, Omit<HistoryFeedback, 'at'>>(), opened: new Set<string>(),
+    /** 프로젝트 id → 서버가 사용 기록 상세에서 밝힌 자기 기록 여부 (canFeedback). 끝나지 않은 상세의 false 는 모름이라 적지 않는다 */
+    own: new Map<string, boolean>(),
   };
   const HT = () => HISTORY_TEXT[lang];
   function clearHistoryAuthority(): void {
-    H.gen++; H.detailGen++; H.list = null; H.detail = null; H.report = null; H.drafts.clear(); H.opened.clear(); H.owner = false; H.busy = false; H.detailBusy = false; H.dirty = true; H.tab = 'mine';
+    H.gen++; H.detailGen++; H.list = null; H.detail = null; H.report = null; H.drafts.clear(); H.opened.clear(); H.own.clear(); H.owner = false; H.busy = false; H.detailBusy = false; H.dirty = true; H.tab = 'mine';
   }
 
   const catalogue = (): ExpertDefinition[] => S.mode === 'live' ? S.boot.data?.experts ?? [] : (S.boot.data?.experts.length ? S.boot.data.experts : DEMO_EXPERTS);
@@ -4165,7 +4181,7 @@ function boot(): void {
   }
   function historyDenied(status: number): void {
     H.error = status; H.unauthorized = status === 401 || status === 403;
-    if (H.unauthorized) { H.list = null; H.detail = null; H.report = null; H.owner = false; H.drafts.clear(); }
+    if (H.unauthorized) { H.list = null; H.detail = null; H.report = null; H.owner = false; H.drafts.clear(); H.own.clear(); }
   }
   async function loadHistory(more = false): Promise<void> {
     if (H.busy) return;
@@ -4195,7 +4211,8 @@ function boot(): void {
     const r = await historyRequest('/' + encodeURIComponent(id));
     if (gen !== H.detailGen) return;
     const detail = r.data as HistoryDetail | null;
-    if (r.status === 200 && detail && normalizeProject(detail.project) && Array.isArray(detail.feedback)) H.detail = detail;
+    const shown = r.status === 200 && detail && Array.isArray(detail.feedback) ? normalizeProject(detail.project) : null;
+    if (shown && detail) { H.detail = detail; noteOwn(shown, detail); }
     else historyDenied(r.status);
     H.detailBusy = false; paintHistory();
   }
@@ -4659,24 +4676,35 @@ function boot(): void {
   // ── 주장 출처와 채택. 묶음은 펼칠 때만 그리고 PROV_PAGE 개씩 늘려 수천 개를 한꺼번에 그리지 않는다
   const PROV_PAGE = 50;
   const provShown = new Map<string, number>();
-  let adopt: null | { projectId: string; claimId: string; phase: 'confirm' | 'posting' | 'reading' | 'done' | 'failed'; note: Text | null } = null;
+  // unknown: 보낸 채택의 결과도, 그 뒤 저장된 상태도 모른다 → 이 프로젝트의 채택 버튼 대신 GET 만 하는 다시 읽기만 낸다
+  let adopt: null | { projectId: string; claimId: string; phase: 'confirm' | 'posting' | 'reading' | 'done' | 'failed' | 'unknown'; note: Text | null } = null;
   let adoptGen = 0;
   const adoptBusy = () => adopt?.phase === 'posting' || adopt?.phase === 'reading';
   function adoptPaint(): void { paintHistory(); keepFocus(renderEvidence); }
   /** 서버와 같은 조건 (끝난 실제 실행, 취소 아님, 진행 중인 검토·메모 없음). 최종 판단은 서버가 한다 */
   const adoptable = (p: ConsoleProject) => p.brief.mode === 'live' && REVISION.parentId.test(p.id) && TERMINAL_PROJECT.includes(p.status) && p.status !== 'cancelled'
     && !reviewBusy(p) && !memoBusy(p);
+  /** 자기 기록 여부는 서버가 준 사용 기록 상세의 canFeedback (자기 actor && 끝남) 으로만 안다. 프로젝트 bearer·응답 본문의 다른 값은 근거가 아니다 */
+  function noteOwn(p: ConsoleProject, d: HistoryDetail): void {
+    if (d.canFeedback === true) H.own.set(p.id, true);
+    else if (TERMINAL_PROJECT.includes(p.status)) H.own.set(p.id, false);
+    else H.own.delete(p.id);
+  }
   function provenanceKids(p: ConsoleProject, opened: Set<string>, prefix: string): Kid[] {
     const m = M, t = m.p3;
     if (p.invalidProvenance) return [h('p', { class: 'cb-warn' }, t.provInvalid)];
     const pv = p.provenance;
     if (!pv) return [];
-    const view = provenanceView(pv), groups = provenanceGroups(pv), can = adoptable(p);
-    const mine = adopt?.projectId === p.id ? adopt : null;
+    const own = H.own.get(p.id), mine = adopt?.projectId === p.id ? adopt : null;
+    // 남의 기록(소유자의 전체 보기 포함)은 채택이 없다. 모르면 (지금 실행) 누를 때 먼저 사용 기록을 GET 으로 확인한다
+    const view = provenanceView(pv), groups = provenanceGroups(pv), can = adoptable(p) && own !== false && mine?.phase !== 'unknown';
     const kids: Kid[] = [h('p', { class: 'cb-help' }, t.provNote), h('ul', { class: 'cb-prov-summary' }, ...provenanceLines(pv, m).map(x => h('li', null, x))),
       h('p', { class: 'cb-help' }, t.provMemoNote)];
-    if (!can && groups.hinted.length + groups.proposals.length) kids.push(h('p', { class: 'cb-help' }, t.provAdoptWait));
+    const open = groups.hinted.length + groups.proposals.length;
+    if (open && own === false) kids.push(h('p', { class: 'cb-help' }, t.provAdoptNotOwn));
+    else if (open && !adoptable(p)) kids.push(h('p', { class: 'cb-help' }, t.provAdoptWait));
     if (mine?.note) kids.push(h('p', { class: mine.phase === 'done' ? 'cb-ok' : 'cb-warn', role: 'status' }, mine.note(m)));
+    if (mine?.phase === 'unknown') kids.push(h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'adopt-reread', onclick: () => { void rereadAdoption(p.id, mine.claimId); } }, t.provReread));
     const item = (c: LedgerClaim) => {
       const st = view.standing.get(c.id) ?? 'generated-proposal', hint = c.numericThresholdHint && st === 'generated-proposal';
       const here = mine?.claimId === c.id ? mine : null;
@@ -4685,12 +4713,12 @@ function boot(): void {
       if (st === 'generated-proposal') {
         if (c.textTruncated) action = h('p', { class: 'cb-help' }, t.provTruncated);
         else if (here?.phase === 'posting' || here?.phase === 'reading') action = h('p', { class: 'cb-help', role: 'status' }, here.phase === 'posting' ? t.provAdopting : t.provReading);
-        else if (here?.phase === 'confirm' && can) action = h('div', { class: 'cb-prov-confirm', role: 'group', 'aria-label': t.provAdoptConfirm },
+        else if (here?.phase === 'confirm' && can && own === true) action = h('div', { class: 'cb-prov-confirm', role: 'group', 'aria-label': t.provAdoptConfirm },
           h('blockquote', { class: 'cb-claim-text' }, c.text), h('p', { class: 'cb-help' }, t.provAdoptAsk),
           h('button', { type: 'button', class: 'cb-secondary', 'data-fk': `adopt-yes:${c.id}`, onclick: () => { void adoptClaim(p, c, pv.ledger.snapshot); } }, t.provAdoptConfirm),
           h('button', { type: 'button', class: 'cb-ghost', 'data-fk': `adopt-no:${c.id}`, onclick: () => { adopt = null; adoptPaint(); } }, t.provAdoptCancel));
         else if (can) action = h('button', { type: 'button', class: 'cb-ghost', 'data-fk': `adopt:${c.id}`, disabled: adoptBusy(),
-          onclick: () => { if (adoptBusy()) return; adopt = { projectId: p.id, claimId: c.id, phase: 'confirm', note: null }; adoptPaint(); } }, t.provAdopt);
+          onclick: () => { if (adoptBusy()) return; if (H.own.get(p.id) === true) { adopt = { projectId: p.id, claimId: c.id, phase: 'confirm', note: null }; adoptPaint(); } else void checkOwnAdopt(p, c); } }, t.provAdopt);
       }
       return h('li', { class: `cb-prov-claim is-${st}${hint ? ' is-hint' : ''}` },
         h('div', { class: 'cb-claim-head' }, h('span', { class: `cb-tag ${st === 'generated-proposal' ? 'is-unval' : 'is-avail'}` }, t.provStanding[st]),
@@ -4726,6 +4754,7 @@ function boot(): void {
     const d = data as HistoryDetail | null;
     const next = isObj(d) && Array.isArray(d.feedback) ? normalizeProject(d.project) : null;
     if (!next || next.id !== id) return null;
+    noteOwn(next, d!);
     if (H.detail?.project.id === id) { H.detail = d!; H.dirty = true; }
     const cur = S.run?.project;
     if (cur && cur.id === id) {
@@ -4736,22 +4765,61 @@ function boot(): void {
   }
   /** 채택: 정확한 글·장부 스냅숏·claimId 만 보낸다 (누가·언제는 서버가 정한다). 실패하거나 응답을 모르면 다시 보내기 전에 저장된 상태를 읽는다 */
   async function adoptClaim(p: ConsoleProject, c: LedgerClaim, snapshot: string): Promise<void> {
-    if (adoptBusy() || !adoptable(p) || c.textTruncated) return;
+    if (adoptBusy() || !adoptable(p) || c.textTruncated || H.own.get(p.id) !== true || adopt?.phase === 'unknown') return;
     const id = p.id, gen = ++adoptGen;
     adopt = { projectId: id, claimId: c.id, phase: 'posting', note: null }; adoptPaint();
     const r = await historyRequest('/' + encodeURIComponent(id) + '/adopt', 'POST', { claimId: c.id, text: c.text, snapshot });
     if (gen !== adoptGen) return;
     if (r.status === 200 && acceptHistoryDetail(id, r.data)) { adopt = { projectId: id, claimId: c.id, phase: 'done', note: m => m.p3.provAdopted }; adoptPaint(); return; }
     const server = isObj(r.data) && typeof r.data.error === 'string' ? clip(r.data.error, 300) : '';
-    const why: Text = r.status === 0 || r.status === 200 ? m => m.p3.provAdoptUnknown : r.status === 404 ? m => m.p3.provAdoptFailed(m.p3.provAdoptForeign)
-      : r.status === 401 || r.status === 403 ? m => m.p3.provAdoptFailed(HT().auth) : m => m.p3.provAdoptFailed(server || String(r.status));
+    const unknown = r.status === 0 || r.status === 200;
+    // 403 은 로그인 문제가 아니라 남의 프로젝트다: 로그아웃하지 않고 로그인하라고도 하지 않는다
+    const why: Text = unknown ? m => m.p3.provAdoptUnknown : r.status === 404 ? m => m.p3.provAdoptFailed(m.p3.provAdoptForeign)
+      : r.status === 401 ? m => m.p3.provAdoptSignedOut : r.status === 403 ? m => m.p3.provAdoptFailed(m.p3.provAdoptNotOwn) : m => m.p3.provAdoptFailed(server || String(r.status));
     adopt = { projectId: id, claimId: c.id, phase: 'reading', note: null }; adoptPaint();
     const g = await historyRequest('/' + encodeURIComponent(id));
     if (gen !== adoptGen) return;
     const next = g.status === 200 ? acceptHistoryDetail(id, g.data) : null;
+    if (!next && unknown) { adopt = { projectId: id, claimId: c.id, phase: 'unknown', note: m => m.p3.provAdoptUnreconciled }; adoptPaint(); return; }
     const seen = !!next?.provenance && provenanceView(next.provenance).active.some(a => a.claimId === c.id && a.text === c.text);
     adopt = { projectId: id, claimId: c.id, phase: seen ? 'done' : 'failed', note: seen ? m => m.p3.provAdoptedSeen : why };
     adoptPaint();
+  }
+  /** 응답을 모를 때 사용자가 누르는 다시 읽기: GET 만 한다. 읽을 때까지 채택 버튼은 돌아오지 않고, 읽으면 새 장부로 다시 고를 수 있다 */
+  async function rereadAdoption(id: string, claimId: string): Promise<void> {
+    if (adoptBusy() || adopt?.projectId !== id || adopt.phase !== 'unknown') return;
+    const gen = ++adoptGen, text = adoptText(id, claimId);
+    adopt = { projectId: id, claimId, phase: 'reading', note: null }; adoptPaint();
+    const g = await historyRequest('/' + encodeURIComponent(id));
+    if (gen !== adoptGen) return;
+    const next = g.status === 200 ? acceptHistoryDetail(id, g.data) : null;
+    if (!next) { adopt = { projectId: id, claimId, phase: 'unknown', note: m => m.p3.provAdoptUnreconciled }; adoptPaint(); return; }
+    const seen = !!next.provenance && provenanceView(next.provenance).active.some(a => a.claimId === claimId && (text === null || a.text === text));
+    adopt = { projectId: id, claimId, phase: seen ? 'done' : 'failed', note: seen ? m => m.p3.provAdoptedSeen : m => m.p3.provAdoptReread };
+    adoptPaint();
+  }
+  /** 화면에 있는 그 주장의 글 (지금 실행이나 사용 기록 상세) */
+  function adoptText(id: string, claimId: string): string | null {
+    for (const p of [S.run?.project, H.detail ? normalizeProject(H.detail.project) : null])
+      if (p?.id === id) { const c = p.provenance?.ledger.claims.find(x => x.id === claimId); if (c) return c.text; }
+    return null;
+  }
+  /** 자기 기록인지 모르는 채로 (지금 실행) 채택을 누르면 먼저 사용 기록 상세를 GET 한다. canFeedback 이 참일 때만 확인 단계로 간다 */
+  async function checkOwnAdopt(p: ConsoleProject, c: LedgerClaim): Promise<void> {
+    if (adoptBusy() || !adoptable(p) || c.textTruncated) return;
+    const id = p.id, gen = ++adoptGen;
+    adopt = { projectId: id, claimId: c.id, phase: 'reading', note: null }; adoptPaint();
+    const g = await historyRequest('/' + encodeURIComponent(id));
+    if (gen !== adoptGen) return;
+    const next = g.status === 200 ? acceptHistoryDetail(id, g.data) : null;
+    const fail = (note: Text) => { adopt = { projectId: id, claimId: c.id, phase: 'failed', note }; adoptPaint(); };
+    if (!next) return fail(g.status === 401 ? m => m.p3.provAdoptSignedOut : g.status === 403 ? m => m.p3.provAdoptNotOwn : g.status === 404 ? m => m.p3.provAdoptForeign : m => m.p3.provAdoptCheckFailed);
+    if (H.own.get(id) !== true) return fail(m => m.p3.provAdoptNotOwn);
+    const view = next.provenance ? provenanceView(next.provenance) : null;
+    if (view?.active.some(a => a.claimId === c.id && a.text === c.text)) { adopt = { projectId: id, claimId: c.id, phase: 'done', note: m => m.p3.provAdoptedSeen }; adoptPaint(); return; }
+    const fresh = next.provenance?.ledger.claims.find(x => x.id === c.id);
+    if (!fresh || fresh.text !== c.text || fresh.textTruncated || !adoptable(next)) return fail(m => m.p3.provAdoptReread);
+    adopt = { projectId: id, claimId: c.id, phase: 'confirm', note: null }; adoptPaint();
   }
 
   function renderEvidence(): void {
@@ -5708,7 +5776,7 @@ function boot(): void {
     if (seq !== ownerSeq) return;
     ownerPending = false;
     if (H.owner && next.status === 'ready' && !next.authenticated && !S.adminToken.trim()) {
-      H.gen++; H.detailGen++; H.list = null; H.detail = null; H.report = null; H.drafts.clear(); H.owner = false; H.busy = false; H.detailBusy = false; H.dirty = true;
+      H.gen++; H.detailGen++; H.list = null; H.detail = null; H.report = null; H.drafts.clear(); H.own.clear(); H.owner = false; H.busy = false; H.detailBusy = false; H.dirty = true;
     }
     Object.assign(S.owner, next);
     ownerIntro();
