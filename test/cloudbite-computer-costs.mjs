@@ -35,7 +35,7 @@ const daytonaOk = (list = [sb(), sb({ id: 'sandbox-stop-1', name: 'old-box', sta
   [/app\.daytona\.io\/api\/sandbox\?/, () => res(200, { items: list, nextCursor: null })],
   [/\/organizations\/org-1\/usage$/, () => res(200, usage)],
 ];
-const nosanaOk = [[/api\.nosana\.com\/api\/credits\/balance$/, () => res(200, { assignedCredits: 5000, reservedCredits: 1250, settledCredits: 500.5 })]];
+const nosanaOk = [[/api\.nosana\.com\/api\/credits\/balance$/, () => res(200, { assignedCredits: 50, reservedCredits: 12.5, settledCredits: 5.005 })]];
 const env1 = { CLOUDBITE_DAYTONA_API_KEY: KEY, CLOUDBITE_COMPUTER_NOSANA_API_KEY: NKEY };
 let clock = 1_800_000_000_000;
 const deps = (f) => ({ fetch: f.fetch, now: () => clock });
@@ -63,6 +63,14 @@ await test('running pays CPU+RAM+disk, stopped pays disk only, archived is free;
   assert.equal(f.calls.find((c) => c.url.includes('nosana')).auth, `Bearer ${NKEY}`);
   assert.ok(f.calls.filter((c) => c.url.includes('daytona')).every((c) => c.auth === `Bearer ${KEY}`));
   noSecrets(body);
+});
+
+await test('live Nosana USD contract: raw balance 20 minus 1.254 remains $18.746, not $0.18746', async () => {
+  const f = fake([...daytonaOk(), [/credits\/balance$/,()=>res(200,{assignedCredits:20,reservedCredits:0,settledCredits:1.254})]]);
+  const {body} = await m.computerCosts(env1,{deps:deps(f)});
+  assert.equal(body.nosana.assignedUsd,20);
+  assert.equal(body.nosana.settledUsd,1.254);
+  assert.equal(body.nosana.availableUsd,18.746);
 });
 
 await test('unknown rates stay null: GPU, non-finite sizes and transitional states are counted, not priced', async () => {

@@ -7,7 +7,9 @@
 //   Daytona billing https://www.daytona.io/docs/en/billing: started = all reserved resources, stopped = reserved disk only, archived = not
 //     billed. There is no balance/wallet API (dashboard only), so the balance is never fetched or guessed.
 //   Nosana OpenAPI https://api.nosana.com/api/openapi.json: GET /credits/balance (Bearer key) -> { assignedCredits, reservedCredits,
-//     settledCredits } in USD cents; available = assigned - reserved - settled (https://learn.nosana.com/api/credits.html).
+//     settledCredits }; available = assigned - reserved - settled (https://learn.nosana.com/api/credits.html).
+// IMPORTANT: the live API returns USD, despite its OpenAPI descriptions saying "USD cents". Verified 2026-10-19 against
+// /credits/transactions amountUsd: a 50-minute $0.303 reservation is reported as 0.303 credits, not 30.3. Do not divide by 100.
 // Only GETs with the explicitly configured keys at fixed URLs: no writes, credit transfers, scaling or budget enforcement. Hourly figures
 // are estimates from COMPUTER_PRICING (running: CPU+RAM+disk; stopped: disk only), not bills. Snapshots, volumes, network and GPU
 // sandboxes have no proven rate here and are listed as excluded rather than added to any total. A failed or refused provider call
@@ -190,7 +192,7 @@ async function nosana(f: Fetcher, key: string | undefined): Promise<CostsNosana>
   const j = got.json;
   const a = isObj(j) ? finite(j.assignedCredits) : null, r = isObj(j) ? finite(j.reservedCredits) : null, s = isObj(j) ? finite(j.settledCredits) : null;
   if (a === null || r === null || s === null) return { status: 'invalid_response', error: 'invalid_response', ...base };
-  const usd = (cents: number) => round(cents / 100, 4);
+  const usd = (credits: number) => round(credits, 4);
   return { status: 'ok', error: null, ...base, unit: 'usd', assignedUsd: usd(a), reservedUsd: usd(r), settledUsd: usd(s), availableUsd: usd(a - r - s) };
 }
 
