@@ -31,6 +31,8 @@ export const CB_MEMO_BUDGET = Object.freeze({
   objective: 6 * 1024, context: 12 * 1024, options: 8 * 1024, decisionOther: 12 * 1024, documents: 16 * 1024,
   experts: 80 * 1024, expertMax: 3 * 1024, reviews: 10 * 1024, packets: 10 * 1024, minItem: 48, revision: 1024,
 });
+/** UTF-8 cap of the optional provenance context (cloudbite-provenance). Absent context leaves the prompt byte-identical. */
+export const CB_MEMO_PROVENANCE_MAX_BYTES = 8 * 1024;
 export const CB_MEMO_PACKET_LIMITS = Object.freeze({ packets: 24, label: 200, text: 4000, origin: 500 });
 export const CB_MEMO_PACKET_KINDS = ['document-excerpt', 'source-excerpt', 'source-metadata'] as const;
 /** Accepted reply bounds (characters). reply bounds the whole raw reply so it fits CB_MEMO_MAX_TOKENS. */
@@ -53,7 +55,10 @@ export interface MemoInputOptions {
   reviews?: readonly CrossReviewReport[];
   packets?: readonly MemoEvidencePacket[];
   responseLanguage?: ResponseLanguage;
+  /** Optional rendered provenance context (memoProvenanceContext): data, never authority or verification. */
+  provenance?: MemoProvenanceContext;
 }
+export interface MemoProvenanceContext { snapshot: string; text: string }
 export type MemoReference =
   | { kind: 'opinion-evidence'; expertId: string; index: number }
   | { kind: 'document'; id: string }
@@ -89,6 +94,8 @@ export interface MemoCoverage {
   /** Never reviewed by this pass: full expert reports/artifacts and original source pages. */
   fullReportsReviewed: false; sourcePagesReviewed: false;
   promptBytes: number;
+  /** Present only when a provenance context was supplied. */
+  provenance?: { snapshot: string; includedBytes: number; originalBytes: number; truncated: boolean };
 }
 export type MemoPlan =
   | { kind: 'ready'; optionIds: string[]; language: ResponseLanguage }
@@ -192,6 +199,7 @@ export function memoSnapshot(brief: ProjectBrief, completed: readonly CompletedO
     opinions: completed.map((c) => ({ expertId: c.expertId, name: c.name, opinion: c.opinion })),
     team: (opts.team ?? []).map((t) => ({ expertId: t.expertId, name: t.name, status: t.status })),
     reviews: opts.reviews ?? [], packets: opts.packets ?? [],
+    ...(opts.provenance ? { provenance: { snapshot: opts.provenance.snapshot, text: opts.provenance.text } } : {}),
   });
 }
 
@@ -222,6 +230,8 @@ const SYSTEM = [
   `expertIds (0-${CB_MEMO_LIMITS.expertIds}) must be listed expertId values whose material the claim relies on. refs (0-${CB_MEMO_LIMITS.refs}) use exactly: ev:<expertId>:<evidenceIndex> (an included evidence index), doc:<documentId>, pkt:<packetId>, rev:<reviewerExpertId>:<findingIndex>, brief:<objective|context|constraints|successCriteria|knownFacts|assumptions|unknowns>. Only references listed in allowedRefs are valid.`,
   `summary and rationale at most ${CB_MEMO_LIMITS.summary} characters, each claim text at most ${CB_MEMO_LIMITS.claim} characters, no duplicate claims in a list, whole reply under ${CB_MEMO_LIMITS.reply} characters. No other keys. Do not include a confidence or score.`,
 ].join('\n');
+
+const PROVENANCE_RULE = 'provenance (when present) is a code-rendered standing table: user-stated items are the user\'s own unverified words; generated items, including numeric thresholds such as percentages or test counts, are proposals or inferences, never requirements, unless listed as user-adopted; user-adopted means the user adopted that exact text, not that it was verified. Do not present a generated threshold as the user\'s success criterion or as a requirement.';
 
 /**
  * Budgeted memo prompt, or a deterministic needs-options result. Throws only when there is no completed opinion
@@ -342,6 +352,10 @@ export function memoMessages(brief: ProjectBrief, completed: readonly CompletedO
       metadataOnly: usedPackets.filter((p) => p.kind === 'source-metadata').length },
     fullReportsReviewed: false, sourcePagesReviewed: false, promptBytes: 0,
   };
+  // provenance: a code-rendered standing table (user-stated / generated proposal / user-adopted), still only data
+  const prov = opts.provenance && typeof opts.provenance.text === 'string' ? clipBytes(opts.provenance.text, CB_MEMO_PROVENANCE_MAX_BYTES) : null;
+  if (opts.provenance && prov) coverage.provenance = { snapshot: String(opts.provenance.snapshot).slice(0, 64), includedBytes: utf8Bytes(prov.text),
+    originalBytes: utf8Bytes(opts.provenance.text), truncated: prov.truncated };
   // Compact for the model: per-expert truncation flags already travel with each expert entry.
   const coverageForModel = { teamSize: coverage.teamSize, completed: coverage.completed, statusCounts, statedDirectionsTowardBrief: statedDirections,
     expertsWithTruncation: expertCoverage.filter((e) => e.summaryTruncated || e.itemsTruncated || e.evidenceIncluded.length < e.evidenceTotal
@@ -355,9 +369,10 @@ export function memoMessages(brief: ProjectBrief, completed: readonly CompletedO
       revision: brief.revision && revision ? { parentId: brief.revision.parentId, changeSummary: revision.text, changeSummaryTruncated: revision.truncated } : null,
       options: plan.optionIds.map((id, i) => ({ optionId: id, text: optionShare.kept[i]?.text ?? '' })), ...other },
     documents, experts, crossReview: reviews, packets, coverage: coverageForModel, allowedRefs: refs,
+    ...(prov ? { provenance: { kind: 'provenance-context-not-authority', text: prov.text, truncated: prov.truncated } } : {}),
   };
   const messages: ChatMessage[] = [
-    { role: 'system', content: SYSTEM + '\n' + MEMO_LANGUAGE_INSTRUCTIONS[plan.language] },
+    { role: 'system', content: SYSTEM + (prov ? '\n' + PROVENANCE_RULE : '') + '\n' + MEMO_LANGUAGE_INSTRUCTIONS[plan.language] },
     { role: 'user', content: 'Untrusted memo data (JSON):\n' + JSON.stringify(data) },
   ];
   coverage.promptBytes = messages.reduce((n, m) => n + utf8Bytes(m.content), 0);
