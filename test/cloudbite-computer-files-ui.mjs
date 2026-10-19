@@ -3,7 +3,8 @@
 // explicit Download posts files/open and activates one same-origin content link, unconfigured storage and 401 are honest,
 // UTF-8 and hostile/long names stay plain text, stale/refused renames, uncertain writes retry the exact bytes, a lost upload
 // answer is reconciled through GET uploads/<id> without a second write, hash/size/conflict results are never counted as saved,
-// KO/EN keeps the folder, selection, drafts and pending work, hidden tabs never poll, and the 390px CSS floor.
+// KO/EN keeps the folder, selection, drafts and pending work, hidden tabs never poll, and the 390px CSS floor; the cloud computer
+// prepare/set-up/release presses send exact bodies, explain a stopped machine and never start one; occupied = used + reserved.
 // Mock API only — no live storage, browser or provider.
 //   node test/cloudbite-computer-files-ui.mjs
 import assert from 'node:assert/strict';
@@ -147,6 +148,17 @@ function server(o = {}) {
         return ok({ result: { ...res } });
       }
     }
+    // cloud computer bridge (mock): the agent reply shape the integration route passes through; never a machine start
+    if (r.method === 'POST' && s.cloud && [`${API}/materialize`, `${API}/agent/configure`, `${API}/close`].includes(p)) {
+      if (s.status.blobs !== 'configured') return err(503, 'store_not_configured');
+      if (!s.cloud.running) return err(409, 'not_running');
+      if (p.endsWith('/configure')) { s.cloud.installed = true; return ok({ ok: true, installed: { ok: true } }); }
+      if (!s.cloud.installed) return err(409, 'agent_not_installed');
+      if (p.endsWith('/close')) return ok({ ok: true, closed: { ok: true } });
+      const e = s.entries.get(b.fileId);
+      return ok({ ok: true, open: { leaseId: b.requestId.replace(/-/g, ''), path: `/home/daytona/CloudFiles/${e.name}`, state: 'open', versionId: b.versionId,
+        fetchedBytes: e.size }, workspace: '~/CloudFiles', launched: false });
+    }
     return err(404, 'not_found');
   }
   return s;
@@ -245,9 +257,9 @@ await test('browse: status then one metadata page; UTF-8, hostile and 255-byte n
   }
   assert.ok(!e.all().some((x) => x.tagName === 'IMG' || x.tagName === 'SCRIPT'), 'names never become markup');
   const t = e.text();
-  assert.match(t, /Copy on cloud computer/); assert.match(t, /Kept on cloud computer/); assert.match(t, /No content uploaded yet/);
+  assert.match(t, /Copy on cloud computer/); assert.match(t, /Keep requested/); assert.match(t, /No content uploaded yet/);
   assert.match(t, /2\.4 MiB/);
-  assert.match(t, /Download puts a separate copy on this device/); assert.match(t, /Opening files directly on the cloud computer comes later/);
+  assert.match(t, /Download puts a separate copy on this device/); assert.match(t, /it does not open an app and never starts the computer/);
   // selecting a file only expands its details
   e.rowBtn('보고서 2026 – 최종.pdf').click(); await e.flush();
   assert.equal(e.rowBtn('보고서 2026 – 최종.pdf').getAttribute('aria-expanded'), 'true');
@@ -379,11 +391,11 @@ await test('new folder and pin: an uncertain answer retries the byte-identical r
   assert.match(e.text(), /Folder Projects created/);
   assert.ok(e.row('Projects'));
   e.rowBtn('보고서 2026 – 최종.pdf').click(); await e.flush();
-  e.btn('Stop keeping on cloud computer').click(); await e.flush();
+  e.btn('Remove keep request').click(); await e.flush();
   const [pin] = e.posts('/pin');
   assert.equal(pin.raw, JSON.stringify({ requestId: pin.body.requestId, fileId: 'f_report', pinned: false }));
-  assert.match(e.text(), /No longer kept/);
-  assert.ok(e.btn('Keep on cloud computer'));
+  assert.match(e.text(), /Keep request removed/);
+  assert.ok(e.btn('Request keeping on cloud computer'));
 });
 
 const content = Buffer.from('hello cloudbite — 파일 내용\n'.repeat(40));
@@ -602,6 +614,86 @@ await test('switching language rewrites ?lang= in place (kept on reload) and kee
   await plain.flush();
   plain.btn('EN').click(); await plain.flush();
   assert.equal(plain.doc.documentElement.lang, 'en');
+});
+
+const noStart = (e) => e.requests.every((r) => r.url.startsWith(API) && !/start|resume|restore|snapshot/i.test(r.url));
+
+await test('cloud computer: prepare is a separate explicit press, honestly worded; set up, prepare and release send exact bodies; nothing starts a machine', async () => {
+  const s = seeded(); s.cloud = { running: true, installed: false };
+  const e = env({ srv: s });
+  await e.flush();
+  e.rowBtn('보고서 2026 – 최종.pdf').click(); await e.flush();
+  assert.match(e.text(), /Prepare places a verified copy of the saved version in ~\/CloudFiles on your running cloud computer\. It does not open an app and never starts the computer\./);
+  assert.ok(e.btn('Download to this device') && e.btn('Prepare on cloud computer'), 'download and prepare are separate controls');
+  assert.equal(e.posts('/materialize').length, 0, 'selecting never prepares');
+  e.btn('Prepare on cloud computer').click(); await e.flush();
+  assert.match(e.text(), /Not done on the cloud computer: File access is not set up on your cloud computer yet\./);
+  e.btn('Set up file access on cloud computer').click(); await e.flush();
+  const [cfg] = e.posts('/agent/configure');
+  assert.match(cfg.body.requestId, UUID); assert.deepEqual(Object.keys(cfg.body), ['requestId']);
+  assert.match(e.text(), /File access is set up/);
+  assert.equal(e.btn('Set up file access on cloud computer'), undefined);
+  e.btn('Prepare on cloud computer').click(); await e.flush();
+  const mat = e.posts('/materialize').at(-1);
+  assert.equal(mat.raw, JSON.stringify({ requestId: mat.body.requestId, fileId: 'f_report', versionId: 'v_r1' }));
+  assert.match(mat.body.requestId, UUID);
+  assert.match(e.text(), /A verified copy is ready on your cloud computer at \/home\/daytona\/CloudFiles\/보고서 2026 – 최종\.pdf\. No app was opened\./);
+  assert.equal(e.btn('Prepare on cloud computer'), undefined, 'one lease per file on this page');
+  e.btn('Release on cloud computer').click(); await e.flush();
+  const [close] = e.posts('/close');
+  assert.equal(close.raw, JSON.stringify({ leaseId: mat.body.requestId.replace(/-/g, '') }));
+  assert.match(e.text(), /Released on the cloud computer/);
+  assert.ok(e.btn('Prepare on cloud computer'));
+  // the lease message stays with its file
+  e.rowBtn('empty.txt').click(); await e.flush();
+  assert.ok(!/Released on the cloud computer/.test(e.text()));
+  assert.equal(e.btn('Prepare on cloud computer').disabled, true, 'nothing saved yet: nothing to prepare');
+  assert.ok(noStart(e)); assert.equal(e.doc.activated.length, 0, 'prepare never downloads to this device');
+  e.btn('KO').click(); await e.flush();
+  e.rowBtn('보고서 2026 – 최종.pdf').click(); await e.flush();
+  assert.match(e.text(), /앱을 열지 않고 컴퓨터를 켜지도 않습니다/); assert.ok(e.btn('클라우드 컴퓨터에 준비'));
+});
+
+await test('cloud computer: a stopped machine is explained (no start); missing R2 disables prepare; a lost answer retries the same request', async () => {
+  const s = seeded(); s.cloud = { running: false, installed: true };
+  const e = env({ srv: s });
+  await e.flush();
+  e.rowBtn('보고서 2026 – 최종.pdf').click(); await e.flush();
+  e.btn('Prepare on cloud computer').click(); await e.flush();
+  assert.match(e.text(), /Your cloud computer is not running\. Start it on the cloud computer page; this page never starts it\./);
+  assert.ok(noStart(e)); assert.equal(e.posts('/materialize').length, 1);
+  assert.equal(e.btn('Retry same request'), undefined, 'a definite refusal is not retried');
+  s.cloud.running = true;
+  s.faults[`POST ${API}/materialize`] = [{ after: () => err(503, 'unknown_outcome') }];
+  e.btn('Prepare on cloud computer').click(); await e.flush();
+  assert.match(e.text(), /Not confirmed: prepare 보고서 2026 – 최종\.pdf on cloud computer/);
+  e.btn('Retry same request').click(); await e.flush();
+  const [, a, b] = e.posts('/materialize');
+  assert.equal(b.raw, a.raw, 'byte-identical retry keeps the requestId (and so the lease id)');
+  assert.match(e.text(), /A verified copy is ready/);
+  const off = env({ srv: seeded({ status: { blobs: 'not_configured' } }) });
+  await off.flush();
+  off.rowBtn('보고서 2026 – 최종.pdf').click(); await off.flush();
+  assert.equal(off.btn('Prepare on cloud computer').disabled, true);
+  assert.match(off.text(), /Needs file contents storage, which is not configured\./);
+  off.btn('Prepare on cloud computer').click(); await off.flush();
+  assert.equal(off.posts('/materialize').length, 0);
+});
+
+await test('storage: occupied is saved versions plus held upload bytes (pending cleanup included); keep is worded as a request, not residency', async () => {
+  const e = env({ srv: seeded({ status: { usedBytes: 5 * MiB, reservedBytes: 3 * MiB, pinnedFiles: 1 } }) });
+  await e.flush();
+  const t = e.text();
+  assert.match(t, /Occupied \| 8 MiB of 10 GiB \| Saved versions \| 5 MiB \| Held by unfinished or ended uploads until cleanup \| 3 MiB/);
+  assert.match(t, /Keep requests \| 1/);
+  assert.ok(!/sav(e|ing) space|will not free|always/i.test(t), 'no savings or residency promise');
+  e.rowBtn('보고서 2026 – 최종.pdf').click(); await e.flush();
+  e.btn('Remove keep request').click(); await e.flush();
+  e.btn('Request keeping on cloud computer').click(); await e.flush();
+  assert.match(e.text(), /Keep request saved\. It is a setting stored with your file list; it does not guarantee a copy stays on the cloud computer\./);
+  e.btn('KO').click(); await e.flush();
+  assert.match(e.text(), /차지한 공간 \| 10 GiB 중 8 MiB/);
+  assert.ok(!/항상 보관/.test(e.text()));
 });
 
 console.log(`${passed} cloudbite-computer-files-ui tests passed`);

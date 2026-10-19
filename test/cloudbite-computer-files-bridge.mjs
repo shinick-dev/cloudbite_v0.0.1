@@ -219,7 +219,7 @@ test('materialize: explicit open on the running owned machine only', async () =>
   assert.ok(!h.kinds().includes('grant'), 'materialize never mints a capability');
   const [prep, run] = h.calls.filter(c => c[0] === 'exec').map(c => c[1]);
   assert.match(prep, /install -m 600 \/dev\/null .*manifests\/0f8fad5b-d9cb-469f-a165-70867728950e\.json\.next/);
-  assert.match(run, /register --manifest .* open --file-id=f_abc --version=v_1; rc=\$\?; rm -f /);
+  assert.match(run, /register --manifest .* open --file-id=f_abc --version=v_1 --lease=0f8fad5bd9cb469fa16570867728950e; rc=\$\?; rm -f /);
   assert.deepEqual(JSON.parse(h.calls.find(c => c[0] === 'upload')[2]), [DIR, FILE]);
   for (const over of [{ machine: null }, { sandbox: { state: 'stopped' } }, { sandbox: { name: 'x' } }]) {
     const n = harness(over);
@@ -270,6 +270,25 @@ test('prepare-end helper: fixed agent command on the running owned machine, repo
   assert.equal((await B.filesBridgePrepareEnd(harness({ exec: [new Error('timeout')] }).deps)).body.error.code, 'unknown_outcome');
   const busy = await B.filesBridgePrepareEnd(harness({ exec: [{ exitCode: 2, result: '{"ok": false, "code": "io_error"}' }] }).deps);
   assert.equal(busy.status, 409); assert.equal(busy.body.error.code, 'io_error');
+});
+
+test('lease close: explicit, validated lease id, fixed agent command on the running owned machine', async () => {
+  const lease = 'a'.repeat(32);
+  const h = harness({ exec: [{ exitCode: 0, result: `{"ok": true, "closed": "${lease}"}` }] });
+  const r = await B.filesBridgeClose(h.deps, { leaseId: lease });
+  assert.equal(r.status, 200); assert.equal(r.body.closed.closed, lease);
+  assert.deepEqual(h.kinds(), ['machine', 'account', 'getSandbox', 'exec']);
+  assert.match(h.calls.find(c => c[0] === 'exec')[1], new RegExp(` close --lease=${lease}'$`));
+  for (const leaseId of [undefined, '', 'A'.repeat(32), 'a'.repeat(31), "a'; rm -rf ~; '", '--lease=x' + 'a'.repeat(23)]) {
+    const b = harness();
+    assert.equal((await B.filesBridgeClose(b.deps, { leaseId })).body.error.code, 'bad_request');
+    assert.deepEqual(b.calls, [], 'refused before any provider call');
+  }
+  const stopped = harness({ sandbox: { state: 'stopped' } });
+  assert.equal((await B.filesBridgeClose(stopped.deps, { leaseId: lease })).body.error.code, 'not_running');
+  assert.deepEqual(providerWrites(stopped), []);
+  const gone = await B.filesBridgeClose(harness({ exec: [{ exitCode: 2, result: '{"ok": false, "code": "not_found"}' }] }).deps, { leaseId: lease });
+  assert.equal(gone.status, 409); assert.equal(gone.body.error.code, 'not_found');
 });
 
 test('generated agent source bundle is the exact Python agent and passes --check', async () => {

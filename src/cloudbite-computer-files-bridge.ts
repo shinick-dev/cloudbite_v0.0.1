@@ -219,6 +219,10 @@ export async function filesBridgeInstall(deps: FilesBridgeDeps, req: { requestId
   return { status: 200, body: { ok: true, installed: true, machineId: cap.machineId, writerEpoch: cap.writerEpoch, expiresAt: cap.expiresAt } };
 }
 
+/** Lease id of one materialize request: the request id without dashes, so a retried open reuses its lease instead of
+ *  taking a second one that would never be closed. */
+export const filesBridgeLeaseId = (requestId: string) => requestId.toLowerCase().replace(/-/g, '');
+
 /** Explicit user open: registers one file (and its parent dirs) and has the agent fetch + verify it. */
 export async function filesBridgeMaterialize(deps: FilesBridgeDeps,
   req: { requestId?: unknown; manifest?: unknown; fileId?: unknown; versionId?: unknown }): Promise<FilesBridgeResult> {
@@ -237,7 +241,7 @@ export async function filesBridgeMaterialize(deps: FilesBridgeDeps,
     if (prep.exitCode !== 0) return fail('install_failed');
     await deps.upload(o.c, o.sb, `${m}.next`, JSON.stringify(manifest));
     const run = await deps.exec(o.c, o.sb, `bash -c 'mv -f ${m}.next ${m} && ${agentCmd(`register --manifest ${m}`)} `
-      + `&& ${agentCmd(`open --file-id=${req.fileId} --version=${req.versionId}`)}; rc=$?; rm -f ${m}; exit $rc'`,
+      + `&& ${agentCmd(`open --file-id=${req.fileId} --version=${req.versionId} --lease=${filesBridgeLeaseId(req.requestId)}`)}; rc=$?; rm -f ${m}; exit $rc'`,
       FILES_BRIDGE_LIMITS.materializeTimeoutS);
     const out = agentJson(run.result);
     if (run.exitCode !== 0 || out?.ok !== true) return { status: 409, body: { error: { code: agentCode(out), message: 'agent_open' } } };
@@ -259,6 +263,15 @@ async function installedAgent(deps: FilesBridgeDeps, args: string, timeoutS: num
     if (run.exitCode !== 0 || out?.ok !== true) return { status: 409, body: { error: { code: agentCode(out), message: label } } };
     return { status: 200, body: { ok: true, [key]: out } };
   } catch { return fail('unknown_outcome'); }
+}
+
+const LEASE = /^[0-9a-f]{32}$/;
+
+/** Explicit user close of one open lease taken by materialize. Without it every open would keep the file `open` and block a
+ *  verified end forever; the agent is never asked to close a lease on its own while an app may still use the file. */
+export function filesBridgeClose(deps: FilesBridgeDeps, req: { leaseId?: unknown }): Promise<FilesBridgeResult> {
+  if (typeof req?.leaseId !== 'string' || !LEASE.test(req.leaseId)) return Promise.resolve(fail('bad_request'));
+  return installedAgent(deps, `close --lease=${req.leaseId}`, FILES_BRIDGE_LIMITS.installTimeoutS, 'agent_close', 'closed');
 }
 
 /** Agent counts/readiness on the running machine. Reads no file bodies and sends nothing remote. */

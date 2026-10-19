@@ -32,6 +32,7 @@ def sha(data):
 class Fake:
     """File-backed fake server so a crashed child process and the parent see the same remote state."""
     configured = True
+    eviction_policy = "verified"  # MOCK: this fake declares verified persistence so eviction logic can be tested
 
     def __init__(self, store):
         self.store = Path(store)
@@ -926,6 +927,56 @@ def test_growing_file_snapshot_is_bounded_per_chunk():
             assert e.fake.body(e.entry("big.bin")["fileId"]) == b"z" * 1064
     finally:
         fa.CHUNK = old_chunk
+
+
+def test_open_with_lease_id_is_idempotent():
+    with env() as e:
+        e.agent.register([e.fake.put("f_1", "v_1", b"one", "a.txt"), e.fake.put("f_2", "v_1", b"two", "b.txt")])
+        lease = "0f8fad5bd9cb469fa16570867728950e"
+        first = e.agent.open(path="a.txt", lease_id=lease)
+        again = e.agent.open(file_id="f_1", version="v_1", lease_id=lease)
+        assert first["leaseId"] == again["leaseId"] == lease and again["replayed"] is True and again["fetchedBytes"] == 0
+        assert e.fake.fetches == 1 and e.agent.status()["openLeases"] == 1, "a retried open takes no second lease"
+        expect("request_conflict", e.agent.open, path="b.txt", lease_id=lease)
+        for bad in ("A" * 32, "a" * 31, "x" * 32, 7):
+            expect("invalid_argument", e.agent.open, path="b.txt", lease_id=bad)
+        e.agent.close_lease(lease)
+        assert e.agent.status()["openLeases"] == 0 and e.agent.prepare_end()["open"] == []
+        expect("not_found", e.agent.close_lease, lease)
+
+
+def test_http_backend_eviction_is_gated_and_keeps_clean_files():
+    # Regression: an HTTP-backed agent must not evict even a verified clean, unpinned, closed agent copy (explicit
+    # evict, auto-evict and the CLI), because server pins and live persistence are not yet proven to reach this agent.
+    with http_env() as h:
+        h.agent = a = h.open_agent()
+        seeded = h.core.seed("clean.bin", b"c" * 400)
+        a.register([seeded])
+        a.close_lease(a.open(path="clean.bin")["leaseId"])
+        item = entry_of(a, "clean.bin")
+        assert item["state"] == "clean" and item["origin"] == "agent" and not item["pinned"] and not item["open"]
+        assert item["evictable"] is False and a.status()["eviction"] == "gated"
+        expect("eviction_gated", a.evict)
+        expect("eviction_gated", a.evict, 1)
+        assert (h.root / "clean.bin").read_bytes() == b"c" * 400 and entry_of(a, "clean.bin")["state"] == "clean"
+        a.cfg["autoEvict"], a.cfg["reserveBytes"] = True, 1000
+        a.disk_free = lambda _: 100
+        a.register([h.core.seed("next.bin", b"n" * 50)])
+        expect("insufficient_space", a.open, path="next.bin")
+        assert (h.root / "clean.bin").exists() and not (h.root / "next.bin").exists()
+        a.close()
+        h.agent = None
+        proc = subprocess.run([sys.executable, "-B", str(AGENT_PATH), "--state", str(h.state), "--capability", str(h.cap),
+                               "evict"], capture_output=True, timeout=60)
+        assert proc.returncode == 2 and json.loads(proc.stdout.decode().strip()) == {"ok": False, "code": "eviction_gated"}
+        assert TOKEN.encode() not in proc.stdout + proc.stderr
+        assert (h.root / "clean.bin").read_bytes() == b"c" * 400
+    with env() as e:
+        e.agent.register([e.fake.put("f_1", "v_1", b"x" * 10, "x.bin")])
+        e.agent.close_lease(e.agent.open(path="x.bin")["leaseId"])
+        e.reopen(fa.UnconfiguredHttpBackend())
+        expect("eviction_gated", e.agent.evict)
+        assert (e.root / "x.bin").exists()
 
 
 def test_http_open_descriptor_gates_content_fetch():

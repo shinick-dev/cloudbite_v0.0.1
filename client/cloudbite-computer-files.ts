@@ -9,6 +9,9 @@
 // durable result whose size and SHA-256 match the local file counts as saved; a conflict keeps the sibling copy and says so.
 // Every write keeps its requestId and exact body in memory until the server answers definitely, so Retry repeats the same
 // request; an upload whose answer was lost first reads GET uploads/<id> and never mints a new write on its own.
+// Prepare on cloud computer (explicit press, R2 required) posts files/materialize: a verified copy is placed under ~/CloudFiles on
+// the RUNNING cloud computer and held open until Release (files/close). It opens no application and never starts the machine;
+// a stopped machine is explained. The keep (pin) control records a request with the file list, not a residency promise.
 // No polling: a visible tab refreshes once when it becomes visible again. Nothing starts a machine or any paid provider action.
 // Everything is drawn with createElement/textContent (names isolated in <bdi>). Text comes from DICT (EN/KO); server error
 // codes are shown verbatim. A message keeps what happened (code, HTTP status) and is worded when drawn, so switching language
@@ -22,6 +25,10 @@ const RENAME_API = `${API}/rename`;
 const PIN_API = `${API}/pin`;
 const OPEN_API = `${API}/open`;
 const BEGIN_API = `${API}/uploads/begin`;
+const MATERIALIZE_API = `${API}/materialize`;
+const CLOSE_API = `${API}/close`;
+const CONFIGURE_API = `${API}/agent/configure`;
+const LEASE_ID = /^[0-9a-f]{32}$/;
 const COMPUTER_PATH = '/cloudbite/computer';
 const ROOT = 'root';
 const FILE_ID = /^f_[A-Za-z0-9]{1,64}$/;
@@ -35,7 +42,7 @@ const CURSOR_MAX = 1024;
 const NAME_BYTES_MAX = 255;
 const UPLOAD_MAX = 32 * 1024 * 1024;
 // The server may refuse these safely and the same request can be repeated.
-const RETRYABLE = ['catalog_busy', 'body_missing', 'not_durable', 'commit_unknown', 'catalog_unavailable', 'blob_unavailable'];
+const RETRYABLE = ['catalog_busy', 'body_missing', 'not_durable', 'commit_unknown', 'catalog_unavailable', 'blob_unavailable', 'unknown_outcome', 'end_in_progress'];
 
 type Kind = 'file' | 'dir';
 type LocalState = 'remote' | 'local' | 'dirty';
@@ -45,7 +52,7 @@ type Entry = {
   currentVersion: string | null; versionSeq: number; pinned: boolean; state: LocalState; rev: number;
 };
 type Status = {
-  catalog: boolean; blobs: boolean; writerEpoch: number; usedBytes: number; quotaBytes: number; maxFileBytes: number;
+  catalog: boolean; blobs: boolean; writerEpoch: number; usedBytes: number; reservedBytes: number; quotaBytes: number; maxFileBytes: number;
   pendingUploads: number; dirtyFiles: number; pinnedFiles: number;
 };
 type Phase = 'begun' | 'body_written' | 'committed' | 'conflict' | 'aborted';
@@ -55,6 +62,9 @@ type Upload = { uploadId: string; fileId: string; size: number; sha256: string; 
 type Dir = { id: string; name: string };
 type Op = { kind: 'mkdir' | 'rename' | 'pin'; url: string; json: string; phase: 'sending' | 'uncertain'; key: string; label: () => string };
 type Step = 'create' | 'begin' | 'body' | 'commit';
+/** A cloud computer action; fileId is the file selected when it was pressed (where its messages are shown) */
+type Prep = { kind: 'prepare' | 'configure' | 'close'; fileId: string; name: string; url: string; json: string; phase: 'sending' | 'uncertain' };
+type Lease = { leaseId: string; path: string; versionId: string };
 type Up = {
   name: string; size: number; sha: string; bytes: ArrayBuffer; parentId: string; dirs: Dir[]; writerEpoch: number;
   createJson: string; beginId: string; beginJson: string | null; fileId: string | null; uploadId: string | null;
@@ -77,24 +87,32 @@ const DICT = {
     notConfigured: 'File storage is not configured for this Cloudbite yet. Nothing is stored and no files can be listed.',
     blobsMissing: 'File contents storage is not configured. You can browse names, but downloads and uploads are off.',
     storeTitle: 'Storage', sConnected: 'Connected', sConfigured: 'Configured', sUnread: 'Configured — list not read', sNotConfigured: 'Not configured', sCatalog: 'File list', sBlobs: 'File contents',
-    sUsed: 'Used', sUsedOf: (u: string, q: string) => `${u} of ${q}`, sPending: 'Unfinished uploads', sDirty: 'Changed on cloud computer, not uploaded', sPinned: 'Kept on cloud computer',
+    sUsed: 'Occupied', sUsedOf: (u: string, q: string) => `${u} of ${q}`, sSaved: 'Saved versions', sReserved: 'Held by unfinished or ended uploads until cleanup',
+    sPending: 'Unfinished uploads', sDirty: 'Changed on cloud computer, not uploaded', sPinned: 'Keep requests',
     whereTitle: 'Three different places',
     where: [
       'Cloudbite files (remote storage) hold the saved original. A file counts as saved only after the server verifies its size and checksum.',
       'Download puts a separate copy on this device. Changes to that copy are not sent back.',
-      'The cloud computer cache is the copy on your cloud computer\'s own disk, shown per file. Opening files directly on the cloud computer comes later.',
+      'The cloud computer cache is the copy on your cloud computer\'s own disk, shown per file. Prepare on cloud computer puts a verified copy in ~/CloudFiles on a running cloud computer; it does not open an app and never starts the computer.',
     ],
     listTitle: 'Files', refresh: 'Refresh', up: 'Up one folder', home: 'My files', pathLabel: 'Folder', listNone: 'This folder is empty.',
     listFailed: 'Could not refresh the list.', more: 'Show more', moreLoading: 'Loading more…', capped: (n: number) => `Showing the first ${n} items.`,
     folderGone: 'This folder no longer exists. Go up or back to My files.',
     kind: { file: 'File', dir: 'Folder' } as Record<Kind, string>,
     state: { remote: 'Remote only', local: 'Copy on cloud computer', dirty: 'Changed on cloud computer — not uploaded yet' } as Record<LocalState, string>,
-    pinned: 'Kept on cloud computer', noContent: 'No content uploaded yet', version: (n: number) => `version ${n}`,
+    pinned: 'Keep requested', noContent: 'No content uploaded yet', version: (n: number) => `version ${n}`,
     openFolder: (n: string) => `Open folder ${n}`, details: 'Details',
     download: 'Download to this device', opening: 'Preparing…', dlStarted: (n: string, s: string) => `Downloading ${n} (${s}) to this device as a separate copy. Edits to it are not saved back.`,
     dlFallback: 'Download did not start? Save the file', dlNone: 'This file has no saved content to download yet.', dlFailed: 'Could not prepare the download.',
-    pin: 'Keep on cloud computer', unpin: 'Stop keeping on cloud computer', pinning: 'Saving…',
-    pinOk: 'Kept. The cloud computer will not free this file to save space.', unpinOk: 'No longer kept. Once its copy is verified as saved it may be freed to save space.',
+    pin: 'Request keeping on cloud computer', unpin: 'Remove keep request', pinning: 'Saving…',
+    pinOk: 'Keep request saved. It is a setting stored with your file list; it does not guarantee a copy stays on the cloud computer.', unpinOk: 'Keep request removed.',
+    cloudTitle: 'On the cloud computer', cloudNote: 'Prepare places a verified copy of the saved version in ~/CloudFiles on your running cloud computer. It does not open an app and never starts the computer.',
+    prepare: 'Prepare on cloud computer', preparing: 'Preparing on cloud computer…', setup: 'Set up file access on cloud computer', settingUp: 'Setting up…',
+    release: 'Release on cloud computer', releasing: 'Releasing…', cloudOff: 'Needs file contents storage, which is not configured.',
+    prepared: (p: string) => `A verified copy is ready on your cloud computer at ${p}. No app was opened. It stays held until you release it.`,
+    setupOk: 'File access is set up on your cloud computer. Press Prepare again.', releaseOk: 'Released on the cloud computer.',
+    cloudFailed: (c: string) => `Not done on the cloud computer: ${c}`,
+    opPrepare: (n: string) => `prepare ${n} on cloud computer`, opSetup: 'set up file access on cloud computer', opRelease: (n: string) => `release ${n} on cloud computer`,
     rename: 'Rename', renameLabel: 'New name', save: 'Save name', saving: 'Saving…', cancel: 'Cancel', renameOk: 'Renamed.',
     nameHint: 'Up to 255 bytes. Not allowed: / \\, control characters, a trailing dot or space, "." or "..". Names are compared ignoring case.',
     nameBad: 'That name is not allowed here.', nameSame: 'That is already its name.',
@@ -117,7 +135,7 @@ const DICT = {
     uncertain: 'No definite answer from the server. Retry sends the same request with the same ID, so it will not happen twice.',
     retrySame: 'Retry same request', forget: 'Forget it', forgot: 'Forgotten. Refresh to see what the server recorded.',
     pendingOp: (l: string) => `Not confirmed: ${l}`, opMkdir: (n: string) => `create folder ${n}`, opRename: (n: string) => `rename to ${n}`,
-    opPin: (n: string) => `keep ${n} on cloud computer`, opUnpin: (n: string) => `stop keeping ${n}`,
+    opPin: (n: string) => `request keeping ${n}`, opUnpin: (n: string) => `remove keep request for ${n}`,
     codes: {
       name_conflict: 'Another item in this folder already uses that name (case is ignored).',
       invalid_name: 'The server refused that name.',
@@ -135,6 +153,16 @@ const DICT = {
       request_conflict: 'This request ID was already used for a different change. Nothing new happened.',
       invalid_upload_state: 'The upload is no longer in a state that can continue.',
       not_verified: 'The server could not verify this yet.',
+      not_running: 'Your cloud computer is not running. Start it on the cloud computer page; this page never starts it.',
+      agent_not_installed: 'File access is not set up on your cloud computer yet.',
+      not_configured: 'Cloud computer file access is not configured for this Cloudbite.',
+      end_in_progress: 'Your cloud computer session is ending. Nothing new was started; try again after it ends.',
+      ownership_mismatch: 'The cloud computer could not be verified as yours, so nothing was done.',
+      insufficient_space: 'Not enough free space on the cloud computer.',
+      eviction_gated: 'Freeing space on the cloud computer is not enabled yet.',
+      install_failed: 'Setting up file access did not finish. Retry repeats the same request.',
+      workspace_exists_unowned: '~/CloudFiles already exists and was not created by Cloudbite, so it was left untouched.',
+      base_exists_unowned: 'A Cloudbite folder on the cloud computer exists but was not created by Cloudbite, so it was left untouched.',
     } as Record<string, string>,
     bytes: ['B', 'KiB', 'MiB', 'GiB', 'TiB'],
   },
@@ -148,24 +176,32 @@ const DICT = {
     notConfigured: '이 Cloudbite 에는 아직 파일 저장소가 설정되지 않았습니다. 저장된 것이 없고 파일 목록도 볼 수 없습니다.',
     blobsMissing: '파일 내용 저장소가 설정되지 않았습니다. 이름은 볼 수 있지만 내려받기와 올리기는 꺼져 있습니다.',
     storeTitle: '저장소', sConnected: '연결됨', sConfigured: '설정됨', sUnread: '설정됨 — 목록 못 읽음', sNotConfigured: '설정 안 됨', sCatalog: '파일 목록', sBlobs: '파일 내용',
-    sUsed: '사용량', sUsedOf: (u: string, q: string) => `${q} 중 ${u}`, sPending: '끝나지 않은 올리기', sDirty: '클라우드 컴퓨터에서 바뀌었고 아직 올리지 않음', sPinned: '클라우드 컴퓨터에 항상 보관',
+    sUsed: '차지한 공간', sUsedOf: (u: string, q: string) => `${q} 중 ${u}`, sSaved: '저장된 버전', sReserved: '끝나지 않았거나 끝난 올리기가 정리 전까지 잡고 있는 공간',
+    sPending: '끝나지 않은 올리기', sDirty: '클라우드 컴퓨터에서 바뀌었고 아직 올리지 않음', sPinned: '보관 요청',
     whereTitle: '서로 다른 세 곳',
     where: [
       'Cloudbite 파일(원격 저장소)은 저장된 원본입니다. 서버가 크기와 체크섬을 확인한 뒤에만 저장된 것으로 칩니다.',
       '내려받기는 이 기기에 별도의 사본을 만듭니다. 그 사본을 고쳐도 다시 올라가지 않습니다.',
-      '클라우드 컴퓨터 캐시는 클라우드 컴퓨터 디스크에 있는 사본이며 파일마다 표시합니다. 클라우드 컴퓨터에서 바로 여는 기능은 나중에 제공합니다.',
+      '클라우드 컴퓨터 캐시는 클라우드 컴퓨터 디스크에 있는 사본이며 파일마다 표시합니다. 클라우드 컴퓨터에 준비하기는 실행 중인 클라우드 컴퓨터의 ~/CloudFiles 에 확인된 사본을 두며, 앱을 열지 않고 컴퓨터를 켜지도 않습니다.',
     ],
     listTitle: '파일', refresh: '새로 고침', up: '상위 폴더로', home: '내 파일', pathLabel: '폴더', listNone: '이 폴더는 비어 있습니다.',
     listFailed: '목록을 새로 고치지 못했습니다.', more: '더 보기', moreLoading: '더 불러오는 중…', capped: (n: number) => `처음 ${n}개 항목만 보여 줍니다.`,
     folderGone: '이 폴더는 더 이상 없습니다. 상위 폴더나 내 파일로 돌아가세요.',
     kind: { file: '파일', dir: '폴더' } as Record<Kind, string>,
     state: { remote: '원격에만 있음', local: '클라우드 컴퓨터에 사본 있음', dirty: '클라우드 컴퓨터에서 바뀜 — 아직 올리지 않음' } as Record<LocalState, string>,
-    pinned: '클라우드 컴퓨터에 항상 보관', noContent: '아직 올린 내용 없음', version: (n: number) => `버전 ${n}`,
+    pinned: '보관 요청됨', noContent: '아직 올린 내용 없음', version: (n: number) => `버전 ${n}`,
     openFolder: (n: string) => `${n} 폴더 열기`, details: '자세히',
     download: '이 기기로 내려받기', opening: '준비 중…', dlStarted: (n: string, s: string) => `${n} (${s}) 을(를) 이 기기에 별도 사본으로 내려받습니다. 이 사본을 고쳐도 다시 저장되지 않습니다.`,
     dlFallback: '내려받기가 시작되지 않았나요? 파일 저장', dlNone: '이 파일에는 아직 내려받을 저장된 내용이 없습니다.', dlFailed: '내려받기를 준비하지 못했습니다.',
-    pin: '클라우드 컴퓨터에 항상 보관', unpin: '항상 보관 해제', pinning: '저장 중…',
-    pinOk: '보관합니다. 클라우드 컴퓨터는 공간 확보를 위해 이 파일을 비우지 않습니다.', unpinOk: '보관을 해제했습니다. 사본이 저장된 것으로 확인되면 공간 확보를 위해 비울 수 있습니다.',
+    pin: '클라우드 컴퓨터 보관 요청', unpin: '보관 요청 해제', pinning: '저장 중…',
+    pinOk: '보관 요청을 저장했습니다. 파일 목록에 기록되는 설정이며 클라우드 컴퓨터에 사본이 늘 남아 있다고 보장하지는 않습니다.', unpinOk: '보관 요청을 해제했습니다.',
+    cloudTitle: '클라우드 컴퓨터에서', cloudNote: '준비하기는 저장된 버전의 확인된 사본을 실행 중인 클라우드 컴퓨터의 ~/CloudFiles 에 둡니다. 앱을 열지 않고 컴퓨터를 켜지도 않습니다.',
+    prepare: '클라우드 컴퓨터에 준비', preparing: '클라우드 컴퓨터에 준비 중…', setup: '클라우드 컴퓨터 파일 연결 설정', settingUp: '설정 중…',
+    release: '클라우드 컴퓨터에서 놓기', releasing: '놓는 중…', cloudOff: '파일 내용 저장소가 필요한데 설정되지 않았습니다.',
+    prepared: (p: string) => `확인된 사본이 클라우드 컴퓨터의 ${p} 에 준비됐습니다. 앱은 열지 않았습니다. 놓기 전까지 잡혀 있습니다.`,
+    setupOk: '클라우드 컴퓨터에 파일 연결을 설정했습니다. 준비를 다시 누르세요.', releaseOk: '클라우드 컴퓨터에서 놓았습니다.',
+    cloudFailed: (c: string) => `클라우드 컴퓨터에서 하지 못함: ${c}`,
+    opPrepare: (n: string) => `${n} 클라우드 컴퓨터에 준비`, opSetup: '클라우드 컴퓨터 파일 연결 설정', opRelease: (n: string) => `${n} 클라우드 컴퓨터에서 놓기`,
     rename: '이름 바꾸기', renameLabel: '새 이름', save: '이름 저장', saving: '저장 중…', cancel: '취소', renameOk: '이름을 바꿨습니다.',
     nameHint: '255바이트까지. 쓸 수 없는 것: / \\, 제어 문자, 끝의 점이나 공백, "." 또는 "..". 대소문자는 구분하지 않고 비교합니다.',
     nameBad: '여기에 쓸 수 없는 이름입니다.', nameSame: '이미 그 이름입니다.',
@@ -188,7 +224,7 @@ const DICT = {
     uncertain: '서버의 확실한 답이 없습니다. 다시 보내기는 같은 ID 의 같은 요청이라 두 번 일어나지 않습니다.',
     retrySame: '같은 요청 다시 보내기', forget: '잊기', forgot: '잊었습니다. 새로 고침으로 서버 기록을 확인하세요.',
     pendingOp: (l: string) => `확인 안 됨: ${l}`, opMkdir: (n: string) => `${n} 폴더 만들기`, opRename: (n: string) => `${n} 으로 이름 바꾸기`,
-    opPin: (n: string) => `${n} 항상 보관`, opUnpin: (n: string) => `${n} 보관 해제`,
+    opPin: (n: string) => `${n} 보관 요청`, opUnpin: (n: string) => `${n} 보관 요청 해제`,
     codes: {
       name_conflict: '이 폴더에 같은 이름의 항목이 이미 있습니다(대소문자 무시).',
       invalid_name: '서버가 그 이름을 거부했습니다.',
@@ -206,6 +242,16 @@ const DICT = {
       request_conflict: '이 요청 ID 는 이미 다른 변경에 쓰였습니다. 새로 일어난 것은 없습니다.',
       invalid_upload_state: '이 올리기는 더 이어 갈 수 없는 상태입니다.',
       not_verified: '서버가 아직 확인하지 못했습니다.',
+      not_running: '클라우드 컴퓨터가 실행 중이 아닙니다. 클라우드 컴퓨터 페이지에서 켜세요. 이 페이지는 컴퓨터를 켜지 않습니다.',
+      agent_not_installed: '클라우드 컴퓨터에 아직 파일 연결이 설정되지 않았습니다.',
+      not_configured: '이 Cloudbite 에는 클라우드 컴퓨터 파일 연결이 설정되지 않았습니다.',
+      end_in_progress: '클라우드 컴퓨터 세션을 끝내는 중입니다. 새로 시작한 것은 없으니 끝난 뒤 다시 시도하세요.',
+      ownership_mismatch: '클라우드 컴퓨터가 내 것인지 확인하지 못해 아무것도 하지 않았습니다.',
+      insufficient_space: '클라우드 컴퓨터의 빈 공간이 부족합니다.',
+      eviction_gated: '클라우드 컴퓨터 공간 비우기는 아직 켜져 있지 않습니다.',
+      install_failed: '파일 연결 설정이 끝나지 않았습니다. 다시 보내기는 같은 요청을 반복합니다.',
+      workspace_exists_unowned: '~/CloudFiles 가 이미 있고 Cloudbite 가 만든 것이 아니라서 건드리지 않았습니다.',
+      base_exists_unowned: '클라우드 컴퓨터의 Cloudbite 폴더가 Cloudbite 가 만든 것이 아니라서 건드리지 않았습니다.',
     } as Record<string, string>,
     bytes: ['B', 'KiB', 'MiB', 'GiB', 'TiB'],
   },
@@ -286,7 +332,7 @@ function normalizeStatus(raw: unknown): Status | null {
   if (!isObj(raw) || !isObj(raw.status)) return null;
   const s = raw.status;
   return {
-    catalog: s.catalog === 'configured', blobs: s.blobs === 'configured', writerEpoch: Math.floor(num(s.writerEpoch)), usedBytes: num(s.usedBytes),
+    catalog: s.catalog === 'configured', blobs: s.blobs === 'configured', writerEpoch: Math.floor(num(s.writerEpoch)), usedBytes: num(s.usedBytes), reservedBytes: num(s.reservedBytes),
     quotaBytes: num(s.quotaBytes), maxFileBytes: num(s.maxFileBytes), pendingUploads: num(s.pendingUploads), dirtyFiles: num(s.dirtyFiles), pinnedFiles: num(s.pinnedFiles),
   };
 }
@@ -353,6 +399,7 @@ function mount(root: HTMLElement): void {
     op: null as Op | null, opMsg: null as Msg, mkMsg: null as Msg,
     dl: null as { fileId: string; phase: 'sending' | 'ready' } | null, dlLink: null as { fileId: string; href: string; name: string; size: number } | null, dlMsg: null as Msg,
     pick: null as File | null, up: null as Up | null, upMsg: null as Msg, upBusy: false,
+    prep: null as Prep | null, prepMsg: null as { fileId: string; msg: Msg } | null, leases: new Map<string, Lease>(), needsSetup: false,
   };
   // gen is bumped on sign-out: every answer that arrives later is dropped and in-flight requests are aborted.
   // seq drops an older list answer that arrives after a newer one.
@@ -419,7 +466,16 @@ function mount(root: HTMLElement): void {
   const renameBox = h('div', 'cf-rename', field('cf-rename-name', renameLabel, renameIn, renameHint), h('div', 'cf-actions', renameSave, renameCancel));
   const rowMsg = h('p', 'cf-msg');
   rowMsg.setAttribute('role', 'status');
-  const panel = h('div', 'cf-panel', panelFacts, dlMsg, dlLink, h('div', 'cf-actions', dlBtn, pinBtn, renameBtn), renameBox, rowMsg);
+  // cloud computer: prepare (materialize) / set up (configure) / release (close); the pending action keeps its exact body
+  const cloudTitle = h('h3'), cloudNote = h('p', 'cf-fine'), prepMsg = h('p', 'cf-msg');
+  prepMsg.setAttribute('role', 'status');
+  const prepBtn = button('cf-btn', () => { prepare(); });
+  const setupBtn = button('cf-btn', () => { setup(); });
+  const closeBtn = button('cf-btn', () => { release(); });
+  const prepRetry = button('cf-btn cf-primary', () => { if (S.prep) void sendPrep(S.prep); });
+  const prepForget = button('cf-btn cf-quiet', () => { const p = S.prep; if (!p) return; S.prep = null; S.prepMsg = { fileId: p.fileId, msg: { text: () => T().forgot, kind: 'info' } }; render(); });
+  const cloudBox = h('div', 'cf-cloud', cloudTitle, cloudNote, prepMsg, h('div', 'cf-actions', prepBtn, setupBtn, closeBtn, prepRetry, prepForget));
+  const panel = h('div', 'cf-panel', panelFacts, dlMsg, dlLink, h('div', 'cf-actions', dlBtn, pinBtn, renameBtn), renameBox, rowMsg, cloudBox);
 
   // storage status
   const storeTitle = h('h2'), storeFacts = h('dl', 'cf-facts');
@@ -621,6 +677,50 @@ function mount(root: HTMLElement): void {
     dlLink.click();
   }
 
+  // ── cloud computer: explicit presses only; a machine that is not running is explained, never started ──
+  async function sendPrep(p: Prep): Promise<void> {
+    if (S.auth !== 'in' || (S.prep && (S.prep !== p || p.phase === 'sending'))) return;
+    p.phase = 'sending'; S.prep = p; S.prepMsg = null; render();
+    const g = gen;
+    const res = await call('POST', p.url, ac.signal, p.json);
+    if (g !== gen || S.prep !== p) return;
+    if (!res.ok && authStatus(res.status)) { signedOut(); return; }
+    if (!res.ok && uncertain(res) && res.code !== 'not_configured') { p.phase = 'uncertain'; render(); return; }
+    S.prep = null;
+    const say = (m: Msg): void => { S.prepMsg = { fileId: p.fileId, msg: m }; };
+    if (!res.ok) {
+      const c = res.code || String(res.status);
+      if (c === 'agent_not_installed') S.needsSetup = true;
+      say({ text: () => T().cloudFailed(codeText(c)), kind: 'warn' }); render(); return;
+    }
+    if (p.kind === 'configure') { S.needsSetup = false; say({ text: () => T().setupOk, kind: 'ok' }); render(); return; }
+    if (p.kind === 'close') { S.leases.delete(p.fileId); say({ text: () => T().releaseOk, kind: 'ok' }); render(); return; }
+    const o = isObj(res.body.open) ? res.body.open : null;
+    const leaseId = o ? idOr(o.leaseId, LEASE_ID) : null, versionId = o ? idOr(o.versionId, VERSION_ID) : null;
+    if (!o || !leaseId || !versionId || typeof o.path !== 'string' || !o.path) { say({ text: () => T().odd, kind: 'warn' }); render(); return; }
+    S.leases.set(p.fileId, { leaseId, path: str(o.path, 4096), versionId });
+    render();
+  }
+
+  function prepare(): void {
+    const e = sel();
+    if (S.prep || S.auth !== 'in' || !e || e.kind !== 'file' || !e.currentVersion || !S.status?.blobs || S.leases.has(e.fileId)) return;
+    void sendPrep({ kind: 'prepare', fileId: e.fileId, name: e.name, url: MATERIALIZE_API, phase: 'sending',
+      json: JSON.stringify({ requestId: uuid(), fileId: e.fileId, versionId: e.currentVersion }) });
+  }
+
+  function setup(): void {
+    const e = sel();
+    if (S.prep || S.auth !== 'in' || !e || !S.status?.blobs) return;
+    void sendPrep({ kind: 'configure', fileId: e.fileId, name: e.name, url: CONFIGURE_API, phase: 'sending', json: JSON.stringify({ requestId: uuid() }) });
+  }
+
+  function release(): void {
+    const e = sel(), l = e ? S.leases.get(e.fileId) : undefined;
+    if (S.prep || S.auth !== 'in' || !e || !l) return;
+    void sendPrep({ kind: 'close', fileId: e.fileId, name: e.name, url: CLOSE_API, phase: 'sending', json: JSON.stringify({ leaseId: l.leaseId }) });
+  }
+
   // ── upload: hash locally, then create → begin → body → commit with immutable IDs ──
   async function startUpload(): Promise<void> {
     if (S.up || S.upBusy || S.auth !== 'in' || !canUpload()) return;
@@ -734,6 +834,7 @@ function mount(root: HTMLElement): void {
     gen++; ac.abort(); ac = new AbortController();
     if (S.op?.phase === 'sending') S.op.phase = 'uncertain';
     if (S.up?.phase === 'sending') S.up.phase = 'uncertain';
+    if (S.prep?.phase === 'sending') S.prep.phase = 'uncertain';
     Object.assign(S, { auth: 'out', loading: false, loadMsg: null, status: null, entries: [], cursor: null, listed: false, listing: false, more: false, listMsg: null, listFail: false, dl: null, dlLink: null, dlMsg: null, upBusy: false });
     S.listVer++;
     render();
@@ -785,7 +886,11 @@ function mount(root: HTMLElement): void {
     fact(storeFacts, d.sCatalog, !st.catalog ? d.sNotConfigured : S.listed && !S.listFail ? d.sConnected : S.listFail ? d.sUnread : d.sConfigured);
     fact(storeFacts, d.sBlobs, st.blobs ? d.sConfigured : d.sNotConfigured);
     if (st.catalog) {
-      fact(storeFacts, d.sUsed, st.quotaBytes > 0 ? d.sUsedOf(bytes(st.usedBytes), bytes(st.quotaBytes)) : bytes(st.usedBytes));
+      // occupied counts saved versions plus bytes held by unfinished uploads and by ended ones until their cleanup
+      const occupied = st.usedBytes + st.reservedBytes;
+      fact(storeFacts, d.sUsed, st.quotaBytes > 0 ? d.sUsedOf(bytes(occupied), bytes(st.quotaBytes)) : bytes(occupied));
+      fact(storeFacts, d.sSaved, bytes(st.usedBytes));
+      fact(storeFacts, d.sReserved, bytes(st.reservedBytes));
       fact(storeFacts, d.sPending, nf().format(st.pendingUploads));
       fact(storeFacts, d.sDirty, nf().format(st.dirtyFiles));
       fact(storeFacts, d.sPinned, nf().format(st.pinnedFiles));
@@ -897,6 +1002,25 @@ function mount(root: HTMLElement): void {
     renameSave.disabled = busy || !draft;
     renameCancel.textContent = d.cancel; renameCancel.disabled = busy;
     showMsg(rowMsg, S.rowMsg);
+
+    cloudTitle.textContent = d.cloudTitle; cloudNote.textContent = d.cloudNote;
+    const p = S.prep, mine = !!p && p.fileId === e.fileId, lease = S.leases.get(e.fileId), stuck = mine && p.phase === 'uncertain';
+    const cloudOn = !!S.status?.blobs, sending = mine && p.phase === 'sending';
+    prepBtn.textContent = sending && p.kind === 'prepare' ? d.preparing : d.prepare;
+    prepBtn.hidden = !!lease || stuck; prepBtn.disabled = !!p || !cloudOn || !e.currentVersion;
+    setupBtn.textContent = sending && p.kind === 'configure' ? d.settingUp : d.setup;
+    setupBtn.hidden = !S.needsSetup || !!lease || stuck; setupBtn.disabled = !!p || !cloudOn;
+    closeBtn.textContent = sending && p.kind === 'close' ? d.releasing : d.release;
+    closeBtn.hidden = !lease || stuck; closeBtn.disabled = !!p;
+    prepRetry.textContent = d.retrySame; prepRetry.hidden = !stuck;
+    prepForget.textContent = d.forget; prepForget.hidden = !stuck;
+    let pm: Msg = S.prepMsg && S.prepMsg.fileId === e.fileId ? S.prepMsg.msg : null;
+    if (stuck) {
+      const label = p.kind === 'prepare' ? d.opPrepare(p.name) : p.kind === 'close' ? d.opRelease(p.name) : d.opSetup;
+      pm = { text: () => `${T().pendingOp(label)} — ${T().uncertain}`, kind: 'warn' };
+    } else if (!pm && lease) { const at = lease.path; pm = { text: () => T().prepared(at), kind: 'ok' }; }
+    else if (!pm && !cloudOn) pm = { text: () => T().cloudOff, kind: 'info' };
+    showMsg(prepMsg, pm);
   }
 
   render();

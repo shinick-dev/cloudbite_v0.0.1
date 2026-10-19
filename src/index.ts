@@ -27,6 +27,8 @@ import { cloudbiteAliasPath, cloudbiteIdentity, retiredCloudbiteOrigin } from '.
 import { isFail, sha, type Env, type State } from './state';
 import { DurableObject } from 'cloudflare:workers';
 import { filesObjectClass } from './cloudbite-computer-files-runtime';
+// Registers the safe-end hooks (automatic backup) on the computer DO at module load.
+import './cloudbite-computer-end-wiring';
 
 export { State } from './state';
 export { CloudbiteProject } from './cloudbite-project';

@@ -11,7 +11,7 @@
 
 import type { DurableObject as DurableObjectBase } from 'cloudflare:workers';
 import { FilesService, durableObjectCatalog, r2BlobStore } from './cloudbite-computer-files';
-import { FilesError, type StorageStatusView, type VersionView } from './cloudbite-computer-files-contract';
+import { FilesError, type ResolveManifestResponse, type StorageStatusView, type VersionView } from './cloudbite-computer-files-contract';
 import { computerOwnerTag, type ComputerMachineRef } from './cloudbite-computer-contract';
 import type { Env } from './state';
 
@@ -137,6 +137,14 @@ export function filesObjectClass(Base: typeof DurableObjectBase) {
       return (await this.bind(ownerId)) ?? this.read(ownerId, req);
     }
 
+    /** Canonical materialize plan for one file version, built from this owner's catalog only (metadata, no body read).
+     *  The bridge manifest is derived from this; client-supplied paths or hashes are never used. */
+    async filesManifest(ownerId: string, req: { fileId: unknown; versionId?: unknown }): Promise<FilesResult<ResolveManifestResponse>> {
+      const b = await this.bind(ownerId); if (b) return b;
+      try { return { ok: true, body: await this.svc.resolveManifest(ownerId, { fileId: req?.fileId as string, versionId: (req?.versionId ?? null) as string | null }) }; }
+      catch (e) { return failFrom(e, false); }
+    }
+
     /** Mints the machine capability. The caller has verified `machineId` is the owner's running, label-verified computer.
      *  An unclaimed workspace is given to this machine (epoch + 1); a different current writer is never displaced here. */
     async filesGrant(ownerId: string, machineId: string, requestId: string): Promise<FilesResult<Omit<FilesAgentGrant, 'endpoint'>>> {
@@ -228,11 +236,13 @@ interface FilesRpc {
   filesWriteBody(ownerId: string, uploadId: string, declared: number, body: ReadableStream<Uint8Array> | null): Promise<FilesResult>;
   filesRead(ownerId: string, req: ReadReq): Promise<FilesRead>;
   filesGrant(ownerId: string, machineId: string, requestId: string): Promise<FilesResult<Omit<FilesAgentGrant, 'endpoint'>>>;
+  filesManifest(ownerId: string, req: { fileId: unknown; versionId?: unknown }): Promise<FilesResult<ResolveManifestResponse>>;
   filesAgentCall(token: string, live: RecordedMachine, op: FilesOp, input: Record<string, unknown>): Promise<FilesResult>;
   filesAgentWriteBody(token: string, live: RecordedMachine, uploadId: string, declared: number, body: ReadableStream<Uint8Array> | null): Promise<FilesResult>;
   filesAgentRead(token: string, live: RecordedMachine, req: ReadReq): Promise<FilesRead>;
 }
-const stubOf = (env: FilesEnv, tag: string) => {
+export type FilesStub = FilesRpc;
+export const stubOf = (env: FilesEnv, tag: string) => {
   const ns = env.CLOUDBITE_COMPUTER_FILES;
   return ns ? ns.get(ns.idFromName(tag)) as unknown as FilesRpc : null;
 };
@@ -325,7 +335,23 @@ export async function filesBrowserRoute(req: Request, env: FilesEnv, url: URL, o
   }
   const named: Record<string, FilesOp> = { 'files/create': 'create', 'files/rename': 'rename', 'files/pin': 'pin', 'files/open': 'open', 'files/uploads/begin': 'begin' };
   const fop = named[op];
+  if (fop === 'begin') { const frozen = await endFrozen(env, tag); if (frozen) return frozen; }
   return fop ? call(stub.filesCall(tag, fop, input), fop !== 'open') : sendFail('not_found', 404);
+}
+
+interface EndRpc { computerEndStatus(tag: string): Promise<{ ok: true; uploadsFrozen?: boolean } | { error: unknown; status: number }> }
+
+/** Safe-end admission barrier for NEW browser uploads only. While an end is draining/stopping, begin is refused; uploads
+ *  already admitted (body/commit/abort) and the machine agent's own drain uploads still finish, so the drain cannot
+ *  deadlock on this barrier. The end status is a storage-only read of the computer DO (no provider call); when it cannot
+ *  be read, begin fails closed. */
+async function endFrozen(env: FilesEnv, tag: string): Promise<Response | null> {
+  if (!env.CLOUDBITE_COMPUTER) return null; // no computer, no safe end to protect
+  try {
+    const st = await (env.CLOUDBITE_COMPUTER.get(env.CLOUDBITE_COMPUTER.idFromName('owner')) as unknown as EndRpc).computerEndStatus(tag);
+    if (!('ok' in st)) return sendFail('catalog_unavailable', 503, true);
+    return st.uploadsFrozen === true ? sendFail('end_in_progress', 409, true) : null;
+  } catch { return sendFail('catalog_unavailable', 503, true); }
 }
 
 async function call(p: Promise<FilesResult>, mutating: boolean): Promise<Response> {

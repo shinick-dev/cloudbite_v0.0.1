@@ -13,7 +13,9 @@ canonical receipt.
 
 Invariants: dirty, uploading, conflicted, pinned and open copies are never evicted; only
 agent-created clean cache whose bytes still match the verified version is eligible, and
-original workspace files are never deleted.  A download replaces nothing until its size and
+original workspace files are never deleted.  Eviction (explicit ``evict`` and auto-evict) runs
+only when the backend declares ``eviction_policy = "verified"``; the HTTP transports do not yet
+(server-effective pins and live persistence are unproven), so with them eviction is gated off.  A download replaces nothing until its size and
 SHA-256 are verified, and never replaces content that differs from the recorded clean copy.
 """
 import argparse
@@ -100,6 +102,7 @@ class BackendError(AgentError):
 class UnconfiguredHttpBackend:
     """Placeholder until the root supplies the scoped server transport."""
     configured = False
+    eviction_policy = None  # gated: nothing is remotely verified
 
     def _refuse(self, *_args, **_kwargs):
         raise BackendError("transport_not_configured")
@@ -124,6 +127,9 @@ class HttpBackend:
     Authorization header of requests to that endpoint; redirects are never followed and nothing here
     logs or returns it."""
     configured = True
+    # Gated until live persistence and server-side effective pins reaching this agent are validated:
+    # a clean local cache alone does not prove the canonical copy survives, so nothing is ever evicted.
+    eviction_policy = None
 
     def __init__(self, config, clock=time.time, timeout=30, connect=None):
         if not isinstance(config, dict) or config.get("schema") != CAPABILITY_SCHEMA \
@@ -725,11 +731,26 @@ class FilesAgent:
                 "pinned": bool(r["pinned"]), "open": r["open_count"], "evictable": self._evictable(r)}
 
     def _evictable(self, r):
-        return r["origin"] == "agent" and r["state"] == "clean" and not r["pinned"] and not r["open_count"]
+        return self._eviction_verified() and r["origin"] == "agent" and r["state"] == "clean"             and not r["pinned"] and not r["open_count"]
+
+    def _eviction_verified(self):
+        """Only a backend that explicitly declares a verified eviction policy may remove local copies."""
+        return getattr(self.backend, "eviction_policy", None) == "verified"
 
     # ---- open / materialize --------------------------------------------------------------------
-    def open(self, path=None, file_id=None, version=None):
+    def open(self, path=None, file_id=None, version=None, lease_id=None):
+        """``lease_id`` (32 lowercase hex, derived from the caller's request id) makes a retried open idempotent: the
+        same id on the same file returns the existing lease instead of taking a second one that nobody would close."""
+        if lease_id is not None and not (isinstance(lease_id, str) and re.fullmatch(r"[0-9a-f]{32}", lease_id)):
+            raise AgentError("invalid_argument")
         row = self._row(path, file_id)
+        if lease_id is not None:
+            held = self.db.execute("SELECT row FROM leases WHERE lease_id=?", (lease_id,)).fetchone()
+            if held:
+                if held["row"] != row["id"]:
+                    raise AgentError("request_conflict")
+                return {"leaseId": lease_id, "path": row["path"], "state": row["state"],
+                        "versionId": row["base_version"], "fetchedBytes": 0, "replayed": True}
         expected = version or row["remote_version"]
         if expected != row["remote_version"]:
             raise AgentError("version_mismatch")
@@ -743,9 +764,11 @@ class FilesAgent:
             if os.path.lexists(target) and row["state"] == "remote-only":
                 raise AgentError("local_modified")
             fetched = self._fetch(row, target, expected)
-        lease = uuid.uuid4().hex
+        lease = lease_id or uuid.uuid4().hex
         with self._tx() as db:
-            db.execute("INSERT INTO leases VALUES(?,?,?)", (lease, row["id"], self.clock()))
+            db.execute("INSERT OR IGNORE INTO leases VALUES(?,?,?)", (lease, row["id"], self.clock()))
+            if db.execute("SELECT row FROM leases WHERE lease_id=?", (lease,)).fetchone()[0] != row["id"]:
+                raise AgentError("request_conflict")  # a concurrent open used this id for another file
             db.execute("UPDATE files SET last_access=? WHERE id=?", (self.clock(), row["id"]))
         row = self._row(file_id=row["file_id"]) if row["file_id"] else self._row(row["path"])
         return {"leaseId": lease, "path": row["path"], "state": row["state"],
@@ -1119,7 +1142,7 @@ class FilesAgent:
     # ---- space -----------------------------------------------------------------------------------
     def _ensure_space(self, needed):
         shortfall = needed + self.cfg["reserveBytes"] - self.disk_free(self.root)
-        if shortfall > 0 and self.cfg.get("autoEvict"):
+        if shortfall > 0 and self.cfg.get("autoEvict") and self._eviction_verified():
             self.evict(shortfall)
             shortfall = needed + self.cfg["reserveBytes"] - self.disk_free(self.root)
         if shortfall > 0:
@@ -1127,6 +1150,8 @@ class FilesAgent:
 
     def evict(self, need_bytes=None):
         """Remove verified clean agent-created cache, least recently used first."""
+        if not self._eviction_verified():
+            raise AgentError("eviction_gated")  # no override: the backend must declare the verified policy
         freed, evicted = 0, []
         rows = self.db.execute("SELECT f.*, (SELECT COUNT(*) FROM leases l WHERE l.row=f.id) AS open_count "
                                "FROM files f WHERE origin='agent' AND state='clean' AND pinned=0 "
@@ -1168,7 +1193,8 @@ class FilesAgent:
                 "pinned": self.db.execute("SELECT COUNT(*) FROM files WHERE pinned=1").fetchone()[0],
                 "transportConfigured": bool(getattr(self.backend, "configured", True)),
                 "freeBytes": self.disk_free(self.root), "reserveBytes": self.cfg["reserveBytes"],
-                "autoEvict": bool(self.cfg.get("autoEvict"))}
+                "autoEvict": bool(self.cfg.get("autoEvict")),
+                "eviction": "verified" if self._eviction_verified() else "gated"}
 
     def prepare_end(self, flush=False):
         """Enter draining and report what still blocks a remote-saved / safe-to-delete claim."""
@@ -1211,7 +1237,7 @@ def main(argv=None, backend=None):
     init.add_argument("--writer-epoch", type=int, default=1)
     init.add_argument("--reserve-bytes", type=int, default=DEFAULT_RESERVE)
     init.add_argument("--max-transfer-bytes", type=int, default=DEFAULT_MAX_TRANSFER)
-    init.add_argument("--auto-evict", action="store_true", help="evict clean agent cache under space pressure")
+    init.add_argument("--auto-evict", action="store_true", help="evict clean agent cache under space pressure (only with a verified eviction policy)")
     sub.add_parser("status", help="counts and readiness; reads no file bodies")
     lst = sub.add_parser("list-local", help="paged metadata of journaled files")
     lst.add_argument("--cursor", type=int, default=0)
@@ -1223,6 +1249,7 @@ def main(argv=None, backend=None):
     grp.add_argument("--path")
     grp.add_argument("--file-id")
     opn.add_argument("--version")
+    opn.add_argument("--lease", help="32-hex lease id for an idempotent retry of the same open")
     cls = sub.add_parser("close", help="release an open lease")
     cls.add_argument("--lease", required=True)
     for name in ("pin", "unpin", "mark-dirty"):
@@ -1264,7 +1291,7 @@ def main(argv=None, backend=None):
                 result = {
                     "status": lambda: agent.status(),
                     "list-local": lambda: agent.list_local(args.cursor, args.limit),
-                    "open": lambda: agent.open(args.path, args.file_id, args.version),
+                    "open": lambda: agent.open(args.path, args.file_id, args.version, args.lease),
                     "close": lambda: agent.close_lease(args.lease),
                     "pin": lambda: agent.set_pinned(args.path, True),
                     "unpin": lambda: agent.set_pinned(args.path, False),

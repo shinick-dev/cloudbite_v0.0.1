@@ -82,7 +82,8 @@ try {
   const base = 'https://cloudbite.shinick.dev', gw = 'https://cloudbite-v001.ai-gongbu.workers.dev';
   const MID = 'sb-0f4c0d0e-1111-2222-3333-444455556666';
   const machine = { id: MID, account: 'primary', name: 'cloudbite-computer-primary-x', labels: {}, status: 'running' };
-  const computerRpc = { computerState: async () => ({ ok: true, status: 'absent' }), computerMachine: async () => ({ ok: true, machine: { ...machine } }) };
+  const computerRpc = { computerState: async () => ({ ok: true, status: 'absent' }), computerMachine: async () => ({ ok: true, machine: { ...machine } }),
+    computerEndStatus: async () => ({ ok: true, uploadsFrozen: false }) }; // safe-end barrier: no end active
   const objects = new Map();
   const mkEnv = (bucket) => {
     const env = { ORIGIN: base, CLOUDBITE_GATEWAY_URL: gw, CLOUDBITE_FILES_BUCKET: bucket,

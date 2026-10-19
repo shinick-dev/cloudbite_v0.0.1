@@ -20,6 +20,7 @@ import {latencyPing,latencyBackend} from './cloudbite-computer-latency';
 import {computerCosts} from './cloudbite-computer-costs';
 import {CLOUDBITE_COMPUTER_FILES_HTML,CLOUDBITE_COMPUTER_FILES_JS,CLOUDBITE_COMPUTER_FILES_CSS} from './cloudbite-computer-files-page';
 import {filesAgentRoute,filesBrowserRoute,type FilesEnv} from './cloudbite-computer-files-runtime';
+import {filesIntegrationRoute} from './cloudbite-computer-files-integration';
 
 const API = '/api/cloudbite/computer';
 const PAGE = '/cloudbite/computer';
@@ -131,6 +132,8 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
   const op=p.slice(API.length+1);
   const computer=env.CLOUDBITE_COMPUTER.get(env.CLOUDBITE_COMPUTER.idFromName('owner'));
   const tag=await computerOwnerTag();
+  // Bridge routes (configure/materialize/close/agent status) before the catalog routes; both stay under files/.
+  const bridge=await filesIntegrationRoute(req,env as FilesEnv,op,tag,computer);if(bridge)return bridge;
   const files=await filesBrowserRoute(req,env as FilesEnv,url,op,tag,admin!==null);if(files)return files;
   if(req.method==='GET' && op==='snapshots'){const result=await computer.computerSnapshots(tag);return json(result,'status' in result&&typeof result.status==='number'?result.status:200);}
   if(req.method==='GET' && op==='latency/ping'){const result=latencyPing();return json(result.body,result.status);}
@@ -141,6 +144,7 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
     try{const result=await computerCosts(env,{refresh:url.searchParams.get('refresh')==='1',ownerTag:tag});return json(result.body,result.status);}catch{return error('costs_unavailable',503);}
   }
   if(req.method==='GET' && op==='state'){const result=await computer.computerState(tag);return json(result,'status' in result&&typeof result.status==='number'?result.status:200);}
+  if(req.method==='GET' && op==='end'){const result=await computer.computerEndStatus(tag);return json(result,'status' in result&&typeof result.status==='number'?result.status:200);}
   if(req.method==='GET' && op==='performance'){const result=await computer.computerPerformance(tag);return json(result,'status' in result&&typeof result.status==='number'?result.status:200);}
   if(req.method==='GET' && op==='compute/sandboxes')return json(await capacitySandboxes(env));
   if(req.method==='GET' && op==='gpu/candidates'){
@@ -220,6 +224,8 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
     case 'snapshot': result=await computer.computerSnapshot(tag,input);break;
     case 'resize': result=await computer.computerResize(tag,input);break;
     case 'launch': result=await computer.computerLaunch(tag);break;
+    case 'end': result=await computer.computerEnd(tag,input);break;
+    case 'end/settings': result=await computer.computerEndSettings(tag,input);break;
     default:return error('not_found',404);
   }
   return json(result, 'status' in result && typeof result.status==='number' ? result.status : 200);

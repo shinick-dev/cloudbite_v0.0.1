@@ -89,6 +89,8 @@ p{margin:0 0 12px}
 .cf-panel{padding:0 12px 12px;min-width:0}
 .cf-panel .cf-facts{margin-top:0}
 .cf-rename{margin-top:4px}
+.cf-cloud{border-top:1px solid var(--line);margin-top:16px;padding-top:12px;min-width:0}
+.cf-cloud .cf-fine{overflow-wrap:anywhere}
 
 .cf-pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:700;background:var(--pale);color:var(--navy);max-width:100%}
 .cf-pill::before{content:'';width:8px;height:8px;border-radius:50%;background:currentColor;flex:none}
