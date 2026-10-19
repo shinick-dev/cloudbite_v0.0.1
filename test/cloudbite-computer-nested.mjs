@@ -180,7 +180,7 @@ await check('nosana run: exact client-manager create body, master key only in th
   const b = JSON.parse(c.body);
   assert.match(b.idempotency_key, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.equal(b.market, '97G9NnvBDQ2WpKu6fasoMsAKmfj63C9rhysJnkeWodAf');
-  assert.deepEqual([b.replicas, b.strategy, b.autostart, b.timeout], [1, 'SIMPLE', true, 7]);
+  assert.deepEqual([b.replicas, b.strategy, b.autostart, b.timeout], [1, 'SIMPLE', true, 50]);
   assert.equal(b.name, 'cbn-' + r.body.job.id);
   assert.deepEqual(Object.keys(b.job_definition), ['version', 'type', 'ops']);
   const op = b.job_definition.ops[0];

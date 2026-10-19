@@ -65,7 +65,10 @@ export const CBN_DEFAULT_IMAGE = 'python:3.12-slim';
 export const CBN_DAYTONA_RESOURCES = { cpu: 2, memory: 4, disk: 8 } as const;
 export const CBN_NOSANA_API = 'https://client-manager.k8s.prd.nosana.com';
 export const CBN_NOSANA_MARKET = '97G9NnvBDQ2WpKu6fasoMsAKmfj63C9rhysJnkeWodAf'; // RTX 4090
-export const CBN_NOSANA_MAX_MINUTES = 10;
+// Credit-paid jobs are rejected by the live network below 3000 seconds (verified JOB_LIST_ERROR, 2026-10-19).
+// This is the provider reservation; the command and local scheduling/cleanup deadlines remain short and independent.
+export const CBN_NOSANA_RESERVATION_MINUTES = 50;
+export const CBN_NOSANA_MAX_MINUTES = CBN_NOSANA_RESERVATION_MINUTES;
 export const CBN_NOSANA_PAGES = 5;               // bounded cursor pagination of owner deployment lists
 export const CBN_NOSANA_OUTPUT_NOTE = 'nosana_output_unavailable';
 export const CBN_NOSANA_PUBLIC_NOTE = 'Nosana GPU job definitions (image and command) are public; never put secrets in them.';
@@ -528,14 +531,13 @@ export class CbNestedService {
       if (all.filter((j) => active(j, now)).length >= CBN_MAX_ACTIVE) return err(429, 'busy', `at most ${CBN_MAX_ACTIVE} nested jobs may be active`);
       const id = 'nj' + hex(this.d.random(12));
       const dy = p.provider === 'daytona' ? this.d.daytona() : null;
-      const minutes = Math.min(CBN_NOSANA_MAX_MINUTES, Math.ceil(p.timeoutSec / 60) + 2);
       const j: NestedJob = {
         id, requestId: p.requestId, capId: cap.id, ownerMachineId: cap.ownerMachineId,
         provider: p.provider, image: p.image, command: p.command, timeoutSec: p.timeoutSec,
         ...(p.requirements ? { requirements: { ...p.requirements } } : {}),
         ...(fh ? { filesHash: fh } : {}), ...(p.files && p.provider === 'nosana' ? { files: p.files } : {}),
         status: 'creating', createdAt: now,
-        deadline: now + (p.provider === 'nosana' ? minutes * 60_000 : Math.min(CBN_MAX_SECONDS * 1000, p.timeoutSec * 1000 + 60_000)) + CBN_GRACE,
+        deadline: now + (p.provider === 'nosana' ? p.timeoutSec * 1000 + 120_000 : Math.min(CBN_MAX_SECONDS * 1000, p.timeoutSec * 1000 + 60_000)) + CBN_GRACE,
         name: `cbn-${id}`, ...(dy ? { account: dy.account } : {}),
         ...(p.provider === 'nosana' ? { idempotencyKey: uuidFrom(this.d.random(16)) } : {}),
         ...(callback ? { callbackHash: await cbNestedHash(callback) } : {}), cleanup: 'none', cleanupTries: 0,
@@ -610,7 +612,7 @@ export class CbNestedService {
       // A selection schedules by requirements across markets (market omitted); no selection keeps the pinned RTX 4090 market.
       idempotency_key: j.idempotencyKey, name: j.name,
       ...(j.requirements ? { requirements: { name: j.requirements.gpu, country: j.requirements.country } } : { market: CBN_NOSANA_MARKET }), replicas: 1,
-      timeout: Math.min(CBN_NOSANA_MAX_MINUTES, Math.ceil(j.timeoutSec / 60) + 2), autostart: true, strategy: 'SIMPLE',
+      timeout: CBN_NOSANA_RESERVATION_MINUTES, autostart: true, strategy: 'SIMPLE',
       job_definition: {
         version: '0.1', type: 'container',
         ops: [{ id: 'work', type: 'container/run', args: {

@@ -205,6 +205,7 @@ const DICT = {
     webLauncher: 'Web launcher on desktop', brokerKey: 'Key via broker — not checked', signInNote: 'Sign-in happens in the desktop and is not tracked here.',
     connected: 'Signed in / key set', notConnected: 'Not connected',
     machineOffNote: 'Install status comes from the running machine; start it to check.',
+    jobsOpen: 'Run CPU/GPU jobs on the web',
     nestedTitle: 'Nested compute (Daytona, Nosana)', nestedLead: 'Asks the server to set up scoped Daytona and Nosana command-line access inside this machine. Only the server\'s answer says whether it worked.',
     nestedConfigure: 'Set up nested compute', nestedConfiguring: 'Setting up…', nestedJobs: 'Show nested jobs', nestedLoading: 'Loading jobs…',
     nestedNone: 'The server reports no nested jobs.', nestedFailed: 'Could not load nested jobs.', nestedNeedsRunning: 'Available while the machine is running.',
@@ -315,6 +316,7 @@ const DICT = {
     webLauncher: '데스크톱 웹 실행기', brokerKey: '중계 키 — 확인 안 됨', signInNote: '로그인은 데스크톱 안에서 하며 여기서 추적하지 않습니다.',
     connected: '로그인 / 키 설정됨', notConnected: '연결 안 됨',
     machineOffNote: '설치 상태는 실행 중인 머신이 알려 줍니다. 확인하려면 시작하세요.',
+    jobsOpen: '웹에서 CPU·GPU 작업 실행',
     nestedTitle: '중첩 컴퓨트 (Daytona, Nosana)', nestedLead: '이 머신 안에 범위가 제한된 Daytona·Nosana 명령줄 접근을 설정해 달라고 서버에 요청합니다. 성공 여부는 서버 응답으로만 압니다.',
     nestedConfigure: '중첩 컴퓨트 설정', nestedConfiguring: '설정 중…', nestedJobs: '중첩 작업 보기', nestedLoading: '작업 불러오는 중…',
     nestedNone: '서버가 보고한 중첩 작업이 없습니다.', nestedFailed: '중첩 작업을 불러오지 못했습니다.', nestedNeedsRunning: '머신이 실행 중일 때 쓸 수 있습니다.',
@@ -739,7 +741,8 @@ function mount(root: HTMLElement, pair: PairLink): void {
   nestedMsg.setAttribute('role', 'status');
   const nestedBtn = button('cc-btn', () => { begin('nested/configure', {}); });
   const jobsBtn = button('cc-btn cc-quiet', () => { void loadJobs(); });
-  const nestedCard = h('section', 'cc-card', nestedTitle, nestedLead, h('div', 'cc-actions', nestedBtn, jobsBtn), nestedMsg, jobsList);
+  const webJobs = h('a', 'cc-btn cc-primary');
+  const nestedCard = h('section', 'cc-card', nestedTitle, nestedLead, h('div', 'cc-actions', nestedBtn, jobsBtn, webJobs), nestedMsg, jobsList);
 
   const keysTitle = h('h2'), keysLead = h('p', 'cc-muted');
   const brokerLink = link('cc-btn', BROKER_URL, true), vaultLink = link('cc-btn', VAULT_URL, true);
@@ -800,7 +803,8 @@ function mount(root: HTMLElement, pair: PairLink): void {
   const copyMsg = h('p', 'cc-msg');
   copyMsg.setAttribute('role', 'status');
   const jobsNote = h('p', 'cc-fine');
-  const chosenBox = h('div', 'cc-chosen', chosenText, runText, h('div', 'cc-field', cmdLabel, cmdIn), copyBtn, copyMsg, jobsNote);
+  const gpuWebJobs = h('a', 'cc-btn cc-primary');
+  const chosenBox = h('div', 'cc-chosen', chosenText, runText, h('div', 'cc-field', cmdLabel, cmdIn), copyBtn, copyMsg, gpuWebJobs, jobsNote);
   const gpuCard = h('section', 'cc-card cc-gpu', gpuTitle, gpuLead, gpuNoSwitch, h('div', 'cc-actions', sbBtn), sbMsg, sbWrap, vramWrap, findBtn,
     candMsg, candHead, distNote, candNote, candList, gpuMsg, gpuRetryRow, chosenBox);
 
@@ -956,6 +960,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
 
     // nested compute
     nestedTitle.textContent = d.nestedTitle; nestedLead.textContent = d.nestedLead;
+    webJobs.textContent=d.jobsOpen;webJobs.setAttribute('href','/cloudbite/computer/jobs?lang='+lang);
     const nestedOk = status === 'running';
     nestedBtn.textContent = S.op?.kind === 'nested/configure' && S.op.phase === 'sending' ? d.nestedConfiguring : d.nestedConfigure;
     nestedBtn.disabled = busy || !nestedOk;
@@ -1071,6 +1076,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
     const cs = S.cands && S.cands.key === S.sandbox ? S.cands : null;
     setMsg(candMsg, S.candMsg ?? (cs && !cs.list.length ? { text: () => d.gpuNone, kind: 'info' } : null));
     const sb = sbs.find(s => sandboxKey(s) === S.sandbox);
+    gpuWebJobs.textContent=d.jobsOpen;gpuWebJobs.setAttribute('href','/cloudbite/computer/jobs?lang='+lang+(sb?'&sandboxId='+encodeURIComponent(sb.id)+'&account='+encodeURIComponent(sb.account):''));
     candHead.hidden = distNote.hidden = !cs;
     candHead.textContent = cs ? `${d.gpuFrom(sb?.name || sb?.id || '–', cs.region)} · ${d.gpuObserved(when(cs.observedAt))}` : '';
     distNote.textContent = `${d.gpuDistanceNote} ${d.gpuFee}`;
