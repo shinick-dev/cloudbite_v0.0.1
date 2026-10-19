@@ -206,6 +206,7 @@ await check('review reservations never exceed the planned phases.review.max = mi
     assert.equal(B.reserveBudget(u, { phase: 'review', key: 'expert-1' }).duplicate, true, 'idempotent replay');
     u = B.reserveBudget(u, { phase: 'review', key: 'x' }).usage;
     assert.equal(u.reviewers.length, 2);
+    assert.deepEqual(B.publicBudget(u).review, {used:2,max:2,available:0,exhausted:true}, 'public effective review capacity matches reservation denial');
     assert.equal(B.reserveBudget(u, { phase: 'review', key: 'expert-2' }).reason, 'review-phase-cap', 'no third reviewer for two experts, even a foreign key');
     assert.equal(B.reserveBudgetBatch(u, [{ phase: 'review', key: 'y' }]).ok, false);
     assert.equal(B.reserveBudget(u, { phase: 'review', key: 'x' }).duplicate, true, 'replay still idempotent at the cap');
@@ -214,6 +215,7 @@ await check('review reservations never exceed the planned phases.review.max = mi
   }
   // A single expert has no cross-review, as the plan says.
   const one = B.createBudgetUsage(plan(ids(1)));
+  assert.deepEqual(B.publicBudget(one).review, {used:0,max:0,available:0,exhausted:true});
   assert.equal(B.reserveBudget(one, { phase: 'review', key: 'expert-1' }).reason, 'review-phase-cap');
 });
 

@@ -297,7 +297,9 @@ export function budgetMetrics(usage: BudgetUsage): BudgetMetrics {
   const c = usage.caps, left = Math.max(0, c.maxModelCalls - usage.total), used = expertUsed(usage);
   const roleRoom = Object.values(usage.experts).reduce((a, n) => a + Math.max(0, c.perExpertCalls - n), 0);
   const expert = metric(used, c.expertPool, Math.min(left, roleRoom));
-  const review = metric(usage.reviewers.length, c.maxReviewCalls, left), memo = metric(usage.memo, c.maxMemoCalls, left);
+  const experts = Object.keys(usage.experts).length;
+  const reviewMax = experts >= 2 ? Math.min(c.maxReviewCalls, experts) : 0;
+  const review = metric(usage.reviewers.length, reviewMax, left), memo = metric(usage.memo, c.maxMemoCalls, left);
   return {
     version: CB_BUDGET_VERSION, migrated: usage.migrated === true,
     total: metric(usage.total, c.maxModelCalls, left), expert, review, memo, perExpertCalls: c.perExpertCalls,
