@@ -154,7 +154,7 @@ await test('signed in: the target is the server context (read-only), jobs load, 
   assert.equal(e.requests[0].url, `${CTX}?sandboxId=evil&account=primary`, 'only sandboxId+account are forwarded; the server verifies them');
   assert.ok(e.requests.some(r => r.url === JOBS));
   assert.match(e.text(), /cloudbite-computer-owner/);
-  assert.match(e.text(), /RTX 4090 · DE · mkt-4090/);
+  assert.match(e.text(), /RTX 4090 · DE/);
   assert.ok(!e.all().some(x => x.tagName === 'INPUT' && /gpu|country/i.test(x.id)), 'no GPU or country input on this page');
   e.setCommand('["python3","-c","print(2)"]');
   e.byId('cj-command').dispatch('keydown', { key: 'Enter' });
@@ -198,8 +198,8 @@ await test('CPU: Review locks inputs and shows the fixed worker, time limit and 
   assert.match(t, /CPU worker · 2 vCPU · 4 GiB RAM · 8 GiB disk/);
   assert.match(t, /python:3\.12-slim/);
   // ceil(120/60)+2 = 4 min at 0.165924/h = 0.0110616
-  assert.match(t, /up to about \$0\.0111 \(4 min at \$0\.165924\/h\)/);
-  assert.match(t, /Network fees are not included/);
+  assert.match(t, /Base estimate \$0\.0111 \(4 min at \$0\.165924\/h\)/);
+  assert.match(t, /network fees are excluded/);
   assert.equal(e.checks().length, 1, 'no public acknowledgement for a private CPU job');
   assert.equal(e.btn('Run').disabled, true);
   e.btn('Run').click(); await e.flush();
@@ -233,9 +233,9 @@ await test('GPU: offered only with a server selection; the public warning and ac
   assert.match(e.text(), /GPU jobs are public/);
   e.btn('Review').click(); await e.flush();
   const t = e.text();
-  assert.match(t, /GPU host \(Nosana\) · RTX 4090 · DE · mkt-4090/);
-  // ceil(60/60)+2 = 3 min at 0.4/h = 0.02
-  assert.match(t, /up to about \$0\.0200 \(3 min at \$0\.4\/h\)/);
+  assert.match(t, /GPU host \(Nosana\) · RTX 4090 · DE/);
+  // GPU provider minimum reservation: 50 min at 0.4/h = 0.3333
+  assert.match(t, /Base estimate \$0\.3333 \(50 min at \$0\.4\/h\)/);
   assert.match(t, /not reserved/);
   assert.equal(e.checks().length, 2);
   e.tick(0);

@@ -30,7 +30,8 @@ export async function webJobsContext(env:ComputerEnv,computer:MachineRpc,nested:
  return{status:200,body:{ok:true,sandbox:sb,selection,pricing:{cpuUsdPerHour:0.165924,gpuBaseUsdPerHour,gpuReservationMinutes:50,networkFeeIncluded:false,observedAt:new Date().toISOString()}}};
 }
 export async function webJobsRun(env:ComputerEnv,computer:MachineRpc,nested:WebJobsRpc,tag:string,input:Record<string,unknown>):Promise<Result>{
- if(Object.keys(input).some(k=>!RUN_KEYS.has(k))||input.acknowledgeCost!==true)return bad('cost_confirmation_required');
+ if(Object.keys(input).some(k=>!RUN_KEYS.has(k)))return bad('bad_request');
+ if(input.acknowledgeCost!==true)return bad('cost_confirmation_required');
  if(input.provider==='nosana'&&input.acknowledgePublic!==true)return bad('public_confirmation_required');
  const sb=await webJobSandbox(env,computer,tag,input.sandboxId,input.account);if(!sb)return bad('bad_sandbox_selection');
  const fields:Record<string,unknown>={ownerMachineId:sb.id};

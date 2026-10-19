@@ -86,7 +86,7 @@ const DICT = {
     checkAgain: 'Check again',
     targetTitle: 'Target', targetLead: 'Set by the server for your signed-in computer. Change the GPU on the cloud computer page.',
     sandbox: 'Computer', region: 'Region', gpu: 'GPU', noGpu: 'No GPU chosen. GPU jobs need one: choose a GPU and country on the cloud computer page.',
-    gpuLine: (g: string, c: string, m: string) => `${g} · ${c}${m ? ` · ${m}` : ''}`,
+    gpuLine: (g: string, c: string, _m: string) => `${g} · ${c}`,
     formTitle: 'Job', provider: 'Where it runs',
     providerOpt: { daytona: 'CPU worker (2 vCPU · 4 GiB RAM · 8 GiB disk)', nosana: 'GPU host (Nosana)' } as Record<Provider, string>,
     gpuNeedsChoice: 'GPU host — choose a GPU first',
@@ -109,9 +109,9 @@ const DICT = {
     rTarget: 'Runs on', rImage: 'Image', rCommand: 'Command', rFiles: 'Files', rTimeout: 'Time limit', rCost: 'Estimated cost',
     rCpu: (s: string) => `CPU worker · ${CPU_SPEC.cpu} vCPU · ${CPU_SPEC.memoryGiB} GiB RAM · ${CPU_SPEC.diskGiB} GiB disk · ${s}`,
     rNone: 'none', rFilesVal: (n: number, b: number) => `${n} file(s), ${b} bytes`,
-    cost: (usd: string, min: number, rate: string) => `up to about ${usd} (${min} min at ${rate}/h)`,
+    cost: (usd: string, min: number, rate: string) => `Base estimate ${usd} (${min} min at ${rate}/h)`,
     costUnknown: 'unknown — the server has no current GPU price',
-    costNote: 'An estimate for the time limit plus 2 minutes of start-up, not a quote. Network fees are not included. A GPU host is not reserved and may not be found.',
+    costNote: 'CPU: time limit plus 2 minutes of start-up. GPU: a minimum 50-minute provider reservation, independent of the shorter command timeout. These are base estimates, not final bills; network fees are excluded. A GPU host is not reserved until execution and may not be found.',
     ackCost: 'I understand this job may cost money.', ackPublic: 'I understand the image, command and files are published and contain no secrets.',
     run: 'Run', running: 'Sending…', runOk: 'Job accepted. It counts as running only when the list below says so.',
     runUncertain: 'No definite answer from the server. Retry sends the same request with the same ID, so it will not run twice.',
@@ -141,7 +141,7 @@ const DICT = {
     checkAgain: '다시 확인',
     targetTitle: '대상', targetLead: '로그인한 컴퓨터를 기준으로 서버가 정합니다. GPU 는 클라우드 컴퓨터 페이지에서 바꿉니다.',
     sandbox: '컴퓨터', region: '지역', gpu: 'GPU', noGpu: '선택한 GPU 가 없습니다. GPU 작업에는 필요합니다 — 클라우드 컴퓨터 페이지에서 GPU 와 국가를 고르세요.',
-    gpuLine: (g: string, c: string, m: string) => `${g} · ${c}${m ? ` · ${m}` : ''}`,
+    gpuLine: (g: string, c: string, _m: string) => `${g} · ${c}`,
     formTitle: '작업', provider: '실행 위치',
     providerOpt: { daytona: 'CPU 워커 (2 vCPU · 4 GiB RAM · 8 GiB 디스크)', nosana: 'GPU 호스트 (Nosana)' } as Record<Provider, string>,
     gpuNeedsChoice: 'GPU 호스트 — 먼저 GPU 를 고르세요',
@@ -164,9 +164,9 @@ const DICT = {
     rTarget: '실행 위치', rImage: '이미지', rCommand: '명령', rFiles: '파일', rTimeout: '제한 시간', rCost: '예상 비용',
     rCpu: (s: string) => `CPU 워커 · ${CPU_SPEC.cpu} vCPU · ${CPU_SPEC.memoryGiB} GiB RAM · ${CPU_SPEC.diskGiB} GiB 디스크 · ${s}`,
     rNone: '없음', rFilesVal: (n: number, b: number) => `${n}개, ${b}바이트`,
-    cost: (usd: string, min: number, rate: string) => `최대 약 ${usd} (${min}분 × 시간당 ${rate})`,
+    cost: (usd: string, min: number, rate: string) => `기본요금 추정 ${usd} (${min}분 × 시간당 ${rate})`,
     costUnknown: '알 수 없음 — 서버에 현재 GPU 가격이 없습니다',
-    costNote: '제한 시간에 시작 준비 2분을 더한 추정치이며 견적이 아닙니다. 네트워크 수수료는 빠져 있습니다. GPU 호스트는 예약되지 않으며 찾지 못할 수 있습니다.',
+    costNote: 'CPU는 제한 시간에 시작 준비 2분을 더해 추정합니다. GPU는 짧은 명령 제한 시간과 별개로 제공업체의 최소 50분 예약이 필요합니다. 기본요금 추정이며 최종 청구액이 아닙니다. 네트워크 수수료는 제외됩니다. GPU 호스트는 실행 시 예약하며 찾지 못할 수 있습니다.',
     ackCost: '이 작업에 비용이 들 수 있음을 이해합니다.', ackPublic: '이미지·명령·파일이 공개되며 비밀이 없음을 확인합니다.',
     run: '실행', running: '보내는 중…', runOk: '작업이 접수되었습니다. 아래 목록이 실행 중이라고 할 때만 실행 중입니다.',
     runUncertain: '서버의 확실한 답이 없습니다. 다시 보내기는 같은 ID 의 같은 요청이라 두 번 실행되지 않습니다.',
@@ -323,7 +323,7 @@ function toBase64(buf: ArrayBuffer): string {
 const usd = (v: number): string => `$${v < 1 ? v.toFixed(4) : v.toFixed(2)}`;
 const rate = (v: number): string => `$${String(Number(v.toFixed(6)))}`;
 /** time limit rounded up to whole minutes, plus 2 minutes of start-up */
-const billedMinutes = (timeoutSec: number): number => Math.ceil(timeoutSec / 60) + 2;
+const billedMinutes = (timeoutSec: number, provider: string): number => provider === 'nosana' ? 50 : Math.ceil(timeoutSec / 60) + 2;
 
 type Kid = Node | string | null | undefined | false;
 function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', ...kids: Kid[]): HTMLElementTagNameMap[K] {
@@ -515,7 +515,7 @@ function mount(root: HTMLElement): void {
     S.review = {
       ctxKey: ctxKey(ctx), provider, image, timeout, command: argv, files, sandboxId: ctx.sandbox.id, account: ctx.sandbox.account,
       target: gpu ? d.gpuLine(gpu.gpu, gpu.country, gpu.market || '') : '',
-      usdPerHour: provider === 'nosana' ? ctx.pricing.gpuBaseUsdPerHour : ctx.pricing.cpuUsdPerHour, minutes: billedMinutes(timeout),
+      usdPerHour: provider === 'nosana' ? ctx.pricing.gpuBaseUsdPerHour : ctx.pricing.cpuUsdPerHour, minutes: billedMinutes(timeout, provider),
     };
     S.ackCost = false; S.ackPublic = false; S.runMsg = null;
     if (JSON.stringify(bodyOf(S.review, uuid())).length > MAX_BODY_BYTES) { S.review = null; S.formMsg = { text: () => T().commandBad(T().whyLong), kind: 'warn' }; }

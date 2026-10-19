@@ -1,6 +1,6 @@
 // Generated file — do not edit. Sources: client/cloudbite-computer-jobs.ts · client/cloudbite-computer-jobs.css
 // Rebuild: node tools/build-cloudbite-computer-jobs.mjs (--check verifies it is current)
-// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 2e0b629f49932551e163d28e5a1539936b277c0eb030ed77b488ad2633c6f7d9 · css sha256 3a13885b68d49135887502f2f5e78c0b48418a812bc9f58425d163341f8c673f
+// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 39519d53db14a23867bb68c67d25de9a4fa7bb9fbdefb926c87892598b140f9a · css sha256 3a13885b68d49135887502f2f5e78c0b48418a812bc9f58425d163341f8c673f
 // Routing (runtime): GET CLOUDBITE_COMPUTER_JOBS_PATH → CLOUDBITE_COMPUTER_JOBS_HTML, CLOUDBITE_COMPUTER_JOBS_JS_PATH → CLOUDBITE_COMPUTER_JOBS_JS (text/javascript),
 // CLOUDBITE_COMPUTER_JOBS_CSS_PATH → CLOUDBITE_COMPUTER_JOBS_CSS (text/css). CSP script-src 'self'; style-src 'self' suffices (no inline).
 // The script calls /api/cloudbite/computer/jobs/* and GET /api/cloudbite/computer/nested/jobs same-origin with the existing cookie and links only to /cloudbite/computer.
@@ -188,7 +188,7 @@ export const CLOUDBITE_COMPUTER_JOBS_JS = [
   "    region: \"Region\",",
   "    gpu: \"GPU\",",
   "    noGpu: \"No GPU chosen. GPU jobs need one: choose a GPU and country on the cloud computer page.\",",
-  "    gpuLine: (g, c, m) => `${g} · ${c}${m ? ` · ${m}` : \"\"}`,",
+  "    gpuLine: (g, c, _m) => `${g} · ${c}`,",
   "    formTitle: \"Job\",",
   "    provider: \"Where it runs\",",
   "    providerOpt: { daytona: \"CPU worker (2 vCPU · 4 GiB RAM · 8 GiB disk)\", nosana: \"GPU host (Nosana)\" },",
@@ -233,9 +233,9 @@ export const CLOUDBITE_COMPUTER_JOBS_JS = [
   "    rCpu: (s) => `CPU worker · ${CPU_SPEC.cpu} vCPU · ${CPU_SPEC.memoryGiB} GiB RAM · ${CPU_SPEC.diskGiB} GiB disk · ${s}`,",
   "    rNone: \"none\",",
   "    rFilesVal: (n, b) => `${n} file(s), ${b} bytes`,",
-  "    cost: (usd2, min, rate2) => `up to about ${usd2} (${min} min at ${rate2}/h)`,",
+  "    cost: (usd2, min, rate2) => `Base estimate ${usd2} (${min} min at ${rate2}/h)`,",
   "    costUnknown: \"unknown — the server has no current GPU price\",",
-  "    costNote: \"An estimate for the time limit plus 2 minutes of start-up, not a quote. Network fees are not included. A GPU host is not reserved and may not be found.\",",
+  "    costNote: \"CPU: time limit plus 2 minutes of start-up. GPU: a minimum 50-minute provider reservation, independent of the shorter command timeout. These are base estimates, not final bills; network fees are excluded. A GPU host is not reserved until execution and may not be found.\",",
   "    ackCost: \"I understand this job may cost money.\",",
   "    ackPublic: \"I understand the image, command and files are published and contain no secrets.\",",
   "    run: \"Run\",",
@@ -308,7 +308,7 @@ export const CLOUDBITE_COMPUTER_JOBS_JS = [
   "    region: \"지역\",",
   "    gpu: \"GPU\",",
   "    noGpu: \"선택한 GPU 가 없습니다. GPU 작업에는 필요합니다 — 클라우드 컴퓨터 페이지에서 GPU 와 국가를 고르세요.\",",
-  "    gpuLine: (g, c, m) => `${g} · ${c}${m ? ` · ${m}` : \"\"}`,",
+  "    gpuLine: (g, c, _m) => `${g} · ${c}`,",
   "    formTitle: \"작업\",",
   "    provider: \"실행 위치\",",
   "    providerOpt: { daytona: \"CPU 워커 (2 vCPU · 4 GiB RAM · 8 GiB 디스크)\", nosana: \"GPU 호스트 (Nosana)\" },",
@@ -353,9 +353,9 @@ export const CLOUDBITE_COMPUTER_JOBS_JS = [
   "    rCpu: (s) => `CPU 워커 · ${CPU_SPEC.cpu} vCPU · ${CPU_SPEC.memoryGiB} GiB RAM · ${CPU_SPEC.diskGiB} GiB 디스크 · ${s}`,",
   "    rNone: \"없음\",",
   "    rFilesVal: (n, b) => `${n}개, ${b}바이트`,",
-  "    cost: (usd2, min, rate2) => `최대 약 ${usd2} (${min}분 × 시간당 ${rate2})`,",
+  "    cost: (usd2, min, rate2) => `기본요금 추정 ${usd2} (${min}분 × 시간당 ${rate2})`,",
   "    costUnknown: \"알 수 없음 — 서버에 현재 GPU 가격이 없습니다\",",
-  "    costNote: \"제한 시간에 시작 준비 2분을 더한 추정치이며 견적이 아닙니다. 네트워크 수수료는 빠져 있습니다. GPU 호스트는 예약되지 않으며 찾지 못할 수 있습니다.\",",
+  "    costNote: \"CPU는 제한 시간에 시작 준비 2분을 더해 추정합니다. GPU는 짧은 명령 제한 시간과 별개로 제공업체의 최소 50분 예약이 필요합니다. 기본요금 추정이며 최종 청구액이 아닙니다. 네트워크 수수료는 제외됩니다. GPU 호스트는 실행 시 예약하며 찾지 못할 수 있습니다.\",",
   "    ackCost: \"이 작업에 비용이 들 수 있음을 이해합니다.\",",
   "    ackPublic: \"이미지·명령·파일이 공개되며 비밀이 없음을 확인합니다.\",",
   "    run: \"실행\",",
@@ -551,7 +551,7 @@ export const CLOUDBITE_COMPUTER_JOBS_JS = [
   "}",
   "const usd = (v) => `$${v < 1 ? v.toFixed(4) : v.toFixed(2)}`;",
   "const rate = (v) => `$${String(Number(v.toFixed(6)))}`;",
-  "const billedMinutes = (timeoutSec) => Math.ceil(timeoutSec / 60) + 2;",
+  "const billedMinutes = (timeoutSec, provider) => provider === \"nosana\" ? 50 : Math.ceil(timeoutSec / 60) + 2;",
   "function h(tag, cls = \"\", ...kids) {",
   "  const el = document.createElement(tag);",
   "  if (cls) el.className = cls;",
@@ -858,7 +858,7 @@ export const CLOUDBITE_COMPUTER_JOBS_JS = [
   "      account: ctx.sandbox.account,",
   "      target: gpu ? d.gpuLine(gpu.gpu, gpu.country, gpu.market || \"\") : \"\",",
   "      usdPerHour: provider === \"nosana\" ? ctx.pricing.gpuBaseUsdPerHour : ctx.pricing.cpuUsdPerHour,",
-  "      minutes: billedMinutes(timeout)",
+  "      minutes: billedMinutes(timeout, provider)",
   "    };",
   "    S.ackCost = false;",
   "    S.ackPublic = false;",
