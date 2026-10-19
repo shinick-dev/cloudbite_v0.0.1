@@ -25,6 +25,10 @@ const POLL_MAX = 90;
 const SNAPSHOT_NAME = /^[a-z0-9](?:[a-z0-9-]{1,46})[a-z0-9]$/;
 // optional short prefix, then 32 random bytes as canonical unpadded base64url (43 chars)
 const PAIR_TOKEN = /^(?:[a-z][a-z0-9]{0,15}_)?([A-Za-z0-9_-]{43})$/;
+const PRICING_HOSTS = ['daytona.io', 'www.daytona.io'];
+const VRAM_CHOICES = [16, 24, 48, 80];
+const SAFE_ID = /^[A-Za-z0-9._:-]{1,120}$/;
+const SAFE_ACCOUNT = /^[A-Za-z0-9_-]{1,40}$/;
 
 type Status = 'absent' | 'starting' | 'running' | 'stopped' | 'stopping' | 'snapshotting' | 'error' | 'unknown';
 const STATUSES: Status[] = ['absent', 'starting', 'running', 'stopped', 'stopping', 'snapshotting', 'error', 'unknown'];
@@ -42,8 +46,26 @@ type MachineState = {
   status: Status; error: string | null; machine: Machine | null; sessionEndsAt: string | null; snapshot: Snapshot | null;
   tools: Map<string, ToolState> | null; configuredAccounts: Account[]; ready: boolean;
 };
-type OpKind = 'start' | 'stop' | 'extend' | 'snapshot' | 'nested/configure';
+type OpKind = 'start' | 'stop' | 'extend' | 'snapshot' | 'nested/configure' | 'resize';
 type Op = { kind: OpKind; requestId: string; body: Record<string, unknown>; phase: 'sending' | 'uncertain' };
+// Performance card (GET performance, POST resize): live usage is null when the machine did not report it — never a fake zero
+type Plan = { cpu: number; memoryGiB: number; usdPerHour: number; deltaUsdPerHour: number };
+type Metrics = { cpuPercent: number | null; memoryUsedGiB: number; memoryLimitGiB: number; memoryPercent: number; load1: number };
+type ResizeStatus = 'idle' | 'pending' | 'failed';
+type Perf = {
+  machineId: string; sampledAt: string | null; metrics: Metrics | null; current: { cpu: number; memoryGiB: number; diskGiB: number; usdPerHour: number };
+  plans: Plan[]; resize: { status: ResizeStatus; cpu: number | null; memoryGiB: number | null; error: string | null }; pricing: { asOf: string; url: string | null };
+};
+type Review = Plan & { machineId: string; fromCpu: number; fromMemoryGiB: number; fromUsdPerHour: number; diskGiB: number; asOf: string };
+// Remote GPU card (GET compute/sandboxes, GET gpu/candidates, POST gpu/select): choosing never rents or starts anything
+type Sandbox = { id: string; account: string; name: string; region: string; state: string; cpu: number | null; memoryGiB: number | null };
+type Candidate = {
+  id: string; gpu: string; vramGb: number | null; available: number | null; country: string | null; market: string | null;
+  usdPerHourMin: number | null; usdPerHourMax: number | null; distanceKm: number | null; selectable: boolean;
+};
+type Candidates = { key: string; region: string; observedAt: string | null; note: string; list: Candidate[] };
+type GpuChoice = { candidateId: string; gpu: string; country: string | null; market: string | null; command: string };
+type GpuOp = { requestId: string; key: string; body: Record<string, unknown>; phase: 'sending' | 'uncertain' };
 type Reply = { ok: true; status: number; body: unknown } | { ok: false; status: number; code: string };
 type Lang = 'en' | 'ko';
 type Msg = { text: () => string; kind: 'ok' | 'warn' | 'info' } | null;
@@ -145,7 +167,8 @@ const DICT = {
     openReady: 'Desktop ticket ready — open it now. It works once and expires shortly.', openLink: 'Open the desktop', openNewTab: 'Opens the separate desktop site.',
     openBad: 'The server returned an unexpected desktop address; it was not opened.', notReady: 'The desktop is not reported ready yet.',
     accountMissing: (a: string) => `The machine belongs to the ${a} account, which is not available now. Cloudbite will not switch accounts.`,
-    done: { start: 'Start accepted.', stop: 'Stop accepted.', extend: 'Session extended.', snapshot: 'Snapshot accepted.', 'nested/configure': 'Nested compute setup accepted.' } as Record<OpKind, string>,
+    done: { start: 'Start accepted.', stop: 'Stop accepted.', extend: 'Session extended.', snapshot: 'Snapshot accepted.', 'nested/configure': 'Nested compute setup accepted.',
+      resize: 'Size change sent. It counts only once the machine reports the new size — press Check now to see.' } as Record<OpKind, string>,
     rejected: (code: string) => `Rejected: ${code}`,
     uncertain: 'No definite answer from the server. Retry sends the same request again, so it will not run twice.',
     retry: 'Retry same request', forget: 'Forget it', pending: 'Request in flight…',
@@ -174,6 +197,34 @@ const DICT = {
     nestedNone: 'The server reports no nested jobs.', nestedFailed: 'Could not load nested jobs.', nestedNeedsRunning: 'Available while the machine is running.',
     keysTitle: 'Accounts and keys', keysLead: 'Borrow API keys and approve brokered access on k.shinick.dev. The approval link opens on this same phone — no QR code or second device needed.',
     broker: 'Open k broker', vault: 'Open key vault',
+    perfTitle: 'Performance and size', perfLead: 'Live CPU and memory use of this machine, and what a bigger size would cost. Nothing is checked until you press Check now.',
+    perfCheck: 'Check now', perfChecking: 'Checking…', perfFailed: 'Could not load performance.', perfNeedsMachine: 'Available once a machine exists.',
+    perfNotLoaded: 'Not checked yet.', sampled: (t: string) => `Measured ${t}`, notSampled: 'The machine did not report live usage (it may be stopped or still starting).',
+    cpuUse: 'CPU use', memUse: 'Memory use', load: 'Load (1 min)', unknownVal: 'unknown',
+    memOf: (u: string, l: string, p: string) => `${u} of ${l} GiB (${p}%)`, nowSize: 'Current size', sizeLine: (c: number, m: number) => `${c} vCPU · ${m} GiB RAM`,
+    perHour: (u: string) => `about ${u} per hour`, priceNote: (a: string) => `Estimated from Daytona list prices as of ${a}. Not a quote or guarantee; disk is unchanged.`,
+    pricingLink: 'Daytona pricing', upgradeLabel: 'Bigger size', pickPlan: 'Choose a size…', noPlans: 'No bigger size is offered for this machine.',
+    planOption: (s: string, delta: string) => `${s} — ${delta} per hour more`, review: 'Review cost', needsRunning: 'Size changes are available while the machine is running.',
+    reviewTitle: 'Confirm the size change', reviewFrom: 'Now', reviewTo: 'After', reviewDelta: 'Extra cost', reviewDeltaVal: (u: string) => `${u} more per hour while the machine runs`,
+    reviewKeep: (dk: string) => `Files stay. Disk stays ${dk} GiB. The change may be refused if the provider has no room.`,
+    apply: 'Apply upgrade', applying: 'Applying…', cancel: 'Cancel', reviewStale: 'The machine or prices changed. Review again before applying.',
+    resizePending: (s: string) => `A size change to ${s} is in progress. Press Check now to see when the machine reports it.`,
+    resizeFailed: (c: string) => `The last size change failed: ${c}`, resizeCheck: 'Press Check now to see whether the last size change was applied before asking for another.',
+    resizeDone: (s: string) => `The machine reports ${s}.`,
+    gpuTitle: 'Remote GPU jobs', gpuLead: 'A remote GPU job runs on a separate rented Nosana GPU host. It is not a CUDA device in this machine — nvidia-smi or PyTorch on the desktop will not see it.',
+    gpuNoSwitch: 'Picking a sandbox here only sets where distance is measured from. It does not switch your desktop.',
+    gpuSandboxes: 'Load my sandboxes', gpuSandboxesLoading: 'Loading sandboxes…', gpuSandbox: 'Measure from sandbox', gpuPickSandbox: 'Choose a sandbox…',
+    gpuSandboxesFailed: 'Could not load sandboxes.', gpuNoSandboxes: 'No sandbox was reported.', gpuPartial: 'Some provider accounts did not answer, so this list may be incomplete.',
+    gpuVram: 'Minimum GPU memory', gpuVramOpt: (n: number) => `${n} GB or more`, gpuFind: 'Find GPUs', gpuFinding: 'Searching…', gpuFailed: 'Could not load GPUs.',
+    gpuNone: 'No GPU matched.', gpuObserved: (t: string) => `Checked ${t}`, gpuFrom: (n: string, r: string) => `From ${n} (${r || '–'})`,
+    gpuVramVal: (n: string) => `${n} GB GPU memory`, gpuHosts: (n: string) => `${n} free hosts`,
+    gpuWhere: (c: string, km: string) => `${c} · about ${km} km away (estimate)`, gpuWhereNoKm: (c: string) => `${c} · distance unknown`, gpuWhereUnknown: 'Location unknown',
+    gpuPrice: (lo: string, hi: string) => (lo === hi ? `Base price ${lo}/h` : `Base price ${lo}–${hi}/h`), gpuNoPrice: 'Price not reported', gpuFee: 'Network fee is separate.',
+    gpuDistanceNote: 'Distance is a rough guess between the country centre and the sandbox region. It is not measured network latency.',
+    gpuChoose: 'Choose', gpuChoosing: 'Choosing…', gpuUnavailable: 'Not available now', gpuOdd: 'The server answered in an unexpected way, so the choice is not confirmed.',
+    gpuChosen: (g: string, c: string) => `Chosen for remote GPU jobs: ${g} · ${c}. Nothing is rented and no job is running.`,
+    gpuRun: 'A paid job starts only when you run this command on the machine:', gpuCmd: 'Command', copy: 'Copy', copied: 'Copied.', copyFailed: 'Copy did not work — select the text and copy it.',
+    gpuJobs: 'Job status shows under Nested compute → Show nested jobs.',
   },
   ko: {
     title: 'Cloudbite — 클라우드 컴퓨터', brand: 'Cloudbite', sub: '나의 클라우드 컴퓨터', workbench: '전문가 작업대', langLabel: '언어',
@@ -218,7 +269,8 @@ const DICT = {
     openReady: '데스크톱 티켓 준비됨 — 지금 여세요. 한 번만 쓰이고 곧 만료됩니다.', openLink: '데스크톱 열기', openNewTab: '별도의 데스크톱 사이트를 엽니다.',
     openBad: '서버가 예상과 다른 데스크톱 주소를 보내 열지 않았습니다.', notReady: '데스크톱이 아직 준비됐다고 보고되지 않았습니다.',
     accountMissing: (a: string) => `이 머신은 ${a} 계정 소속인데 지금 사용할 수 없습니다. Cloudbite 는 계정을 바꾸지 않습니다.`,
-    done: { start: '시작 요청이 접수됐습니다.', stop: '중지 요청이 접수됐습니다.', extend: '세션을 연장했습니다.', snapshot: '스냅샷 요청이 접수됐습니다.', 'nested/configure': '중첩 컴퓨트 설정 요청이 접수됐습니다.' } as Record<OpKind, string>,
+    done: { start: '시작 요청이 접수됐습니다.', stop: '중지 요청이 접수됐습니다.', extend: '세션을 연장했습니다.', snapshot: '스냅샷 요청이 접수됐습니다.', 'nested/configure': '중첩 컴퓨트 설정 요청이 접수됐습니다.',
+      resize: '크기 변경을 보냈습니다. 머신이 새 크기를 보고해야 적용된 것입니다 — 지금 확인을 눌러 보세요.' } as Record<OpKind, string>,
     rejected: (code: string) => `거부됨: ${code}`,
     uncertain: '서버에서 확실한 답을 받지 못했습니다. 다시 시도는 같은 요청을 보내므로 두 번 실행되지 않습니다.',
     retry: '같은 요청 다시 보내기', forget: '잊기', pending: '요청 처리 중…',
@@ -247,6 +299,34 @@ const DICT = {
     nestedNone: '서버가 보고한 중첩 작업이 없습니다.', nestedFailed: '중첩 작업을 불러오지 못했습니다.', nestedNeedsRunning: '머신이 실행 중일 때 쓸 수 있습니다.',
     keysTitle: '계정과 키', keysLead: 'k.shinick.dev 에서 API 키를 빌리고 중계 접근을 승인합니다. 승인 링크는 이 휴대폰에서 바로 열리므로 QR 코드나 다른 기기가 필요 없습니다.',
     broker: 'k 중계 열기', vault: '키 금고 열기',
+    perfTitle: '성능과 크기', perfLead: '이 머신의 실제 CPU·메모리 사용량과 더 큰 크기의 예상 비용입니다. 지금 확인을 누르기 전에는 확인하지 않습니다.',
+    perfCheck: '지금 확인', perfChecking: '확인 중…', perfFailed: '성능 정보를 불러오지 못했습니다.', perfNeedsMachine: '머신이 있어야 쓸 수 있습니다.',
+    perfNotLoaded: '아직 확인하지 않았습니다.', sampled: (t: string) => `${t} 측정`, notSampled: '머신이 실시간 사용량을 보고하지 않았습니다 (중지됐거나 시작 중일 수 있음).',
+    cpuUse: 'CPU 사용률', memUse: '메모리 사용량', load: '부하 (1분)', unknownVal: '모름',
+    memOf: (u: string, l: string, p: string) => `${l} GiB 중 ${u} (${p}%)`, nowSize: '현재 크기', sizeLine: (c: number, m: number) => `vCPU ${c} · RAM ${m} GiB`,
+    perHour: (u: string) => `시간당 약 ${u}`, priceNote: (a: string) => `${a} 기준 Daytona 공시 가격으로 추정했습니다. 견적이나 보장이 아니며 디스크는 그대로입니다.`,
+    pricingLink: 'Daytona 가격', upgradeLabel: '더 큰 크기', pickPlan: '크기를 고르세요…', noPlans: '이 머신에 제공되는 더 큰 크기가 없습니다.',
+    planOption: (s: string, delta: string) => `${s} — 시간당 ${delta} 추가`, review: '비용 확인', needsRunning: '크기 변경은 머신이 실행 중일 때 할 수 있습니다.',
+    reviewTitle: '크기 변경 확인', reviewFrom: '지금', reviewTo: '변경 후', reviewDelta: '추가 비용', reviewDeltaVal: (u: string) => `머신이 켜져 있는 동안 시간당 ${u} 추가`,
+    reviewKeep: (dk: string) => `파일은 남습니다. 디스크는 ${dk} GiB 그대로입니다. 공급자에 여유가 없으면 거절될 수 있습니다.`,
+    apply: '업그레이드 적용', applying: '적용 중…', cancel: '취소', reviewStale: '머신이나 가격이 바뀌었습니다. 적용하기 전에 다시 확인하세요.',
+    resizePending: (s: string) => `${s}(으)로 크기를 바꾸는 중입니다. 머신이 보고했는지 지금 확인을 눌러 보세요.`,
+    resizeFailed: (c: string) => `마지막 크기 변경 실패: ${c}`, resizeCheck: '다른 변경을 요청하기 전에 지금 확인을 눌러 마지막 크기 변경이 적용됐는지 보세요.',
+    resizeDone: (s: string) => `머신이 ${s}(으)로 보고합니다.`,
+    gpuTitle: '원격 GPU 작업', gpuLead: '원격 GPU 작업은 따로 빌린 Nosana GPU 호스트에서 돕니다. 이 머신에 꽂힌 CUDA 장치가 아니므로 데스크톱의 nvidia-smi 나 PyTorch 에는 보이지 않습니다.',
+    gpuNoSwitch: '여기서 샌드박스를 고르면 거리 기준만 바뀝니다. 데스크톱을 바꾸지 않습니다.',
+    gpuSandboxes: '내 샌드박스 불러오기', gpuSandboxesLoading: '샌드박스 불러오는 중…', gpuSandbox: '거리 기준 샌드박스', gpuPickSandbox: '샌드박스를 고르세요…',
+    gpuSandboxesFailed: '샌드박스를 불러오지 못했습니다.', gpuNoSandboxes: '보고된 샌드박스가 없습니다.', gpuPartial: '일부 공급자 계정이 답하지 않아 목록이 빠졌을 수 있습니다.',
+    gpuVram: '최소 GPU 메모리', gpuVramOpt: (n: number) => `${n} GB 이상`, gpuFind: 'GPU 찾기', gpuFinding: '찾는 중…', gpuFailed: 'GPU 를 불러오지 못했습니다.',
+    gpuNone: '맞는 GPU 가 없습니다.', gpuObserved: (t: string) => `${t} 확인`, gpuFrom: (n: string, r: string) => `기준: ${n} (${r || '–'})`,
+    gpuVramVal: (n: string) => `GPU 메모리 ${n} GB`, gpuHosts: (n: string) => `빈 호스트 ${n}대`,
+    gpuWhere: (c: string, km: string) => `${c} · 약 ${km} km (추정)`, gpuWhereNoKm: (c: string) => `${c} · 거리 모름`, gpuWhereUnknown: '위치 모름',
+    gpuPrice: (lo: string, hi: string) => (lo === hi ? `기본 가격 시간당 ${lo}` : `기본 가격 시간당 ${lo}–${hi}`), gpuNoPrice: '가격 보고 없음', gpuFee: '네트워크 수수료는 따로입니다.',
+    gpuDistanceNote: '거리는 국가 중심점과 샌드박스 지역 사이의 대략적인 추정입니다. 실제로 잰 네트워크 지연이 아닙니다.',
+    gpuChoose: '선택', gpuChoosing: '선택 중…', gpuUnavailable: '지금 쓸 수 없음', gpuOdd: '서버 응답 형식이 예상과 달라 선택이 확인되지 않았습니다.',
+    gpuChosen: (g: string, c: string) => `원격 GPU 작업용으로 선택: ${g} · ${c}. 아무것도 빌리지 않았고 실행 중인 작업도 없습니다.`,
+    gpuRun: '유료 작업은 머신에서 이 명령을 실행할 때만 시작됩니다:', gpuCmd: '명령', copy: '복사', copied: '복사했습니다.', copyFailed: '복사하지 못했습니다 — 글자를 선택해 복사하세요.',
+    gpuJobs: '작업 상태는 중첩 컴퓨트 → 중첩 작업 보기에서 봅니다.',
   },
 };
 type Dict = typeof DICT.en;
@@ -330,6 +410,91 @@ function safeDesktopUrl(raw: unknown): string | null {
   try { u = new URL(raw); } catch { return null; }
   if (u.origin !== GATEWAY_ORIGIN || u.username || u.password || (u.pathname !== DESKTOP_PATH && !u.pathname.startsWith(`${DESKTOP_PATH}/`))) return null;
   return u.href;
+}
+
+const iso = (v: unknown): string | null => (typeof v === 'string' && v.length <= 40 && Number.isFinite(Date.parse(v)) ? v : null);
+const country = (v: unknown): string | null => (typeof v === 'string' && /^[A-Z]{2}$/.test(v) ? v : null);
+/** printable text only (no control characters) — server text is still drawn with textContent */
+const plain = (v: unknown, max: number): string => str(v, max).replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+
+/** GET performance → Perf, or null when the answer is not the documented shape. Only size increases are kept as plans. */
+function normalizePerf(raw: unknown): Perf | null {
+  if (!isObj(raw) || !isObj(raw.current)) return null;
+  const machineId = str(raw.machineId, 120), c = raw.current;
+  const cur = { cpu: num(c.cpu), memoryGiB: num(c.memoryGiB), diskGiB: num(c.diskGiB), usdPerHour: num(c.usdPerHour) };
+  if (!machineId || cur.cpu === null || cur.memoryGiB === null || cur.diskGiB === null || cur.usdPerHour === null) return null;
+  const current = { cpu: cur.cpu, memoryGiB: cur.memoryGiB, diskGiB: cur.diskGiB, usdPerHour: cur.usdPerHour };
+  let metrics: Metrics | null = null;
+  if (isObj(raw.metrics)) {
+    const m = raw.metrics;
+    const used = num(m.memoryUsedGiB), limit = num(m.memoryLimitGiB), pct = num(m.memoryPercent), load1 = num(m.load1);
+    if (used !== null && limit !== null && pct !== null && load1 !== null) metrics = { cpuPercent: num(m.cpuPercent), memoryUsedGiB: used, memoryLimitGiB: limit, memoryPercent: pct, load1 };
+  }
+  const plans: Plan[] = [];
+  for (const p of Array.isArray(raw.plans) ? raw.plans.filter(isObj).slice(0, 8) : []) {
+    const cpu = num(p.cpu), memoryGiB = num(p.memoryGiB), usdPerHour = num(p.usdPerHour), deltaUsdPerHour = num(p.deltaUsdPerHour);
+    if (cpu === null || memoryGiB === null || usdPerHour === null || deltaUsdPerHour === null || deltaUsdPerHour <= 0) continue;
+    if (cpu < current.cpu || memoryGiB < current.memoryGiB || (cpu === current.cpu && memoryGiB === current.memoryGiB)) continue;
+    if (!plans.some(x => x.cpu === cpu && x.memoryGiB === memoryGiB)) plans.push({ cpu, memoryGiB, usdPerHour, deltaUsdPerHour });
+  }
+  const rz = isObj(raw.resize) ? raw.resize : {};
+  const status: ResizeStatus = rz.status === 'pending' || rz.status === 'failed' ? rz.status : 'idle';
+  const rzErr = str(rz.error, 64);
+  const pr = isObj(raw.pricing) ? raw.pricing : {};
+  return {
+    machineId, sampledAt: iso(raw.sampledAt), metrics, current, plans,
+    resize: { status, cpu: num(rz.cpu), memoryGiB: num(rz.memoryGiB), error: rzErr ? (SAFE_CODE.test(rzErr) ? rzErr : 'error') : null },
+    pricing: { asOf: plain(pr.asOf, 40), url: safePricingUrl(pr.url) },
+  };
+}
+function safePricingUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string' || raw.length > 300) return null;
+  try {
+    const u = new URL(raw);
+    return u.protocol === 'https:' && PRICING_HOSTS.includes(u.hostname) && !u.username && !u.password && !u.port ? u.href : null;
+  } catch { return null; }
+}
+
+function normalizeSandboxes(raw: unknown): { list: Sandbox[]; partial: boolean } | null {
+  if (!isObj(raw) || !Array.isArray(raw.sandboxes)) return null;
+  const list: Sandbox[] = [];
+  for (const s of raw.sandboxes.filter(isObj).slice(0, 60)) {
+    const id = str(s.id, 120), account = str(s.account, 40);
+    if (!SAFE_ID.test(id) || !SAFE_ACCOUNT.test(account) || list.some(x => x.id === id && x.account === account)) continue;
+    list.push({ id, account, name: plain(s.name, 80), region: plain(s.region, 40), state: plain(s.state, 30), cpu: num(s.cpu), memoryGiB: num(s.memoryGiB) });
+  }
+  return { list, partial: raw.partial === true };
+}
+const sandboxKey = (s: { id: string; account: string }) => `${s.account}/${s.id}`;
+
+/** GET gpu/candidates → only accepted when it answers for exactly the sandbox that was asked about */
+function normalizeCandidates(raw: unknown, want: Sandbox): Candidates | null {
+  if (!isObj(raw) || !isObj(raw.sandbox) || !Array.isArray(raw.candidates)) return null;
+  if (raw.sandbox.id !== want.id || raw.sandbox.account !== want.account) return null;
+  const list: Candidate[] = [];
+  for (const c of raw.candidates.filter(isObj).slice(0, 50)) {
+    const id = str(c.id, 120);
+    if (!SAFE_ID.test(id) || list.some(x => x.id === id)) continue;
+    const available = num(c.available);
+    list.push({
+      id, gpu: plain(c.gpu, 80) || id, vramGb: num(c.vramGb), available, country: country(c.country), market: plain(c.market, 80) || null,
+      usdPerHourMin: num(c.usdPerHourMin), usdPerHourMax: num(c.usdPerHourMax), distanceKm: num(c.distanceKm),
+      selectable: c.selectable === true && available !== null && available > 0,
+    });
+  }
+  return { key: sandboxKey(want), region: plain(raw.sandbox.region, 40) || want.region, observedAt: iso(raw.observedAt), note: plain(raw.note, 400), list };
+}
+
+const shellWord = (s: string) => (/^[A-Za-z0-9._:/-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+/** POST gpu/select → the recorded choice; the command shown is the server's only when it is one plain cloudbite-compute line */
+function normalizeChoice(raw: unknown, candidateId: string): GpuChoice | null {
+  if (!isObj(raw) || !isObj(raw.selection) || raw.selection.candidateId !== candidateId) return null;
+  const s = raw.selection, gpu = plain(s.gpu, 80);
+  if (!gpu) return null;
+  const c = country(s.country);
+  const cmd = typeof raw.commandExample === 'string' && raw.commandExample.length <= 400 && /^cloudbite-compute [\x20-\x7e]+$/.test(raw.commandExample) ? raw.commandExample
+    : `cloudbite-compute run --provider nosana --gpu ${shellWord(gpu)}${c ? ` --country ${c}` : ''} -- <command>`;
+  return { candidateId, gpu, country: c, market: plain(s.market, 80) || null, command: cmd };
 }
 
 function fromB64u(s: string): ArrayBuffer {
@@ -457,8 +622,17 @@ function mount(root: HTMLElement, pair: PairLink): void {
     account: '' as AccountId | '', op: null as Op | null, opMsg: null as Msg,
     launching: false, launchUrl: '', launchMsg: null as Msg, snapName: '', snapMsg: null as Msg, termOpen: false,
     jobs: null as NestedJob[] | null, jobsLoading: false, jobsMsg: null as Msg,
+    // performance card: fetched only from Check now (or right after a size change answer), never by polling
+    perf: null as Perf | null, perfLoading: false, perfMsg: null as Msg, plan: '', review: null as Review | null, reviewMsg: null as Msg,
+    resizeCheck: false, // a size change ended without a confirmed answer: Check now must succeed before another one is offered
+    sent: null as { cpu: number; memoryGiB: number } | null,
+    // remote GPU card
+    sandboxes: null as Sandbox[] | null, sbPartial: false, sbLoading: false, sbMsg: null as Msg, sandbox: '', vram: 24,
+    cands: null as Candidates | null, candLoading: false, candMsg: null as Msg, gpuOp: null as GpuOp | null, gpuMsg: null as Msg, choice: null as GpuChoice | null, copyMsg: null as Msg,
   };
   let pollTimer: ReturnType<typeof setTimeout> | null = null, polls = 0, clockTimer: ReturnType<typeof setTimeout> | null = null, loadSeq = 0;
+  // bumped on sign-out and on every selection change, so an answer that arrives late is dropped instead of drawn
+  let perfSeq = 0, sbSeq = 0, candSeq = 0, gpuSeq = 0;
 
   // ── skeleton ──
   const brandSub = h('span', 'cc-sub');
@@ -499,7 +673,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
   launchMsg.setAttribute('role', 'status');
   launchLink.addEventListener('click', () => { setTimeout(() => { S.launchUrl = ''; render(); }, 0); });
   const launchBox = h('div', 'cc-launch-box', launchMsg, launchLink, launchHint);
-  const opMsg = h('p', 'cc-msg'), retryBtn = button('cc-btn', () => { if (S.op) void send(S.op); }), forgetBtn = button('cc-btn cc-quiet', () => { S.op = null; S.opMsg = null; render(); });
+  const opMsg = h('p', 'cc-msg'), retryBtn = button('cc-btn', () => { if (S.op) void send(S.op); }), forgetBtn = button('cc-btn cc-quiet', () => { forgetOp(); });
   opMsg.setAttribute('role', 'status');
   const opBox = h('div', 'cc-op', opMsg, h('div', 'cc-actions', retryBtn, forgetBtn));
   const loadMsg = h('p', 'cc-msg');
@@ -544,10 +718,69 @@ function mount(root: HTMLElement, pair: PairLink): void {
   const brokerLink = link('cc-btn', BROKER_URL, true), vaultLink = link('cc-btn', VAULT_URL, true);
   const keysCard = h('section', 'cc-card', keysTitle, keysLead, h('div', 'cc-actions', brokerLink, vaultLink));
 
+  // performance and size
+  const perfTitle = h('h2'), perfLead = h('p', 'cc-muted'), perfMsg = h('p', 'cc-msg'), perfSampled = h('p', 'cc-fine');
+  perfMsg.setAttribute('role', 'status');
+  const perfBtn = button('cc-btn cc-quiet', () => { void loadPerf(); });
+  const perfFacts = h('dl', 'cc-facts');
+  const priceNote = h('p', 'cc-fine'), pricingLink = link('cc-text-link', '#', true);
+  const planLabel = h('label', 'cc-field-label'), planSel = h('select', 'cc-select');
+  planSel.id = 'cc-plan'; planLabel.setAttribute('for', 'cc-plan');
+  planSel.addEventListener('change', () => { S.plan = planSel.value; S.review = null; S.reviewMsg = null; render(); });
+  const planWrap = h('div', 'cc-field', planLabel, planSel);
+  const reviewBtn = button('cc-btn', () => { openReview(); });
+  const reviewTitle = h('h3'), reviewFacts = h('dl', 'cc-facts'), reviewKeep = h('p', 'cc-fine');
+  const applyBtn = button('cc-btn cc-primary', () => { applyResize(); });
+  const cancelBtn = button('cc-btn cc-quiet', () => { S.review = null; render(); });
+  const reviewBox = h('div', 'cc-review', reviewTitle, reviewFacts, reviewKeep, h('div', 'cc-actions', applyBtn, cancelBtn));
+  reviewBox.setAttribute('role', 'group');
+  const reviewMsg = h('p', 'cc-msg');
+  reviewMsg.setAttribute('role', 'status');
+  // an uncertain size change is retried with the same requestId from here too (same handlers as the machine card)
+  const rzRetry = button('cc-btn', () => { if (S.op?.kind === 'resize') void send(S.op); }), rzForget = button('cc-btn cc-quiet', () => { forgetOp(); });
+  const rzRetryRow = h('div', 'cc-actions', rzRetry, rzForget);
+  const perfCard = h('section', 'cc-card cc-perf', perfTitle, perfLead, h('div', 'cc-actions', perfBtn), perfMsg, perfSampled, perfFacts,
+    h('div', 'cc-price', priceNote, pricingLink), planWrap, reviewBtn, reviewMsg, rzRetryRow, reviewBox);
+
+  // remote GPU jobs
+  const gpuTitle = h('h2'), gpuLead = h('p', 'cc-muted'), gpuNoSwitch = h('p', 'cc-fine');
+  const sbBtn = button('cc-btn cc-quiet', () => { void loadSandboxes(); });
+  const sbMsg = h('p', 'cc-msg');
+  sbMsg.setAttribute('role', 'status');
+  const sbLabel = h('label', 'cc-field-label'), sbSel = h('select', 'cc-select');
+  sbSel.id = 'cc-gpu-sandbox'; sbLabel.setAttribute('for', 'cc-gpu-sandbox');
+  sbSel.addEventListener('change', () => { if (S.gpuOp) { render(); return; } S.sandbox = sbSel.value; dropCandidates(); render(); });
+  const vramLabel = h('label', 'cc-field-label'), vramSel = h('select', 'cc-select');
+  vramSel.id = 'cc-gpu-vram'; vramLabel.setAttribute('for', 'cc-gpu-vram');
+  vramSel.addEventListener('change', () => {
+    if (S.gpuOp) { render(); return; }
+    const n = Number(vramSel.value); S.vram = VRAM_CHOICES.includes(n) ? n : 24; dropCandidates(); render();
+  });
+  const sbWrap = h('div', 'cc-field', sbLabel, sbSel), vramWrap = h('div', 'cc-field', vramLabel, vramSel);
+  const findBtn = button('cc-btn', () => { void loadCandidates(); });
+  const candMsg = h('p', 'cc-msg'), candHead = h('p', 'cc-fine'), candNote = h('p', 'cc-fine'), distNote = h('p', 'cc-fine'), candList = h('ul', 'cc-gpus');
+  candMsg.setAttribute('role', 'status');
+  const gpuMsg = h('p', 'cc-msg');
+  gpuMsg.setAttribute('role', 'status');
+  const gpuRetry = button('cc-btn', () => { if (S.gpuOp) void sendChoice(S.gpuOp); });
+  const gpuForget = button('cc-btn cc-quiet', () => { S.gpuOp = null; S.gpuMsg = null; gpuSeq++; render(); });
+  const gpuRetryRow = h('div', 'cc-actions', gpuRetry, gpuForget);
+  const chosenText = h('p', 'cc-msg cc-ok'), runText = h('p', 'cc-fine'), cmdLabel = h('label', 'cc-field-label'), cmdIn = h('input', 'cc-input cc-cmd');
+  cmdIn.id = 'cc-gpu-cmd'; cmdLabel.setAttribute('for', 'cc-gpu-cmd');
+  cmdIn.setAttribute('readonly', ''); cmdIn.setAttribute('autocomplete', 'off'); cmdIn.setAttribute('autocapitalize', 'none'); cmdIn.setAttribute('spellcheck', 'false');
+  cmdIn.addEventListener('focus', () => { cmdIn.select(); });
+  const copyBtn = button('cc-btn', () => { void copyCommand(); });
+  const copyMsg = h('p', 'cc-msg');
+  copyMsg.setAttribute('role', 'status');
+  const jobsNote = h('p', 'cc-fine');
+  const chosenBox = h('div', 'cc-chosen', chosenText, runText, h('div', 'cc-field', cmdLabel, cmdIn), copyBtn, copyMsg, jobsNote);
+  const gpuCard = h('section', 'cc-card cc-gpu', gpuTitle, gpuLead, gpuNoSwitch, h('div', 'cc-actions', sbBtn), sbMsg, sbWrap, vramWrap, findBtn,
+    candMsg, candHead, distNote, candNote, candList, gpuMsg, gpuRetryRow, chosenBox);
+
   const signOutBtn = button('cc-btn cc-quiet', () => { void logout(); });
   const footer = h('footer', 'cc-footer', signOutBtn);
 
-  const signedIn = h('div', 'cc-grid', phoneCard, machineCard, h('div', 'cc-side', termCard, snapCard, keysCard, nestedCard), appsCard);
+  const signedIn = h('div', 'cc-grid', phoneCard, machineCard, perfCard, gpuCard, h('div', 'cc-side', termCard, snapCard, keysCard, nestedCard), appsCard);
   const main = h('main', 'cc-main', h1, lead, authCard, signedIn, footer);
   root.replaceChildren(header, main);
 
@@ -703,6 +936,148 @@ function mount(root: HTMLElement, pair: PairLink): void {
 
     keysTitle.textContent = d.keysTitle; keysLead.textContent = d.keysLead;
     brokerLink.textContent = d.broker; vaultLink.textContent = d.vault;
+
+    renderPerf(d, m, status);
+    renderGpu(d);
+  }
+
+  const money = (n: number) => `$${n.toFixed(n < 1 ? 4 : 2)}`;
+  const when = (t: string | null) => (t ? new Date(Date.parse(t)).toLocaleString(lang === 'ko' ? 'ko-KR' : 'en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : T().unknownVal);
+  const planKey = (p: { cpu: number; memoryGiB: number }) => `${p.cpu}/${p.memoryGiB}`;
+  const round1 = (n: number) => String(Math.round(n * 10) / 10);
+
+  function renderPerf(d: Dict, m: Machine | null, status: Status | null): void {
+    perfTitle.textContent = d.perfTitle; perfLead.textContent = d.perfLead;
+    perfBtn.textContent = S.perfLoading ? d.perfChecking : d.perfCheck;
+    perfBtn.disabled = S.perfLoading || !m;
+    const p = S.perf;
+    setMsg(perfMsg, S.perfMsg ?? (!m && S.state ? { text: () => d.perfNeedsMachine, kind: 'info' } : !p && !S.perfLoading ? { text: () => d.perfNotLoaded, kind: 'info' } : null));
+    perfSampled.hidden = perfFacts.hidden = !p;
+    if (p) {
+      const mt = p.metrics;
+      perfSampled.textContent = mt ? d.sampled(when(p.sampledAt)) : d.notSampled;
+      perfFacts.replaceChildren(
+        ...fact(d.nowSize, `${d.sizeLine(p.current.cpu, p.current.memoryGiB)} · ${d.perHour(money(p.current.usdPerHour))}`),
+        ...fact(d.cpuUse, mt && mt.cpuPercent !== null ? `${round1(mt.cpuPercent)}%` : d.unknownVal),
+        ...fact(d.memUse, mt ? d.memOf(round1(mt.memoryUsedGiB), round1(mt.memoryLimitGiB), round1(mt.memoryPercent)) : d.unknownVal),
+        ...fact(d.load, mt ? String(Math.round(mt.load1 * 100) / 100) : d.unknownVal));
+    }
+    priceNote.parentElement!.hidden = !p;
+    priceNote.textContent = p ? d.priceNote(p.pricing.asOf || d.unknownVal) : '';
+    pricingLink.hidden = !p?.pricing.url;
+    pricingLink.setAttribute('href', p?.pricing.url || '#');
+    pricingLink.textContent = d.pricingLink;
+
+    // a size change is offered only on fresh data, while running, with nothing else in flight
+    const resizeOp = S.op?.kind === 'resize' ? S.op : null;
+    const canResize = !!p && status === 'running' && !S.op && !S.perfLoading && !S.resizeCheck && p.resize.status !== 'pending';
+    const plans = p?.plans ?? [];
+    if (!plans.some(x => planKey(x) === S.plan)) S.plan = '';
+    planWrap.hidden = !p;
+    planLabel.textContent = d.upgradeLabel;
+    const none = h('option', '', plans.length ? d.pickPlan : d.noPlans);
+    none.value = '';
+    planSel.replaceChildren(none, ...plans.map(x => {
+      const o = h('option', '', d.planOption(d.sizeLine(x.cpu, x.memoryGiB), money(x.deltaUsdPerHour)));
+      o.value = planKey(x);
+      return o;
+    }));
+    planSel.value = S.plan;
+    planSel.disabled = !canResize || !plans.length;
+    reviewBtn.textContent = d.review;
+    reviewBtn.hidden = !p || !plans.length;
+    reviewBtn.disabled = !canResize || !S.plan || !!S.review;
+
+    const target = p && p.resize.cpu !== null && p.resize.memoryGiB !== null ? d.sizeLine(p.resize.cpu, p.resize.memoryGiB) : '–';
+    const reached = !!p && !!S.sent && p.resize.status === 'idle' && p.current.cpu === S.sent.cpu && p.current.memoryGiB === S.sent.memoryGiB;
+    setMsg(reviewMsg, resizeOp?.phase === 'uncertain' ? { text: () => d.uncertain, kind: 'warn' }
+      : S.reviewMsg ?? (S.resizeCheck && !resizeOp ? { text: () => d.resizeCheck, kind: 'warn' }
+        : p?.resize.status === 'pending' ? { text: () => d.resizePending(target), kind: 'info' }
+        : p?.resize.status === 'failed' ? { text: () => d.resizeFailed(p.resize.error || 'error'), kind: 'warn' }
+        : reached && p ? { text: () => d.resizeDone(d.sizeLine(p.current.cpu, p.current.memoryGiB)), kind: 'ok' }
+        : p && plans.length && status !== 'running' ? { text: () => d.needsRunning, kind: 'info' } : null));
+    rzRetryRow.hidden = resizeOp?.phase !== 'uncertain';
+    rzRetry.textContent = d.retry; rzForget.textContent = d.forget;
+
+    const rv = S.review;
+    reviewBox.hidden = !rv;
+    if (rv) {
+      reviewTitle.textContent = d.reviewTitle;
+      reviewFacts.replaceChildren(
+        ...fact(d.reviewFrom, `${d.sizeLine(rv.fromCpu, rv.fromMemoryGiB)} · ${d.perHour(money(rv.fromUsdPerHour))}`),
+        ...fact(d.reviewTo, `${d.sizeLine(rv.cpu, rv.memoryGiB)} · ${d.perHour(money(rv.usdPerHour))}`),
+        ...fact(d.reviewDelta, d.reviewDeltaVal(money(rv.deltaUsdPerHour))));
+      reviewKeep.textContent = `${d.reviewKeep(String(rv.diskGiB))} ${d.priceNote(rv.asOf || d.unknownVal)}`;
+      applyBtn.textContent = resizeOp?.phase === 'sending' ? d.applying : d.apply;
+      applyBtn.disabled = cancelBtn.disabled = !!S.op;
+      cancelBtn.textContent = d.cancel;
+    }
+  }
+
+  function renderGpu(d: Dict): void {
+    gpuTitle.textContent = d.gpuTitle; gpuLead.textContent = d.gpuLead; gpuNoSwitch.textContent = d.gpuNoSwitch;
+    const locked = !!S.gpuOp;
+    sbBtn.textContent = S.sbLoading ? d.gpuSandboxesLoading : d.gpuSandboxes;
+    sbBtn.disabled = S.sbLoading || locked;
+    const sbs = S.sandboxes ?? [];
+    setMsg(sbMsg, S.sbMsg ?? (S.sandboxes && !sbs.length ? { text: () => d.gpuNoSandboxes, kind: 'info' } : S.sandboxes && S.sbPartial ? { text: () => d.gpuPartial, kind: 'warn' } : null));
+    if (!sbs.some(s => sandboxKey(s) === S.sandbox)) S.sandbox = '';
+    sbWrap.hidden = vramWrap.hidden = findBtn.hidden = !sbs.length;
+    sbLabel.textContent = d.gpuSandbox; vramLabel.textContent = d.gpuVram;
+    const blank = h('option', '', d.gpuPickSandbox);
+    blank.value = '';
+    sbSel.replaceChildren(blank, ...sbs.map(s => {
+      const o = h('option', '', `${s.name || s.id} · ${s.region || '–'} · ${s.state || '–'} · ${s.account}`);
+      o.value = sandboxKey(s);
+      return o;
+    }));
+    sbSel.value = S.sandbox; sbSel.disabled = locked;
+    vramSel.replaceChildren(...VRAM_CHOICES.map(n => { const o = h('option', '', d.gpuVramOpt(n)); o.value = String(n); return o; }));
+    vramSel.value = String(S.vram); vramSel.disabled = locked;
+    findBtn.textContent = S.candLoading ? d.gpuFinding : d.gpuFind;
+    findBtn.disabled = !S.sandbox || S.candLoading || locked;
+
+    const cs = S.cands && S.cands.key === S.sandbox ? S.cands : null;
+    setMsg(candMsg, S.candMsg ?? (cs && !cs.list.length ? { text: () => d.gpuNone, kind: 'info' } : null));
+    const sb = sbs.find(s => sandboxKey(s) === S.sandbox);
+    candHead.hidden = distNote.hidden = !cs;
+    candHead.textContent = cs ? `${d.gpuFrom(sb?.name || sb?.id || '–', cs.region)} · ${d.gpuObserved(when(cs.observedAt))}` : '';
+    distNote.textContent = `${d.gpuDistanceNote} ${d.gpuFee}`;
+    candNote.hidden = !cs?.note; candNote.textContent = cs?.note ?? '';
+    candList.hidden = !cs || !cs.list.length;
+    candList.replaceChildren(...(cs?.list ?? []).map(c => candidateItem(c, d)));
+
+    setMsg(gpuMsg, S.gpuOp?.phase === 'uncertain' ? { text: () => d.uncertain, kind: 'warn' } : S.gpuOp ? { text: () => d.pending, kind: 'info' } : S.gpuMsg);
+    gpuRetryRow.hidden = S.gpuOp?.phase !== 'uncertain';
+    gpuRetry.textContent = d.retry; gpuForget.textContent = d.forget;
+
+    const ch = S.choice;
+    chosenBox.hidden = !ch;
+    if (ch) {
+      chosenText.textContent = d.gpuChosen(ch.market ? `${ch.gpu} · ${ch.market}` : ch.gpu, ch.country ?? d.gpuWhereUnknown);
+      runText.textContent = d.gpuRun; cmdLabel.textContent = d.gpuCmd;
+      if (cmdIn.value !== ch.command) cmdIn.value = ch.command;
+      copyBtn.textContent = d.copy;
+      setMsg(copyMsg, S.copyMsg);
+      jobsNote.textContent = d.gpuJobs;
+    }
+  }
+
+  function candidateItem(c: Candidate, d: Dict): HTMLElement {
+    const where = !c.country ? d.gpuWhereUnknown : c.distanceKm === null ? d.gpuWhereNoKm(c.country) : d.gpuWhere(c.country, String(Math.round(c.distanceKm)));
+    const lo = c.usdPerHourMin ?? c.usdPerHourMax, hi = c.usdPerHourMax ?? c.usdPerHourMin;
+    const price = lo === null || hi === null ? d.gpuNoPrice : d.gpuPrice(money(lo), money(hi));
+    const sending = S.gpuOp?.body.candidateId === c.id;
+    const b = button(`cc-btn${c.selectable ? '' : ' cc-quiet'}`, () => { choose(c); });
+    b.textContent = !c.selectable ? d.gpuUnavailable : sending && S.gpuOp?.phase === 'sending' ? d.gpuChoosing : d.gpuChoose;
+    b.disabled = !c.selectable || !!S.gpuOp;
+    const chosen = S.choice?.candidateId === c.id;
+    const li = h('li', `cc-gpu-item${c.selectable ? '' : ' cc-gpu-off'}${chosen ? ' cc-gpu-chosen' : ''}`,
+      h('div', 'cc-app-head', h('strong', '', c.market ? `${c.gpu} · ${c.market}` : c.gpu), h('span', 'cc-chip', d.gpuVramVal(c.vramGb === null ? '–' : String(c.vramGb)))),
+      h('p', 'cc-fine', where), h('p', 'cc-fine', `${d.gpuHosts(c.available === null ? '–' : String(c.available))} · ${price}`), b);
+    li.setAttribute('data-candidate', c.id);
+    if (chosen) li.setAttribute('aria-current', 'true');
+    return li;
   }
 
   function appCard(t: Tool, rows: Map<string, ToolState> | null, d: Dict): HTMLElement {
@@ -753,9 +1128,19 @@ function mount(root: HTMLElement, pair: PairLink): void {
 
   // ── server calls ──
   function signedOut(): void {
-    stopPoll();
+    stopPoll(); resetCapacity();
     S.auth = 'out'; S.state = null; S.launchUrl = ''; S.paired = false; S.enrollMsg = null;
     void checkSession();
+  }
+
+  /** forget everything the performance and GPU cards loaded; answers still in flight are dropped by the bumped counters */
+  function resetCapacity(): void {
+    perfSeq++; sbSeq++; candSeq++; gpuSeq++;
+    Object.assign(S, {
+      perf: null, perfLoading: false, perfMsg: null, plan: '', review: null, reviewMsg: null, resizeCheck: false, sent: null,
+      sandboxes: null, sbPartial: false, sbLoading: false, sbMsg: null, sandbox: '', cands: null, candLoading: false, candMsg: null,
+      gpuOp: null, gpuMsg: null, choice: null, copyMsg: null,
+    });
   }
 
   async function checkSession(): Promise<boolean> {
@@ -848,23 +1233,158 @@ function mount(root: HTMLElement, pair: PairLink): void {
     op.phase = 'sending'; S.op = op; S.opMsg = null; render();
     const r = await call(`${API}/${op.kind}`, op.body);
     if (S.op !== op) return;
+    // a size change is never taken as done from the POST answer alone: the card re-reads performance (a GET) before offering another
+    const settleResize = () => { if (op.kind === 'resize') { S.review = null; S.resizeCheck = true; void loadPerf(); } };
     if (r.ok) {
       S.op = null; S.opMsg = { text: () => T().done[op.kind], kind: 'ok' };
       if (op.kind === 'snapshot') { S.snapName = ''; S.snapMsg = null; }
       const st = isObj(r.body) && typeof r.body.status === 'string' ? normalizeState(r.body) : null;
       if (st) S.state = st;
+      settleResize();
       polls = 0; render(); void loadState(); return;
     }
     if (r.status === 0 || r.status >= 500 || r.status === 408) {
       // Lost or ambiguous: the server may have acted. Keep the same requestId for a retry; never mint a new one silently.
-      op.phase = 'uncertain'; render(); polls = 0; void loadState(); return;
+      op.phase = 'uncertain'; settleResize(); render(); polls = 0; void loadState(); return;
     }
     S.op = null;
     if (r.status === 401 || r.status === 403) { signedOut(); return; }
     const code = r.code || T().httpErr(r.status);
     S.opMsg = { text: () => (op.kind === 'snapshot' && code === 'snapshot_exists' ? T().snapExists : T().rejected(code)), kind: 'warn' };
     if (op.kind === 'snapshot') S.snapMsg = S.opMsg;
+    if (op.kind === 'resize') { settleResize(); S.reviewMsg = S.opMsg; }
     render(); void loadState();
+  }
+
+  /** dropping an uncertain request; for a size change, performance is re-read before another can be asked for */
+  function forgetOp(): void {
+    const kind = S.op?.kind;
+    S.op = null; S.opMsg = null;
+    if (kind === 'resize') { S.resizeCheck = true; void loadPerf(); }
+    render();
+  }
+
+  async function loadPerf(): Promise<void> {
+    if (S.auth !== 'in') return;
+    const seq = ++perfSeq;
+    S.perfLoading = true; S.perfMsg = null; render();
+    const r = await call(`${API}/performance`);
+    if (seq !== perfSeq || S.auth !== 'in') return;
+    S.perfLoading = false;
+    if (r.ok) {
+      const p = normalizePerf(r.body);
+      if (p) {
+        const rv = S.review;
+        if (rv && (p.machineId !== rv.machineId || !p.plans.some(x => x.cpu === rv.cpu && x.memoryGiB === rv.memoryGiB && x.usdPerHour === rv.usdPerHour && x.deltaUsdPerHour === rv.deltaUsdPerHour))) {
+          S.review = null; S.reviewMsg = { text: () => T().reviewStale, kind: 'warn' };
+        }
+        S.perf = p;
+        if (!S.op || S.op.kind !== 'resize') S.resizeCheck = false;
+      } else S.perfMsg = { text: () => T().perfFailed, kind: 'warn' };
+    } else if (r.status === 401 || r.status === 403) { signedOut(); return; }
+    else S.perfMsg = { text: () => `${T().perfFailed} ${r.status === 0 ? T().netErr : r.code ? T().rejected(r.code) : T().httpErr(r.status)}`, kind: 'warn' };
+    render();
+  }
+
+  function openReview(): void {
+    const p = S.perf, plan = p?.plans.find(x => planKey(x) === S.plan);
+    if (!p || !plan || S.op || S.perfLoading || S.resizeCheck || p.resize.status === 'pending' || S.state?.status !== 'running') return;
+    S.review = { ...plan, machineId: p.machineId, fromCpu: p.current.cpu, fromMemoryGiB: p.current.memoryGiB, fromUsdPerHour: p.current.usdPerHour, diskGiB: p.current.diskGiB, asOf: p.pricing.asOf };
+    S.reviewMsg = null;
+    render();
+  }
+
+  /** the explicit Apply: sends exactly the reviewed size, only if the loaded prices still match what was reviewed */
+  function applyResize(): void {
+    const rv = S.review, p = S.perf;
+    if (!rv || S.op) return;
+    const plan = p?.plans.find(x => x.cpu === rv.cpu && x.memoryGiB === rv.memoryGiB);
+    if (!p || !plan || p.machineId !== rv.machineId || plan.usdPerHour !== rv.usdPerHour || plan.deltaUsdPerHour !== rv.deltaUsdPerHour
+      || S.perfLoading || S.resizeCheck || p.resize.status === 'pending' || S.state?.status !== 'running') {
+      S.review = null; S.reviewMsg = { text: () => T().reviewStale, kind: 'warn' }; render(); return;
+    }
+    S.sent = { cpu: rv.cpu, memoryGiB: rv.memoryGiB }; S.reviewMsg = null;
+    begin('resize', { cpu: rv.cpu, memoryGiB: rv.memoryGiB, acknowledgeCost: true });
+  }
+
+  // ── remote GPU: sandboxes and candidates are read only on a button press; a choice records a preference, never a rental ──
+  function dropCandidates(): void {
+    candSeq++;
+    S.cands = null; S.candLoading = false; S.candMsg = null; S.choice = null; S.copyMsg = null; S.gpuMsg = null;
+  }
+
+  async function loadSandboxes(): Promise<void> {
+    if (S.auth !== 'in' || S.sbLoading || S.gpuOp) return;
+    const seq = ++sbSeq;
+    S.sbLoading = true; S.sbMsg = null; render();
+    const r = await call(`${API}/compute/sandboxes`);
+    if (seq !== sbSeq || S.auth !== 'in') return;
+    S.sbLoading = false;
+    if (r.ok) {
+      const got = normalizeSandboxes(r.body);
+      if (got) {
+        S.sandboxes = got.list; S.sbPartial = got.partial;
+        if (!got.list.some(s => sandboxKey(s) === S.sandbox)) { S.sandbox = ''; dropCandidates(); }
+      } else S.sbMsg = { text: () => T().gpuSandboxesFailed, kind: 'warn' };
+    } else if (r.status === 401 || r.status === 403) { signedOut(); return; }
+    else S.sbMsg = { text: () => `${T().gpuSandboxesFailed} ${r.status === 0 ? T().netErr : r.code ? T().rejected(r.code) : T().httpErr(r.status)}`, kind: 'warn' };
+    render();
+  }
+
+  async function loadCandidates(): Promise<void> {
+    const sb = S.sandboxes?.find(s => sandboxKey(s) === S.sandbox);
+    if (S.auth !== 'in' || !sb || S.candLoading || S.gpuOp) return;
+    const seq = ++candSeq, key = sandboxKey(sb), vram = S.vram;
+    S.candLoading = true; S.candMsg = null; render();
+    const q = new URLSearchParams({ sandboxId: sb.id, account: sb.account, minVramGb: String(vram) });
+    const r = await call(`${API}/gpu/candidates?${q.toString()}`);
+    if (seq !== candSeq || S.auth !== 'in' || S.sandbox !== key || S.vram !== vram) return;
+    S.candLoading = false;
+    if (r.ok) {
+      const c = normalizeCandidates(r.body, sb);
+      if (c) S.cands = c; else { S.cands = null; S.candMsg = { text: () => T().gpuFailed, kind: 'warn' }; }
+    } else if (r.status === 401 || r.status === 403) { signedOut(); return; }
+    else S.candMsg = { text: () => `${T().gpuFailed} ${r.status === 0 ? T().netErr : r.code ? T().rejected(r.code) : T().httpErr(r.status)}`, kind: 'warn' };
+    render();
+  }
+
+  function choose(c: Candidate): void {
+    const sb = S.sandboxes?.find(s => sandboxKey(s) === S.sandbox);
+    if (S.gpuOp || !sb || !c.selectable || S.cands?.key !== S.sandbox || !S.cands.list.some(x => x.id === c.id)) return;
+    let requestId: string;
+    try { requestId = uuid(); } catch { S.gpuMsg = { text: () => T().netErr, kind: 'warn' }; render(); return; }
+    S.choice = null; S.copyMsg = null;
+    void sendChoice({ requestId, key: S.sandbox, body: { requestId, sandboxId: sb.id, account: sb.account, candidateId: c.id }, phase: 'sending' });
+  }
+
+  async function sendChoice(op: GpuOp): Promise<void> {
+    const seq = ++gpuSeq;
+    op.phase = 'sending'; S.gpuOp = op; S.gpuMsg = null; render();
+    const r = await call(`${API}/gpu/select`, op.body);
+    if (seq !== gpuSeq || S.gpuOp !== op || S.auth !== 'in') return;
+    if (r.ok) {
+      S.gpuOp = null;
+      const ch = normalizeChoice(r.body, op.body.candidateId as string);
+      if (ch && S.sandbox === op.key) S.choice = ch; else S.gpuMsg = { text: () => T().gpuOdd, kind: 'warn' };
+    } else if (r.status === 0 || r.status >= 500 || r.status === 408) {
+      op.phase = 'uncertain'; // same requestId on retry
+    } else {
+      S.gpuOp = null;
+      if (r.status === 401 || r.status === 403) { signedOut(); return; }
+      const code = r.code || T().httpErr(r.status);
+      S.gpuMsg = { text: () => T().rejected(code), kind: 'warn' };
+    }
+    render();
+  }
+
+  async function copyCommand(): Promise<void> {
+    const text = S.choice?.command;
+    if (!text) return;
+    const clip = (navigator as { clipboard?: { writeText?: (t: string) => Promise<void> } }).clipboard;
+    let ok = false;
+    try { if (clip && typeof clip.writeText === 'function') { await clip.writeText(text); ok = true; } } catch { ok = false; }
+    S.copyMsg = ok ? { text: () => T().copied, kind: 'ok' } : { text: () => T().copyFailed, kind: 'warn' };
+    render();
   }
 
   function startOrResume(): void {
@@ -935,6 +1455,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
     const r = await call(`${AUTH_API}/logout`, {});
     S.authBusy = false;
     if (r.ok && isObj(r.body) && r.body.authenticated === false) {
+      resetCapacity();
       S.auth = 'out'; S.state = null; S.op = null; S.opMsg = null; S.launchUrl = ''; S.paired = false; S.enrollMsg = null; S.authMsg = { text: () => T().signedOut, kind: 'ok' };
     } else {
       S.authMsg = { text: () => (r.ok ? T().sessionFailed : r.status === 0 ? T().netErr : T().httpErr(r.status)), kind: 'warn' };
