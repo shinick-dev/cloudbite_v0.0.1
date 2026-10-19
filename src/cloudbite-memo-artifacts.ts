@@ -13,7 +13,7 @@ export interface MemoArtifactSelection {
 }
 const PATH = /^out\/[a-z0-9][a-z0-9_-]{0,47}(\.[a-z0-9_-]{1,16})?\.(md|txt|json|csv)$/;
 const RESERVED = new Set(['out/result.json', 'out/manifest.json', 'out/knowledge.json', 'out/diagnostic.json', 'out/author-response.json']);
-const ID = /^[a-z0-9][a-z0-9-]{0,79}$/;
+const ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const enc = new TextEncoder();
 
 /** One artifact per completed expert before selecting a second. Does not read storage or arbitrary paths. */

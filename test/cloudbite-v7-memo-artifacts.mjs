@@ -14,6 +14,10 @@ check('completed experts only, safe collected artifact paths, one file per role 
   assert.equal(p.entries.length, 12); assert.equal(p.eligible, 30);
   assert.deepEqual(p.entries.map(a => a.expertId), Array.from({ length: 12 }, (_, i) => `role-${i}`));
   assert.ok(p.entries.every(a => a.path === 'out/report.md' && a.key === `artifact:run-${a.expertId.slice(5)}:out/report.md`));
+  // Expert/run IDs follow the 64-character memo packet ID contract.
+  const long = expert(1); long.run.expertId = 'r'.repeat(65);
+  assert.equal(M.selectMemoArtifacts([long]).entries.length, 0);
+  long.run.expertId = 'r'.repeat(64); assert.equal(M.selectMemoArtifacts([long]).entries.length, 2);
   const two = M.selectMemoArtifacts([expert(1), expert(2)]);
   assert.deepEqual(two.entries.map(a => a.path), ['out/report.md', 'out/report.md', 'out/analysis.csv', 'out/analysis.csv']);
 });

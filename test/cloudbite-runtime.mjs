@@ -989,7 +989,10 @@ await check('phase-one knowledge: role-bound packs, unknown citation and missing
   for (const role of final.roles) {
     const def = boot.j.experts.find((e) => e.id === role.id);
     assert.equal(role.revision, def.source.revision); assert.match(role.revision, /^[0-9a-f]{40}$/);
-    assert.equal(role.promptHash, REAL.expertInstructionHash(def));
+    // promptHash keeps its persona meaning (history revision accounting); the composite identity is stored beside it.
+    assert.equal(role.promptHash, createHash('sha256').update(def.prompt).digest('hex'));
+    assert.equal(role.instructionHash, REAL.expertInstructionHash(def)); assert.equal(role.instructionHashSchema, 'expert-instructions/v2');
+    assert.notEqual(role.instructionHash, role.promptHash);
     const components = REAL.expertInstructionComponents(def);
     assert.equal(components.personaSha256, createHash('sha256').update(def.prompt).digest('hex'));
     assert.equal(components.runnerSha256, createHash('sha256').update(REAL.CB_RUNNER_PY).digest('hex'));

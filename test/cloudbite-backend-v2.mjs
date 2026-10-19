@@ -487,6 +487,39 @@ await test('v7 memo: collected generated artifacts reach the real DO prompt, and
   assert.equal(accepted.status, 200, accepted.text); assert.equal(accepted.data.memo.status, 'completed');
 });
 
+await test('v7 memo: sealed disclosures and source records keep priority; generated artifacts never displace them from the cap', async () => {
+  const w = world(), x = await finished(w);
+  const ids = x.created.brief.expertIds; N.memoIds = ids;
+  const store = w.store(x.id), runs = store.m.get('project').runs;
+  const src = (id) => ({ id, title: `Title ${id}`, url: `https://example.org/${id}`, license: 'CC-BY', checkStatus: 'unchecked', checkedAt: '', originalText: 'not-fetched' });
+  const list = Array.from({ length: 20 }, (_, i) => `pmc-s-${i}`);
+  store.m.set('packets', [{ expertId: ids[0], binding: 'bound', bindingNote: '', pack: null, observed: { retrievals: 1, cardIds: [], sourceIds: list },
+    cards: [], references: [], originalSourceTextFetched: false, auditNotes: [], bytes: 0, sources: list.map(src), sha256: hash(ids[0] + list.join()),
+    omitted: { cards: 0, sources: 3, references: 0, observedIds: 0, unidentifiedIds: 0, truncatedSummaries: 0 } }]);
+  let files = 0;
+  for (const run of runs) {
+    const record = store.m.get('expert:' + run);
+    record.run.artifacts = ['out/report.md', 'out/analysis.csv', 'out/plan.txt'].map(path => ({ path, label: path, bytes: 60 }));
+    store.m.set('expert:' + run, record);
+    for (const a of record.run.artifacts) { store.m.set(`artifact:${run}:${a.path}`, `Generated proposal ${run} ${a.path}, not execution proof.`); files++; }
+  }
+  const r = await memo(w, x);
+  assert.equal(r.status, 200, r.text); assert.equal(r.data.memo.status, 'completed', r.text);
+  const data = JSON.parse(N.calls[0].req.messages[1].content.replace(/^[^\n]*\n/, ''));
+  const pk = data.packets;
+  // 1 sealed-packet disclosure + 20 distinct sources come first, all retained; artifacts fill only the remaining slots.
+  assert.match(pk[0].id, /^omit-/); assert.match(pk[0].label, /^3 observed source/);
+  assert.deepEqual(pk.slice(1, 21).map(p => p.label), list.map(id => `Title ${id}`));
+  assert.ok(pk.slice(0, 21).every(p => p.kind === 'source-metadata' && p.originalText === 'absent'));
+  const artifacts = pk.filter(p => p.kind === 'expert-artifact-excerpt');
+  assert.equal(artifacts.length, 3); assert.ok(pk.slice(21).every(p => p.kind === 'expert-artifact-excerpt'));
+  const generated = Math.min(files, 12) + (files > 12 ? 1 : 0);
+  assert.deepEqual(data.coverage.packets, { included: 24, total: 21 + generated, truncated: 0, omitted: generated - 3, invalid: 0, metadataOnly: 21 });
+  assert.deepEqual(r.data.memo.coverage.packets, data.coverage.packets, 'stored coverage equals what the model was told');
+  assert.equal(data.coverage.sourcePagesReviewed, false); assert.equal(data.coverage.fullReportsReviewed, false);
+  assert.match(N.calls[0].req.messages[0].content, /not independent sources or proof that a tool ran/);
+});
+
 // ── follow-up rounds ──
 await test('revision: a new project bound to the reading actor\'s parent; replay keeps the original snapshot; deleted or foreign parents fail before create', async () => {
   const w = world(), parent = await finished(w);

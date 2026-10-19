@@ -53,7 +53,7 @@ import {
 } from './cloudbite-memo';
 import { buildExpertAssignments } from './cloudbite-workorders';
 import { selectMemoArtifacts, memoArtifactPackets } from './cloudbite-memo-artifacts';
-import { expertInstructionHash } from './cloudbite-instruction-identity';
+import { EXPERT_INSTRUCTION_IDENTITY, expertInstructionHash } from './cloudbite-instruction-identity';
 import { defaultResponseLanguage } from './cloudbite-workflow';
 import { previousRoundWorkOrderRules, previousRoundWorkspaceFiles, ROUND_VERSION, type ProjectPreviousRound } from './cloudbite-revision';
 import { artifactPacketsFor, buildArtifactPacket, type StoredArtifact } from './cloudbite-artifact-review';
@@ -437,7 +437,8 @@ export class CloudbiteProject extends DurableObject<Env> {
       actor: historyActor, model: brief.mode === 'live' ? this.config()!.nosana.model : 'server-demo', revision: 1, published: 0, nextAt: 0,
       roles: await Promise.all(brief.expertIds.map(async id => {
         const def = catalogue.find(x => x.id === id)!;
-        return { id, basis: def.source.basis, revision: def.source.revision, promptHash: expertInstructionHash(def) };
+        return { id, basis: def.source.basis, revision: def.source.revision, promptHash: await cbHash(def.prompt),
+          instructionHash: expertInstructionHash(def), instructionHashSchema: EXPERT_INSTRUCTION_IDENTITY };
       })),
     } : undefined;
     // From here: storage only, no other awaits — concurrent duplicate creates serialize on the input gate.
@@ -1031,7 +1032,8 @@ export class CloudbiteProject extends DurableObject<Env> {
     }
     const selection = selectMemoArtifacts(s.experts);
     const artifactContents = selection.entries.length ? await store.get<unknown>(selection.entries.map(a => a.key)) : new Map<string, unknown>();
-    const packets = [...memoArtifactPackets(selection, artifactContents), ...disclosures, ...sources];
+    // Generated artifacts come after disclosures and source records, so they never displace a source from the leaf cap.
+    const packets = [...disclosures, ...sources, ...memoArtifactPackets(selection, artifactContents)];
     const reviews = s.cr && s.cr.review.status !== 'running' ? s.cr.review.reports : [];
     return { coaching: true, team: s.experts.map((e) => ({ expertId: e.run.expertId, name: e.run.name, status: e.run.status })),
       ...(reviews.length ? { reviews } : {}), ...(packets.length ? { packets } : {}),

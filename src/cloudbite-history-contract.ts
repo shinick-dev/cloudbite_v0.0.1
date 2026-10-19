@@ -6,7 +6,9 @@ export const HISTORY_TTL = HISTORY_DAYS * 86400_000;
 export const HISTORY_ISSUES = ['incorrect', 'missing-sources', 'too-generic', 'off-topic', 'slow', 'other'] as const;
 export type HistoryIssue = typeof HISTORY_ISSUES[number];
 export interface HistoryFeedback { expertId: string; rating: 'helpful' | 'unhelpful'; issue?: HistoryIssue; comment: string; at: number }
-export interface HistoryRole { id: string; basis: string; revision: string; promptHash: string }
+/** promptHash is always sha256(persona prompt). Records created since expert-instructions/v2 also carry the composite
+ * creation-time instruction identity separately; older records lack both optional fields. */
+export interface HistoryRole { id: string; basis: string; revision: string; promptHash: string; instructionHash?: string; instructionHashSchema?: 'expert-instructions/v2' }
 export interface HistoryIdentity { actor: string; model: string; roles: HistoryRole[]; revision: number; published: number; nextAt: number; deleted?: boolean }
 export interface HistoryExpertSignal { id: string; status: string; confidence?: number; referenced: boolean; errorKind?: string }
 export interface HistoryRow {
