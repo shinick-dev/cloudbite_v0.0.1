@@ -40,7 +40,12 @@ export type QuantitativeErrorCode =
   | 'csv-too-many-columns' | 'csv-duplicate-header' | 'csv-column-missing' | 'csv-column-ambiguous';
 export interface QuantitativeError { code: QuantitativeErrorCode; message: string }
 export type ExpectedComparison =
-  | ({ status: 'within-tolerance' | 'outside-tolerance'; tolerance: number; absoluteDifference: number; relativeDifference: number | null } & NormalisedQuantity)
+  | ({ status: 'within-tolerance' | 'outside-tolerance'; tolerance: number;
+      /** null only when the difference overflows float64; `unavailable` then names why. */
+      absoluteDifference: number | null;
+      /** null when expected is 0 (no `unavailable` entry) or when the ratio overflows float64 (`unavailable` says so). */
+      relativeDifference: number | null;
+      unavailable?: { absoluteDifference?: 'overflow'; relativeDifference: 'overflow' } } & NormalisedQuantity)
   | ({ status: 'dimension-mismatch'; tolerance: number } & NormalisedQuantity);
 export type SensitivitySide = { status: 'completed'; inputValue: number; value: number; change: number } | { status: 'error'; inputValue: number; error: QuantitativeError };
 export interface SensitivityResult { variable: string; delta: number; unit: string; resultUnit: string; plus: SensitivitySide; minus: SensitivitySide }
@@ -288,9 +293,16 @@ function runArithmetic(req: ArithmeticRequest, inputSha256: string, csvSupplied:
       const e = normalise(req.expected), shown = describe(req.expected);
       if (!sameDims(e.d, q.d)) res.expected = { status: 'dimension-mismatch', tolerance, ...shown };
       else {
+        // Both inputs are finite, but |a - e| can exceed float64 (opposite signs near the limit) and diff / |e| can too
+        // (tiny expected). Status stays exact: an overflowing difference is necessarily outside a tolerance in [0, 1].
         const diff = Math.abs(q.v - e.v), scale = Math.max(Math.abs(q.v), Math.abs(e.v));
-        res.expected = { status: diff <= tolerance * scale ? 'within-tolerance' : 'outside-tolerance', tolerance, absoluteDifference: diff,
-          relativeDifference: e.v === 0 ? null : diff / Math.abs(e.v), ...shown };
+        const rel = e.v === 0 ? null : diff / Math.abs(e.v);
+        const absOverflow = !Number.isFinite(diff), relOverflow = rel !== null && !Number.isFinite(rel);
+        res.expected = { status: diff <= tolerance * scale ? 'within-tolerance' : 'outside-tolerance', tolerance,
+          absoluteDifference: absOverflow ? null : diff, relativeDifference: relOverflow ? null : rel,
+          ...(relOverflow ? { unavailable: absOverflow ? { absoluteDifference: 'overflow' as const, relativeDifference: 'overflow' as const } : { relativeDifference: 'overflow' as const } } : {}),
+          ...shown };
+        if (relOverflow) res.warnings.push(`${absOverflow ? 'absolute and relative difference' : 'relative difference'} overflows float64 and is reported as unavailable`);
       }
     }
     if (req.sensitivity) {

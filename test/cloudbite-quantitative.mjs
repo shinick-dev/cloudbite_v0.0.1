@@ -131,6 +131,36 @@ t('expected comparison with relative tolerance in base units', () => {
   assert.match(ar('1', {}, { tolerance: 0.1 }).warnings.join(' '), /without expected/);
 });
 
+t('expected comparison never serialises an overflowing difference as a silent null', () => {
+  const finiteDeep = x => { if (typeof x === 'number') assert.ok(Number.isFinite(x), `non-finite ${x}`); else if (x && typeof x === 'object') Object.values(x).forEach(finiteDeep); };
+  // Opposite signs at the float64 edge: |a - e| overflows although both inputs are finite.
+  const huge = ar('a', { a: { value: 1e308, unit: '' } }, { expected: { value: -1e308, unit: '' }, tolerance: 1 });
+  assert.equal(huge.status, 'completed'); assert.equal(huge.expected.status, 'outside-tolerance');
+  assert.equal(huge.expected.absoluteDifference, null); assert.equal(huge.expected.relativeDifference, null);
+  assert.deepEqual(huge.expected.unavailable, { absoluteDifference: 'overflow', relativeDifference: 'overflow' });
+  assert.match(huge.warnings.join(' '), /absolute and relative difference overflows/);
+  finiteDeep(huge); assert.deepEqual(JSON.parse(JSON.stringify(huge)), huge);
+  // Tiny expected: |a - e| is finite but |a - e| / |e| overflows.
+  for (const [a, e] of [[1e300, 1e-300], [1, 5e-324], [-1, 1e-310]]) {
+    const r = ar('a', { a: { value: a, unit: '' } }, { expected: { value: e, unit: '' } });
+    assert.equal(r.expected.status, 'outside-tolerance'); assert.equal(r.expected.absoluteDifference, Math.abs(a - e));
+    assert.equal(r.expected.relativeDifference, null); assert.deepEqual(r.expected.unavailable, { relativeDifference: 'overflow' });
+    assert.match(r.warnings.join(' '), /relative difference overflows/);
+    finiteDeep(r); assert.deepEqual(JSON.parse(JSON.stringify(r)), r);
+  }
+  // Ordinary comparisons and expected = 0 are unchanged: no unavailable entry, no warning.
+  const ord = ar('a', { a: { value: 2, unit: '' } }, { expected: { value: 2.5, unit: '' } });
+  assert.equal(ord.expected.absoluteDifference, 0.5); assert.equal(ord.expected.relativeDifference, 0.2);
+  assert.ok(!('unavailable' in ord.expected)); assert.deepEqual(ord.warnings, []);
+  const zero = ar('a', { a: { value: 1e308, unit: '' } }, { expected: { value: 0, unit: '' } });
+  assert.equal(zero.expected.absoluteDifference, 1e308); assert.equal(zero.expected.relativeDifference, null);
+  assert.ok(!('unavailable' in zero.expected)); assert.deepEqual(zero.warnings, []);
+  assert.equal(ar('0', {}, { expected: { value: 0, unit: '' } }).expected.status, 'within-tolerance');
+  // Near-edge but representable differences stay numeric.
+  const edge = ar('a', { a: { value: 8e307, unit: '' } }, { expected: { value: -8e307, unit: '' } });
+  assert.equal(edge.expected.absoluteDifference, 1.6e308); assert.equal(edge.expected.relativeDifference, 2); assert.ok(!('unavailable' in edge.expected));
+});
+
 t('sensitivity: explicit ±delta in the variable unit, finite and invalid perturbations', () => {
   const r = ar('t * f', { t: { value: 500, unit: 'ps' }, f: { value: 2, unit: 'GHz' } }, { sensitivity: { variable: 't', delta: 50 } });
   assert.equal(r.sensitivity.unit, 'ps'); assert.equal(r.sensitivity.resultUnit, '1');

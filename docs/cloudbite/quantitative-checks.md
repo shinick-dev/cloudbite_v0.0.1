@@ -57,6 +57,10 @@ not decomposed into V·A. Exponents beyond ±8 are rejected. The result reports 
 **Expected comparison** — `expected` is normalised to base units. Different dimensions → `dimension-mismatch`.
 Otherwise `within-tolerance` iff `|actual − expected| ≤ tolerance · max(|actual|, |expected|)`; `tolerance` is
 relative, in [0, 1], default `1e-9`. `relativeDifference` is `null` when expected is 0.
+Both inputs are finite, but the difference can still exceed float64 (opposite signs near ±1.8e308) and the ratio can
+too (tiny expected). Then the overflowing field is `null` **and** `unavailable` names it (`{ relativeDifference:
+'overflow' }`, plus `absoluteDifference: 'overflow'` when the difference itself overflows) with a warning; no result
+ever carries `Infinity`/`NaN`. The status stays exact — an overflowing difference is always `outside-tolerance`.
 
 **Sensitivity** — one explicit variable and a non-zero finite `delta` in **that variable's own unit**. The engine
 recomputes the expression at `value + delta` and `value − delta`; each side is `completed` (value and change from the
