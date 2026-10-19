@@ -49,7 +49,9 @@ export type InferenceResult = { content: string } | { error: string; status: num
 const THINKING_OFF_MODELS = new Set(['qwen/qwen3.8-27b']);
 
 /** Output budgets the server may request: every role/reviewer call, and the one fixed decision-memo value. */
-const MAX_TOKENS = new Set([CB_INFERENCE_MAX_TOKENS, CB_MEMO_MAX_TOKENS]);
+/** Fixed server budget for the expanded, quotation-bearing cross-review schema. No extra call. */
+export const CB_CLAIM_REVIEW_MAX_TOKENS = 4096;
+const MAX_TOKENS = new Set([CB_INFERENCE_MAX_TOKENS, CB_MEMO_MAX_TOKENS, CB_CLAIM_REVIEW_MAX_TOKENS]);
 export interface ChatOptions { /** Server-chosen only (never user input); anything but an allowed value is refused. */ maxTokens?: number }
 
 /** The upstream request body: same budgets for every model, plus thinking-off and JSON mode for the models above. */

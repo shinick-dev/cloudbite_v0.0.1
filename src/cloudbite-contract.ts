@@ -144,6 +144,8 @@ export interface ExpertRun {
   authorResponse?: import('./cloudbite-author-response').AuthorResponseParsed | { invalid: string };
 }
 export interface ProjectRun {
+  /** App-computed records over explicit user inputs or this project's stored text. Never decision correctness. */
+  quantitativeChecks?: QuantitativeCheckRecord[];
   id: string;
   brief: ProjectBrief;
   status: ProjectStatus;
@@ -167,6 +169,16 @@ export interface ProjectRun {
   previousRound?: import('./cloudbite-revision').ProjectPreviousRound;
   /** Epistemic origin and explicit user adoption; neither is independent fact verification. */
   provenance?: { ledger: import('./cloudbite-provenance').ProvenanceLedger; state: import('./cloudbite-provenance').ProvenanceState };
+}
+export interface QuantitativeCheckRecord {
+  id: string;
+  projectId: string;
+  createdAt: number;
+  request: import('./cloudbite-quantitative').QuantitativeRequest;
+  result: Awaited<ReturnType<typeof import('./cloudbite-quantitative').runQuantitativeCheck>>;
+  source?: { kind: 'artifact'; expertId: string; path: string; sha256: string }
+    | { kind: 'document'; id: string; sha256: string };
+  execution: 'app-deterministic';
 }
 // Public mirrors of leaf types whose modules import server-only configuration (cloudbite-config → state), so the
 // browser build (tsconfig.client.json) can read them. src/cloudbite-project.ts asserts at compile time that each

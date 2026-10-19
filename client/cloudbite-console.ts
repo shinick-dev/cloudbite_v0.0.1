@@ -21,6 +21,8 @@ import type { HistoryList, HistoryDetail, HistoryReport, HistoryIssue, HistoryFe
 import type { CatalogueMaxRoles, ProjectMaxExperts } from '../src/cloudbite-catalogue-limits';
 import type { ClaimAdoption, ClaimStanding, LedgerClaim, ProvenanceLedger, ProvenanceState } from '../src/cloudbite-provenance';
 import type { AuthorResponseParsed, AuthorResponsePlan } from '../src/cloudbite-author-response';
+import type { QuantitativeCheckRecord } from '../src/cloudbite-contract';
+import type { QuantitativeRequest } from '../src/cloudbite-quantitative';
 
 type Mode = 'demo' | 'live';
 type View = 'home' | 'guide' | 'help' | 'settings' | 'history';
@@ -36,7 +38,7 @@ type ConsoleProject = Omit<ProjectRun, 'experts' | 'crossReview'> & {
   experts: ConsoleExpert[]; crossReview?: ConsoleReview; invalidCrossReview?: boolean;
   memo?: ConsoleMemo; invalidMemo?: boolean; evidenceSignals?: EvidenceSignals; invalidSignals?: boolean;
   previousRound?: ProjectPreviousRound; invalidRound?: boolean; invalidAuthorPlan?: boolean; memoBudget?: BudgetPhaseView;
-  invalidProvenance?: boolean;
+  invalidProvenance?: boolean; invalidQuantitative?: boolean;
 };
 interface Limits { min: number; max: number }
 interface FormInput { title: string; objective: string; context: string; expertIds: string[] }
@@ -506,8 +508,36 @@ const P3_KO: typeof P3_EN = {
   fuAuthorNone: '작성자 응답: 해당 작성자를 한 명 이상 고르세요.',
 };
 
+const P4_EN = {
+  title: 'Reproduce a calculation', note: 'Calculate from explicit inputs or a stored CSV. No model call. This checks arithmetic, not whether the inputs or the decision are correct. Up to 20 distinct checks are retained with this project.',
+  arithmetic: 'Formula', csv: 'Stored CSV', expression: 'Expression', variables: 'Variables — one name,value,unit per line',
+  variablesHint: 'Example: delay,0.72,ns. Use the variable name in the expression. Leave the unit empty for a ratio.',
+  source: 'CSV source', column: 'Numeric column name', run: 'Calculate and save', running: 'Calculating…',
+  records: 'Saved calculation records', none: 'No calculations recorded.', invalid: 'The saved calculation records could not be read.',
+  failed: 'Calculation request failed. Reload this project before trying again if the response was lost.',
+  inputError: 'Use a formula and at most 20 unique variables in name,value,unit format, with finite numeric values.',
+  readonly: 'Saved records are read-only here. New checks can be made from the current live project.',
+  noCsv: 'No stored CSV is available in this project.', sourceNote: 'CSV checks use the stored text identified below; its origin and completeness are not verified.',
+  supportTitle: 'Claim-to-text assessment', supportNote: 'Model assessment of the supplied passage; not factual verification. Curated cards are summaries, not original source pages.',
+  supportStatus: { supported: 'Supports', partial: 'Partly supports', contradicted: 'Contradicts', insufficient: 'Cannot determine' } as Record<string, string>,
+  supportInvalid: 'The claim-to-text assessment could not be read.',
+};
+const P4_KO: typeof P4_EN = {
+  title: '계산 재현', note: '입력값이나 저장된 CSV로 계산합니다. 모델 호출은 없습니다. 입력의 사실성이나 결정의 타당성을 검증하지는 않습니다. 프로젝트당 서로 다른 계산 20개까지 함께 보관합니다.',
+  arithmetic: '수식', csv: '저장된 CSV', expression: '계산식', variables: '변수 — 한 줄에 이름,값,단위',
+  variablesHint: '예: delay,0.72,ns. 계산식에는 변수 이름을 사용하세요. 비율은 단위를 비워 두세요.',
+  source: 'CSV 자료', column: '숫자 열 이름', run: '계산하고 저장', running: '계산 중…',
+  records: '저장된 계산 기록', none: '아직 계산 기록이 없습니다.', invalid: '저장된 계산 기록을 읽을 수 없습니다.',
+  failed: '계산 요청이 실패했습니다. 응답이 끊겼다면 프로젝트를 다시 읽은 뒤 재시도하세요.',
+  inputError: '계산식과 이름,값,단위 형식의 변수를 입력하세요. 변수는 중복 없이 최대 20개이며 값은 유한한 숫자여야 합니다.',
+  readonly: '여기서는 저장된 기록만 확인합니다. 현재 실제 실행 프로젝트에서 새 계산을 할 수 있습니다.',
+  noCsv: '이 프로젝트에는 저장된 CSV가 없습니다.', sourceNote: '아래에 표시한 저장 텍스트를 계산합니다. 자료의 사실성이나 완전성을 검증한 것은 아닙니다.',
+  supportTitle: '주장과 인용문 대조', supportNote: '제공된 문장에 대한 모델의 판단이며 사실 검증이 아닙니다. 지식 카드는 요약문이며 출처 원문과 다릅니다.',
+  supportStatus: { supported: '지지', partial: '부분 지지', contradicted: '불일치', insufficient: '판단 불가' },
+  supportInvalid: '주장과 인용문 대조 결과를 읽을 수 없습니다.',
+};
 const EN = {
-  p2: P2_EN, p3: P3_EN,
+  p2: P2_EN, p3: P3_EN, p4: P4_EN,
   docTitle: 'Cloudbite — Expert sandbox workspace',
   langGroup: 'Language',
   langChanged: 'Language: English',
@@ -970,7 +1000,7 @@ const EN = {
 type Messages = typeof EN;
 
 const KO: Messages = {
-  p2: P2_KO, p3: P3_KO,
+  p2: P2_KO, p3: P3_KO, p4: P4_KO,
   docTitle: 'Cloudbite — 전문가 샌드박스 작업공간',
   langGroup: '언어',
   langChanged: '언어: 한국어',
@@ -1828,6 +1858,7 @@ function normalizeProject(raw: unknown): ConsoleProject | null {
     ? { parentId: b.revision.parentId, changeSummary: clip(b.revision.changeSummary, REVISION.changeSummary),
       ...(typeof b.revision.reviewSnapshotHash === 'string' && SHA256.test(b.revision.reviewSnapshotHash) ? { reviewSnapshotHash: b.revision.reviewSnapshotHash } : {}) } : null;
   const prov = opt(raw.provenance, v => normalizeProvenance(v, id));
+  const quantitative = opt(raw.quantitativeChecks, v => normalizeQuantitative(v, id));
   // 작성자 응답 계획은 이전 라운드 안의 선택 필드다: 읽을 수 없으면 그 계획만 빼고 그렇다고 밝힌다 (비교·참고는 그대로)
   let authorPlan: AuthorResponsePlan | null | undefined;
   if (round && isObj(raw.previousRound) && raw.previousRound.authorResponse !== undefined && raw.previousRound.authorResponse !== null) {
@@ -1852,7 +1883,30 @@ function normalizeProject(raw: unknown): ConsoleProject | null {
     ...(authorPlan === null ? { invalidAuthorPlan: true } : {}),
     ...(memoBudget ? { memoBudget } : {}),
     ...(prov ? { provenance: prov } : prov === null ? { invalidProvenance: true } : {}),
+    ...(quantitative ? { quantitativeChecks: quantitative } : quantitative === null ? { invalidQuantitative: true } : {}),
   };
+}
+
+/** Bounded read-only projection. Values are rendered as text, never interpreted as code or markup. */
+function normalizeQuantitative(raw: unknown, projectId: string): QuantitativeCheckRecord[] | null {
+  if (!Array.isArray(raw) || raw.length > 20) return null;
+  const records: QuantitativeCheckRecord[] = [], ids = new Set<string>();
+  for (const r of raw) {
+    if (!isObj(r) || typeof r.id !== 'string' || !/^qc_[0-9a-f]{32}$/.test(r.id) || ids.has(r.id) || r.projectId !== projectId
+      || r.execution !== 'app-deterministic' || !isInt(r.createdAt) || !isObj(r.request) || !isObj(r.result)
+      || !['arithmetic', 'csv-summary'].includes(String(r.request.kind)) || !['completed', 'error'].includes(String(r.result.status))) return null;
+    try { if (JSON.stringify(r.request).length > 12 * 1024 || JSON.stringify(r.result).length > 64 * 1024) return null; } catch { return null; }
+    if (r.request.kind === 'arithmetic' && (typeof r.request.expression !== 'string' || !isObj(r.request.variables))) return null;
+    if (r.request.kind === 'csv-summary' && typeof r.request.column !== 'string') return null;
+    if (r.source !== undefined) {
+      const s = r.source;
+      if (!isObj(s) || typeof s.sha256 !== 'string' || !SHA256.test(s.sha256)) return null;
+      if (s.kind === 'document' ? typeof s.id !== 'string' : s.kind !== 'artifact' || typeof s.expertId !== 'string' || typeof s.path !== 'string') return null;
+    }
+    if (r.request.kind === 'csv-summary' && r.source === undefined) return null;
+    ids.add(r.id); records.push(r as unknown as QuantitativeCheckRecord);
+  }
+  return records;
 }
 
 function statusFromExperts(experts: ConsoleExpert[]): ProjectStatus {
@@ -4596,7 +4650,84 @@ function boot(): void {
       h('h3', { id: `${prefix}review-h` }, m.reviewTitle), ...review));
     const memo = memoKids(p, interactive, prefix, opened);
     if (memo.length) kids.push(h('section', { class: 'cb-memo', 'aria-labelledby': `${prefix}memo-h` }, h('h3', { id: `${prefix}memo-h` }, m.p2.memoTitle), ...memo));
+    const quant = quantitativeKids(p, interactive, opened, prefix);
+    if (quant) kids.push(quant);
     return kids;
+  }
+
+  const quantDrafts = new Map<string, { kind: 'arithmetic' | 'csv-summary'; expression: string; variables: string; source: string; column: string; busy: boolean; error: boolean; inputError: boolean }>();
+  function quantitativeKids(p: ConsoleProject, interactive: boolean, opened: Set<string>, prefix: string): Kid {
+    if (p.brief.mode !== 'live' || !TERMINAL_PROJECT.includes(p.status) || p.status === 'cancelled') return null;
+    const t = M.p4, can = interactive && S.run?.project?.id === p.id && !!S.run.accessToken;
+    const q = quantDrafts.get(p.id) ?? { kind: 'arithmetic', expression: '', variables: '', source: '', column: '', busy: false, error: false, inputError: false };
+    quantDrafts.set(p.id, q);
+    const sources: Array<{ label: string; ref: NonNullable<QuantitativeCheckRecord['source']> }> = [
+      ...(p.brief.documents ?? []).filter(d => /\.csv$/i.test(d.name)).map(d => ({ label: d.name, ref: { kind: 'document' as const, id: d.id, sha256: '' } })),
+      ...p.experts.filter(e => e.status === 'completed').flatMap(e => e.artifacts.filter(a => /\.csv$/i.test(a.path)).map(a => ({
+        label: `${e.name}: ${a.path}`, ref: { kind: 'artifact' as const, expertId: e.expertId, path: a.path, sha256: '' },
+      }))),
+    ];
+    const field = (label: string, node: HTMLElement) => h('label', { class: 'cb-field' }, h('span', null, label), node);
+    const content: Kid[] = [h('p', { class: 'cb-help' }, t.note)];
+    if (p.invalidQuantitative) content.push(h('p', { class: 'cb-warn' }, t.invalid));
+    if (can) {
+      const mode = h('select', { 'aria-label': t.title, disabled: q.busy, onchange: (ev: Event) => { q.kind = (ev.target as HTMLSelectElement).value as typeof q.kind; renderEvidence(); } },
+        h('option', { value: 'arithmetic', selected: q.kind === 'arithmetic' }, t.arithmetic), h('option', { value: 'csv-summary', selected: q.kind === 'csv-summary' }, t.csv));
+      content.push(mode);
+      if (q.kind === 'arithmetic') content.push(
+        field(t.expression, h('input', { value: q.expression, maxlength: 1000, disabled: q.busy, oninput: (ev: Event) => { q.expression = (ev.target as HTMLInputElement).value; } })),
+        field(t.variables, h('textarea', { value: q.variables, rows: 4, maxlength: 6000, disabled: q.busy, oninput: (ev: Event) => { q.variables = (ev.target as HTMLTextAreaElement).value; } })),
+        h('p', { class: 'cb-help' }, t.variablesHint));
+      else if (sources.length) content.push(field(t.source, h('select', { disabled: q.busy, onchange: (ev: Event) => { q.source = (ev.target as HTMLSelectElement).value; } },
+        ...sources.map((s, i) => h('option', { value: String(i), selected: q.source === String(i) }, s.label)))),
+        field(t.column, h('input', { value: q.column, maxlength: 200, disabled: q.busy, oninput: (ev: Event) => { q.column = (ev.target as HTMLInputElement).value; } })),
+        h('p', { class: 'cb-help' }, t.sourceNote));
+      else content.push(h('p', { class: 'cb-help' }, t.noCsv));
+      if (q.error || q.inputError) content.push(h('p', { class: 'cb-warn', role: 'status' }, q.inputError ? t.inputError : t.failed));
+      content.push(h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'quant-run', disabled: q.busy || (q.kind === 'csv-summary' && !sources.length),
+        onclick: () => { void runQuantitative(p, sources); } }, q.busy ? t.running : t.run));
+    } else content.push(h('p', { class: 'cb-help' }, t.readonly));
+    const saved = p.quantitativeChecks ?? [];
+    content.push(h('h4', null, t.records), !saved.length ? h('p', { class: 'cb-help' }, t.none) : h('ol', { class: 'cb-quant-records' }, ...saved.map(r => h('li', null,
+      evDisclosure(opened, `${prefix}quant:${r.id}`, 'cb-quiet', [h('span', null, r.request.kind === 'arithmetic' ? r.request.expression : `${r.request.column} — ${r.source?.kind === 'artifact' ? r.source.path : r.source?.kind === 'document' ? r.source.id : ''}`)],
+        h('p', { class: 'cb-help' }, new Date(r.createdAt).toISOString()), h('pre', { class: 'cb-doc-text' }, JSON.stringify(r, null, 2)))))));
+    return evDisclosure(opened, `${prefix}quant`, 'cb-quiet cb-quant', [h('span', null, t.title)], ...content);
+  }
+
+  async function runQuantitative(p: ConsoleProject, sources: Array<{ ref: NonNullable<QuantitativeCheckRecord['source']> }>): Promise<void> {
+    const run = S.run, q = quantDrafts.get(p.id);
+    if (!run?.accessToken || run.project?.id !== p.id || !q || q.busy) return;
+    const gen = S.gen, id = p.id;
+    let request: QuantitativeRequest, source: object | undefined;
+    q.error = q.inputError = false;
+    if (q.kind === 'arithmetic') {
+      const variables: Record<string, { value: number; unit: string }> = Object.create(null);
+      const rows = q.variables.split(/\r?\n/).filter(x => x.trim());
+      if (!q.expression.trim() || rows.length > 20) { q.inputError = true; renderEvidence(); return; }
+      for (const row of rows) {
+        const parts = row.split(',').map(x => x.trim()), [name, val, unit = ''] = parts;
+        if (parts.length < 2 || parts.length > 3 || !/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(name) || Object.hasOwn(variables, name) || !val || !Number.isFinite(Number(val))) {
+          q.inputError = true; renderEvidence(); return;
+        }
+        variables[name] = { value: Number(val), unit };
+      }
+      request = { kind: 'arithmetic', expression: q.expression, variables };
+    } else {
+      const selected = sources[Number(q.source || '0')]?.ref;
+      if (!selected || !q.column.trim()) { q.inputError = true; renderEvidence(); return; }
+      source = selected.kind === 'artifact' ? { kind: selected.kind, expertId: selected.expertId, path: selected.path } : { kind: selected.kind, id: selected.id };
+      request = { kind: 'csv-summary', column: q.column };
+    }
+    q.busy = true; renderEvidence();
+    try {
+      const r = await fetch(`/api/cloudbite/projects/${encodeURIComponent(id)}/quantitative`, { method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        headers: { authorization: `Bearer ${run.accessToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ request, ...(source ? { source } : {}) }) });
+      const raw: unknown = await r.json(), next = r.ok ? normalizeProject(raw) : null;
+      if (gen !== S.gen || S.run?.project?.id !== id) return;
+      if (!next || next.id !== id || next.invalidQuantitative) q.error = true;
+      else S.run.project = next;
+    } catch { if (gen === S.gen && S.run?.project?.id === id) q.error = true; }
+    finally { q.busy = false; if (gen === S.gen && S.run?.project?.id === id) keepFocus(renderEvidence); }
   }
 
   // 메모와 교차 검토는 서로 겹치지 않는다 (서버도 409 로 거절하고 아무것도 예약하지 않는다): 한쪽이 이 화면이나 서버에서 진행 중이면 다른 쪽 버튼을 내지 않는다

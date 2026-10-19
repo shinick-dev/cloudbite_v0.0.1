@@ -39,7 +39,7 @@ import {
 } from './cloudbite-config';
 import { artifactPath, extraArtifactPath, isInvalid, PROJECT_ID, validateBrief, validateResult, validateWorkspace } from './cloudbite-validate';
 import { CbDaytonaError, CB_LABEL_CLAIM, CB_LABEL_PROJECT, CB_LABEL_RUN, cbCreateSandbox, cbDeleteSandbox, cbDownload, cbExec, cbFindByLabels, cbGetSandbox, cbStartRunner, cbUpload, type CbSandbox } from './cloudbite-daytona';
-import { chatMessages, nosanaChat, type ChatMessage, type InferenceResult } from './cloudbite-inference';
+import { chatMessages, nosanaChat, CB_CLAIM_REVIEW_MAX_TOKENS, type ChatMessage, type InferenceResult } from './cloudbite-inference';
 import { buildEvidenceSignals, evidenceClaims } from './cloudbite-evidence';
 import { CB_CROSS_REVIEW_MAX_PEERS, CB_CROSS_REVIEW_STALE, findingTextAvailability, parseReviewReply, reviewMessages, reviewPlan, reviewSnapshot, type CompletedOpinion, type FindingTextAvailability, type ReviewPlan } from './cloudbite-cross-review';
 import { buildEvidencePackets, EVIDENCE_PACKET_LIMITS, type EvidencePacket, type EvidencePacketInput } from './cloudbite-evidence-packet';
@@ -59,6 +59,8 @@ import { buildProvenanceLedger, emptyProvenanceState, parseProvenanceState, vali
 import { authorResponseWorkspaceFiles, authorResponseWorkOrderRules, parseAuthorResponse, authorResponseArtifact, verifyAuthorResponsePlan, validateCollectedAuthorResponse,
   AUTHOR_RESPONSE_LIMITS, AUTHOR_RESPONSE_PATHS, type AuthorResponsePlan } from './cloudbite-author-response';
 import { renderProvenanceWorkspace } from './cloudbite-provenance';
+import { parseQuantitativeRequest, runQuantitativeCheck } from './cloudbite-quantitative';
+import { buildClaimSupportContext } from './cloudbite-claim-support';
 import { importPmc, isPmcImportError, parsePmcIdentifier, PMC_LIMITS, type PmcImport } from './cloudbite-pmc';
 import { CB_RUNNER_PY, RUNNER_DIAGNOSTIC_MAX, runnerCapability, runnerFailureMessage } from './cloudbite-runner';
 import { historyIndex, historyRow } from './cloudbite-history';
@@ -115,7 +117,7 @@ interface MemoRecord { memo: ProjectMemo; claim?: string }
 /** content = raw out/knowledge.json; neither = the runner wrote none; oversize = larger than the audit bound. */
 interface AuditRecord { content?: string; oversize?: true }
 interface PmcState { lastCallAt: number; calls: Record<string, number[]>; busy?: { claim: string; until: number } }
-interface Loaded { p: ProjectRecord; experts: ExpertRecord[]; cr?: CrossReviewRecord; memo?: MemoRecord; budget?: unknown; round?: ProjectPreviousRound; packets?: EvidencePacket[]; provenance?: unknown }
+interface Loaded { p: ProjectRecord; experts: ExpertRecord[]; cr?: CrossReviewRecord; memo?: MemoRecord; budget?: unknown; round?: ProjectPreviousRound; packets?: EvidencePacket[]; provenance?: unknown; quantitative?: C.QuantitativeCheckRecord[] }
 export interface CreateOptions {
   /** Effective team cap the API derived (operator, visitor session and stated budget); the plan takes the minimum. */
   maxExperts?: number;
@@ -190,7 +192,7 @@ export class CloudbiteProject extends DurableObject<Env> {
   protected clock() { return Date.now(); }
   protected config(): CloudbiteConfig | null { return cloudbiteConfig(this.env); }
   /** The one provider call of a cross-review reviewer (tests replace it to observe or fail calls). */
-  protected reviewInference(cfg: CloudbiteConfig, messages: ChatMessage[]): Promise<InferenceResult> { return nosanaChat(cfg.nosana, messages); }
+  protected reviewInference(cfg: CloudbiteConfig, messages: ChatMessage[]): Promise<InferenceResult> { return nosanaChat(cfg.nosana, messages, { maxTokens: CB_CLAIM_REVIEW_MAX_TOKENS }); }
   /** The one provider call of a decision memo; maxTokens is the fixed memo output budget (nosanaChat allows no other). */
   protected memoInference(cfg: CloudbiteConfig, messages: ChatMessage[], maxTokens: number): Promise<InferenceResult> { return nosanaChat(cfg.nosana, messages, { maxTokens }); }
   /** Network seams of the PMC import (fixed NCBI endpoints only; see pmcFetcher). */
@@ -221,10 +223,10 @@ export class CloudbiteProject extends DurableObject<Env> {
     const p = await this.ctx.storage.get<ProjectRecord>('project');
     if (!p) return null;
     // At most 100 runs + 5 keys: inside the 128-key multi-get limit.
-    const m = await this.ctx.storage.get<unknown>([...p.runs.map((r) => `expert:${r}`), CROSS_REVIEW, 'memo', 'budget', 'round', 'packets', 'provenance']);
+    const m = await this.ctx.storage.get<unknown>([...p.runs.map((r) => `expert:${r}`), CROSS_REVIEW, 'memo', 'budget', 'round', 'packets', 'provenance', 'quantitative']);
     return { p, experts: p.runs.map((r) => m.get(`expert:${r}`) as ExpertRecord).filter(Boolean), cr: m.get(CROSS_REVIEW) as CrossReviewRecord | undefined,
       memo: m.get('memo') as MemoRecord | undefined, budget: m.get('budget'), round: m.get('round') as ProjectPreviousRound | undefined, packets: m.get('packets') as EvidencePacket[] | undefined,
-      provenance: m.get('provenance') };
+      provenance: m.get('provenance'), quantitative: m.get('quantitative') as C.QuantitativeCheckRecord[] | undefined };
   }
   /** Public projection. Optional views (routing, crossReview, memo, usage, …) are appended here and only when present. */
   private view(s: Loaded): ProjectRun {
@@ -233,6 +235,7 @@ export class CloudbiteProject extends DurableObject<Env> {
       ...(p.brief.mode === 'live' ? { evidenceClaims: evidenceClaims(p.brief, runs) } : {}),
       ...(cr ? { crossReview: cr.review } : {}),
       ...(p.assignments ? { assignments: p.assignments } : {}),
+      ...(s.quantitative && !p.history?.deleted ? { quantitativeChecks: s.quantitative } : {}),
       ...(s.memo ? { memo: s.memo.memo } : {}),
       ...(usage ? { usage } : {}),
       ...(s.round ? { previousRound: s.round } : {}),
@@ -525,7 +528,7 @@ export class CloudbiteProject extends DurableObject<Env> {
       delete p.routing; delete p.assignments; delete p.brief.revision;
       // Review, memo, packet and previous-round data quote original opinions or briefs: remove them, and their claims
       // with them (an in-flight attempt cannot write back). The budget ledger is operational bookkeeping and stays.
-      await tx.delete([CROSS_REVIEW, 'memo', 'round', 'packets', 'provenance']);
+      await tx.delete([CROSS_REVIEW, 'memo', 'round', 'packets', 'provenance', 'quantitative']);
       if (!p.history.deleted) {
         p.history.deleted = true; p.history.revision++; p.history.nextAt = 0;
         p.brief.title = '[deleted]'; p.brief.objective = '[deleted]'; p.brief.context = ''; p.feedback = [];
@@ -659,7 +662,7 @@ export class CloudbiteProject extends DurableObject<Env> {
       const peers = completed.filter((c) => ids.has(c.expertId));
       const artifacts = artifactPacketsFor(s.p.id, r.expertId, peers, storedArtifacts);
       const reply = await this.reviewInference(cfg, reviewMessages(r, peers, s.p.brief, catalogue.find(e => e.id === r.expertId), packets, artifacts)).catch((): InferenceResult => ({ error: 'inference upstream unavailable', status: 504 }));
-      const report = 'error' in reply ? { invalid: reply.error } : parseReviewReply(reply.content, r, peers, { language });
+      const report = 'error' in reply ? { invalid: reply.error } : parseReviewReply(reply.content, r, peers, { language, claimSupportContext: buildClaimSupportContext(s.p.brief, peers, packets) });
       if ('invalid' in report) failures.push(`${r.expertId}: ${report.invalid}`);
       else reports.push(report);
     }));
@@ -866,6 +869,57 @@ export class CloudbiteProject extends DurableObject<Env> {
     const s = await this.load();
     if (!s || s.p.purgeAt <= now || !s.p.tokens.includes(tokenHash)) return fail(401, 'project access token is not valid');
     return this.view(s);
+  }
+
+  /** Explicit, bounded, deterministic calculations. No provider/sandbox call or arbitrary command execution. */
+  async quantitativeCheck(token: unknown, raw: unknown): Promise<ProjectRun | CbFail> {
+    const tokenHash = typeof token === 'string' ? await cbHash(token) : '';
+    const s = await this.load();
+    if (!s || s.p.purgeAt <= this.clock() || !s.p.tokens.includes(tokenHash) || s.p.history?.deleted) return fail(401, 'project access token is not valid');
+    if (s.p.brief.mode !== 'live' || !TERMINAL_PROJECT.has(s.p.status) || s.p.status === 'cancelled') return fail(409, 'calculations need a finished live project');
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw) || Object.keys(raw).some(k => k !== 'request' && k !== 'source')) return fail(400, 'expected a calculation request and optional source');
+    const body = raw as Record<string, unknown>, request = parseQuantitativeRequest(body.request);
+    if ('invalid' in request) return fail(400, request.invalid);
+    let csv: string | undefined, source: C.QuantitativeCheckRecord['source'];
+    if (request.kind === 'csv-summary') {
+      const r = body.source;
+      if (typeof r !== 'object' || r === null || Array.isArray(r)) return fail(400, 'CSV calculations need a stored project source');
+      const ref = r as Record<string, unknown>;
+      if (ref.kind === 'document' && Object.keys(ref).length === 2 && typeof ref.id === 'string') {
+        const doc = s.p.brief.documents?.find(d => d.id === ref.id && /\.csv$/i.test(d.name));
+        if (!doc) return fail(404, 'CSV document not found');
+        csv = doc.content;
+        source = { kind: 'document', id: doc.id, sha256: await cbHash(csv) };
+      } else if (ref.kind === 'artifact' && Object.keys(ref).length === 3 && typeof ref.expertId === 'string' && typeof ref.path === 'string' && artifactPath(ref.path) && /\.csv$/i.test(ref.path)) {
+        const e = s.experts.find(e => e.run.expertId === ref.expertId && e.run.status === 'completed' && e.run.artifacts.some(a => a.path === ref.path));
+        if (!e) return fail(404, 'CSV artifact not found');
+        csv = await this.ctx.storage.get<string>(`artifact:${e.run.id}:${ref.path}`);
+        if (typeof csv !== 'string') return fail(404, 'CSV artifact text is unavailable');
+        source = { kind: 'artifact', expertId: e.run.expertId, path: ref.path, sha256: await cbHash(csv) };
+      } else return fail(400, 'invalid CSV source');
+    } else if (body.source !== undefined) return fail(400, 'arithmetic uses explicit inputs, not an artifact source');
+    const id = 'qc_' + (await cbHash(JSON.stringify({ projectId: s.p.id, request, source: source ?? null }))).slice(0, 32);
+    const existing = s.quantitative?.find(x => x.id === id);
+    if (existing) return this.view(s);
+    // Computation may await hashing. The transaction below rechecks authority/deletion after it returns.
+    const result = await runQuantitativeCheck(request, csv);
+    const record: C.QuantitativeCheckRecord = { id, projectId: s.p.id, createdAt: this.clock(), request, result, execution: 'app-deterministic', ...(source ? { source } : {}) };
+    const written = await this.ctx.storage.transaction(async tx => {
+      const p = await tx.get<ProjectRecord>('project');
+      if (!p || p.purgeAt <= this.clock() || p.history?.deleted || !p.tokens.includes(tokenHash)) return fail(401, 'project access token is not valid');
+      if (!TERMINAL_PROJECT.has(p.status) || p.status === 'cancelled') return fail(409, 'calculations need a finished project');
+      const checks = await tx.get<C.QuantitativeCheckRecord[]>('quantitative') ?? [];
+      if (checks.some(x => x.id === id)) return null;
+      if (checks.length >= 20) return fail(429, 'at most 20 distinct calculations per project');
+      p.updatedAt = this.clock();
+      if (p.history) { p.history.revision++; p.history.nextAt = 0; }
+      await tx.put({ project: p, quantitative: [...checks, record] });
+      return null;
+    });
+    if (written) return written;
+    await this.publishHistory();
+    const fresh = await this.load();
+    return fresh && !fresh.p.history?.deleted && fresh.p.purgeAt > this.clock() ? this.view(fresh) : fail(410, 'project was deleted or expired during the calculation');
   }
 
   private completed(s: Pick<Loaded, 'experts'>): CompletedOpinion[] {

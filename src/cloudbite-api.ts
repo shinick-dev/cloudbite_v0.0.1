@@ -312,12 +312,20 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     return response;
   }
 
-  const m = path.match(/^\/api\/cloudbite\/projects\/([^/]+)(\/cancel|\/artifact|\/review|\/memo)?$/);
+  const m = path.match(/^\/api\/cloudbite\/projects\/([^/]+)(\/cancel|\/artifact|\/review|\/memo|\/quantitative)?$/);
   if (!m || !PROJECT_ID.test(m[1])) return json({ error: 'not found' }, 404);
   if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);
   const stub = ns.getByName(m[1]);
   const token = bearer(req);
   if (!token) return json({ error: 'project access token required' }, 401);
+  if (m[2] === '/quantitative') {
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
+    if (!strictOrigin()) return json({ error: 'bad origin' }, 403);
+    if (!(req.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) return json({ error: 'content-type must be application/json' }, 415);
+    const b = await readJson(req, 12 * 1024);
+    if ('error' in b) return json({ error: b.error }, b.status);
+    return result(json, await stub.quantitativeCheck(token, b.ok));
+  }
   if (m[2] === '/cancel') {
     if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
     if (!strictOrigin()) return json({ error: 'bad origin' }, 403);
