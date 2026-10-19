@@ -4,6 +4,7 @@
 // network is a fake Nosana endpoint and a fake PMC host, and any other host fails the test.
 //   node test/cloudbite-backend-v2.mjs
 import assert from 'node:assert/strict';
+import { coachingFixture } from './fixtures/cloudbite-coaching.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -34,6 +35,7 @@ let N, P;
 const reset = () => { N = { calls: [], hold: null, reply: null, fail: false }; P = { calls: [], reply: null }; };
 reset();
 const memoReply = (ids) => JSON.stringify({
+  coaching: coachingFixture(ids[0]),
   summary: 'The finished opinions were read against both options; the first option is favoured with conditions.',
   recommendation: { status: 'recommend', optionIds: ['option-1'], rationale: 'The first option fits the stated objective.', expertIds: [ids[0]], refs: ['brief:objective'] },
   options: [{ optionId: 'option-1', benefits: [claim('Fits the objective', [ids[0]])], risks: [], conditions: [] },
@@ -389,14 +391,43 @@ await test('memo: every sealed source reaches the leaf cap with exact counts; re
   assert.ok(pk.every((p) => p.originalText === 'absent' && /original text not fetched/.test(p.originMetadata) && p.excerpt === undefined));
 });
 
-await test('memo: without decision options a deterministic needs-options record and no call; demo projects refuse', async () => {
+await test('memo: a rough brief gets an unadopted coaching proposal in one memo call; demo projects refuse', async () => {
   const w = world(), x = await finished(w, { b: brief({ decision: undefined }) });
+  N.memoIds = x.created.brief.expertIds;
+  N.reply = (kind) => {
+    assert.equal(kind, 'memo');
+    const reply = JSON.parse(memoReply(N.memoIds));
+    reply.recommendation = { status: 'no-recommendation', optionIds: [], rationale: 'No user-supplied options to compare; the coaching plan proposes a next step.', expertIds: [N.memoIds[0]], refs: ['brief:objective'] };
+    reply.options = [];
+    return JSON.stringify(reply);
+  };
+  const originalBrief = structuredClone(w.store(x.id).m.get('project').brief);
   const r = await memo(w, x);
-  assert.equal(r.status, 200, r.text); assert.equal(r.data.memo.status, 'needs-options'); assert.equal(N.calls.length, 0);
-  assert.equal(w.store(x.id).m.get('budget').memo, 0, 'nothing reserved');
-  assert.equal((await memo(w, x)).data.memo.status, 'needs-options');
+  assert.equal(r.status, 200, r.text); assert.equal(r.data.memo.status, 'completed'); assert.equal(N.calls.length, 1);
+  assert.equal(r.data.memo.memo.coaching.version, 'cloudbite-coaching/v1');
+  assert.equal(r.data.memo.memo.coaching.repairs[0].kind, 'unknown');
+  assert.deepEqual(r.data.memo.memo.recommendation.optionIds, []);
+  assert.deepEqual(r.data.memo.memo.comparison, []);
+  assert.deepEqual(w.store(x.id).m.get('project').brief, originalBrief, 'proposal never rewrites the brief');
+  assert.equal(w.store(x.id).m.get('budget').memo, 1, 'one existing memo reservation');
+  assert.equal((await memo(w, x)).data.memo.status, 'completed');
+  assert.equal(N.calls.length, 1, 'completed coaching is cached, never rerun');
   const d = await finished(w, { b: brief({ mode: 'demo' }) });
-  assert.equal((await memo(w, d)).status, 409); assert.equal(N.calls.length, 0);
+  assert.equal((await memo(w, d)).status, 409); assert.equal(N.calls.length, 1);
+});
+
+await test('memo: missing or malformed required coaching fails the single attempt without automatic retry', async () => {
+  for (const bad of [undefined, { version: 'cloudbite-coaching/v1', stance: 'cheerlead' }]) {
+    const w = world(), x = await finished(w);
+    N.memoIds = x.created.brief.expertIds;
+    N.reply = () => { const raw = JSON.parse(memoReply(N.memoIds)); if (bad === undefined) delete raw.coaching; else raw.coaching = bad; return JSON.stringify(raw); };
+    const start = N.calls.length;
+    const r = await memo(w, x);
+    assert.equal(r.status, 200); assert.equal(r.data.memo.status, 'failed');
+    assert.equal((await memo(w, x)).data.memo.status, 'failed');
+    assert.equal(N.calls.length - start, 1, 'malformed advice does not trigger hidden retries');
+    assert.equal(w.store(x.id).m.get('budget').memo, 1);
+  }
 });
 
 await test('memo: a delete during the call or a superseded claim discards the late result', async () => {

@@ -5,6 +5,7 @@
 // run); the only network is a fake Nosana endpoint and any other host fails the test.
 //   node test/cloudbite-backend-v3.mjs
 import assert from 'node:assert/strict';
+import { coachingFixture } from './fixtures/cloudbite-coaching.mjs';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -36,6 +37,7 @@ let N;
 const reset = () => { N = { calls: [], reply: null, memoIds: [] }; };
 reset();
 const memoReply = (ids) => JSON.stringify({
+  coaching: coachingFixture(ids[0]),
   summary: 'The finished opinions were read against both options; the first option is favoured with conditions.',
   recommendation: { status: 'recommend', optionIds: ['option-1'], rationale: 'The first option fits the stated objective.', expertIds: [ids[0]], refs: ['brief:objective'] },
   options: [{ optionId: 'option-1', benefits: [claim('Fits the objective', [ids[0]])], risks: [], conditions: [] },

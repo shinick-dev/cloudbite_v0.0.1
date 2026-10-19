@@ -828,8 +828,9 @@ export class CloudbiteProject extends DurableObject<Env> {
 
   /**
    * POST /api/cloudbite/projects/<id>/memo (Worker has already checked Origin, content-type and the empty JSON body).
-   * Final decision memo on a finished live project with at least one completed opinion. Without decision options the
-   * outcome is a deterministic needs-options record and no call. Otherwise one paid attempt: the claim and its budget
+   * Constructive project memo on a finished live project with at least one completed opinion. The coaching mode can
+   * propose a refined project even without user-supplied options; it never invents adopted decision options. One paid
+   * attempt: the claim and its budget
    * reservation are written in one transaction before inference; the strictly parsed result is written only if the same
    * claim is still current, the token is still authorized, the project is live and undeleted and the inputs unchanged.
    */
@@ -1028,7 +1029,7 @@ export class CloudbiteProject extends DurableObject<Env> {
     }
     const packets = [...disclosures, ...sources];
     const reviews = s.cr && s.cr.review.status !== 'running' ? s.cr.review.reports : [];
-    return { team: s.experts.map((e) => ({ expertId: e.run.expertId, name: e.run.name, status: e.run.status })),
+    return { coaching: true, team: s.experts.map((e) => ({ expertId: e.run.expertId, name: e.run.name, status: e.run.status })),
       ...(reviews.length ? { reviews } : {}), ...(packets.length ? { packets } : {}),
       provenance: (({ ledger, state }) => memoProvenanceContext(ledger, state, defaultResponseLanguage(s.p.brief)))(this.provenanceView(s)) };
   }
