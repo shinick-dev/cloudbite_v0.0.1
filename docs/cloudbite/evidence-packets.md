@@ -29,8 +29,11 @@ Each cited reference gets a deterministic `availability`: `supplied-project-text
 `curated-card-text`, `curated-card-text-omitted`, `retrieval-unverified`, `not-retrieved` (catalogue presence only)
 or `unknown-id`. This is availability, not support: the reply schema stays supported/challenged/insufficient.
 
-Bounds (`EVIDENCE_PACKET_LIMITS`): 12 KiB per role, 32 KiB total via `buildEvidencePackets` (fair share of what
-remains), 1500-byte card summaries, UTF-8 truncation on code points. Every cut is counted in `omitted`.
+Bounds (`EVIDENCE_PACKET_LIMITS`): 12 KiB per role, 32 KiB total via `buildEvidencePackets` including its serialized
+array and packet envelopes, 1500-byte card summaries, UTF-8 truncation on code points. Whole packets may be omitted
+when their fixed headers do not fit; `buildEvidenceSignals.packetCoverage` names the omitted experts. Order actual
+review targets first when constructing review context. Included packets count cuts in `omitted`; missing packets
+never imply no retrieval occurred. A zero/tiny budget returns an empty array (its two JSON brackets are fixed overhead).
 Packets are deeply frozen and carry `bytes` and `sha256` of their canonical JSON.
 
 ## Cross-review (`src/cloudbite-cross-review.ts`)

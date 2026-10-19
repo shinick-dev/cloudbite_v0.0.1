@@ -281,15 +281,23 @@ export function buildEvidencePacket(input: EvidencePacketInput, budget: number =
 }
 
 /**
- * Packets for several roles under one total UTF-8 budget, in the given order. The per-role budget is the smaller of
- * roleBytes and what remains; later roles may therefore carry fewer cards, and say so in omitted counts.
+ * Hard total UTF-8 bound, including serialized envelopes. Order actual review targets first. A role's irreducible
+ * header can exceed its fair share: omit whole packets that cannot fit and disclose missing expertIds separately.
  */
 export function buildEvidencePackets(inputs: readonly EvidencePacketInput[], totalBytes: number = EVIDENCE_PACKET_LIMITS.totalBytes): EvidencePacket[] {
-  let remaining = Math.max(0, Math.min(totalBytes, EVIDENCE_PACKET_LIMITS.totalBytes));
-  return inputs.map((input, i) => {
-    // Fair share of what remains: bytes a small packet leaves unused carry over to the roles after it.
-    const p = buildEvidencePacket(input, Math.floor(remaining / (inputs.length - i)));
-    remaining = Math.max(0, remaining - p.bytes);
-    return p;
-  });
+  const max = Number.isFinite(totalBytes) ? Math.max(0, Math.min(Math.floor(totalBytes), EVIDENCE_PACKET_LIMITS.totalBytes)) : 0;
+  if (max < 2) return [];
+  const out: EvidencePacket[] = [];
+  let used = 2; // JSON array brackets; each following entry also needs a comma.
+  for (const [i, input] of inputs.entries()) {
+    const comma = out.length ? 1 : 0, remaining = max - used - comma;
+    if (remaining <= 0) break;
+    // Preserve useful card text for included roles instead of emitting over-budget empty headers for every role.
+    const share = Math.min(remaining, Math.max(2048, Math.floor(remaining / (inputs.length - i))));
+    const packet = buildEvidencePacket(input, share);
+    const actual = utf8(JSON.stringify(packet)); // packet.bytes excludes its own bytes/hash envelope.
+    if (actual > remaining) continue;
+    out.push(packet); used += actual + comma;
+  }
+  return out;
 }

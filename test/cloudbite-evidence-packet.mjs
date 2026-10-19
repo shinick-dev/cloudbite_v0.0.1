@@ -162,6 +162,23 @@ await check('bounds: large multilingual pack truncates on code points, counts om
   assert.equal(M.truncateUtf8('가나다라', 7), '가…'); assert.equal(M.truncateUtf8('🚀🚀', 6), '…'); assert.equal(M.truncateUtf8('🚀🚀', 8), '🚀🚀');
 });
 
+await check('100-role batch respects the actual serialized cap and explicitly exposes omitted packet coverage', () => {
+  const roles = M.CLOUDBITE_EXPERTS.slice(0,100);
+  const inputs = roles.map(r => ({brief, expertId:r.id, opinion:opinion(['[source:PROJECT.md] synthetic project statement'])}));
+  const packets = M.buildEvidencePackets(inputs);
+  assert.ok(utf8(JSON.stringify(packets)) <= M.EVIDENCE_PACKET_LIMITS.totalBytes);
+  assert.ok(packets.length < inputs.length && packets.length > 0);
+  const runs = roles.map((r,i) => ({id:`e${i}`,expertId:r.id,name:r.name,status:'completed',opinion:inputs[i].opinion,activity:[],artifacts:[],updatedAt:1}));
+  const coverage = M.buildEvidenceSignals(brief,runs,{packets}).packetCoverage;
+  assert.equal(coverage.total,100); assert.equal(coverage.included,packets.length);
+  assert.equal(coverage.omittedExpertIds.length,100-packets.length);
+  for (const cap of [0,1,64,500,1024,4096]) {
+    const batch=M.buildEvidencePackets(inputs,cap);
+    assert.ok(batch.length===0 || utf8(JSON.stringify(batch))<=cap,`cap=${cap}`);
+  }
+  assert.deepEqual(M.buildEvidencePackets(inputs,NaN),[]);
+});
+
 await check('reviewMessages carries peer packets (card text and provenance) and stays backward compatible without them', () => {
   const peerOp = { expertId: ROLE.id, name: ROLE.name, opinion: ROLE_OPINION };
   const me = { expertId: OTHER.id, name: OTHER.name, opinion: opinion(['[doc:doc-1] mine']) };

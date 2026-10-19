@@ -54,6 +54,7 @@ export interface EvidenceSignals {
   schema: typeof EVIDENCE_SIGNALS_SCHEMA;
   interpretation: string;
   experts: ExpertEvidenceSignals[];
+  packetCoverage: { supplied: boolean; included: number; total: number; omittedExpertIds: string[] };
   review: { completedOpinions: number; reviewedOpinions: number; reviewers: number; status: ProjectCrossReview['status'] | 'not-run'; disclosure: string };
 }
 
@@ -86,6 +87,8 @@ export function buildEvidenceSignals(brief: ProjectBrief, experts: readonly Expe
   const reviewed = out.filter(x => x.crossReview && x.crossReview.findings > 0).length;
   return {
     schema: EVIDENCE_SIGNALS_SCHEMA, interpretation: EVIDENCE_SIGNALS_INTERPRETATION, experts: out,
+    packetCoverage: { supplied: opts.packets !== undefined, included: completed.filter(e => opts.packets?.some(p => p.expertId === e.expertId)).length,
+      total: completed.length, omittedExpertIds: completed.filter(e => !opts.packets?.some(p => p.expertId === e.expertId)).map(e => e.expertId) },
     review: { completedOpinions: out.length, reviewedOpinions: reviewed, reviewers: reports.length, status: opts.crossReview?.status ?? 'not-run',
       disclosure: opts.crossReview ? `${reviewed} of ${out.length} completed opinions received at least one cross-review finding; the others were not reviewed. Findings are reviewer readings, not verification.`
         : 'No cross-review has run; no opinion was reviewed by another expert.' },
