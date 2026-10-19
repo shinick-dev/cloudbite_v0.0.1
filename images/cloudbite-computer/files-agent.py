@@ -6,9 +6,10 @@ strings, refuses symlink crossings and path escapes, and never prints file conte
 credentials.  The journal is SQLite (WAL, synchronous=FULL) under the --state directory.
 
 Remote I/O goes through an injected backend (contract: docs/cloudbite/files-agent-contract.md).
-The CLI ships only ``UnconfiguredHttpBackend``, which refuses every call with
-``transport_not_configured`` until the root wires a real transport; nothing is reported as
-remotely saved without a matching canonical receipt.
+``HttpBackend`` talks to the CloudBite app over HTTPS with one private, machine-scoped capability
+file (``--capability``); without it the CLI uses ``UnconfiguredHttpBackend``, which refuses every
+call with ``transport_not_configured``.  Nothing is reported as remotely saved without a matching
+canonical receipt.
 
 Invariants: dirty, uploading, conflicted, pinned and open copies are never evicted; only
 agent-created clean cache whose bytes still match the verified version is eligible, and
@@ -18,15 +19,19 @@ SHA-256 are verified, and never replaces content that differs from the recorded 
 import argparse
 import contextlib
 import hashlib
+import http.client
 import json
 import os
 import re
 import shutil
+import socket
 import sqlite3
+import ssl
 import stat
 import sys
 import time
 import unicodedata
+import urllib.parse
 import uuid
 
 CHUNK = 1 << 20
@@ -43,11 +48,19 @@ BACKEND_CODES = {"transport_not_configured", "store_not_configured", "base_versi
                  "stale_writer_epoch", "stale_writer", "stale_revision", "request_conflict",
                  "quota_exceeded", "too_large", "too_many_uploads", "not_found", "checksum_mismatch",
                  "hash_mismatch", "size_mismatch", "body_missing", "not_durable", "catalog_busy",
-                 "commit_unknown", "invalid_upload_state"}
-CONFLICT_CODES = {"base_version_conflict", "stale_writer_epoch", "stale_writer", "stale_revision"}
+                 "commit_unknown", "invalid_upload_state", "name_conflict", "catalog_unavailable",
+                 "blob_unavailable", "capability_invalid", "capability_expired", "invalid_request",
+                 "invalid_name", "is_a_directory", "not_a_directory", "not_verified", "too_many_children",
+                 "depth_exceeded"}
+CONFLICT_CODES = {"base_version_conflict", "stale_writer_epoch", "stale_writer", "stale_revision", "name_conflict"}
 UNKNOWN_CODES = {"commit_unknown", "invalid_upload_state"}
 UNRESOLVED = ("prepared", "sending", "unknown")
 REPARSE_POINT = 0x400
+CAPABILITY_SCHEMA = "cloudbite.files.agent-capability.v1"
+AGENT_PREFIX = "/api/cloudbite/computer/files/agent/v1"
+LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+MAX_JSON_BYTES = 1 << 20
+MAX_CAPABILITY_BYTES = 16 << 10
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -65,7 +78,13 @@ CREATE TABLE IF NOT EXISTS ops(
   created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS leases(lease_id TEXT PRIMARY KEY, row INTEGER NOT NULL, created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS fetches(row INTEGER PRIMARY KEY, temp TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS dirs(dir_id TEXT PRIMARY KEY, path TEXT NOT NULL, path_key TEXT NOT NULL UNIQUE);
+CREATE TABLE IF NOT EXISTS dir_ops(path_key TEXT PRIMARY KEY, path TEXT NOT NULL, request_id TEXT NOT NULL,
+  parent_id TEXT NOT NULL, name TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS reports(file_id TEXT PRIMARY KEY, seq INTEGER NOT NULL, version TEXT,
+  dirty INTEGER NOT NULL, acked INTEGER NOT NULL);
 """
+OPS_EXTRA = (("parent_id", "TEXT"), ("name", "TEXT"))
 
 
 class AgentError(Exception):
@@ -86,6 +105,244 @@ class UnconfiguredHttpBackend:
         raise BackendError("transport_not_configured")
 
     fetch_version = begin_upload = put_body = commit_upload = get_operation = _refuse
+    create_entry = record_local_state = _refuse
+
+
+class TransportUnknown(Exception):
+    """No definite answer (network loss, timeout, redirect, malformed or mismatched reply): outcome unknown."""
+
+
+def _nfc(value):
+    return unicodedata.normalize("NFC", value) if isinstance(value, str) else value
+
+
+class HttpBackend:
+    """Scoped HTTPS transport to the CloudBite files agent routes (docs/cloudbite/files-bridge.md).
+
+    The capability file is private (0600, owned by this user) and names exactly one origin, machine,
+    workspace and writer epoch.  The token goes only into the Authorization header of requests to that
+    origin; redirects are never followed and nothing here logs or returns it."""
+    configured = True
+
+    def __init__(self, config, clock=time.time, timeout=30, connect=None):
+        if not isinstance(config, dict) or config.get("schema") != CAPABILITY_SCHEMA:
+            raise AgentError("capability_invalid")
+        parts = urllib.parse.urlsplit(config.get("origin") or "")
+        loopback = parts.hostname in LOOPBACK
+        if not (parts.scheme == "https" or (parts.scheme == "http" and loopback)) or not parts.hostname \
+                or parts.username or parts.password or parts.path not in ("", "/") or parts.query or parts.fragment:
+            raise AgentError("capability_invalid")
+        token = config.get("token")
+        if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._~+/=-]{32,512}", token):
+            raise AgentError("capability_invalid")
+        try:
+            port = parts.port
+        except ValueError:
+            raise AgentError("capability_invalid") from None
+        try:
+            self.scope = {"machineId": _ident(config.get("machineId")),
+                          "workspaceId": _ident(config.get("workspaceId")),
+                          "writerEpoch": _int(config.get("writerEpoch"), 1)}
+            self.expires_at = _int(config.get("expiresAt"), 1)
+        except AgentError:
+            raise AgentError("capability_invalid") from None
+        self._secure, self._host, self._port = parts.scheme == "https", parts.hostname, port
+        self._token, self._clock, self._timeout = token, clock, timeout
+        self._connect = connect or self._default_connect
+
+    @staticmethod
+    def load(path, **kwargs):
+        try:
+            fd = os.open(path, _open_flags(os.O_RDONLY))
+        except OSError:
+            raise AgentError("capability_invalid") from None
+        with os.fdopen(fd, "rb") as handle:
+            st = os.fstat(handle.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                raise AgentError("capability_invalid")
+            if os.name != "nt" and (st.st_mode & 0o077 or st.st_uid != os.getuid()):
+                raise AgentError("capability_insecure")
+            raw = handle.read(MAX_CAPABILITY_BYTES + 1)
+        if len(raw) > MAX_CAPABILITY_BYTES:
+            raise AgentError("capability_invalid")
+        try:
+            config = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            raise AgentError("capability_invalid") from None
+        return HttpBackend(config, **kwargs)
+
+    def __repr__(self):
+        return "HttpBackend(%s)" % self._host
+
+    def _default_connect(self):
+        if self._secure:
+            return http.client.HTTPSConnection(self._host, self._port, timeout=self._timeout,
+                                               context=ssl.create_default_context())
+        return http.client.HTTPConnection(self._host, self._port, timeout=self._timeout)
+
+    def _open(self, method, route, body=None, length=None, content_type=None):
+        """Send one request; returns (connection, response) for a 2xx answer.  Raises BackendError for a
+        definite server refusal (error envelope) and TransportUnknown for anything else."""
+        if self._clock() * 1000 >= self.expires_at:
+            raise BackendError("capability_expired")  # refused locally: nothing is sent
+        headers = {"authorization": "Bearer " + self._token, "accept": "application/json",
+                   "user-agent": "cloudbite-files-agent/1"}
+        if body is not None:
+            headers["content-type"] = content_type
+            headers["content-length"] = str(length)
+        conn = self._connect()
+        try:
+            conn.request(method, AGENT_PREFIX + "/" + route, body=body, headers=headers)
+            resp = conn.getresponse()
+        except (OSError, http.client.HTTPException, ssl.SSLError, socket.timeout):
+            conn.close()
+            raise TransportUnknown("connection") from None
+        if 200 <= resp.status < 300:
+            return conn, resp
+        try:
+            raw = resp.read(64 << 10) if resp.status >= 400 else b""
+        except (OSError, http.client.HTTPException):
+            raw = b""
+        finally:
+            conn.close()
+        code = None
+        with contextlib.suppress(ValueError, AttributeError, TypeError):
+            code = json.loads(raw.decode("utf-8"))["error"]["code"]
+        if 400 <= resp.status < 600 and isinstance(code, str) and code in BACKEND_CODES:
+            raise BackendError(code)
+        raise TransportUnknown("status_%d" % resp.status)  # redirects included: never followed
+
+    def _json(self, method, route, payload=None):
+        body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        conn, resp = self._open(method, route, body, None if body is None else len(body), "application/json")
+        try:
+            raw = resp.read(MAX_JSON_BYTES + 1)
+        except (OSError, http.client.HTTPException):
+            raise TransportUnknown("connection") from None
+        finally:
+            conn.close()
+        try:
+            value = json.loads(raw.decode("utf-8")) if len(raw) <= MAX_JSON_BYTES else None
+        except ValueError:
+            value = None
+        if not isinstance(value, dict):
+            raise TransportUnknown("malformed")
+        return value
+
+    @staticmethod
+    def _q(value):
+        return urllib.parse.quote(_ident(value), safe="")
+
+    @staticmethod
+    def _same_upload(up, req, upload_id=None):
+        return (isinstance(up, dict) and isinstance(up.get("uploadId"), str) and bool(up["uploadId"])
+                and (upload_id is None or up["uploadId"] == upload_id)
+                and (req.get("fileId") is None or up.get("fileId") == req["fileId"])
+                and up.get("baseVersion") == req["baseVersion"] and up.get("writerEpoch") == req["writerEpoch"]
+                and up.get("size") == req["size"] and not isinstance(up.get("size"), bool)
+                and up.get("sha256") == req["sha256"])
+
+    def _receipt(self, req, result):
+        """Canonical CommitResult + the op's staged immutable fields -> agent receipt."""
+        if not isinstance(result, dict) or result.get("durable") is not True \
+                or result.get("fileId") != req["fileId"] or result.get("size") != req["size"] \
+                or isinstance(result.get("size"), bool) or result.get("sha256") != req["sha256"] \
+                or not isinstance(result.get("versionId"), str) or not result["versionId"]:
+            raise TransportUnknown("receipt_mismatch")
+        if result.get("status") == "conflict":
+            raise BackendError("base_version_conflict")
+        if result.get("status") != "committed" or result["versionId"] == req["baseVersion"]:
+            raise TransportUnknown("receipt_mismatch")
+        return {"requestId": req["requestId"], "fileId": result["fileId"], "versionId": result["versionId"],
+                "baseVersion": req["baseVersion"], "size": req["size"], "sha256": req["sha256"],
+                "writerEpoch": req["writerEpoch"], "canonical": True}
+
+    def fetch_version(self, req):
+        route = "versions/%s/%s/content" % (self._q(req["fileId"]), self._q(req["versionId"]))
+        conn, resp = self._open("GET", route)
+        try:
+            length = resp.getheader("content-length")
+            declared = resp.getheader("x-cloudbite-sha256")
+            if length is not None and (not length.isdigit() or int(length) != req["maxBytes"]):
+                raise AgentError("size_mismatch")
+            if declared is not None and req.get("sha256") and declared.lower() != req["sha256"]:
+                raise AgentError("checksum_mismatch")
+            remaining = req["maxBytes"] + 1  # read one byte past the bound so overlong bodies are seen
+            while remaining > 0:
+                chunk = resp.read(min(CHUNK, remaining))
+                if not chunk:
+                    return
+                remaining -= len(chunk)
+                yield chunk
+        finally:
+            conn.close()
+
+    def create_entry(self, req):
+        entry = self._json("POST", "create", req).get("entry")
+        if not isinstance(entry, dict) or entry.get("kind") != req["kind"] or entry.get("parentId") != req["parentId"] \
+                or _nfc(entry.get("name")) != _nfc(req["name"]):
+            raise TransportUnknown("receipt_mismatch")
+        _ident(entry.get("fileId"))
+        return entry
+
+    def begin_upload(self, req):
+        file_id = req["fileId"]
+        if file_id is None:
+            file_id = self.create_entry({"requestId": req["requestId"] + ":create", "parentId": req["parentId"],
+                                         "name": req["name"], "kind": "file"})["fileId"]
+        fields = {"requestId": req["requestId"], "fileId": file_id, "baseVersion": req["baseVersion"],
+                  "writerEpoch": req["writerEpoch"], "size": req["size"], "sha256": req["sha256"]}
+        up = self._json("POST", "uploads/begin", fields).get("upload")
+        if not self._same_upload(up, fields):
+            raise TransportUnknown("receipt_mismatch")
+        _ident(up["uploadId"])
+        return {"requestId": req["requestId"], "uploadId": up["uploadId"], "fileId": file_id, "phase": up.get("phase")}
+
+    def put_body(self, req, handle):
+        route = "uploads/%s/body" % self._q(req["uploadId"])
+        conn, resp = self._open("PUT", route, handle, req["size"], "application/octet-stream")
+        try:
+            resp.read(MAX_JSON_BYTES)
+        except (OSError, http.client.HTTPException):
+            raise TransportUnknown("connection") from None
+        finally:
+            conn.close()
+
+    def commit_upload(self, req):
+        result = self._json("POST", "uploads/%s/commit" % self._q(req["uploadId"]),
+                            {"uploadId": req["uploadId"]}).get("result")
+        return self._receipt(req, result)
+
+    def get_operation(self, req):
+        rid = req["requestId"]
+        if not req.get("uploadId"):
+            return {"requestId": rid, "phase": "unknown_request"}  # begin reply lost: resend same requestId
+        up = self._json("GET", "uploads/%s" % self._q(req["uploadId"])).get("upload")
+        if not self._same_upload(up, req, req["uploadId"]):
+            raise TransportUnknown("receipt_mismatch")
+        phase = up.get("phase")
+        if phase in ("committed", "conflict") and up.get("result") is not None:
+            try:
+                return {"requestId": rid, "phase": "committed", "receipt": self._receipt(req, up["result"])}
+            except BackendError as err:
+                return {"requestId": rid, "phase": "conflict", "code": err.code}
+        if phase == "aborted":
+            return {"requestId": rid, "phase": "rejected"}
+        if phase in ("begun", "body_written"):
+            expires = up.get("expiresAt")
+            if isinstance(expires, (int, float)) and not isinstance(expires, bool) and expires <= self._clock() * 1000:
+                return {"requestId": rid, "phase": "rejected"}  # expired reservation: a new op is needed
+            return {"requestId": rid, "phase": "resend"}
+        raise TransportUnknown("receipt_mismatch")
+
+    def record_local_state(self, req):
+        answer = self._json("POST", "local-state", req)
+        local = answer.get("local")
+        if not isinstance(answer.get("applied"), bool) or not isinstance(local, dict) \
+                or local.get("fileId") != req["fileId"] or local.get("machineId") != req["machineId"] \
+                or isinstance(local.get("seq"), bool) or not isinstance(local.get("seq"), int):
+            raise TransportUnknown("malformed")
+        return answer
 
 
 def check_rel(path):
@@ -113,6 +370,19 @@ def check_rel(path):
 
 def path_key(path):
     return unicodedata.normalize("NFC", path).casefold()
+
+
+def fold_ambiguous(path):
+    """True when this agent's NFC+casefold key and the catalog's NFC+toLowerCase key may disagree
+    (e.g. 'ß' vs 'ss', final sigma).  Such names are refused for registration and remote creation."""
+    return any(_nfc(p).casefold() != _nfc(p).lower() for p in path.split("/"))
+
+
+def _migrate(db):
+    have = {r[1] for r in db.execute("PRAGMA table_info(ops)")}
+    for column, kind in OPS_EXTRA:
+        if column not in have:
+            db.execute("ALTER TABLE ops ADD COLUMN %s %s" % (column, kind))
 
 
 def _is_link(st):
@@ -180,9 +450,15 @@ class FilesAgent:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript(SCHEMA)
+        _migrate(self.db)
         self.cfg = {r["key"]: json.loads(r["value"]) for r in self.db.execute("SELECT * FROM meta")}
         if "root" not in self.cfg:
+            self.db.close()
             raise AgentError("not_configured")
+        scope = getattr(self.backend, "scope", None)
+        if scope is not None and any(scope.get(k) != self.cfg.get(k) for k in ("machineId", "workspaceId", "writerEpoch")):
+            self.db.close()
+            raise AgentError("scope_mismatch")  # capability for another machine/workspace/epoch: no request sent
         self.root = self.cfg["root"]
         self._recover()
 
@@ -202,7 +478,7 @@ class FilesAgent:
                 return False
         if within(home, root) or within(state, root) or within(root, state):
             raise AgentError("path_forbidden")
-        os.makedirs(os.path.join(state, "staging"), exist_ok=True)
+        os.makedirs(os.path.join(state, "staging"), mode=0o700, exist_ok=True)
         if os.stat(root).st_dev != os.stat(state).st_dev:
             raise AgentError("invalid_argument")
         cfg = {"root": root, "workspaceId": _ident(workspace_id), "machineId": _ident(machine_id),
@@ -213,9 +489,17 @@ class FilesAgent:
         try:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(SCHEMA)
+            _migrate(db)
             existing = db.execute("SELECT value FROM meta WHERE key='root'").fetchone()
             if existing and json.loads(existing[0]) != root:
                 raise AgentError("invalid_argument")
+            for key in ("workspaceId", "machineId"):
+                prior = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+                if existing and prior and json.loads(prior[0]) != cfg[key]:
+                    raise AgentError("invalid_argument")  # one journal per workspace+machine
+            epoch = db.execute("SELECT value FROM meta WHERE key='writerEpoch'").fetchone()
+            if existing and epoch and json.loads(epoch[0]) > cfg["writerEpoch"]:
+                raise AgentError("stale_writer_epoch")  # never move the fence backwards
             db.execute("BEGIN IMMEDIATE")
             for key, value in cfg.items():
                 if key != "draining" or not existing:
@@ -309,7 +593,17 @@ class FilesAgent:
             for entry in entries:
                 if not isinstance(entry, dict):
                     raise AgentError("invalid_argument")
+                if entry.get("kind") == "dir":
+                    added += self._register_dir(db, _ident(entry.get("fileId")), entry.get("path"))
+                    continue
+                if entry.get("kind", "file") != "file":
+                    raise AgentError("invalid_argument")
                 file_id, path = _ident(entry.get("fileId")), entry.get("path")
+                check_rel(path)
+                if fold_ambiguous(path):
+                    raise AgentError("path_ambiguous")
+                if db.execute("SELECT 1 FROM dirs WHERE path_key=?", (path_key(path),)).fetchone():
+                    raise AgentError("path_collision")
                 version, sha = _ident(entry.get("versionId")), _sha(entry.get("sha256"))
                 size = _int(entry.get("size"))
                 mode = _int(entry.get("mode", 0o644)) & 0o777
@@ -333,6 +627,74 @@ class FilesAgent:
                                (file_id, path, key, origin, "remote-only", version, sha, size, mode))
                     added += 1
         return {"added": added, "updated": updated}
+
+    def _register_dir(self, db, dir_id, path):
+        """Record a catalog directory id for a path.  Metadata only: creates nothing on disk."""
+        check_rel(path)
+        if fold_ambiguous(path):
+            raise AgentError("path_ambiguous")
+        key = path_key(path)
+        if db.execute("SELECT 1 FROM files WHERE path_key=?", (key,)).fetchone():
+            raise AgentError("path_collision")
+        same_id = db.execute("SELECT * FROM dirs WHERE dir_id=?", (dir_id,)).fetchone()
+        same_key = db.execute("SELECT * FROM dirs WHERE path_key=?", (key,)).fetchone()
+        if same_key and same_key["dir_id"] != dir_id:
+            raise AgentError("path_collision")
+        if same_id and same_id["path"] != path:
+            raise AgentError("busy")  # directory moves are out of scope here
+        if same_id:
+            return 0
+        db.execute("INSERT INTO dirs VALUES(?,?,?)", (dir_id, path, key))
+        return 1
+
+    def _parent(self, path):
+        """(parentId, name) for a new remote entry; the parent must be a registered catalog directory."""
+        if fold_ambiguous(path):
+            raise AgentError("path_ambiguous")
+        head, _, name = path.rpartition("/")
+        if not head:
+            return "root", name
+        row = self.db.execute("SELECT dir_id, path FROM dirs WHERE path_key=?", (path_key(head),)).fetchone()
+        if not row:
+            raise AgentError("parent_not_registered")
+        if row["path"] != head:
+            raise AgentError("path_collision")
+        return row["dir_id"], name
+
+    def create_dir(self, path):
+        """Create one remote directory under a registered parent.  The request id is journaled before
+        sending, so a retry after an unknown outcome replays the same request, never a second folder."""
+        check_rel(path)
+        key = path_key(path)
+        if self.db.execute("SELECT 1 FROM files WHERE path_key=?", (key,)).fetchone():
+            raise AgentError("path_collision")
+        done = self.db.execute("SELECT * FROM dirs WHERE path_key=?", (key,)).fetchone()
+        if done:
+            if done["path"] != path:
+                raise AgentError("path_collision")
+            return {"path": path, "dirId": done["dir_id"], "created": False}
+        pending = self.db.execute("SELECT * FROM dir_ops WHERE path_key=?", (key,)).fetchone()
+        if pending and pending["path"] != path:
+            raise AgentError("path_collision")
+        if not pending:
+            parent_id, name = self._parent(path)
+            with self._tx() as db:
+                db.execute("INSERT INTO dir_ops VALUES(?,?,?,?,?)", (key, path, uuid.uuid4().hex, parent_id, name))
+            pending = self.db.execute("SELECT * FROM dir_ops WHERE path_key=?", (key,)).fetchone()
+        try:
+            entry = self.backend.create_entry({"requestId": pending["request_id"], "parentId": pending["parent_id"],
+                                               "name": pending["name"], "kind": "dir"})
+        except BackendError as err:
+            if err.code in ("request_conflict", "name_conflict"):
+                with self._tx() as db:
+                    db.execute("DELETE FROM dir_ops WHERE path_key=?", (key,))
+            raise
+        except Exception:
+            raise AgentError("backend_error") from None  # unknown: same request id next time
+        with self._tx() as db:
+            self._register_dir(db, _ident(entry.get("fileId")), path)
+            db.execute("DELETE FROM dir_ops WHERE path_key=?", (key,))
+        return {"path": path, "dirId": entry["fileId"], "created": True}
 
     def list_local(self, cursor=0, limit=100):
         cursor, limit = _int(cursor), _int(limit, 1)
@@ -425,7 +787,7 @@ class FilesAgent:
             with os.fdopen(fd, "wb") as out:
                 try:
                     chunks = self.backend.fetch_version({"fileId": row["file_id"], "versionId": version,
-                                                         "maxBytes": size})
+                                                         "maxBytes": size, "sha256": row["remote_sha"]})
                     for chunk in chunks:
                         written += len(chunk)
                         if written > size:
@@ -510,7 +872,7 @@ class FilesAgent:
         results = []
         retry = self.db.execute("SELECT o.request_id FROM ops o JOIN files f ON f.active_op=o.request_id "
                                 "WHERE o.phase='prepared' LIMIT ?", (limit,)).fetchall()
-        fresh = self.db.execute("SELECT id FROM files WHERE state='dirty' AND active_op IS NULL "
+        fresh = self.db.execute("SELECT id, path FROM files WHERE state='dirty' AND active_op IS NULL "
                                 "ORDER BY id LIMIT ?", (limit,)).fetchall()
         for item in retry:
             results.append(self._send(item["request_id"]))
@@ -518,10 +880,10 @@ class FilesAgent:
             try:
                 request_id = self._prepare(item["id"])
             except AgentError as err:
-                results.append({"code": err.code})
+                results.append({"path": item["path"], "code": err.code})
                 continue
             except OSError:
-                results.append({"code": "io_error"})
+                results.append({"path": item["path"], "code": "io_error"})
                 continue
             if request_id:
                 results.append(self._send(request_id))
@@ -530,6 +892,7 @@ class FilesAgent:
     def _prepare(self, row_id):
         """Stage an immutable snapshot and persist the operation before anything is sent."""
         row = self.db.execute("SELECT * FROM files WHERE id=?", (row_id,)).fetchone()
+        parent_id, name = (None, None) if row["file_id"] else self._parent(row["path"])
         source = self._resolve(row["path"])
         st = os.stat(source)
         if st.st_size > self.cfg["maxTransferBytes"]:
@@ -557,10 +920,14 @@ class FilesAgent:
             if current["state"] != "dirty" or current["active_op"] is not None:
                 self._unlink_staging("upload-" + request_id)
                 return None
-            db.execute("INSERT INTO ops VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            if current["file_id"] != row["file_id"]:
+                self._unlink_staging("upload-" + request_id)
+                return None
+            db.execute("INSERT INTO ops(request_id,row,file_id,path,base_version,writer_epoch,size,sha256,dirty_rev,"
+                       "phase,upload_id,receipt,code,created,parent_id,name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                        (request_id, row_id, current["file_id"], None if current["file_id"] else current["path"],
                         current["base_version"], self.cfg["writerEpoch"], size, digest.hexdigest(),
-                        current["dirty_rev"], "prepared", None, None, None, self.clock()))
+                        current["dirty_rev"], "prepared", None, None, None, self.clock(), parent_id, name))
             db.execute("UPDATE files SET state='uploading', active_op=? WHERE id=?", (request_id, row_id))
         return request_id
 
@@ -575,24 +942,32 @@ class FilesAgent:
         try:
             began = self.backend.begin_upload({
                 "requestId": request_id, "fileId": op["file_id"], "path": op["path"],
+                "parentId": op["parent_id"], "name": op["name"],
                 "baseVersion": op["base_version"], "writerEpoch": op["writer_epoch"],
                 "size": op["size"], "sha256": op["sha256"]})
-            if not isinstance(began, dict) or began.get("requestId") != request_id or not began.get("uploadId"):
+            if not isinstance(began, dict) or began.get("requestId") != request_id or not began.get("uploadId") \
+                    or (op["file_id"] is not None and began.get("fileId", op["file_id"]) != op["file_id"]):
                 return self._mark_op(request_id, "unknown", "receipt_mismatch")
-            upload_id = str(began["uploadId"])
-            with self._tx() as db:
-                db.execute("UPDATE ops SET upload_id=? WHERE request_id=?", (upload_id, request_id))
-            with open(staged, "rb") as body:
-                offset = 0
-                for chunk in iter(lambda: body.read(CHUNK), b""):
-                    self.backend.put_body({"uploadId": upload_id, "offset": offset}, chunk)
-                    offset += len(chunk)
-            receipt = self.backend.commit_upload({"requestId": request_id, "uploadId": upload_id})
+            upload_id = _ident(str(began["uploadId"]))
+            file_id = op["file_id"] or (_ident(began["fileId"]) if began.get("fileId") is not None else None)
+            with self._tx() as db:  # learned ids are journaled before any body byte is sent
+                db.execute("UPDATE ops SET upload_id=?, file_id=? WHERE request_id=?", (upload_id, file_id, request_id))
+            op = self._op(request_id)
+            if began.get("phase") not in ("committed", "conflict"):  # replayed begin after commit: skip body
+                with open(staged, "rb") as body:
+                    self.backend.put_body({"uploadId": upload_id, "size": op["size"], "sha256": op["sha256"]}, body)
+            receipt = self.backend.commit_upload(self._op_request(op))
         except BackendError as err:
             return self._rejected(request_id, err.code)
         except Exception:
             return self._mark_op(request_id, "unknown", "backend_error")
         return self._apply_receipt(request_id, receipt)
+
+    @staticmethod
+    def _op_request(op):
+        return {"requestId": op["request_id"], "uploadId": op["upload_id"], "fileId": op["file_id"],
+                "baseVersion": op["base_version"], "writerEpoch": op["writer_epoch"], "size": op["size"],
+                "sha256": op["sha256"]}
 
     def _mark_op(self, request_id, phase, code):
         with self._tx() as db:
@@ -660,8 +1035,7 @@ class FilesAgent:
         for op in self.db.execute("SELECT request_id FROM ops WHERE phase IN ('sending','unknown')").fetchall():
             request_id = op["request_id"]
             try:
-                answer = self.backend.get_operation({"requestId": request_id,
-                                                     "uploadId": self._op(request_id)["upload_id"]})
+                answer = self.backend.get_operation(self._op_request(self._op(request_id)))
             except BackendError as err:
                 results.append({"requestId": request_id, "phase": "unknown", "code": err.code})
                 continue
@@ -671,14 +1045,56 @@ class FilesAgent:
             phase = answer.get("phase") if isinstance(answer, dict) and answer.get("requestId") == request_id else None
             if phase == "committed":
                 results.append(self._apply_receipt(request_id, answer.get("receipt")))
-            elif phase == "unknown_request":
-                results.append(self._mark_op(request_id, "prepared", None))  # never landed: resend same id
+            elif phase in ("unknown_request", "resend"):
+                # never landed, or landed without a commit: resend the same id (begin/create replay server-side)
+                results.append(self._mark_op(request_id, "prepared", None))
             elif phase == "conflict":
                 results.append(self._rejected(request_id, answer.get("code") or "base_version_conflict"))
             elif phase == "rejected":
                 results.append(self._rejected(request_id, "request_conflict"))
             else:
                 results.append({"requestId": request_id, "phase": "unknown", "code": "pending"})
+        return {"results": results}
+
+    def report_local(self, limit=SYNC_LIMIT):
+        """Report each catalog file's local copy (recordLocalState).  A clean claim is sent only for the
+        verified catalog version; the seq is journaled before sending and only grows, so a late report
+        can never overwrite a newer one on the server.  Unacknowledged reports are resent next time."""
+        limit = min(_int(limit, 1), SYNC_LIMIT)
+        rows = self.db.execute(
+            "SELECT f.file_id, f.state, f.base_version, f.remote_version, r.seq, r.version, r.dirty AS rdirty, r.acked "
+            "FROM files f LEFT JOIN reports r ON r.file_id=f.file_id "
+            "WHERE f.file_id IS NOT NULL AND f.state!='remote-only' ORDER BY f.id").fetchall()
+        results = []
+        for row in rows:
+            if len(results) >= limit:
+                break
+            dirty = row["state"] in ("dirty", "uploading", "conflict")
+            version = row["base_version"]
+            if not dirty and (version is None or version != row["remote_version"]):
+                continue  # nothing verifiable to claim
+            if row["acked"] and row["version"] == version and bool(row["rdirty"]) == dirty:
+                continue
+            seq = (row["seq"] or 0) + 1
+            with self._tx() as db:
+                db.execute("INSERT OR REPLACE INTO reports VALUES(?,?,?,?,0)", (row["file_id"], seq, version, int(dirty)))
+            req = {"machineId": self.cfg["machineId"], "writerEpoch": self.cfg["writerEpoch"], "seq": seq,
+                   "fileId": row["file_id"], "versionId": version, "dirty": dirty}
+            try:
+                answer = self.backend.record_local_state(req)
+                local = answer["local"]
+            except BackendError as err:
+                results.append({"fileId": row["file_id"], "applied": False, "code": err.code})
+                continue
+            except Exception:
+                results.append({"fileId": row["file_id"], "applied": False, "code": "backend_error"})
+                continue
+            acked = answer["applied"] or (local.get("versionId") == version and local.get("dirty") is dirty)
+            with self._tx() as db:
+                db.execute("UPDATE reports SET seq=MAX(seq, ?), acked=? WHERE file_id=?",
+                           (local["seq"], int(bool(acked)), row["file_id"]))
+            results.append({"fileId": row["file_id"], "applied": bool(answer["applied"]), "acked": bool(acked),
+                            "dirty": dirty})
         return {"results": results}
 
     # ---- space -----------------------------------------------------------------------------------
@@ -767,6 +1183,7 @@ class FilesAgent:
 def main(argv=None, backend=None):
     parser = argparse.ArgumentParser(prog="files-agent.py", description=__doc__.splitlines()[0])
     parser.add_argument("--state", required=True, help="agent state directory (journal and staging)")
+    parser.add_argument("--capability", help="private 0600 capability file for the HTTPS transport")
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init", help="configure the single allowlisted workspace root")
     init.add_argument("--root", required=True)
@@ -794,6 +1211,10 @@ def main(argv=None, backend=None):
     syn = sub.add_parser("sync", help="upload dirty files through the configured transport")
     syn.add_argument("--limit", type=int, default=SYNC_LIMIT)
     sub.add_parser("reconcile", help="resolve unknown upload outcomes by request id")
+    rep = sub.add_parser("report-local", help="report local copy state of catalog files")
+    rep.add_argument("--limit", type=int, default=SYNC_LIMIT)
+    sub.add_parser("create-dir", help="create one remote folder under a registered parent").add_argument(
+        "--path", required=True)
     ev = sub.add_parser("evict", help="remove verified clean agent cache")
     ev.add_argument("--need-bytes", type=int)
     end = sub.add_parser("prepare-end", help="drain and report end-of-session readiness")
@@ -809,6 +1230,8 @@ def main(argv=None, backend=None):
                                     args.reserve_bytes, args.max_transfer_bytes, args.auto_evict)
             result = {"configured": True}
         else:
+            if backend is None and args.capability:
+                backend = HttpBackend.load(args.capability)
             agent = FilesAgent(args.state, backend=backend)
             if args.command == "register":
                 with open(args.manifest, "rb") as handle:
@@ -829,6 +1252,8 @@ def main(argv=None, backend=None):
                     "mark-dirty": lambda: agent.mark_dirty(args.path),
                     "sync": lambda: agent.sync(args.limit),
                     "reconcile": lambda: agent.reconcile(),
+                    "report-local": lambda: agent.report_local(args.limit),
+                    "create-dir": lambda: agent.create_dir(args.path),
                     "evict": lambda: agent.evict(args.need_bytes),
                     "prepare-end": lambda: agent.prepare_end(args.flush),
                     "resume": lambda: agent.resume(),

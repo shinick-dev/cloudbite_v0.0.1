@@ -1,6 +1,8 @@
-"""Files agent fault tests: synthetic temp directories and a fake transport only; no network."""
+"""Files agent fault tests: synthetic temp directories, a fake transport and a loopback-only fake HTTP
+server shaped like the core routes.  No external network; nothing here is live persistence evidence."""
 import contextlib
 import hashlib
+import http.server
 import importlib.util
 import json
 import os
@@ -9,7 +11,11 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+import types
 import unicodedata
+import urllib.parse
 from pathlib import Path
 
 AGENT_PATH = Path(__file__).resolve().parent.parent / "images/cloudbite-computer/files-agent.py"
@@ -77,10 +83,10 @@ class Fake:
         self._save(state)
         return {"requestId": req["requestId"], "uploadId": "u_" + req["requestId"]}
 
-    def put_body(self, req, chunk):
+    def put_body(self, req, handle):
         state = self._load()
         op = state["ops"][req["uploadId"][2:]]
-        op["body"] = (bytes.fromhex(op["body"])[:req["offset"]] + chunk).hex()
+        op["body"] = handle.read().hex()
         self._save(state)
 
     def commit_upload(self, req):
@@ -470,6 +476,396 @@ def test_cli_json_protocol():
         assert (base / "ws" / "note.txt").read_bytes() == secret
     finally:
         shutil.rmtree(base, ignore_errors=True)
+
+
+# ---- real HTTP transport against a loopback core-shaped fake (mock server; not live persistence) ----------
+TOKEN = "tok_" + "Q7x" * 14
+HTTP_PREFIX = fa.AGENT_PREFIX + "/"
+
+
+class CoreFake:
+    """Core-shaped server state: requestId replay, immutable uploads, canonical commit, writer epoch."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.entries = {"root": {"kind": "dir"}}
+        self.versions = {}
+        self.uploads = {}
+        self.replay = {}
+        self.local = {}
+        self.epoch, self.machine = 1, "m_test"
+        self.seen = []
+        self.faults = {}
+        self.n = 0
+
+    def rid(self, prefix):
+        self.n += 1
+        return "%s_%04d" % (prefix, self.n)
+
+    def seed(self, path, data, parent="root"):
+        file_id, version = self.rid("f"), self.rid("v")
+        self.entries[file_id] = {"kind": "file", "parentId": parent, "name": path.rsplit("/", 1)[-1], "current": version}
+        self.versions[version] = {"fileId": file_id, "data": data}
+        return {"fileId": file_id, "path": path, "versionId": version, "size": len(data), "sha256": sha(data)}
+
+    def seed_dir(self, path, parent="root"):
+        dir_id = self.rid("f")
+        self.entries[dir_id] = {"kind": "dir", "parentId": parent, "name": path.rsplit("/", 1)[-1], "current": None}
+        return {"kind": "dir", "fileId": dir_id, "path": path}
+
+    def uview(self, u):
+        return {k: u[k] for k in ("uploadId", "fileId", "baseVersion", "writerEpoch", "size", "sha256", "phase",
+                                  "expiresAt", "result")}
+
+    def handle(self, method, route, headers, read_body):
+        if headers.get("authorization") != "Bearer " + TOKEN:
+            return 401, {"error": {"code": "capability_invalid"}}
+        parts = route.split("/")
+        if method == "POST" and route == "create":
+            req = json.loads(read_body())
+            args = [req["parentId"], unicodedata.normalize("NFC", req["name"]), req["kind"]]
+            if req["requestId"] in self.replay:
+                op, prev, result = self.replay[req["requestId"]]
+                return (200, result) if prev == args else (409, {"error": {"code": "request_conflict"}})
+            for e in self.entries.values():
+                if e.get("parentId") == req["parentId"] and e["name"].lower() == args[1].lower():
+                    return 409, {"error": {"code": "name_conflict"}}
+            file_id = self.rid("f")
+            self.entries[file_id] = {"kind": req["kind"], "parentId": req["parentId"], "name": args[1], "current": None}
+            result = {"entry": {"fileId": file_id, "parentId": req["parentId"], "name": args[1], "kind": req["kind"]}}
+            self.replay[req["requestId"]] = ("create", args, result)
+            return 200, result
+        if method == "POST" and route == "uploads/begin":
+            req = json.loads(read_body())
+            args = [req[k] for k in ("fileId", "baseVersion", "writerEpoch", "size", "sha256")]
+            if req["requestId"] in self.replay:
+                op, prev, upload_id = self.replay[req["requestId"]]
+                if prev != args:
+                    return 409, {"error": {"code": "request_conflict"}}
+                return 200, {"upload": self.uview(self.uploads[upload_id])}
+            if req["writerEpoch"] != self.epoch:
+                return 409, {"error": {"code": "stale_writer"}}
+            upload_id = self.rid("u")
+            self.uploads[upload_id] = dict(zip(("fileId", "baseVersion", "writerEpoch", "size", "sha256"), args),
+                                           uploadId=upload_id, phase="begun", expiresAt=4102444800000,
+                                           result=None, data=None)
+            self.replay[req["requestId"]] = ("begin", args, upload_id)
+            return 200, {"upload": self.uview(self.uploads[upload_id])}
+        if method == "PUT" and len(parts) == 3 and parts[0] == "uploads" and parts[2] == "body":
+            u = self.uploads[parts[1]]
+            data = read_body()
+            if int(headers.get("content-length")) != u["size"] or len(data) != u["size"]:
+                return 422, {"error": {"code": "size_mismatch"}}
+            if sha(data) != u["sha256"]:
+                return 422, {"error": {"code": "hash_mismatch"}}
+            u["data"], u["phase"] = data, "body_written"
+            return 200, {"upload": self.uview(u)}
+        if method == "POST" and len(parts) == 3 and parts[0] == "uploads" and parts[2] == "commit":
+            u = self.uploads[parts[1]]
+            if u["result"]:
+                return 200, {"result": u["result"]}
+            if u["data"] is None:
+                return 422, {"error": {"code": "body_missing"}}
+            e = self.entries[u["fileId"]]
+            version = self.rid("v")
+            self.versions[version] = {"fileId": u["fileId"], "data": u["data"]}
+            if u["baseVersion"] == e["current"]:
+                e["current"], status, conflict = version, "committed", None
+            else:
+                status, conflict = "conflict", self.rid("f")
+            u["result"] = {"status": status, "fileId": u["fileId"], "versionId": version, "versionSeq": 1,
+                           "size": u["size"], "sha256": u["sha256"], "conflictFileId": conflict, "durable": True}
+            u["phase"] = status
+            return 200, {"result": u["result"]}
+        if method == "GET" and len(parts) == 2 and parts[0] == "uploads":
+            u = self.uploads.get(parts[1])
+            return (200, {"upload": self.uview(u)}) if u else (404, {"error": {"code": "not_found"}})
+        if method == "GET" and len(parts) == 4 and parts[0] == "versions" and parts[3] == "content":
+            v = self.versions.get(parts[2])
+            if not v or v["fileId"] != parts[1]:
+                return 404, {"error": {"code": "not_found"}}
+            return 200, v["data"]
+        if method == "POST" and route == "local-state":
+            req = json.loads(read_body())
+            if req["writerEpoch"] != self.epoch or req["machineId"] != self.machine:
+                return 409, {"error": {"code": "stale_writer"}}
+            key = req["fileId"]
+            cur = self.local.get(key)
+            if cur and cur["seq"] >= req["seq"]:
+                return 200, {"local": cur, "applied": False}
+            if not req["dirty"] and req["versionId"] != self.entries[key]["current"]:
+                return 409, {"error": {"code": "not_verified"}}
+            self.local[key] = {k: req[k] for k in ("machineId", "fileId", "versionId", "dirty", "seq")}
+            return 200, {"local": self.local[key], "applied": True}
+        return 404, {"error": {"code": "not_found"}}
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def _go(self):
+        core = self.server.core
+        route = urllib.parse.unquote(self.path[len(HTTP_PREFIX):]) if self.path.startswith(HTTP_PREFIX) else "?"
+        headers = {k.lower(): v for k, v in self.headers.items()}
+        cached = []
+
+        def read_body():
+            if not cached:
+                cached.append(self.rfile.read(int(headers.get("content-length") or 0)))
+            return cached[0]
+        with core.lock:
+            core.seen.append((self.command, route, headers))
+            kind = "uploads" if route.startswith("uploads/") and route != "uploads/begin" else route
+            fault = core.faults.pop((self.command, kind), None)
+            if fault == "drop_before":
+                read_body()
+                return
+            if fault == "redirect":
+                read_body()
+                self.send_response(302)
+                self.send_header("location", "http://198.51.100.7/steal")
+                self.end_headers()
+                return
+            status, body = core.handle(self.command, route, headers, read_body)
+            if callable(fault):
+                status, body = fault(status, body)
+            if fault == "drop_after":
+                return  # processed, but the reply is lost
+        raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("content-type", "application/octet-stream" if isinstance(body, bytes) else "application/json")
+        self.send_header("content-length", str(len(raw)))
+        if isinstance(body, bytes):
+            self.send_header("x-cloudbite-sha256", sha(body))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    do_GET = do_POST = do_PUT = _go
+
+
+@contextlib.contextmanager
+def http_env(**cap):
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.core = CoreFake()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = tempfile.mkdtemp(prefix="cb-files-http-")
+    ns = None
+    try:
+        root, state = Path(base) / "workspace", Path(base) / "state"
+        root.mkdir()
+        fa.FilesAgent.init(str(state), str(root), "w_test", "m_test", reserve_bytes=0).close()
+        config = {"schema": fa.CAPABILITY_SCHEMA, "origin": "http://127.0.0.1:%d" % server.server_address[1],
+                  "token": TOKEN, "machineId": "m_test", "workspaceId": "w_test", "writerEpoch": 1,
+                  "expiresAt": int(time.time() * 1000) + 3600_000}
+        config.update(cap)
+        cap_path = Path(base) / "capability.json"
+        cap_path.write_text(json.dumps(config))
+        if os.name != "nt":
+            os.chmod(cap_path, 0o600)
+        ns = types.SimpleNamespace(core=server.core, root=root, state=state, cap=cap_path, config=config, agent=None)
+        ns.open_agent = lambda: fa.FilesAgent(str(state), backend=fa.HttpBackend.load(str(cap_path)),
+                                              disk_free=lambda _: 10 << 30)
+        yield ns
+    finally:
+        if ns and ns.agent:
+            ns.agent.close()
+        server.shutdown()
+        server.server_close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def entry_of(agent, path):
+    return next(i for i in agent.list_local(0, 500)["items"] if i["path"] == path)
+
+
+def test_http_roundtrip_create_open_upload_report():
+    with http_env() as h:
+        h.agent = a = h.open_agent()
+        docs = h.core.seed_dir("docs")
+        seeded = h.core.seed("docs/a.txt", b"remote one", parent=docs["fileId"])
+        a.register([docs, seeded])
+        opened = a.open(path="docs/a.txt")
+        assert opened["fetchedBytes"] == 10 and (h.root / "docs/a.txt").read_bytes() == b"remote one"
+        (h.root / "docs/a.txt").write_bytes(b"local two")
+        a.mark_dirty("docs/a.txt")
+        (h.root / "docs/new.txt").write_bytes(b"brand new")
+        a.mark_dirty("docs/new.txt")
+        results = a.sync()["results"]
+        assert [r["state"] for r in results] == ["clean", "clean"], results
+        new_id = entry_of(a, "docs/new.txt")["fileId"]
+        assert h.core.entries[new_id]["parentId"] == docs["fileId"] and h.core.entries[new_id]["name"] == "new.txt"
+        assert h.core.versions[h.core.entries[seeded["fileId"]]["current"]]["data"] == b"local two"
+        reports = a.report_local()["results"]
+        assert len(reports) == 2 and all(r["applied"] and not r["dirty"] for r in reports), reports
+        assert a.report_local()["results"] == [], "acknowledged state is not resent"
+        made = a.create_dir("docs/sub")
+        assert made["created"] and h.core.entries[made["dirId"]]["kind"] == "dir"
+        assert a.prepare_end()["open"] == ["docs/a.txt"]
+        for method, route, headers in h.core.seen:
+            assert headers["authorization"] == "Bearer " + TOKEN
+            assert "cookie" not in headers and "origin" not in headers
+        out = json.dumps([results, reports, made, a.status(), repr(a.backend)])
+        assert TOKEN not in out and TOKEN[4:20] not in out
+
+
+def test_http_unknown_outcomes_reconcile_with_same_ids():
+    with http_env() as h:
+        h.agent = a = h.open_agent()
+        seeded = h.core.seed("a.txt", b"one")
+        a.register([seeded])
+        a.open(path="a.txt")
+        (h.root / "a.txt").write_bytes(b"two")
+        a.mark_dirty("a.txt")
+        h.core.faults[("POST", "uploads")] = "drop_after"  # commit lands, reply lost
+        lost = a.sync()["results"][0]
+        assert lost["phase"] == "unknown" and entry_of(a, "a.txt")["state"] == "uploading"
+        assert a.prepare_end()["ready"] is False
+        a.resume()
+        assert a.reconcile()["results"][0]["state"] == "clean"
+        assert len(h.core.uploads) == 1
+        # begin reply lost: no uploadId known, resend same requestId -> server replays the same upload
+        (h.root / "a.txt").write_bytes(b"three")
+        a.mark_dirty("a.txt")
+        h.core.faults[("POST", "uploads/begin")] = "drop_after"
+        first = a.sync()["results"][0]
+        assert first["phase"] == "unknown" and a._op(first["requestId"])["upload_id"] is None
+        assert a.reconcile()["results"][0]["phase"] == "prepared"
+        again = a.sync()["results"][0]
+        assert again["requestId"] == first["requestId"] and again["state"] == "clean"
+        assert len(h.core.uploads) == 2, "one upload per request id"
+        # body PUT reply lost: GET upload says body_written -> resend same id, commit once
+        (h.root / "a.txt").write_bytes(b"four")
+        a.mark_dirty("a.txt")
+        h.core.faults[("PUT", "uploads")] = "drop_after"
+        third = a.sync()["results"][0]
+        assert third["phase"] == "unknown"
+        assert a.reconcile()["results"][0]["phase"] == "prepared"
+        assert a.sync()["results"][0]["state"] == "clean" and len(h.core.uploads) == 3
+        # new file whose create reply is lost: derived create requestId replays, no duplicate entry
+        (h.root / "n.txt").write_bytes(b"new")
+        a.mark_dirty("n.txt")
+        h.core.faults[("POST", "create")] = "drop_after"
+        assert a.sync()["results"][0]["phase"] == "unknown"
+        a.reconcile()
+        assert a.sync()["results"][0]["state"] == "clean"
+        assert sum(1 for e in h.core.entries.values() if e.get("name") == "n.txt") == 1
+        # redirect is never followed and leaves the outcome unknown
+        (h.root / "n.txt").write_bytes(b"newer")
+        a.mark_dirty("n.txt")
+        h.core.faults[("POST", "uploads/begin")] = "redirect"
+        before = len(h.core.seen)
+        assert a.sync()["results"][0]["phase"] == "unknown"
+        assert len(h.core.seen) == before + 1, "no follow-up request to the redirect target"
+
+
+def test_http_malformed_and_conflicting_receipts_preserve_dirty():
+    def tamper(**changes):
+        def fault(status, body):
+            return status, dict(body, result=dict(body["result"], **changes))
+        return fault
+    with http_env() as h:
+        h.agent = a = h.open_agent()
+        a.register([h.core.seed("a.txt", b"one")])
+        a.open(path="a.txt")
+        for changes in ({"sha256": "0" * 64}, {"durable": False}, {"size": 999}, {"fileId": "f_other"},
+                        {"status": "weird"}):
+            (h.root / "a.txt").write_bytes(b"edit %r" % sorted(changes))
+            a.mark_dirty("a.txt")
+            h.core.faults[("POST", "uploads")] = tamper(**changes)
+            result = a.sync()["results"][0]
+            assert result["phase"] == "unknown", (changes, result)
+            assert entry_of(a, "a.txt")["state"] == "uploading"
+            assert a.reconcile()["results"][0]["state"] == "clean"  # GET upload has the true receipt
+        # someone else advanced the file: canonical conflict result -> local conflict, bytes kept
+        file_id = entry_of(a, "a.txt")["fileId"]
+        h.core.entries[file_id]["current"] = "v_elsewhere"
+        (h.root / "a.txt").write_bytes(b"mine")
+        a.mark_dirty("a.txt")
+        assert a.sync()["results"][0]["phase"] == "conflict"
+        assert entry_of(a, "a.txt")["state"] == "conflict" and (h.root / "a.txt").read_bytes() == b"mine"
+        assert a.prepare_end()["safeToDelete"] is False
+
+
+def test_http_stale_epoch_expiry_and_scope_fail_closed():
+    with http_env() as h:
+        h.agent = a = h.open_agent()
+        a.register([h.core.seed("a.txt", b"one")])
+        a.open(path="a.txt")
+        (h.root / "a.txt").write_bytes(b"after takeover")
+        a.mark_dirty("a.txt")
+        h.core.epoch = 2  # another machine became the writer
+        assert a.sync()["results"][0]["code"] == "stale_writer"
+        assert entry_of(a, "a.txt")["state"] == "conflict" and (h.root / "a.txt").read_bytes() == b"after takeover"
+        assert a.report_local()["results"][0]["code"] == "stale_writer"
+        a.close()
+        h.agent = None
+    with http_env(expiresAt=1) as h:
+        h.agent = a = h.open_agent()
+        (h.root / "b.txt").write_bytes(b"local")
+        a.mark_dirty("b.txt")
+        assert a.sync()["results"][0]["code"] == "capability_expired"
+        assert h.core.seen == [], "expired capability sends nothing"
+    for bad in ({"writerEpoch": 2}, {"machineId": "m_other"}, {"workspaceId": "w_other"}):
+        with http_env(**bad) as h:
+            expect("scope_mismatch", h.open_agent)
+    for bad in ({"origin": "http://198.51.100.7"}, {"origin": "https://u:p@x.example"},
+                {"origin": "https://x.example/api"}, {"origin": "ftp://x.example"}, {"token": "short"},
+                {"schema": "other"}, {"expiresAt": "soon"}):
+        with http_env(**bad) as h:
+            expect("capability_invalid", fa.HttpBackend.load, str(h.cap))
+    with http_env() as h:
+        if os.name == "nt":
+            SKIPS.append("capability file 0600/owner check (Windows host)")
+        else:
+            os.chmod(h.cap, 0o644)
+            expect("capability_insecure", fa.HttpBackend.load, str(h.cap))
+
+
+def test_http_names_parents_and_collisions_are_conservative():
+    with http_env() as h:
+        h.agent = a = h.open_agent()
+        expect("path_ambiguous", a.register, [h.core.seed("Straße.txt", b"x")])
+        expect("path_ambiguous", a.register, [h.core.seed_dir("ΟΔΟΣ")])
+        docs = h.core.seed_dir("docs")
+        a.register([docs])
+        expect("path_collision", a.register, [h.core.seed("DOCS", b"x")])
+        (h.root / "loose").mkdir()
+        (h.root / "loose" / "x.txt").write_bytes(b"x")
+        a.mark_dirty("loose/x.txt")
+        (h.root / "Maße.txt").write_bytes(b"y")
+        a.mark_dirty("Maße.txt")
+        codes = sorted(r.get("code") for r in a.sync()["results"])
+        assert codes == ["parent_not_registered", "path_ambiguous"], codes
+        assert {entry_of(a, p)["state"] for p in ("loose/x.txt", "Maße.txt")} == {"dirty"}
+        assert not any(m == "POST" and r == "create" for m, r, _ in h.core.seen), "nothing created remotely"
+        expect("parent_not_registered", a.create_dir, "loose/deeper")
+        # remote name already taken by an unregistered sibling: conflict, local bytes kept
+        h.core.seed("taken.txt", b"server")
+        (h.root / "TAKEN.txt").write_bytes(b"mine")
+        a.mark_dirty("TAKEN.txt")
+        assert "name_conflict" in [r.get("code") for r in a.sync()["results"]]
+        assert entry_of(a, "TAKEN.txt")["state"] == "conflict"
+
+
+def test_http_cli_never_prints_capability():
+    with http_env() as h:
+        (h.root / "note.txt").write_bytes(b"CONTENT-MARKER")
+
+        def cli(*args):
+            proc = subprocess.run([sys.executable, "-B", str(AGENT_PATH), "--state", str(h.state), "--capability",
+                                   str(h.cap), *args], capture_output=True, timeout=60)
+            for blob in (proc.stdout, proc.stderr):
+                assert TOKEN.encode() not in blob and b"CONTENT-MARKER" not in blob
+            return proc.returncode, json.loads(proc.stdout.decode("utf-8").strip().splitlines()[-1])
+        assert cli("mark-dirty", "--path", "note.txt")[1]["state"] == "dirty"
+        code, out = cli("sync")
+        assert code == 0 and out["results"][0]["state"] == "clean", out
+        assert cli("report-local")[1]["results"][0]["applied"] is True
+        assert cli("status")[1]["transportConfigured"] is True
+        h.cap.write_text("{not json")
+        assert cli("status") == (2, {"ok": False, "code": "capability_invalid"})
 
 
 if __name__ == "__main__":
