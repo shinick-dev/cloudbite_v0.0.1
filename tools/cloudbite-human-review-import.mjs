@@ -2,24 +2,31 @@
 // exact saved answer, src/cloudbite-human-review.ts). It re-derives every hash from the included material, refuses
 // anything that does not bind, and turns the files into inputs the existing offline evaluator already understands:
 // a cases file, one HistoryDetail export per answer, rating rows bound to each export's exact bytes, and a batch manifest
-// that pairs later answers to the same question (same question/stage/material) with the earlier one as baseline.
-// human-issues.json compares the person's issue categories and scores before/after for the SAME reviewer and rubric only.
+// that pairs a later answer of the SAME role to the same question (same question/stage/material and expertId) from a
+// DIFFERENT, strictly earlier project with that earlier answer as baseline. Two roles of one run are never a before/after,
+// and repeated answers of one role inside one project stay unpaired. human-issues.json compares the person's issue
+// categories and scores before/after for the SAME reviewer, role and rubric only.
+// Provenance is operator-declared (--provenance, default test-synthetic): the files are not server-signed, so hashes prove
+// internal consistency only, never that a provider produced the answer. Declare observed-live only for real history exports.
 // Nothing here scores, ranks or declares a winner; unset dimensions stay NOT_SCORED. No network, no model, no cookies.
 //
 //   node tools/cloudbite-human-review-import.mjs --input A.json [--input B.json ...] [--out DIR] [--batch-id ID]
-//        [--evaluate] [--force] [--allow-outside-repo] [--allow-private-local]
+//        [--provenance observed-live|synthetic-qa|test-synthetic] [--evaluate] [--force] [--allow-outside-repo] [--allow-private-local]
 // --evaluate then runs tools/cloudbite-quality-batch.mjs on the written manifest (output in DIR/evaluation/<batch-id>).
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
-  EVALUATOR_VERSION, FORBIDDEN_ARG, HUMAN_DIMENSIONS, INPUT_LIMITS, NOT_SCORED, ROOT, canonical, caseFingerprint, readBoundedFile, resolveOutput, scanSensitive, writeNew,
+  EVALUATOR_VERSION, FORBIDDEN_ARG, HUMAN_DIMENSIONS, INPUT_LIMITS, NOT_SCORED, PROVENANCES, ROOT, canonical, caseFingerprint, readBoundedFile, resolveOutput, scanSensitive, writeNew,
 } from './evaluate-cloudbite-quality.mjs';
 import { BATCH_VERSION, runBatch } from './cloudbite-quality-batch.mjs';
 
 export const IMPORT_VERSION = 'cloudbite-human-review-import/v1';
 export const CANDIDATE_VERSION = 'cloudbite-regression-candidate/v1';
+export const DEFAULT_PROVENANCE = 'test-synthetic';
+export const PAIRING_SCOPE = 'Before/after pairs are answers of the same role (expertId) to the same question/stage/material from different projects, '
+  + 'strictly older first. Different roles, the same project and equal createdAt are never paired; scores and issues are compared only for the same reviewer.';
 export const DEFAULT_IMPORT_OUT = join(ROOT, '.artifacts/human-review-import');
 export const ISSUE_CATEGORIES = Object.freeze(['factual-error', 'unsupported-claim', 'missing-source', 'misread-material', 'missing-alternative', 'unsafe-next-step',
   'fabricated-execution', 'too-generic', 'off-topic', 'other']);
@@ -70,14 +77,18 @@ export function exportDetail(c) {
   }, null, 2) + '\n';
 }
 
-/** Same reviewer and rubric only: issue categories persisting/resolved/introduced and per-dimension score deltas. */
+/** Same reviewer, role and rubric across different projects only: issue categories persisting/resolved/introduced and
+ * per-dimension score deltas. Anything else is NOT_SCORED with a reason. */
 export function compareHuman(base, cand) {
-  const sameReviewer = base.human.reviewer === cand.human.reviewer;
+  const sameReviewer = base.human.reviewer === cand.human.reviewer, sameRole = base.source.expertId === cand.source.expertId;
+  const sameProject = base.source.projectId === cand.source.projectId;
   const cats = (c) => c.human.issues.map((x) => x.category);
-  const out = { caseId: caseIdFor(cand), rubric: EVALUATOR_VERSION, sameReviewer, sameRole: base.source.expertId === cand.source.expertId,
+  const out = { caseId: caseIdFor(cand), rubric: EVALUATOR_VERSION, sameReviewer, sameRole, sameProject, scope: PAIRING_SCOPE,
     baseline: { projectId: base.source.projectId, expertId: base.source.expertId, outputSha256: base.outputSha256, reviewer: base.human.reviewer, issues: cats(base), regressionCandidate: base.human.regressionCandidate },
     candidate: { projectId: cand.source.projectId, expertId: cand.source.expertId, outputSha256: cand.outputSha256, reviewer: cand.human.reviewer, issues: cats(cand), regressionCandidate: cand.human.regressionCandidate },
     note: 'One person\'s annotations of two exact answers to the same question. Differences are prompts for review, not accuracy or a winner.' };
+  if (!sameRole) return { ...out, issues: NOT_SCORED, scores: NOT_SCORED, reason: 'different roles: answers of two experts are not a before/after' };
+  if (sameProject) return { ...out, issues: NOT_SCORED, scores: NOT_SCORED, reason: 'same project: answers from one run are not a before/after' };
   if (!sameReviewer) return { ...out, issues: NOT_SCORED, scores: NOT_SCORED, reason: 'different reviewers: annotations are not paired' };
   const b = new Set(cats(base)), k = new Set(cats(cand));
   return { ...out,
@@ -89,36 +100,44 @@ export function compareHuman(base, cand) {
 }
 
 /** Pure: candidates → files to write. Later reviews of the same output replace earlier ones; nothing is merged. */
-export function buildImport(candidates, { batchId = 'human-review-import' } = {}) {
+export function buildImport(candidates, { batchId = 'human-review-import', provenance = DEFAULT_PROVENANCE } = {}) {
   if (!SLUG.test(batchId)) throw new Error('--batch-id must be 1-64 letters, digits, dot, dash or underscore');
+  if (!PROVENANCES.includes(provenance)) throw new Error(`--provenance must be one of ${PROVENANCES.join(', ')}`);
   const latest = new Map();
   for (const c of candidates) { const cur = latest.get(c.outputSha256); if (!cur || c.human.revision > cur.human.revision) latest.set(c.outputSha256, c); }
   const groups = new Map();
   for (const c of [...latest.values()].sort((x, y) => x.source.createdAt - y.source.createdAt || (x.outputSha256 < y.outputSha256 ? -1 : 1))) {
-    const id = caseIdFor(c); if (!groups.has(id)) groups.set(id, []); groups.get(id).push(c);
+    const id = caseIdFor(c) + '\n' + c.source.expertId; if (!groups.has(id)) groups.set(id, []); groups.get(id).push(c);
   }
-  const cases = [], exports = [], ratings = [], entries = [], comparisons = [];
-  for (const [caseId, list] of groups) {
-    const b = list[0].input.brief;
-    cases.push({ id: caseId, suite: 'human-regression', type: 'regression-candidate', provenance: 'human-review-export', heldOut: false,
+  const cases = [], exports = [], ratings = [], entries = [], comparisons = [], unpaired = [], seenCases = new Set();
+  for (const list of groups.values()) {
+    const caseId = caseIdFor(list[0]), b = list[0].input.brief;
+    // A role answering twice inside one project has no defined before/after: those answers are neither paired nor a baseline.
+    const perProject = new Map(); for (const c of list) perProject.set(c.source.projectId, (perProject.get(c.source.projectId) ?? 0) + 1);
+    const dup = (c) => perProject.get(c.source.projectId) > 1;
+    if (!seenCases.has(caseId)) seenCases.add(caseId), cases.push({ id: caseId, suite: 'human-regression', type: 'regression-candidate', provenance: 'human-review-export', heldOut: false,
       purpose: 'Built from person-reviewed history answers. Not held out and not a benchmark; the rubric anchors are empty on purpose.',
       brief: { title: b.title, objective: b.objective, context: b.context, ...(b.stage ? { stage: b.stage } : {}), ...(b.decision ? { decision: b.decision } : {}), ...(b.documents ? { documents: b.documents } : {}) },
       rubric: { anchors: [], forbiddenPhrases: [] } });
     let prev = null;
     for (const c of list) {
+      const base = prev && !dup(c) && prev.source.createdAt < c.source.createdAt ? prev : null;
       const text = exportDetail(c), name = `exports/${caseId}__${c.outputSha256.slice(0, 12)}.json`, inputSha256 = sha256(Buffer.from(text, 'utf8'));
       exports.push({ name, text, caseId, inputSha256 });
       // A review with no integer score adds no rating row: the evaluator keeps every dimension NOT_SCORED.
       if (scored(c)) ratings.push({ caseId, inputSha256, reviewer: c.human.reviewer, ratedAt: c.human.recordedAt, scores: c.human.scores,
         notes: [c.human.comment, c.human.issues.length ? 'issues: ' + c.human.issues.map((x) => x.category).join(', ') : ''].filter(Boolean).join(' | ').slice(0, INPUT_LIMITS.note) });
-      entries.push({ caseId, input: name, provenance: 'observed-live', ...(prev ? { baseline: `exports/${caseId}__${prev.outputSha256.slice(0, 12)}.json`, baselineProvenance: 'observed-live' } : {}),
-        collection: { method: 'history human-review export', collectedAt: c.exportedAt ?? c.human.recordedAt, note: `reviewed answer of ${c.source.expertId} in ${c.source.projectId}` } });
-      if (prev) comparisons.push(compareHuman(prev, c));
-      prev = c;
+      entries.push({ caseId, input: name, provenance, ...(base ? { baseline: `exports/${caseId}__${base.outputSha256.slice(0, 12)}.json`, baselineProvenance: provenance } : {}),
+        collection: { method: 'history human-review export', collectedAt: c.exportedAt ?? c.human.recordedAt,
+          note: `reviewed answer of ${c.source.expertId} in ${c.source.projectId}; provenance operator-declared, not provider-signed` } });
+      if (base) comparisons.push(compareHuman(base, c));
+      else unpaired.push({ caseId, expertId: c.source.expertId, projectId: c.source.projectId, outputSha256: c.outputSha256,
+        reason: dup(c) ? 'same role answered more than once in this project' : prev ? 'same createdAt as the previous answer: order undefined' : 'first answer of this role to this question' });
+      if (!dup(c)) prev = c;
     }
   }
   if (entries.length > INPUT_LIMITS.inputs) throw new Error(`at most ${INPUT_LIMITS.inputs} reviewed answers per import (the batch limit)`);
-  return { cases, exports, ratings, comparisons, manifest: { version: BATCH_VERSION, batchId, entries } };
+  return { cases, exports, ratings, comparisons, unpaired, provenance, manifest: { version: BATCH_VERSION, batchId, entries } };
 }
 
 function parseArgs(argv) {
@@ -126,7 +145,7 @@ function parseArgs(argv) {
   const o = { inputs: [], flags: new Set() };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i], v = () => { if (i + 1 >= argv.length) throw new Error(`${a} needs a value`); return argv[++i]; };
-    if (a === '--input') o.inputs.push(v()); else if (a === '--out') o.out = v(); else if (a === '--batch-id') o.batchId = v();
+    if (a === '--input') o.inputs.push(v()); else if (a === '--out') o.out = v(); else if (a === '--batch-id') o.batchId = v(); else if (a === '--provenance') o.provenance = v();
     else if (['--evaluate', '--force', '--allow-outside-repo', '--allow-private-local'].includes(a)) o.flags.add(a);
     else throw new Error(`unknown argument ${a}`);
   }
@@ -145,7 +164,7 @@ export function runImport(argv, { log = console.log } = {}) {
     if (r.errors) throw new Error(`refusing ${input}: ${r.errors.join('; ')}`);
     candidates.push(r.candidate);
   }
-  const built = buildImport(candidates, { batchId: o.batchId });
+  const built = buildImport(candidates, { batchId: o.batchId, provenance: o.provenance });
   const allowOutside = o.flags.has('--allow-outside-repo'), force = o.flags.has('--force');
   const out = resolveOutput(o.out ?? DEFAULT_IMPORT_OUT, { allowOutsideRepo: allowOutside });
   if (existsSync(join(out, 'manifest.json')) && !force) throw new Error(`refusing to overwrite ${out}; pass --force`);
@@ -154,9 +173,10 @@ export function runImport(argv, { log = console.log } = {}) {
   writeNew(join(out, 'cases.jsonl'), built.cases.map((c) => JSON.stringify(c)).join('\n') + '\n', force);
   writeNew(join(out, 'ratings.jsonl'), built.ratings.map((r) => JSON.stringify(r)).join('\n') + (built.ratings.length ? '\n' : ''), force);
   writeNew(join(out, 'manifest.json'), JSON.stringify(built.manifest, null, 2) + '\n', force);
-  writeNew(join(out, 'human-issues.json'), JSON.stringify({ version: IMPORT_VERSION, rubric: EVALUATOR_VERSION, comparisons: built.comparisons,
-    note: 'Pairs are consecutive answers to the same question/stage/material, oldest first. Scores and issues are compared only for the same reviewer.' }, null, 2) + '\n', force);
-  log(`${built.manifest.batchId}: ${built.exports.length} reviewed answers, ${built.cases.length} questions, ${built.ratings.length} rating rows, ${built.comparisons.length} before/after pairs`);
+  writeNew(join(out, 'human-issues.json'), JSON.stringify({ version: IMPORT_VERSION, rubric: EVALUATOR_VERSION, scope: PAIRING_SCOPE,
+    provenance: { declared: built.provenance, basis: 'operator-declared via --provenance; not a cryptographic provider proof' },
+    comparisons: built.comparisons, unpaired: built.unpaired }, null, 2) + '\n', force);
+  log(`${built.manifest.batchId}: ${built.exports.length} reviewed answers, ${built.cases.length} questions, ${built.ratings.length} rating rows, ${built.comparisons.length} before/after pairs, ${built.unpaired.length} unpaired; provenance ${built.provenance} (operator-declared)`);
   log(`wrote ${relative(process.cwd(), out) || out}`);
   let batch = null;
   if (o.flags.has('--evaluate')) {
