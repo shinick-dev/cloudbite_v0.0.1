@@ -15,6 +15,7 @@ export const FILES_LIMITS = {
   fileBytesDefault: 2 * 1024 ** 3,
   fileBytesHardMax: 50 * 1024 ** 3,
   conflictNameAttempts: 20,
+  moveScanMax: 1_000,      // entries scanned to prove subtree height when a directory moves deeper
 } as const;
 
 export const ROOT_ID = 'root';
@@ -27,7 +28,7 @@ export type FilesErrorCode =
   | 'not_found'            // unknown id, or id owned by another owner (indistinguishable on purpose)
   | 'not_a_directory'
   | 'is_a_directory'
-  | 'invalid_move'         // move into itself/descendant, or moving root
+  | 'invalid_move'         // move into itself/descendant, moving root, or a directory > moveScanMax entries moved deeper
   | 'depth_exceeded'
   | 'too_many_children'
   | 'invalid_cursor'
@@ -174,3 +175,18 @@ export interface LocalStateResponse { local: LocalCopyView; applied: boolean }
 export interface AdvanceWriterRequest { requestId: string; expectedEpoch: number; machineId: string }
 export interface AdvanceWriterResponse { writerEpoch: number; writerMachine: string }
 export interface StorageStatusResponse { status: StorageStatusView }
+export interface ResolveManifestRequest { fileId: string; versionId?: string | null }
+export interface ManifestDir { fileId: string; name: string; path: string } // path: '/'-joined from root, no leading '/'
+/** Metadata-only materialize plan for one file version: the canonical path built from this owner's own entries. */
+export interface FileManifest {
+  rootId: typeof ROOT_ID;
+  fileId: string;
+  name: string;
+  path: string;
+  versionId: string;         // verified to belong to fileId
+  versionSeq: number;
+  size: number;
+  sha256: string;
+  dirs: ManifestDir[];       // ancestors top-down, root excluded; at most depthMax - 1
+}
+export interface ResolveManifestResponse { manifest: FileManifest }

@@ -22,15 +22,20 @@ const streamOf = (bytes, chunk = 3) => new ReadableStream({
 const drain = async (s) => { const parts = []; for await (const p of s) parts.push(...p); return Uint8Array.from(parts); };
 
 class MemCatalog {
-  constructor() { this.m = new Map(); this.fault = null; this.writes = 0; }
+  // beforeWrite / beforeGetMany: one-shot barrier hooks that run another operation between a plan's reads and its write
+  constructor() { this.m = new Map(); this.fault = null; this.writes = 0; this.beforeWrite = null; this.beforeGetMany = null; }
   async get(k) { return this.m.has(k) ? structuredClone(this.m.get(k)) : undefined; }
-  async getMany(keys) { const out = new Map(); for (const k of keys) if (this.m.has(k)) out.set(k, structuredClone(this.m.get(k))); return out; }
+  async getMany(keys) {
+    const h = this.beforeGetMany; if (h) { this.beforeGetMany = null; await h(keys); }
+    const out = new Map(); for (const k of keys) if (this.m.has(k)) out.set(k, structuredClone(this.m.get(k))); return out;
+  }
   async list(prefix, { startAfter, limit }) {
     return [...this.m.keys()].filter(k => k.startsWith(prefix) && (startAfter === undefined || k > startAfter)).sort()
       .slice(0, limit).map(k => [k, structuredClone(this.m.get(k))]);
   }
   async write(b) {
     this.writes++;
+    const h = this.beforeWrite; if (h) { this.beforeWrite = null; await h(b); }
     const f = this.fault; this.fault = null;
     if (f === 'throw-before') throw new Error('lost');
     for (const [k, rev] of b.expect) if ((this.m.get(k)?.rev ?? 0) !== rev) return false;
@@ -44,7 +49,7 @@ class MemCatalog {
 class MemBlobs {
   constructor({ providerSha = true, durable = true } = {}) {
     this.kind = 'memory-test'; this.o = new Map(); this.providerSha = providerSha; this.durable = durable;
-    this.calls = { put: 0, head: 0, get: 0 }; this.maxChunk = 0; this.chunks = 0; this.corrupt = null;
+    this.calls = { put: 0, head: 0, get: 0 }; this.maxChunk = 0; this.chunks = 0; this.corrupt = null; this.afterPut = null; this.beforeHead = null;
   }
   async put(key, body, { size, sha256 }) {
     this.calls.put++;
@@ -54,9 +59,11 @@ class MemBlobs {
     if (bytes.length !== size) throw new Error('length');
     if (this.providerSha && sha(bytes) !== sha256) throw new Error('provider checksum rejected');
     this.o.set(key, bytes);
+    const h = this.afterPut; if (h) { this.afterPut = null; await h(key); }
   }
   async head(key) {
     this.calls.head++;
+    const h = this.beforeHead; if (h) { this.beforeHead = null; await h(key); }
     const b = this.o.get(key); if (!b) return null;
     const stored = this.corrupt?.(b) ?? b;
     return { size: stored.length, sha256: this.providerSha ? sha(stored) : null, durable: this.durable };
@@ -444,6 +451,168 @@ await test('R2 adapter: forwards declared sha256 for provider-side verification,
   assert.equal(await r2.head('missing'), null);
   await r2.get('k', { offset: 1, length: 1 }); assert.deepEqual(seen.get, { range: { offset: 1, length: 1 } });
   assert.equal(await r2.get('missing'), null);
+});
+
+// ---- race / depth regressions (barrier hooks in the test doubles; still in-memory, not live persistence) ----
+
+const mkdir = async (svc, parentId, name) => (await svc.create(A, { requestId: R(), parentId, name, kind: 'dir' })).entry;
+const mkchain = async (svc, parentId, prefix, n) => { const out = []; for (let i = 0; i < n; i++) out.push(parentId = (await mkdir(svc, parentId, prefix + i)).fileId); return out; };
+const entryOf = async (catalog, id) => catalog.get(`fs/${A}/e/${id}`);
+async function depthOf(catalog, id) { let d = 0; while (id !== 'root') { if (++d > 64) return Infinity; id = (await entryOf(catalog, id)).parentId; } return d; }
+
+await test('race: recordLocalState with no dirty delta is fenced by a writer advance between read and write', async () => {
+  const { svc, catalog } = make();
+  await svc.advanceWriter(A, { requestId: R(), expectedEpoch: 1, machineId: 'pc1' });
+  const f = (await svc.create(A, { requestId: R(), parentId: 'root', name: 'r.txt', kind: 'file' })).entry;
+  const st = (patch) => svc.recordLocalState(A, { machineId: 'pc1', writerEpoch: 2, fileId: f.fileId, versionId: null, dirty: true, ...patch });
+  await st({ seq: 1 });
+  catalog.beforeWrite = () => svc.advanceWriter(A, { requestId: R(), expectedEpoch: 2, machineId: 'pc2' });
+  await code(st({ seq: 2 }), 'stale_writer'); // dirty -> dirty: delta 0, must still be fenced by the workspace record
+  assert.equal((await catalog.get(`fs/${A}/l/pc1/${f.fileId}`)).seq, 1, 'stale ack not applied');
+});
+
+await test('race: concurrent directory moves through descendants cannot form a cycle', async () => {
+  const { svc, catalog } = make();
+  // distinct old parents so the two moves share no child counter: only the ancestor chain can serialize them
+  const pa = await mkdir(svc, 'root', 'PA'), pb = await mkdir(svc, 'root', 'PB');
+  const a = await mkdir(svc, pa.fileId, 'A'), b = await mkdir(svc, pb.fileId, 'B'), b1 = await mkdir(svc, b.fileId, 'b1');
+  // move A under B/b1 while, between its reads and its write, B is moved under A
+  catalog.beforeWrite = async () => { await svc.rename(A, { requestId: R(), fileId: b.fileId, expectedRev: b.rev, parentId: a.fileId }); };
+  await code(svc.rename(A, { requestId: R(), fileId: a.fileId, expectedRev: a.rev, parentId: b1.fileId }), 'invalid_move');
+  for (const id of [a.fileId, b.fileId, b1.fileId]) assert.ok(await depthOf(catalog, id) < 64, 'every node still reaches root');
+  assert.equal((await entryOf(catalog, a.fileId)).parentId, pa.fileId);
+  assert.equal((await entryOf(catalog, b.fileId)).parentId, a.fileId);
+});
+
+await test('depth: moving a directory deeper checks the existing subtree height', async () => {
+  const { svc, catalog } = make();
+  const deep = await mkchain(svc, 'root', 'p', 30);                 // deep[i] at depth i+1
+  const x = await mkdir(svc, 'root', 'X'), xs = await mkchain(svc, x.fileId, 'x', 2); // X/x0/x1: height 2
+  await code(svc.rename(A, { requestId: R(), fileId: x.fileId, expectedRev: x.rev, parentId: deep[29] }), 'depth_exceeded'); // x1 would be 33
+  assert.equal((await entryOf(catalog, x.fileId)).parentId, 'root');
+  const ok = await svc.rename(A, { requestId: R(), fileId: x.fileId, expectedRev: x.rev, parentId: deep[28] }); // x1 lands exactly at 32
+  assert.equal(await depthOf(catalog, xs[1]), 32);
+  // moving to an equal or shallower depth never needs a subtree scan and is always allowed
+  const back = await svc.rename(A, { requestId: R(), fileId: x.fileId, expectedRev: ok.entry.rev, parentId: 'root' });
+  assert.equal(back.entry.parentId, 'root');
+  // a file may be moved anywhere a create would be allowed
+  const f = (await svc.create(A, { requestId: R(), parentId: 'root', name: 'f', kind: 'file' })).entry;
+  const deeper = await mkdir(svc, deep[28], 'q'); // depth 30
+  const last = await mkdir(svc, deeper.fileId, 'r'); // depth 31
+  const fm = await svc.rename(A, { requestId: R(), fileId: f.fileId, expectedRev: f.rev, parentId: last.fileId });
+  assert.equal(await depthOf(catalog, fm.entry.fileId), 32);
+});
+
+await test('depth: a large subtree is not moved deeper (bounded scan), but may move sideways', async () => {
+  const { svc } = make({ quota: 1 << 24 });
+  const big = await mkdir(svc, 'root', 'big'), other = await mkdir(svc, 'root', 'other');
+  for (let i = 0; i <= 1000; i++) // FILES_LIMITS.moveScanMax + 1 entries
+    await svc.create(A, { requestId: R(), parentId: big.fileId, name: 'f' + i, kind: 'file' });
+  await code(svc.rename(A, { requestId: R(), fileId: big.fileId, expectedRev: big.rev, parentId: other.fileId }), 'invalid_move');
+  const sub = await mkdir(svc, 'root', 'sub');
+  const inner = await svc.rename(A, { requestId: R(), fileId: sub.fileId, expectedRev: sub.rev, parentId: other.fileId });
+  const side = await svc.rename(A, { requestId: R(), fileId: big.fileId, expectedRev: big.rev, name: 'renamed' });
+  assert.equal(side.entry.name, 'renamed');
+  assert.equal(inner.entry.parentId, other.fileId);
+});
+
+await test('race: create in a subtree racing an ancestor move deeper cannot exceed depth 32', async () => {
+  const { svc, catalog } = make();
+  const x = await mkdir(svc, 'root', 'X'), xs = await mkchain(svc, x.fileId, 'x', 29); // xs[28] at depth 30
+  const host = await mkdir(svc, 'root', 'host');
+  // create at depth 31 under xs[28]; between its reads and write, X moves under host (+1): xs[28] -> 31, new entry would be 32
+  catalog.beforeWrite = async () => { await svc.rename(A, { requestId: R(), fileId: x.fileId, expectedRev: x.rev, parentId: host.fileId }); };
+  const c = await svc.create(A, { requestId: R(), parentId: xs[28], name: 'leaf', kind: 'dir' });
+  assert.equal(await depthOf(catalog, c.entry.fileId), 32);
+  // and the next level is rejected, even if racing
+  catalog.beforeWrite = null;
+  await code(svc.create(A, { requestId: R(), parentId: c.entry.fileId, name: 'too-deep', kind: 'file' }), 'depth_exceeded');
+  const y = await mkdir(svc, 'root', 'Y'), ys = await mkchain(svc, y.fileId, 'y', 30); // ys[29] at depth 31
+  const host2 = await mkdir(svc, 'root', 'host2');
+  catalog.beforeWrite = async () => { await svc.rename(A, { requestId: R(), fileId: y.fileId, expectedRev: y.rev, parentId: host2.fileId }); };
+  await code(svc.create(A, { requestId: R(), parentId: ys[29], name: 'late', kind: 'file' }), 'depth_exceeded');
+  assert.equal(await depthOf(catalog, ys[29]), 32);
+});
+
+await test('race: subtree growth during a deeper move is caught by the scanned child counters', async () => {
+  const { svc, catalog } = make();
+  const deep = await mkchain(svc, 'root', 'p', 29);
+  const x = await mkdir(svc, 'root', 'X'), x0 = await mkdir(svc, x.fileId, 'x0'); // height 1
+  // moving X under deep[28] puts x0 at 31; meanwhile x0/child appears (would land at 32: fine) and then x0/child/g (33: not fine)
+  let child;
+  catalog.beforeWrite = async () => {
+    child = await mkdir(svc, x0.fileId, 'child');
+    await svc.create(A, { requestId: R(), parentId: child.fileId, name: 'g', kind: 'file' });
+  };
+  await code(svc.rename(A, { requestId: R(), fileId: x.fileId, expectedRev: x.rev, parentId: deep[28] }), 'depth_exceeded');
+  assert.equal((await entryOf(catalog, x.fileId)).parentId, 'root');
+});
+
+await test('race: body write after a writer advance is refused before and after the provider put', async () => {
+  const { svc, blobs } = make();
+  const f = (await svc.create(A, { requestId: R(), parentId: 'root', name: 'b.txt', kind: 'file' })).entry;
+  const bytes = enc.encode('paid body');
+  const u = await upload(svc, A, f.fileId, bytes, { write: false });
+  await svc.advanceWriter(A, { requestId: R(), expectedEpoch: 1, machineId: 'm2' });
+  const puts = blobs.calls.put;
+  await code(svc.writeUploadBody(A, u.uploadId, streamOf(bytes)), 'stale_writer');
+  assert.equal(blobs.calls.put, puts, 'preflight: nothing streamed to the provider');
+  const u2 = await upload(svc, A, f.fileId, bytes, { write: false, epoch: 2 });
+  blobs.afterPut = () => svc.advanceWriter(A, { requestId: R(), expectedEpoch: 2, machineId: 'm3' });
+  await code(svc.writeUploadBody(A, u2.uploadId, streamOf(bytes)), 'stale_writer');
+  assert.equal((await svc.getUpload(A, { uploadId: u2.uploadId })).upload.phase, 'begun');
+  await code(svc.commitUpload(A, { uploadId: u2.uploadId }), 'stale_writer');
+  await code(svc.open(A, { fileId: f.fileId }), 'not_found'); // no canonical version was claimed
+});
+
+await test('race: upload expiring during provider verification is not committed', async () => {
+  const { svc, blobs } = make();
+  const f = (await svc.create(A, { requestId: R(), parentId: 'root', name: 'e.txt', kind: 'file' })).entry;
+  const u = await upload(svc, A, f.fileId, enc.encode('slow verify'));
+  const saved = clock;
+  blobs.beforeHead = () => { clock = u.expiresAt + 1; };
+  try { await code(svc.commitUpload(A, { uploadId: u.uploadId }), 'invalid_upload_state'); } finally { clock = saved; }
+  await code(svc.open(A, { fileId: f.fileId }), 'not_found');
+  assert.equal((await svc.listVersions(A, { fileId: f.fileId })).versions.length, 0);
+});
+
+await test('resolveManifest: metadata-only canonical path, ownership, version mismatch, collisions, concurrent rename', async () => {
+  const { svc, catalog, blobs } = make();
+  const docs = await mkdir(svc, 'root', '문서'), sub = await mkdir(svc, docs.fileId, 'Sub');
+  const f = (await svc.create(A, { requestId: R(), parentId: sub.fileId, name: '보고서.txt', kind: 'file' })).entry;
+  const g = (await svc.create(A, { requestId: R(), parentId: 'root', name: 'sub', kind: 'file' })).entry; // case variant of Sub, other dir
+  await code(svc.create(A, { requestId: R(), parentId: docs.fileId, name: 'SUB', kind: 'dir' }), 'name_conflict');
+  const v1 = (await svc.commitUpload(A, { uploadId: (await upload(svc, A, f.fileId, enc.encode('v1'))).uploadId })).result;
+  const gv = (await svc.commitUpload(A, { uploadId: (await upload(svc, A, g.fileId, enc.encode('g'))).uploadId })).result;
+  const v2 = (await svc.commitUpload(A, { uploadId: (await upload(svc, A, f.fileId, enc.encode('v2!'), { base: v1.versionId })).uploadId })).result;
+  const calls = { ...blobs.calls };
+  const m = (await svc.resolveManifest(A, { fileId: f.fileId })).manifest;
+  assert.deepEqual(m, { rootId: 'root', fileId: f.fileId, name: '보고서.txt', path: '문서/Sub/보고서.txt', versionId: v2.versionId,
+    versionSeq: 2, size: 3, sha256: sha(enc.encode('v2!')),
+    dirs: [{ fileId: docs.fileId, name: '문서', path: '문서' }, { fileId: sub.fileId, name: 'Sub', path: '문서/Sub' }] });
+  const old = (await svc.resolveManifest(A, { fileId: f.fileId, versionId: v1.versionId })).manifest;
+  assert.equal(old.versionId, v1.versionId); assert.equal(old.size, 2); assert.equal(old.sha256, sha(enc.encode('v1')));
+  assert.equal((await svc.resolveManifest(A, { fileId: g.fileId })).manifest.path, 'sub');
+  assert.deepEqual(blobs.calls, calls, 'resolveManifest must not touch BlobStore');
+  await code(svc.resolveManifest(A, { fileId: f.fileId, versionId: gv.versionId }), 'not_found'); // version of another file
+  await code(svc.resolveManifest(A, { fileId: f.fileId, versionId: 'v_0000000000001_' + 'q'.repeat(26) }), 'not_found');
+  await code(svc.resolveManifest(A, { fileId: f.fileId, versionId: 'nope' }), 'invalid_request');
+  await code(svc.resolveManifest(B, { fileId: f.fileId }), 'not_found');
+  await code(svc.resolveManifest(A, { fileId: sub.fileId }), 'is_a_directory');
+  await code(svc.resolveManifest(A, { fileId: 'root' }), 'is_a_directory');
+  const empty = (await svc.create(A, { requestId: R(), parentId: 'root', name: 'empty', kind: 'file' })).entry;
+  await code(svc.resolveManifest(A, { fileId: empty.fileId }), 'not_found');
+  // a rename landing between the walk and its revalidation is never mixed into the path
+  catalog.beforeGetMany = async () => { await svc.rename(A, { requestId: R(), fileId: sub.fileId, expectedRev: sub.rev, name: 'Moved' }); };
+  assert.equal((await svc.resolveManifest(A, { fileId: f.fileId })).manifest.path, '문서/Moved/보고서.txt');
+  const noBlob = make({ blobs: null, catalog });
+  assert.equal((await noBlob.svc.resolveManifest(A, { fileId: f.fileId })).manifest.path, '문서/Moved/보고서.txt');
+  // deepest allowed file resolves with 31 parent dirs
+  const chain = await mkchain(svc, 'root', 'd', 31);
+  const leaf = (await svc.create(A, { requestId: R(), parentId: chain[30], name: 'leaf', kind: 'file' })).entry;
+  await svc.commitUpload(A, { uploadId: (await upload(svc, A, leaf.fileId, enc.encode('x'))).uploadId });
+  const lm = (await svc.resolveManifest(A, { fileId: leaf.fileId })).manifest;
+  assert.equal(lm.dirs.length, 31); assert.equal(lm.path.split('/').length, 32);
 });
 
 console.log(`\n${passed} passed`);

@@ -10,7 +10,8 @@ import {
   type AdvanceWriterRequest, type AdvanceWriterResponse, type BeginUploadRequest, type CommitRequest, type CommitResponse,
   type CommitResult, type CreateRequest, type EntryResponse, type FileEntryView, type FileKind, type ListRequest,
   type ListResponse, type ListVersionsRequest, type ListVersionsResponse, type LocalCopyView, type LocalStateRequest,
-  type LocalStateResponse, type OpenRequest, type OpenResponse, type RenameRequest, type SetPinnedRequest,
+  type LocalStateResponse, type ManifestDir, type OpenRequest, type OpenResponse, type RenameRequest,
+  type ResolveManifestRequest, type ResolveManifestResponse, type SetPinnedRequest,
   type StorageStatusView, type UploadResponse, type UploadView, type VersionView,
 } from './cloudbite-computer-files-contract';
 
@@ -213,15 +214,46 @@ export class FilesService {
     if (e.kind !== 'dir') throw new FilesError('not_a_directory');
     return e;
   }
-  /** Depth of `fileId` (root = 0); detects `avoid` among its ancestors (move into own subtree). */
-  private async depth(o: string, fileId: string, avoid?: string): Promise<number> {
-    let id = fileId, d = 0;
-    while (id !== ROOT_ID) {
+  /** `dirId` and its ancestors below root, nearest first (length = depth of dirId; root = []). `avoid` on the chain
+   *  is a move into its own subtree. Callers put every chain rev into their batch expectations: a concurrent move of
+   *  any ancestor then fails the write, so depth and acyclicity are checked against the state actually written. */
+  private async ancestry(o: string, dirId: string, avoid?: string): Promise<Entry[]> {
+    const chain: Entry[] = [];
+    for (let id = dirId; id !== ROOT_ID;) {
       if (id === avoid) throw new FilesError('invalid_move');
-      if (++d > L.depthMax) throw new FilesError('depth_exceeded');
-      id = (await this.entry(o, id)).parentId;
+      if (chain.length >= L.depthMax) throw new FilesError('depth_exceeded');
+      const e = await this.entry(o, id);
+      chain.push(e); id = e.parentId;
     }
-    return d;
+    return chain;
+  }
+  private revs(o: string, chain: Entry[]): Array<[string, number]> { return chain.map(e => [this.k(o, 'e', e.fileId), e.rev]); }
+
+  /** Proves the subtree under `dirId` is at most `budget` levels tall by a bounded breadth-first scan. Returns the
+   *  child-counter revs of every scanned directory: any create/move into the subtree bumps one, failing the batch. */
+  private async subtreeFits(o: string, dirId: string, budget: number): Promise<Array<[string, number]>> {
+    const expect: Array<[string, number]> = [];
+    let level = [dirId], height = 0, scanned = 0;
+    while (level.length) {
+      const next: string[] = [];
+      for (const d of level) {
+        expect.push([this.k(o, 'n', d), (await this.counter(o, d)).rev]);
+        const prefix = this.k(o, 'c', d) + '/';
+        for (let after: string | undefined; ;) {
+          const rows = await this.read(this.cat().list(prefix, { startAfter: after, limit: L.listPageMax }));
+          if ((scanned += rows.length) > L.moveScanMax) throw new FilesError('invalid_move', 'directory too large to move deeper');
+          if (rows.length) {
+            if (height + 1 > budget) throw new FilesError('depth_exceeded');
+            const got = await this.read(this.cat().getMany(rows.map(([, r]) => this.k(o, 'e', String(r.fileId)))));
+            for (const e of got.values()) if ((e as Entry).kind === 'dir') next.push((e as Entry).fileId);
+          }
+          if (rows.length < L.listPageMax) break;
+          after = rows[rows.length - 1]![0];
+        }
+      }
+      level = next; height++;
+    }
+    return expect;
   }
   private async counter(o: string, dirId: string): Promise<Counter> {
     return (await this.get<Counter>(this.k(o, 'n', dirId))) ?? { rev: 0, children: 0 };
@@ -276,8 +308,8 @@ export class FilesService {
     return this.tx<EntryResponse>(async () => {
       const rp = await this.replay(o, requestId, 'create', args);
       if (rp.hit) return { done: rp.result as EntryResponse };
-      const parent = await this.dir(o, parentId);
-      if (await this.depth(o, parentId) + 1 > L.depthMax) throw new FilesError('depth_exceeded');
+      const parent = await this.dir(o, parentId), chain = await this.ancestry(o, parentId);
+      if (chain.length + 1 > L.depthMax) throw new FilesError('depth_exceeded');
       const idxKey = this.k(o, 'c', parentId, fold);
       if (await this.get(idxKey)) throw new FilesError('name_conflict');
       const n = await this.counter(o, parentId);
@@ -285,7 +317,8 @@ export class FilesService {
       const e: Entry = { rev: 1, fileId, parentId, name, fold, kind, size: 0, mtime: this.now(), currentVersion: null, versionSeq: 0, pinned: false };
       const result: EntryResponse = { entry: this.view(e, undefined) };
       return { result, batch: {
-        expect: [[rp.key, 0], [idxKey, 0], [this.k(o, 'e', fileId), 0], [this.k(o, 'e', parentId), parent.rev], [this.k(o, 'n', parentId), n.rev]],
+        expect: [[rp.key, 0], [idxKey, 0], [this.k(o, 'e', fileId), 0], [this.k(o, 'e', parentId), parent.rev], [this.k(o, 'n', parentId), n.rev],
+          ...this.revs(o, chain)],
         put: [[this.k(o, 'e', fileId), e], [idxKey, { rev: 1, fileId }], [this.k(o, 'n', parentId), { rev: n.rev + 1, children: n.children + 1 }],
           ...(kind === 'dir' ? [[this.k(o, 'n', fileId), { rev: 1, children: 0 }] as [string, CatalogRecord]] : []),
           [rp.key, { rev: 1, op: 'create', args, result }]],
@@ -307,10 +340,18 @@ export class FilesService {
       if (e.rev !== expectedRev) throw new FilesError('stale_revision');
       const name = nn?.name ?? e.name, fold = nn?.fold ?? e.fold, parentId = np ?? e.parentId;
       const parent = await this.dir(o, parentId);
-      if (parentId !== e.parentId && (await this.depth(o, parentId, fileId)) + 1 > L.depthMax) throw new FilesError('depth_exceeded');
       const oldIdx = this.k(o, 'c', e.parentId, e.fold), newIdx = this.k(o, 'c', parentId, fold);
       const moved = oldIdx !== newIdx;
       const expect: Array<[string, number]> = [[rp.key, 0], [this.k(o, 'e', fileId), e.rev], [this.k(o, 'e', parentId), parent.rev]];
+      if (parentId !== e.parentId) {
+        // both chains are pinned: the new one for acyclicity and depth, the old one for the depth the subtree had
+        const to = await this.ancestry(o, parentId, fileId), from = await this.ancestry(o, e.parentId);
+        const depth = to.length + 1;
+        if (depth > L.depthMax) throw new FilesError('depth_exceeded');
+        expect.push(...this.revs(o, to), ...this.revs(o, from));
+        // a subtree that only moves sideways or up stays within the bound it already met; deeper needs proof
+        if (e.kind === 'dir' && depth > from.length + 1) expect.push(...await this.subtreeFits(o, fileId, L.depthMax - depth));
+      }
       const put: Array<[string, CatalogRecord]> = [], del: string[] = [];
       if (moved) {
         const oldRow = await this.get(oldIdx);
@@ -375,6 +416,39 @@ export class FilesService {
     const page = rows.slice(0, limit), last = page[page.length - 1];
     return { versions: page.map(([, v]) => this.versionView(v as Ver)),
       nextCursor: rows.length > limit && last ? encodeCursor(fileId, last[0].slice(prefix.length)) : null };
+  }
+
+  /** Metadata-only materialize plan: canonical path of `fileId` built from this owner's entries (each hop checked
+   *  against its parent's child index), plus the version's size/hash. The walk is re-read in one getMany and must be
+   *  unchanged, so a concurrent rename/move is never mixed into the path. At most depthMax hops; BlobStore untouched. */
+  async resolveManifest(ownerId: string, req: ResolveManifestRequest): Promise<ResolveManifestResponse> {
+    const o = this.owner(ownerId), fileId = fileIdOf(req?.fileId);
+    if (fileId === ROOT_ID) throw new FilesError('is_a_directory');
+    const want = req.versionId === undefined || req.versionId === null ? null : str(req.versionId, VER_RE, 'versionId');
+    attempt: for (let i = 0; i < ATTEMPTS; i++) {
+      const e = await this.entry(o, fileId);
+      if (e.kind !== 'file') throw new FilesError('is_a_directory');
+      const versionId = want ?? e.currentVersion;
+      if (versionId === null) throw new FilesError('not_found', 'file has no version');
+      const v = await this.get<Ver>(this.vKey(o, fileId, versionId));
+      if (!v || v.versionId !== versionId || v.fileId !== fileId) throw new FilesError('not_found', 'version not found');
+      const chain: Entry[] = [e]; // target first, then ancestors up to (excluding) root
+      for (let id = e.parentId; id !== ROOT_ID;) {
+        if (chain.length >= L.depthMax) throw new FilesError('depth_exceeded');
+        const d = await this.get<Entry>(this.k(o, 'e', id));
+        if (!d || d.kind !== 'dir') continue attempt;
+        chain.push(d); id = d.parentId;
+      }
+      const idx = chain.map(c => this.k(o, 'c', c.parentId, c.fold));
+      const again = await this.read(this.cat().getMany(chain.map(c => this.k(o, 'e', c.fileId)).concat(idx)));
+      if (chain.some((c, j) => again.get(this.k(o, 'e', c.fileId))?.rev !== c.rev || again.get(idx[j]!)?.fileId !== c.fileId)) continue;
+      const dirs: ManifestDir[] = [];
+      let path = '';
+      for (const d of chain.slice(1).reverse()) { path = path ? `${path}/${d.name}` : d.name; dirs.push({ fileId: d.fileId, name: d.name, path }); }
+      return { manifest: { rootId: ROOT_ID, fileId, name: e.name, path: path ? `${path}/${e.name}` : e.name, versionId,
+        versionSeq: v.versionSeq, size: v.size, sha256: v.sha256, dirs } };
+    }
+    throw new FilesError('catalog_busy');
   }
 
   /** Streams bytes of one immutable version (bounded range). The transport is wired by the caller; no provider URL. */
@@ -442,6 +516,8 @@ export class FilesService {
     if (!u) throw new FilesError('not_found');
     if ((u.phase !== 'begun' && u.phase !== 'body_written') || this.now() > u.expiresAt) throw new FilesError('invalid_upload_state');
     if (!body || typeof (body as ReadableStream).getReader !== 'function') throw bad('body is required');
+    // fenced before streaming (no paid transfer for a stale writer) and re-checked after; commit fences again atomically
+    if ((await this.ws(o)).writerEpoch !== u.writerEpoch) throw new FilesError('stale_writer');
     const h = this.hasher();
     let n = 0, failure: FilesError | null = null;
     const fail = (e: FilesError) => { failure = e; throw e; };
@@ -459,8 +535,10 @@ export class FilesService {
     try { await blobs.put(u.objectKey, limited, { size: u.size, sha256: u.sha256 }); }
     catch { throw failure ?? new FilesError('blob_unavailable'); }
     if (failure) throw failure;
+    const ws = await this.ws(o);
+    if (ws.writerEpoch !== u.writerEpoch) throw new FilesError('stale_writer'); // object stays for owned-object GC
     if (u.phase === 'begun') {
-      try { await this.cat().write({ expect: [[key, u.rev]], put: [[key, { ...u, rev: u.rev + 1, phase: 'body_written' }]], del: [] }); }
+      try { await this.cat().write({ expect: [[key, u.rev], [this.k(o, 'ws'), ws.rev]], put: [[key, { ...u, rev: u.rev + 1, phase: 'body_written' }]], del: [] }); }
       catch { /* phase is advisory; commit verifies the provider object itself */ }
     }
     return this.getUpload(o, { uploadId });
@@ -522,9 +600,11 @@ export class FilesService {
       if (!u) throw new FilesError('not_found');
       if (u.result) return { done: u.result };
       if (u.phase === 'aborted') throw new FilesError('invalid_upload_state', 'upload aborted');
+      const t = this.now();
+      if (t > u.expiresAt) throw new FilesError('invalid_upload_state', 'upload expired');
       const ws = await this.ws(o);
       if (ws.writerEpoch !== u.writerEpoch) throw new FilesError('stale_writer');
-      const e = await this.entry(o, u.fileId), t = this.now();
+      const e = await this.entry(o, u.fileId);
       const wsNext: Ws = { ...ws, rev: ws.rev + 1, reservedBytes: Math.max(0, ws.reservedBytes - u.size),
         usedBytes: ws.usedBytes + u.size, pendingUploads: Math.max(0, ws.pendingUploads - 1) };
       const expect: Array<[string, number]> = [[uKey, u.rev], [this.k(o, 'ws'), ws.rev], [this.k(o, 'e', e.fileId), e.rev]];
@@ -614,9 +694,11 @@ export class FilesService {
       if (!dirty && (versionId === null || versionId !== e.currentVersion)) throw new FilesError('not_verified');
       const next: Local = { rev: (cur?.rev ?? 0) + 1, machineId, fileId, versionId, dirty, seq, updatedAt: this.now() };
       const delta = (dirty ? 1 : 0) - (cur?.dirty ? 1 : 0);
-      const expect: Array<[string, number]> = [[lKey, cur?.rev ?? 0], [this.k(o, 'e', fileId), e.rev]];
+      // ws is always expected (even with no counter change): it carries the writer fence, so an advanceWriter landing
+      // between this read and the write rejects the batch and the retry reports stale_writer
+      const expect: Array<[string, number]> = [[lKey, cur?.rev ?? 0], [this.k(o, 'e', fileId), e.rev], [this.k(o, 'ws'), ws.rev]];
       const put: Array<[string, CatalogRecord]> = [[lKey, next]];
-      if (delta) { expect.push([this.k(o, 'ws'), ws.rev]); put.push([this.k(o, 'ws'), { ...ws, rev: ws.rev + 1, dirtyFiles: Math.max(0, ws.dirtyFiles + delta) }]); }
+      if (delta) put.push([this.k(o, 'ws'), { ...ws, rev: ws.rev + 1, dirtyFiles: Math.max(0, ws.dirtyFiles + delta) }]);
       return { result: { local: this.localView(next), applied: true }, batch: { expect, put, del: [] } };
     });
   }
