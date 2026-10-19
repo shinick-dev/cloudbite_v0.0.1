@@ -579,3 +579,26 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   .cb-nav-btn, .cb-card, .cb-tool, .cb-primary, .cb-secondary, .cb-expert-opt { transition: background-color .15s, border-color .15s, color .15s; }
   .cb-disclosure > summary > .i-chevron { transition: transform .18s cubic-bezier(.16, 1, .3, 1); }
 }
+
+/* ── 제품 v3: 주장 출처·채택 · 검토가 읽은 산출물 · 저자 응답 */
+.cb-prov { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.cb-prov > p { margin: 0; overflow-wrap: anywhere; }
+.cb-prov-summary, .cb-prov-origin, .cb-art-files { margin: 0; padding-left: 18px; font-size: 13px; overflow-wrap: anywhere; }
+.cb-prov-claims { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.cb-prov-claim { border-left: 3px solid var(--line-strong); padding: 4px 0 4px 12px; min-width: 0; }
+.cb-prov-claim.is-hint { border-left-color: var(--conditional); background: var(--conditional-soft); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.cb-prov-claim.is-user-adopted { border-left-color: var(--support); }
+.cb-prov-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 4px; }
+.cb-prov-confirm > blockquote, .cb-prov-confirm > p { flex-basis: 100%; margin: 0; }
+.cb-prov-confirm > blockquote { padding: 4px 10px; border-left: 2px solid var(--blue); overflow-wrap: anywhere; }
+.cb-art-role h5, .cb-ar-author h5 { margin: 6px 0 2px; font-size: 13px; }
+.cb-art-files li { overflow-wrap: anywhere; }
+.cb-ar-author { background: var(--blue-softer); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.cb-ar-author p { margin: 0; overflow-wrap: anywhere; }
+.cb-ar-original { white-space: pre-wrap; color: var(--muted); }
+.cb-ar-answer { margin-top: 4px; overflow-wrap: anywhere; }
+.cb-chip.is-revise { background: var(--conditional-soft); color: #6e4a00; }
+.cb-chip.is-withdraw { background: var(--concern-soft); color: #8c1d2c; }
+.cb-chip.is-maintain { background: var(--support-soft); color: #0b5a3b; }
+.cb-ar-ask { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.cb-ar-ask > p { margin: 0; }

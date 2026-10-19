@@ -19,18 +19,24 @@ import type { ProjectPreviousRound, RoundOmission, RoundOption } from '../src/cl
 import type { CloudbiteAccessRequest, CloudbiteAccessSession } from '../src/cloudbite-access-contract';
 import type { HistoryList, HistoryDetail, HistoryReport, HistoryIssue, HistoryFeedback } from '../src/cloudbite-history-contract';
 import type { CatalogueMaxRoles, ProjectMaxExperts } from '../src/cloudbite-catalogue-limits';
+import type { ClaimAdoption, ClaimStanding, LedgerClaim, ProvenanceLedger, ProvenanceState } from '../src/cloudbite-provenance';
+import type { AuthorResponseParsed, AuthorResponsePlan } from '../src/cloudbite-author-response';
 
 type Mode = 'demo' | 'live';
 type View = 'home' | 'guide' | 'help' | 'settings' | 'history';
-type ConsoleExpert = ExpertRun & { invalidOpinion?: boolean };
+/** invalidAuthorResponse: 서버가 보낸 저자 응답을 읽을 수 없다 (서버가 거부한 응답 { invalid } 와는 다르다) */
+type ConsoleExpert = ExpertRun & { invalidOpinion?: boolean; invalidAuthorResponse?: boolean };
+type ConsoleReview = ProjectCrossReview & { invalidArtifactCoverage?: boolean };
+type Provenance = { ledger: ProvenanceLedger; state: ProvenanceState };
 /** 서버가 저장한 결정 메모. 모양을 검사해 그대로 받으며, 원문 의견은 따로 그대로 남는다 */
 type ConsoleMemo = ProjectMemo;
 /** invalidCrossReview / invalidMemo / invalidSignals: 서버가 이 콘솔이 읽을 수 없는 값을 보냈다 (그리지 않고 그렇다고 밝힌다).
  *  memoBudget: 서버 사용량 장부의 메모 칸 (없으면 모름 — 서버가 판단한다) */
-type ConsoleProject = Omit<ProjectRun, 'experts'> & {
-  experts: ConsoleExpert[]; invalidCrossReview?: boolean;
+type ConsoleProject = Omit<ProjectRun, 'experts' | 'crossReview'> & {
+  experts: ConsoleExpert[]; crossReview?: ConsoleReview; invalidCrossReview?: boolean;
   memo?: ConsoleMemo; invalidMemo?: boolean; evidenceSignals?: EvidenceSignals; invalidSignals?: boolean;
-  previousRound?: ProjectPreviousRound; invalidRound?: boolean; memoBudget?: BudgetPhaseView;
+  previousRound?: ProjectPreviousRound; invalidRound?: boolean; invalidAuthorPlan?: boolean; memoBudget?: BudgetPhaseView;
+  invalidProvenance?: boolean;
 };
 interface Limits { min: number; max: number }
 interface FormInput { title: string; objective: string; context: string; expertIds: string[] }
@@ -352,8 +358,144 @@ const P2_KO: typeof P2_EN = {
   memoReading: '저장된 메모 상태를 읽는 중입니다 (새 메모 요청은 보내지 않습니다)…',
 };
 
+// ── 제품 v3 문구 (주장 출처·채택 · 검토가 읽은 산출물 · 저자 응답). EN.p3 / KO.p3, KO 는 같은 모양
+const P3_EN = {
+  provTitle: 'Claim provenance',
+  provNote: 'Who wrote each claim and whether you adopted it. This is structure, not fact-checking: nothing here verifies a claim, retrieves a source or reads full reports.',
+  provCounts: (stated: number, proposals: number, hinted: number, adopted: number) => `${stated} user statements · ${proposals} generated proposals (${hinted} with numbers or thresholds) · ${adopted} adopted by a user`,
+  provStale: (n: number) => `${plural(n, 'earlier adoption')} no longer match the current claim text and give no standing.`,
+  provCoverage: (experts: number, omitted: number, items: number, cut: number, refs: number) => `Read ${plural(experts, 'role')} (${omitted} omitted); ${items} items omitted, ${cut} claims shortened, ${refs} references omitted.`,
+  provCarried: (n: number, bad: number) => `${plural(n, 'adoption')} carried from the previous round${bad ? `, ${bad} unreadable dropped` : ''}.`,
+  provInvalid: 'The server sent claim provenance this console cannot read, so it is not shown and nothing can be adopted.',
+  provGroup: { hinted: 'Generated proposals with numbers or thresholds', adopted: 'Adopted by a user', proposals: 'Other generated proposals', stated: 'Your own statements' },
+  provStanding: { 'user-stated': 'User statement', 'generated-proposal': 'Generated proposal', 'user-adopted': 'User-adopted' },
+  provHint: 'Contains a number or threshold — a proposal, not a requirement',
+  provMore: (n: number) => `Show ${n} more`,
+  provOrigin: 'Origin and standing',
+  provOriginName: { 'user-statement': 'Written by the user in the brief', 'generated-opinion': 'Written by an expert model', 'parent-adoption': 'Adopted in the previous round' },
+  provField: (field: string, index: number) => `Field: ${field} · item ${index + 1}`,
+  provExpert: (name: string) => `Role: ${name}`,
+  provRef: { 'supplied-document': 'document supplied with this project', 'catalogue-listed': 'listed in the role catalogue (not retrieved)', 'not-found': 'not found' },
+  provAdoptedIn: (project: string, at: string) => `Adopted in ${project} at ${at} (recorded by the server)`,
+  provTruncated: 'This claim was shortened, so its full text was never shown and it cannot be adopted.',
+  provAdopt: 'Adopt…',
+  provAdoptConfirm: 'Adopt this exact text',
+  provAdoptCancel: 'Keep as proposal',
+  provAdoptAsk: 'You are adopting exactly this text as your own requirement. Adoption is your decision, not verification. The original memo stays unchanged and is not regenerated.',
+  provAdopting: 'Saving the adoption…',
+  provReading: 'Checking the saved state before anything else is sent…',
+  provAdopted: 'Adopted. The saved project was read again.',
+  provAdoptedSeen: 'The saved project already shows this adoption.',
+  provAdoptFailed: (why: string) => `Not adopted: ${why}`,
+  provAdoptUnknown: 'The server could not be reached. The saved state was read again; adopt again only if it still shows a proposal.',
+  provAdoptForeign: 'This project was not found or is not yours.',
+  provAdoptWait: 'Adoption is possible once the project has finished and no review or memo is running.',
+  provMemoNote: 'The decision memo is a saved snapshot: adopting a claim later does not change or regenerate it.',
+  mdProvTitle: 'Claim provenance',
+  artTitle: (roles: number, files: number) => `Artifact text the reviewers read (${plural(roles, 'role')}, ${plural(files, 'file')})`,
+  artNote: 'Reviewers read these stored text excerpts. No code was run, no data was parsed and nothing was independently verified.',
+  artFile: (path: string, a: number, b: number, total: number) => `${path} · lines ${a}–${b} of ${total}`,
+  artExcerptCut: 'excerpt cut at the reading limit',
+  artStoredCut: 'stored copy was already truncated',
+  artOmitted: (path: string, reason: string) => `${path}: not read (${reason})`,
+  artReason: { 'opinion-duplicate': 'duplicate of the opinion', 'knowledge-audit': 'knowledge audit file', 'runner-manifest': 'runner manifest', 'missing-text': 'no stored text',
+    binary: 'binary', 'unsafe-path': 'unsafe path', 'duplicate-path': 'duplicate path', 'file-limit': 'file limit', budget: 'reading budget' } as Record<string, string>,
+  artNone: 'No stored artifact text was given to the reviewers.',
+  artInvalid: 'The server sent artifact coverage this console cannot read, so it is not shown.',
+  arTitle: 'Author response',
+  arNote: 'Authors answered the review findings on their own evidence. A response is the author’s position, not a verification or a ruling on the reviewer. The original opinions and memo of the earlier project are unchanged.',
+  arFinding: (reviewer: string, verdict: string, author: string, n: number) => `${reviewer} · ${verdict} · ${author}, evidence ${n}`,
+  arOriginal: (dir: string, conf: number) => `Original opinion (earlier project, unchanged): ${dir} · self-assessed confidence ${conf}%`,
+  arDisposition: { revise: 'Revise', withdraw: 'Withdraw', maintain: 'Maintain' },
+  arMissing: 'No response to this finding',
+  arPending: 'No response yet (the role has not completed)',
+  arStatus: { complete: 'All findings answered', partial: 'Some findings answered', none: 'No findings answered' },
+  arAnswered: (a: number, e: number) => `${a} of ${e} answered`,
+  arInvalid: (why: string) => `Response rejected by the server: ${why}`,
+  arUnreadable: 'The server sent a response this console cannot read, so it is not shown.',
+  arSeparate: 'This is separate from the role’s opinion status above.',
+  arCapped: (included: number, eligible: number) => `${included} of ${eligible} eligible findings were included.`,
+  arUnselected: (s: string) => `Affected authors not selected: ${s}`,
+  arPlanInvalid: 'The server sent an author-response plan this console cannot read, so it is not shown.',
+  arReviewer: 'Reviewer’s rationale',
+  arEvidence: 'Author’s original evidence',
+  arAsk: 'Ask authors to respond',
+  arAskHelp: 'Opens a new follow-up project for the authors whose evidence was challenged or found insufficient. You choose which of them run, prepare a plan and confirm the run; nothing runs or is paid for automatically, and this project stays unchanged.',
+  arNone: 'No completed author has a challenged or insufficient finding, so there is nothing to answer.',
+  fuAuthor: (names: string) => `Author response round. Only these affected authors can be selected: ${names}. The child project uses its own normal budget.`,
+  fuAuthorOnly: 'Author response: select only affected authors (manual selection; Jev routing is not used).',
+  fuAuthorNone: 'Author response: select at least one affected author.',
+};
+const P3_KO: typeof P3_EN = {
+  provTitle: '주장 출처',
+  provNote: '각 주장을 누가 썼고 사용자가 채택했는지를 보입니다. 구조일 뿐 사실 확인이 아닙니다. 여기서는 주장을 검증하거나 출처를 가져오거나 전체 보고서를 읽지 않습니다.',
+  provCounts: (stated: number, proposals: number, hinted: number, adopted: number) => `사용자 진술 ${stated}개 · 생성된 제안 ${proposals}개(숫자·기준 포함 ${hinted}개) · 사용자 채택 ${adopted}개`,
+  provStale: (n: number) => `이전 채택 ${n}개는 지금 주장 글과 맞지 않아 효력이 없습니다.`,
+  provCoverage: (experts: number, omitted: number, items: number, cut: number, refs: number) => `역할 ${experts}개를 읽었습니다(${omitted}개 빠짐). 항목 ${items}개 빠짐, 주장 ${cut}개 줄임, 참조 ${refs}개 빠짐.`,
+  provCarried: (n: number, bad: number) => `이전 라운드에서 넘어온 채택 ${n}개${bad ? `, 읽을 수 없어 버린 것 ${bad}개` : ''}.`,
+  provInvalid: '서버가 보낸 주장 출처를 이 화면이 읽을 수 없어 표시하지 않으며 채택할 수 없습니다.',
+  provGroup: { hinted: '숫자·기준이 있는 생성된 제안', adopted: '사용자가 채택함', proposals: '그 밖의 생성된 제안', stated: '사용자가 쓴 진술' },
+  provStanding: { 'user-stated': '사용자 진술', 'generated-proposal': '생성된 제안', 'user-adopted': '사용자 채택' },
+  provHint: '숫자나 기준이 있습니다 — 요구 사항이 아니라 제안입니다',
+  provMore: (n: number) => `${n}개 더 보기`,
+  provOrigin: '출처와 지위',
+  provOriginName: { 'user-statement': '사용자가 브리프에 쓴 글', 'generated-opinion': '전문가 모델이 쓴 글', 'parent-adoption': '이전 라운드에서 채택한 글' },
+  provField: (field: string, index: number) => `칸: ${field} · ${index + 1}번째 항목`,
+  provExpert: (name: string) => `역할: ${name}`,
+  provRef: { 'supplied-document': '이 프로젝트에 넣은 자료', 'catalogue-listed': '역할 카탈로그에 있음(가져오지 않음)', 'not-found': '찾지 못함' },
+  provAdoptedIn: (project: string, at: string) => `${project} 에서 ${at} 에 채택(서버 기록)`,
+  provTruncated: '이 주장은 줄여 저장되어 전체 글이 보인 적이 없으므로 채택할 수 없습니다.',
+  provAdopt: '채택…',
+  provAdoptConfirm: '이 글 그대로 채택',
+  provAdoptCancel: '제안으로 두기',
+  provAdoptAsk: '이 글을 정확히 그대로 사용자의 요구 사항으로 채택합니다. 채택은 사용자의 결정이며 검증이 아닙니다. 원래 메모는 바뀌지 않고 다시 만들지 않습니다.',
+  provAdopting: '채택을 저장하는 중…',
+  provReading: '다른 요청을 보내기 전에 저장된 상태를 확인하는 중…',
+  provAdopted: '채택했습니다. 저장된 프로젝트를 다시 읽었습니다.',
+  provAdoptedSeen: '저장된 프로젝트에 이미 이 채택이 있습니다.',
+  provAdoptFailed: (why: string) => `채택하지 못했습니다: ${why}`,
+  provAdoptUnknown: '서버에 닿지 못했습니다. 저장된 상태를 다시 읽었으니, 여전히 제안으로 보일 때만 다시 채택하세요.',
+  provAdoptForeign: '이 프로젝트를 찾을 수 없거나 사용자의 프로젝트가 아닙니다.',
+  provAdoptWait: '프로젝트가 끝나고 진행 중인 검토·메모가 없을 때 채택할 수 있습니다.',
+  provMemoNote: '결정 메모는 저장된 시점의 기록입니다. 나중에 주장을 채택해도 메모는 바뀌거나 다시 만들어지지 않습니다.',
+  mdProvTitle: '주장 출처',
+  artTitle: (roles: number, files: number) => `검토자가 읽은 산출물 글 (역할 ${roles}개, 파일 ${files}개)`,
+  artNote: '검토자는 저장된 글 발췌를 읽었습니다. 코드를 실행하거나 데이터를 분석하지 않았고 아무것도 따로 검증하지 않았습니다.',
+  artFile: (path: string, a: number, b: number, total: number) => `${path} · ${total}줄 중 ${a}–${b}줄`,
+  artExcerptCut: '읽기 한도에서 발췌가 잘림',
+  artStoredCut: '저장본이 이미 잘려 있음',
+  artOmitted: (path: string, reason: string) => `${path}: 읽지 않음 (${reason})`,
+  artReason: { 'opinion-duplicate': '의견과 중복', 'knowledge-audit': '지식 감사 파일', 'runner-manifest': '실행기 목록', 'missing-text': '저장된 글 없음',
+    binary: '바이너리', 'unsafe-path': '안전하지 않은 경로', 'duplicate-path': '중복 경로', 'file-limit': '파일 수 한도', budget: '읽기 한도' },
+  artNone: '검토자에게 저장된 산출물 글이 주어지지 않았습니다.',
+  artInvalid: '서버가 보낸 산출물 범위를 이 화면이 읽을 수 없어 표시하지 않습니다.',
+  arTitle: '저자 응답',
+  arNote: '저자가 자기 근거에 대한 검토 지적에 답했습니다. 응답은 저자의 입장일 뿐 검증이나 검토자에 대한 판정이 아닙니다. 이전 프로젝트의 원래 의견과 메모는 바뀌지 않습니다.',
+  arFinding: (reviewer: string, verdict: string, author: string, n: number) => `${reviewer} · ${verdict} · ${author}, 근거 ${n}`,
+  arOriginal: (dir: string, conf: number) => `원래 의견(이전 프로젝트, 바뀌지 않음): ${dir} · 자체 평가 확신도 ${conf}%`,
+  arDisposition: { revise: '수정', withdraw: '철회', maintain: '유지' },
+  arMissing: '이 지적에 대한 응답 없음',
+  arPending: '아직 응답 없음 (역할이 끝나지 않음)',
+  arStatus: { complete: '모든 지적에 응답', partial: '일부 지적에 응답', none: '응답한 지적 없음' },
+  arAnswered: (a: number, e: number) => `${e}개 중 ${a}개 응답`,
+  arInvalid: (why: string) => `서버가 응답을 거부했습니다: ${why}`,
+  arUnreadable: '서버가 보낸 응답을 이 화면이 읽을 수 없어 표시하지 않습니다.',
+  arSeparate: '위의 역할 의견 상태와는 별개입니다.',
+  arCapped: (included: number, eligible: number) => `해당 지적 ${eligible}개 중 ${included}개를 넣었습니다.`,
+  arUnselected: (s: string) => `고르지 않은 해당 저자: ${s}`,
+  arPlanInvalid: '서버가 보낸 저자 응답 계획을 이 화면이 읽을 수 없어 표시하지 않습니다.',
+  arReviewer: '검토자의 근거',
+  arEvidence: '저자의 원래 근거',
+  arAsk: '저자에게 응답 요청',
+  arAskHelp: '근거가 반박되었거나 부족하다고 지적된 저자들을 위한 새 후속 프로젝트를 엽니다. 어떤 저자를 실행할지 고르고 계획을 준비해 실행을 확인합니다. 자동으로 실행되거나 비용이 드는 것은 없으며 이 프로젝트는 바뀌지 않습니다.',
+  arNone: '반박되었거나 부족하다고 지적된 완료 저자가 없어 응답할 것이 없습니다.',
+  fuAuthor: (names: string) => `저자 응답 라운드. 해당 저자만 고를 수 있습니다: ${names}. 새 프로젝트는 자기의 보통 예산을 씁니다.`,
+  fuAuthorOnly: '저자 응답: 해당 저자만 직접 고르세요 (Jev 경로 선택은 쓰지 않습니다).',
+  fuAuthorNone: '저자 응답: 해당 저자를 한 명 이상 고르세요.',
+};
+
 const EN = {
-  p2: P2_EN,
+  p2: P2_EN, p3: P3_EN,
   docTitle: 'Cloudbite — Expert sandbox workspace',
   langGroup: 'Language',
   langChanged: 'Language: English',
@@ -816,7 +958,7 @@ const EN = {
 type Messages = typeof EN;
 
 const KO: Messages = {
-  p2: P2_KO,
+  p2: P2_KO, p3: P3_KO,
   docTitle: 'Cloudbite — 전문가 샌드박스 작업공간',
   langGroup: '언어',
   langChanged: '언어: 한국어',
@@ -1648,6 +1790,10 @@ function normalizeExpertRun(raw: unknown, i: number): ConsoleExpert | null {
   if (error) run.error = error;
   if (opinion) run.opinion = opinion;
   else if (raw.opinion !== undefined && raw.opinion !== null) run.invalidOpinion = true;
+  if (raw.authorResponse !== undefined && raw.authorResponse !== null) {
+    const ar = normalizeAuthorResponse(raw.authorResponse, expertId);
+    if (ar) run.authorResponse = ar; else run.invalidAuthorResponse = true;
+  }
   return run;
 }
 
@@ -1666,8 +1812,16 @@ function normalizeProject(raw: unknown): ConsoleProject | null {
   const memoBudget = isObj(raw.usage) ? phaseView(raw.usage.memo) : null;
   const budget = isObj(b.budget) && BUDGET_FIELDS.every(f => isInt((b.budget as Record<string, unknown>)[f], BUDGET_LIMITS[f][0], BUDGET_LIMITS[f][1]))
     ? Object.fromEntries(BUDGET_FIELDS.map(f => [f, (b.budget as Record<string, number>)[f]])) as unknown as ProjectBudget : null;
-  const revision = isObj(b.revision) && typeof b.revision.parentId === 'string' && REVISION.parentId.test(b.revision.parentId) && typeof b.revision.changeSummary === 'string'
-    ? { parentId: b.revision.parentId, changeSummary: clip(b.revision.changeSummary, REVISION.changeSummary) } : null;
+  const revision: ProjectRevision | null = isObj(b.revision) && typeof b.revision.parentId === 'string' && REVISION.parentId.test(b.revision.parentId) && typeof b.revision.changeSummary === 'string'
+    ? { parentId: b.revision.parentId, changeSummary: clip(b.revision.changeSummary, REVISION.changeSummary),
+      ...(typeof b.revision.reviewSnapshotHash === 'string' && SHA256.test(b.revision.reviewSnapshotHash) ? { reviewSnapshotHash: b.revision.reviewSnapshotHash } : {}) } : null;
+  const prov = opt(raw.provenance, v => normalizeProvenance(v, id));
+  // 저자 응답 계획은 이전 라운드 안의 선택 필드다: 읽을 수 없으면 그 계획만 빼고 그렇다고 밝힌다 (비교·참고는 그대로)
+  let authorPlan: AuthorResponsePlan | null | undefined;
+  if (round && isObj(raw.previousRound) && raw.previousRound.authorResponse !== undefined && raw.previousRound.authorResponse !== null) {
+    authorPlan = normalizeAuthorPlan(raw.previousRound.authorResponse, round.parentId);
+    if (authorPlan) round.authorResponse = authorPlan;
+  }
   return {
     id, status, experts, createdAt: num(raw.createdAt) ?? 0, updatedAt: num(raw.updatedAt) ?? 0,
     brief: {
@@ -1683,7 +1837,9 @@ function normalizeProject(raw: unknown): ConsoleProject | null {
     ...(memo ? { memo } : memo === null ? { invalidMemo: true } : {}),
     ...(signals ? { evidenceSignals: signals } : signals === null ? { invalidSignals: true } : {}),
     ...(round ? { previousRound: round } : round === null ? { invalidRound: true } : {}),
+    ...(authorPlan === null ? { invalidAuthorPlan: true } : {}),
     ...(memoBudget ? { memoBudget } : {}),
+    ...(prov ? { provenance: prov } : prov === null ? { invalidProvenance: true } : {}),
   };
 }
 
@@ -1872,7 +2028,7 @@ function normalizeClaims(raw: unknown): EvidenceClaim[] | undefined {
 }
 const REVIEW_STATUSES: ProjectCrossReview['status'][] = ['running', 'completed', 'failed'];
 /** 교차 검토. 실행 위치·상태·판정 중 하나라도 모르는 값이면 전체를 null 로 돌려 그리지 않는다 (짐작해 그리지 않는다) */
-function normalizeCrossReview(raw: unknown): ProjectCrossReview | null {
+function normalizeCrossReview(raw: unknown): ConsoleReview | null {
   if (!isObj(raw) || raw.execution !== 'server-nosana' || !REVIEW_STATUSES.includes(raw.status as ProjectCrossReview['status'])) return null;
   if (raw.reports !== undefined && !Array.isArray(raw.reports)) return null;
   const reports: CrossReviewReport[] = [];
@@ -1903,11 +2059,216 @@ function normalizeCrossReview(raw: unknown): ProjectCrossReview | null {
     avail.push({ reviewerExpertId: clip(t.reviewerExpertId, 80), targetExpertId: clip(t.targetExpertId, 80), evidenceIndex: t.evidenceIndex,
       verdict: t.verdict as CrossReviewFinding['verdict'], availability: (a ?? []) as CrossReviewTextAvailability['availability'], textBasis: t.textBasis as CrossReviewTextAvailability['textBasis'] });
   }
+  const art = raw.artifactCoverage === undefined || raw.artifactCoverage === null ? undefined : normalizeArtifactCoverage(raw.artifactCoverage);
   return {
     status: raw.status as ProjectCrossReview['status'], snapshotHash: str(raw.snapshotHash, 128), startedAt: num(raw.startedAt) ?? 0,
     ...(completedAt !== null ? { completedAt } : {}), reports, ...(error ? { error } : {}), execution: 'server-nosana',
     ...(coverage ? { coverage } : {}), ...(disclosure ? { disclosure } : {}), ...(avail.length ? { textAvailability: avail } : {}),
+    ...(art ? { artifactCoverage: art } : art === null ? { invalidArtifactCoverage: true } : {}),
   };
+}
+type ArtifactCoverage = NonNullable<ProjectCrossReview['artifactCoverage']>;
+const SHA256 = /^[0-9a-f]{64}$/;
+/** 검토자가 읽은 저장 산출물 발췌의 범위 (파일·해시·줄 범위·잘림·빠진 이유). 하나라도 틀리면 null → 그리지 않고 밝힌다 */
+function normalizeArtifactCoverage(raw: unknown): ArtifactCoverage | null {
+  return every(raw, PROJECT_MAX, a => {
+    if (!isObj(a) || typeof a.expertId !== 'string' || !a.expertId || typeof a.packetSha256 !== 'string' || !SHA256.test(a.packetSha256)) return null;
+    const files = every(a.files, 50, f => isObj(f) && typeof f.path === 'string' && f.path && typeof f.sha256 === 'string' && SHA256.test(f.sha256)
+      && isInt(f.startLine, 1) && isInt(f.endLine) && isInt(f.totalLines) && f.endLine >= f.startLine - 1 && f.endLine <= f.totalLines && isBool(f.excerptTruncated) && isBool(f.storedTruncated)
+      ? { path: clip(f.path, 300), sha256: f.sha256, startLine: f.startLine, endLine: f.endLine, totalLines: f.totalLines, excerptTruncated: f.excerptTruncated, storedTruncated: f.storedTruncated } : null);
+    const omitted = every(a.omitted, 200, o => isObj(o) && typeof o.path === 'string' && typeof o.reason === 'string' && o.reason ? { path: clip(o.path, 300), reason: clip(o.reason, 60) } : null);
+    return files && omitted ? { expertId: clip(a.expertId, 80), packetSha256: a.packetSha256, files, omitted } : null;
+  });
+}
+
+// ───────── 주장 출처 (src/cloudbite-provenance.ts). 서버가 다시 계산한 장부와 채택 상태를 엄격히 받는다. 지위는 구조일 뿐 검증이 아니다
+const CLAIM_ID = /^cl-[0-9a-f]{16}$/, PROV_SNAPSHOT = /^ps-[0-9a-f]{16}$/;
+const CLAIM_ORIGINS: LedgerClaim['origin'][] = ['user-statement', 'generated-opinion', 'parent-adoption'];
+const CLAIM_KINDS: LedgerClaim['kind'][] = ['objective', 'context', 'option', 'constraint', 'success-criterion', 'known-fact', 'user-assumption', 'unknown',
+  'opinion-summary', 'opinion-evidence', 'opinion-assumption', 'opinion-action', 'adopted-statement'];
+const REF_AVAIL: LedgerClaim['refs'][number]['availability'][] = ['supplied-document', 'catalogue-listed', 'not-found'];
+/** 100 역할 × (요약 + 3목록 × 12) + 브리프 + 넘어온 채택 64 를 넉넉히 덮는 상한. 넘으면 읽지 않는다 */
+const PROV_MAX_CLAIMS = 6000;
+const PROV_TEXT = 1000;
+const adoptedIn = (v: unknown) => isObj(v) && typeof v.projectId === 'string' && typeof v.actor === 'string' && isInt(v.at) ? { projectId: clip(v.projectId, 128), actor: clip(v.actor, 200), at: v.at } : null;
+function normalizeProvenance(raw: unknown, projectId: string): Provenance | null {
+  if (!isObj(raw) || !isObj(raw.ledger) || !isObj(raw.state)) return null;
+  const l = raw.ledger, s = raw.state, c = l.coverage;
+  if (l.version !== 'cloudbite-provenance/v1' || l.projectId !== projectId || typeof l.snapshot !== 'string' || !PROV_SNAPSHOT.test(l.snapshot)) return null;
+  if (!isObj(c) || c.factsVerified !== false || c.sourcesRetrieved !== false
+    || !(['experts', 'expertsOmitted', 'itemsOmitted', 'textTruncated', 'refsOmitted', 'carriedAdoptions', 'carriedInvalid'] as const).every(k => isInt(c[k]))) return null;
+  const ids = new Set<string>();
+  const claims = every(l.claims, PROV_MAX_CLAIMS, x => {
+    if (!isObj(x) || typeof x.id !== 'string' || !CLAIM_ID.test(x.id) || ids.has(x.id) || !CLAIM_ORIGINS.includes(x.origin as LedgerClaim['origin'])
+      || !CLAIM_KINDS.includes(x.kind as LedgerClaim['kind']) || typeof x.field !== 'string' || !isInt(x.index) || typeof x.text !== 'string' || x.text.length > PROV_TEXT
+      || !isBool(x.textTruncated) || !isBool(x.numericThresholdHint) || (x.expertId !== undefined && typeof x.expertId !== 'string')) return null;
+    const refs = every(x.refs, 8, r => isObj(r) && (r.kind === 'document' || r.kind === 'knowledge') && typeof r.id === 'string'
+      && REF_AVAIL.includes(r.availability as LedgerClaim['refs'][number]['availability']) ? { kind: r.kind as 'document' | 'knowledge', id: clip(r.id, 120), availability: r.availability as LedgerClaim['refs'][number]['availability'] } : null);
+    const ad = x.adoptedIn === undefined ? undefined : adoptedIn(x.adoptedIn);
+    if (!refs || ad === null || (x.origin === 'parent-adoption') !== !!ad) return null;
+    ids.add(x.id);
+    // 글은 자르지 않는다: 채택은 서버의 글과 정확히 같아야 한다
+    const claim: LedgerClaim = { id: x.id, origin: x.origin as LedgerClaim['origin'], kind: x.kind as LedgerClaim['kind'], field: clip(x.field, 200), index: x.index,
+      ...(typeof x.expertId === 'string' ? { expertId: clip(x.expertId, 80) } : {}), text: x.text, textTruncated: x.textTruncated, refs, numericThresholdHint: x.numericThresholdHint,
+      ...(ad ? { adoptedIn: ad } : {}) };
+    return claim;
+  });
+  if (!claims) return null;
+  if (s.version !== 'cloudbite-provenance/v1' || s.projectId !== projectId) return null;
+  const seen = new Set<string>();
+  const adoptions = every(s.adoptions, 64, a => {
+    if (!isObj(a) || typeof a.claimId !== 'string' || !CLAIM_ID.test(a.claimId) || seen.has(a.claimId) || typeof a.text !== 'string' || typeof a.snapshot !== 'string'
+      || !PROV_SNAPSHOT.test(a.snapshot) || a.projectId !== projectId || typeof a.actor !== 'string' || !isInt(a.at) || a.meaning !== 'user-adoption-not-verification') return null;
+    seen.add(a.claimId);
+    const out: ClaimAdoption = { claimId: a.claimId, text: a.text, snapshot: a.snapshot, projectId, actor: clip(a.actor, 200), at: a.at, meaning: 'user-adoption-not-verification' };
+    return out;
+  });
+  if (!adoptions) return null;
+  return {
+    ledger: { version: 'cloudbite-provenance/v1', projectId, snapshot: l.snapshot, claims,
+      coverage: { experts: c.experts as number, expertsOmitted: c.expertsOmitted as number, itemsOmitted: c.itemsOmitted as number, textTruncated: c.textTruncated as number,
+        refsOmitted: c.refsOmitted as number, carriedAdoptions: c.carriedAdoptions as number, carriedInvalid: c.carriedInvalid as number, factsVerified: false, sourcesRetrieved: false } },
+    state: { version: 'cloudbite-provenance/v1', projectId, adoptions },
+  };
+}
+/** 서버 effectiveAdoptions·claimStanding 과 같은 규칙: 지금 장부에 같은 id·같은 글로 남은 채택만 효력이 있다 */
+function provenanceView(pv: Provenance): { standing: Map<string, ClaimStanding>; active: ClaimAdoption[]; stale: ClaimAdoption[] } {
+  const active: ClaimAdoption[] = [], stale: ClaimAdoption[] = [];
+  const byId = new Map(pv.ledger.claims.map(c => [c.id, c]));
+  for (const a of pv.state.adoptions) { const c = byId.get(a.claimId); (c && c.text === a.text && !c.textTruncated ? active : stale).push(a); }
+  const standing = new Map<string, ClaimStanding>();
+  for (const c of pv.ledger.claims) standing.set(c.id, c.origin === 'user-statement' ? 'user-stated' : c.origin === 'parent-adoption' ? 'user-adopted'
+    : active.some(a => a.claimId === c.id && a.text === c.text) ? 'user-adopted' : 'generated-proposal');
+  return { standing, active, stale };
+}
+type ProvGroup = keyof typeof P3_EN.provGroup;
+/** 묶음: 숫자·기준이 있는 제안을 먼저 (요구 사항처럼 읽히기 쉬워서), 그다음 채택된 것, 그 밖의 제안, 사용자 진술 */
+function provenanceGroups(pv: Provenance): Record<ProvGroup, LedgerClaim[]> {
+  const { standing } = provenanceView(pv);
+  const g: Record<ProvGroup, LedgerClaim[]> = { hinted: [], adopted: [], proposals: [], stated: [] };
+  for (const c of pv.ledger.claims) {
+    const s = standing.get(c.id);
+    if (s === 'user-stated') g.stated.push(c);
+    else if (s === 'user-adopted') g.adopted.push(c);
+    else if (c.numericThresholdHint) g.hinted.push(c);
+    else g.proposals.push(c);
+  }
+  return g;
+}
+function provenanceLines(pv: Provenance, m: Messages): string[] {
+  const t = m.p3, g = provenanceGroups(pv), { stale } = provenanceView(pv), c = pv.ledger.coverage;
+  return [
+    t.provCounts(g.stated.length, g.hinted.length + g.proposals.length, g.hinted.length, g.adopted.length),
+    ...(stale.length ? [t.provStale(stale.length)] : []),
+    t.provCoverage(c.experts, c.expertsOmitted, c.itemsOmitted, c.textTruncated, c.refsOmitted),
+    ...(c.carriedAdoptions || c.carriedInvalid ? [t.provCarried(c.carriedAdoptions, c.carriedInvalid)] : []),
+  ];
+}
+
+// ───────── 저자 응답 (src/cloudbite-author-response.ts): 계획은 이전 라운드 안에, 응답은 각 역할 실행 옆에 따로 있다
+const DISPOSITIONS = ['revise', 'withdraw', 'maintain'] as const;
+const AR_FINDING = /^arf_[0-9a-f]{32}$/;
+function normalizeAuthorResponse(raw: unknown, expertId: string): AuthorResponseParsed | { invalid: string } | null {
+  if (!isObj(raw)) return null;
+  if ('invalid' in raw) return typeof raw.invalid === 'string' && raw.invalid ? { invalid: clip(raw.invalid, 400) } : null;
+  const cv = raw.coverage, lg = raw.language;
+  if (raw.expertId !== expertId || !isObj(cv) || !isObj(lg) || !RESPONSE_LANGS.includes(lg.language as ResponseLanguage)
+    || !['consistent', 'mismatch', 'unknown'].includes(lg.status as string)) return null;
+  const responses = every(raw.responses, 9, r => isObj(r) && typeof r.findingId === 'string' && AR_FINDING.test(r.findingId) && DISPOSITIONS.includes(r.disposition as typeof DISPOSITIONS[number])
+    && typeof r.rationale === 'string' ? { findingId: r.findingId, disposition: r.disposition as typeof DISPOSITIONS[number], rationale: clip(r.rationale, 600) } : null);
+  const missing = strArr(cv.missing, 9, 40);
+  if (!responses || !missing || !isInt(cv.expected) || !isInt(cv.answered) || !['complete', 'partial', 'none'].includes(cv.status as string)
+    || cv.answered !== responses.length || new Set(responses.map(r => r.findingId)).size !== responses.length) return null;
+  return { expertId, responses, coverage: { expected: cv.expected, answered: cv.answered, missing, status: cv.status as AuthorResponseParsed['coverage']['status'] },
+    language: { language: lg.language as ResponseLanguage, status: lg.status as AuthorResponseParsed['language']['status'] } };
+}
+const EXECUTION_KEYS = { kind: 'new-child-project', automaticCalls: 0, budget: 'child-normal', parentMutation: 'none', parentMemo: 'unchanged', childMemo: 'own-optional' } as const;
+function normalizeAuthorPlan(raw: unknown, parentId: string): AuthorResponsePlan | null {
+  if (!isObj(raw) || raw.version !== 'cloudbite-author-response/v1' || raw.kind !== 'author-response-follow-up' || raw.trust !== 'untrusted-data' || raw.parentId !== parentId
+    || !PROJECT_STATUSES.includes(raw.parentStatus as ProjectStatus) || !RESPONSE_LANGS.includes(raw.responseLanguage as ResponseLanguage)
+    || typeof raw.planSha256 !== 'string' || !SHA256.test(raw.planSha256) || typeof raw.disclosure !== 'string') return null;
+  const ex = raw.execution, cr = raw.crossReview, cap = raw.capped;
+  if (!isObj(ex) || Object.keys(EXECUTION_KEYS).some(k => ex[k] !== EXECUTION_KEYS[k as keyof typeof EXECUTION_KEYS])) return null;
+  const reviewers = isObj(cr) ? strArr(cr.reviewers, 8, 80) : null;
+  if (!isObj(cr) || typeof cr.snapshotHash !== 'string' || !SHA256.test(cr.snapshotHash) || !(cr.completedAt === null || isInt(cr.completedAt)) || !reviewers
+    || !isInt(cr.findings) || !isInt(cr.supported) || !isInt(cr.eligible)) return null;
+  const roles = strArr(raw.roles, PROJECT_MAX, 80), unselected = strArr(raw.unselectedAuthors, PROJECT_MAX, 80);
+  const authors = every(raw.authors, PROJECT_MAX, a => {
+    const o = isObj(a) ? a.original : null, fids = isObj(a) ? strArr(a.findingIds, 9, 40) : null;
+    return isObj(a) && typeof a.expertId === 'string' && typeof a.name === 'string' && typeof a.opinionSha256 === 'string' && SHA256.test(a.opinionSha256) && fids
+      && isObj(o) && DIRECTIONS.includes(o.direction as OpinionDirection) && isInt(o.confidence, 0, 100) && typeof o.summary === 'string' && isInt(o.evidenceCount)
+      ? { expertId: clip(a.expertId, 80), name: clip(a.name, 120), opinionSha256: a.opinionSha256, findingIds: fids,
+        original: { direction: o.direction as OpinionDirection, confidence: o.confidence, summary: clip(o.summary, 1500), evidenceCount: o.evidenceCount } } : null;
+  });
+  const findings = every(raw.findings, 9, f => isObj(f) && typeof f.findingId === 'string' && AR_FINDING.test(f.findingId) && typeof f.reviewerExpertId === 'string'
+    && typeof f.targetExpertId === 'string' && isInt(f.evidenceIndex) && (f.verdict === 'challenged' || f.verdict === 'insufficient')
+    && typeof f.reviewerRationale === 'string' && typeof f.evidenceText === 'string'
+    ? { findingId: f.findingId, reviewerExpertId: clip(f.reviewerExpertId, 80), targetExpertId: clip(f.targetExpertId, 80), evidenceIndex: f.evidenceIndex,
+      verdict: f.verdict as 'challenged' | 'insufficient', reviewerRationale: clip(f.reviewerRationale, 1000), evidenceText: clip(f.evidenceText, 1000) } : null);
+  const omittedIds = isObj(cap) ? strArr(cap.omittedFindingIds, 18, 40) : null;
+  const excluded = every(raw.excluded, 64, x => isObj(x) && isInt(x.reportIndex) && typeof x.reason === 'string'
+    ? { reportIndex: x.reportIndex, reason: x.reason as AuthorResponsePlan['excluded'][number]['reason'], ...(isInt(x.findingIndex) ? { findingIndex: x.findingIndex } : {}),
+      ...(typeof x.reviewerExpertId === 'string' ? { reviewerExpertId: clip(x.reviewerExpertId, 80) } : {}), ...(typeof x.targetExpertId === 'string' ? { targetExpertId: clip(x.targetExpertId, 80) } : {}) } : null);
+  const omissions = every(raw.omissions, 200, o => isObj(o) && typeof o.path === 'string' && (o.omittedBytes === undefined || isInt(o.omittedBytes)) && (o.omittedItems === undefined || isInt(o.omittedItems))
+    ? { path: clip(o.path, 120), ...(o.omittedBytes !== undefined ? { omittedBytes: o.omittedBytes as number } : {}), ...(o.omittedItems !== undefined ? { omittedItems: o.omittedItems as number } : {}) } : null);
+  if (!roles || !unselected || !authors || !findings || !omittedIds || !excluded || !omissions || !isObj(cap) || !isInt(cap.limit) || !isInt(cap.eligibleSelected) || !isInt(cap.included)) return null;
+  // 지적은 그 저자 것이어야 한다: 계획의 묶음이 서로 맞지 않으면 읽지 않는다
+  if (findings.some(f => !authors.some(a => a.expertId === f.targetExpertId && a.findingIds.includes(f.findingId)))) return null;
+  return { version: 'cloudbite-author-response/v1', kind: 'author-response-follow-up', trust: 'untrusted-data', parentId, parentStatus: raw.parentStatus as ProjectStatus,
+    crossReview: { snapshotHash: cr.snapshotHash, completedAt: cr.completedAt as number | null, reviewers, findings: cr.findings, supported: cr.supported, eligible: cr.eligible },
+    responseLanguage: raw.responseLanguage as ResponseLanguage, execution: { ...EXECUTION_KEYS }, roles, authors, findings,
+    capped: { limit: cap.limit, eligibleSelected: cap.eligibleSelected, included: cap.included, omittedFindingIds: omittedIds },
+    unselectedAuthors: unselected, excluded, omissions, disclosure: clip(raw.disclosure, 2000), planSha256: raw.planSha256 };
+}
+/** 저자 응답을 요청할 수 있는 저자: 서버 후보와 같은 조건 (반박·부족, 검토자·대상 모두 완료 저자이고 서로 다름, 근거 칸이 있음) */
+function authorResponseAffected(p: ConsoleProject): string[] {
+  const cr = p.crossReview;
+  if (!cr || cr.status !== 'completed' || !SHA256.test(cr.snapshotHash)) return [];
+  const done = new Map(p.experts.filter(e => e.status === 'completed' && e.opinion && !e.invalidOpinion).map(e => [e.expertId, e]));
+  const hit = new Set<string>();
+  for (const r of cr.reports) for (const f of r.findings) {
+    const target = done.get(f.targetExpertId);
+    if ((f.verdict === 'challenged' || f.verdict === 'insufficient') && done.has(r.reviewerExpertId) && target && r.reviewerExpertId !== f.targetExpertId
+      && f.evidenceIndex < target.opinion!.evidence.length) hit.add(f.targetExpertId);
+  }
+  return p.experts.map(e => e.expertId).filter(id => hit.has(id));
+}
+/** 저자 응답 요청 버튼을 낼 수 있는 프로젝트: 끝난 실제 실행 + 완료된 교차 검토 (부모 권한은 서버가 다시 확인한다) */
+function authorResponseEligible(p: ConsoleProject): boolean {
+  return followUpEligible(p) && p.status !== 'cancelled' && p.crossReview?.status === 'completed' && authorResponseAffected(p).length > 0;
+}
+/** 저자 응답 줄 (화면·보고서 공용). 지적마다 응답·없음, 역할마다 거부·읽을 수 없음·아직 없음을 의견 상태와 따로 적는다 */
+function authorResponseLines(plan: AuthorResponsePlan, experts: ConsoleExpert[], m: Messages, name: NameOf): Array<{ author: string; head: string; original: string; lines: string[] }> {
+  const t = m.p3;
+  return plan.authors.map(a => {
+    const run = experts.find(e => e.expertId === a.expertId), ar = run?.authorResponse;
+    const head: string[] = [];
+    if (run?.invalidAuthorResponse) head.push(t.arUnreadable);
+    else if (ar && 'invalid' in ar) head.push(t.arInvalid(ar.invalid));
+    else if (ar) head.push(`${t.arStatus[ar.coverage.status]} · ${t.arAnswered(ar.coverage.answered, ar.coverage.expected)}`);
+    else head.push(t.arPending);
+    const lines = plan.findings.filter(f => a.findingIds.includes(f.findingId)).map(f => {
+      const r = ar && !('invalid' in ar) ? ar.responses.find(x => x.findingId === f.findingId) : undefined;
+      const answer = r ? `${t.arDisposition[r.disposition]} — ${r.rationale}` : ar && !('invalid' in ar) ? t.arMissing : '';
+      return `${t.arFinding(name(f.reviewerExpertId), m.verdict[f.verdict], name(f.targetExpertId), f.evidenceIndex + 1)}${answer ? ` → ${answer}` : ''}`;
+    });
+    return { author: a.name, head: head.join(''), original: t.arOriginal(m.direction[a.original.direction], a.original.confidence), lines };
+  });
+}
+/** 검토자가 읽은 산출물 글 (화면·보고서 공용). 읽기만 했다는 것 외에 아무것도 주장하지 않는다 */
+function artifactFileLine(f: ArtifactCoverage[number]['files'][number], m: Messages): string {
+  const t = m.p3, flags = [...(f.excerptTruncated ? [t.artExcerptCut] : []), ...(f.storedTruncated ? [t.artStoredCut] : [])];
+  return `${t.artFile(f.path, f.startLine, f.endLine, f.totalLines)} · sha256 ${f.sha256.slice(0, 12)}…${flags.length ? ` · ${flags.join(' · ')}` : ''}`;
+}
+const artifactOmitLine = (o: { path: string; reason: string }, m: Messages) => m.p3.artOmitted(o.path, m.p3.artReason[o.reason] ?? o.reason);
+function artifactLines(cr: ConsoleReview, m: Messages, name: NameOf): string[] {
+  const t = m.p3;
+  if (cr.invalidArtifactCoverage) return [t.artInvalid];
+  const a = cr.artifactCoverage;
+  if (!a) return [];
+  if (!a.length) return [t.artNone];
+  return [t.artTitle(a.length, a.reduce((n, x) => n + x.files.length, 0)), t.artNote,
+    ...a.flatMap(x => [`${name(x.expertId)} (packet ${x.packetSha256.slice(0, 12)}…)`, ...x.files.map(f => `  ${artifactFileLine(f, m)}`), ...x.omitted.map(o => `  ${artifactOmitLine(o, m)}`)])];
 }
 const TEXT_BASIS: CrossReviewTextAvailability['textBasis'][] = ['available', 'partial', 'unavailable', 'uncited'];
 
@@ -2542,6 +2903,25 @@ function phaseTwoMarkdown(p: ConsoleProject, m: Messages): string[] {
       }
     }
   }
+  const t3 = m.p3, plan = r?.authorResponse;
+  if (plan || p.invalidAuthorPlan) {
+    out.push('', `## ${t3.arTitle}`);
+    if (!plan) out.push(t3.arPlanInvalid);
+    else {
+      out.push(`> ${t3.arNote}`, '', `- ${t3.arCapped(plan.capped.included, plan.capped.eligibleSelected)}`,
+        ...(plan.unselectedAuthors.length ? [`- ${t3.arUnselected(plan.unselectedAuthors.map(name).join(', '))}`] : []), `- ${plan.disclosure}`);
+      for (const a of authorResponseLines(plan, p.experts, m, name)) out.push('', `### ${a.author}`, `- ${a.original}`, `- ${a.head} (${t3.arSeparate})`, ...a.lines.map(x => `- ${x}`));
+    }
+  }
+  if (p.provenance || p.invalidProvenance) {
+    out.push('', `## ${t3.mdProvTitle}`);
+    if (!p.provenance) out.push(t3.provInvalid);
+    else {
+      const g = provenanceGroups(p.provenance), claim = (c: LedgerClaim) => `- ${c.text}${c.expertId ? ` _(${name(c.expertId)})_` : ''}`;
+      out.push(`> ${t3.provNote}`, '', ...provenanceLines(p.provenance, m).map(x => `- ${x}`), `- ${t3.provMemoNote}`);
+      for (const k of ['adopted', 'hinted'] as const) if (g[k].length) out.push('', `### ${t3.provGroup[k]}`, ...g[k].map(claim));
+    }
+  }
   out.push('', `## ${t.sigTitle}`);
   const sg = p.evidenceSignals;
   if (p.invalidSignals) out.push(t.sigInvalid);
@@ -2559,6 +2939,7 @@ function phaseTwoMarkdown(p: ConsoleProject, m: Messages): string[] {
       if (c.unassigned.length) out.push(`- ${t.revUnassigned(c.unassigned.map(name).join(', '))}`);
     }
     out.push(`- ${t.revCap}`, ...(cr.disclosure ? [`- ${cr.disclosure}`] : []));
+    out.push(...artifactLines(cr, m, name).map(x => `- ${x}`));
     for (const rep of cr.reports) for (const f of rep.findings) {
       const basis = cr.textAvailability?.find(x => x.reviewerExpertId === rep.reviewerExpertId && x.targetExpertId === f.targetExpertId && x.evidenceIndex === f.evidenceIndex);
       out.push(`- ${m.reviewBy(name(rep.reviewerExpertId))} · ${m.verdict[f.verdict]} · ${m.reviewFinding(name(f.targetExpertId), f.evidenceIndex + 1)}${basis ? ` (${t.revBasis[basis.textBasis]})` : ''}${f.rationale ? ` — ${f.rationale}` : ''}`);
@@ -2767,7 +3148,8 @@ function boot(): void {
      *  blocked 만 예외다: 서버가 409 로 시작하지 않았고 GET 으로 시도 기록이 없음을 확인했다 (예약 없음) → 유료 버튼을 다시 낼 수 있다 */
     memo: null as null | { projectId: string; phase: 'running' | 'reading' | 'unknown' | 'failed' | 'blocked' | 'settled'; error: Text | null; polls: number },
     /** 사용 기록에서 시작한 후속 라운드 초안: 부모 id 와 서버가 읽어 준 부모 프로젝트(참고·비교용), 사용자가 쓰는 바뀐 점 요약 */
-    followUp: null as null | { parentId: string; parent: ConsoleProject; changeSummary: string },
+    /** authorResponse: 저자 응답 라운드 (부모의 완료된 교차 검토 해시와 고를 수 있는 해당 저자). 없으면 보통 후속 라운드 */
+    followUp: null as null | { parentId: string; parent: ConsoleProject; changeSummary: string; authorResponse?: { reviewSnapshotHash: string; affected: string[] } },
     /** 실제 실행 전 준비한 계획. body 는 미리보기에 보낸 바로 그 JSON 문자열이며, 실행은 이 문자열을 그대로 보낸다 (기본값을 덧붙이지 않는다).
      *  sig 는 준비한 순간의 의미 있는 입력 전체. 하나라도 바뀌면 계획을 버린다 */
     plan: null as null | { sig: string; phase: 'preparing' | 'ready' | 'error'; routed: boolean; body: string; preview: ProjectPreview | null; error: Text | null },
@@ -3033,12 +3415,14 @@ function boot(): void {
   const fuParentLine = h('p', { class: 'cb-help' });
   const fuDiffList = h('ul', { class: 'cb-fu-diff' });
   const fuRefs = h('div', { class: 'cb-fu-refs' });
+  const fuAuthorLine = h('p', { class: 'cb-help cb-fu-author', hidden: true });
+  const fuRolesNote = tx('p', { class: 'cb-help' }, m => m.p2.fuRoles);
   const fuCancelBtn = tx('button', { type: 'button', class: 'cb-ghost', 'data-fk': 'fu-cancel', onclick: () => cancelFollowUp() }, m => m.p2.fuCancel);
   const fuBox = h('section', { class: 'cb-followup', 'aria-labelledby': 'cb-fu-h', hidden: true },
     tx('h3', { id: 'cb-fu-h', class: 'cb-label' }, m => m.p2.fuTitle), fuParentLine, tx('p', { class: 'cb-help' }, m => m.p2.fuNote),
     h('div', { class: 'cb-field' }, tx('label', { for: 'cb-fu-summary', class: 'cb-label' }, m => m.p2.fuSummary), fuSummaryIn,
       bind(h('p', { id: 'cb-fu-help', class: 'cb-help' }), (n, m) => { n.textContent = m.p2.fuSummaryHelp(REVISION.changeSummary); })),
-    tx('p', { class: 'cb-help' }, m => m.p2.fuRoles),
+    fuAuthorLine, fuRolesNote,
     tx('h4', { class: 'cb-label' }, m => m.p2.fuDiff), fuDiffList, fuRefs, fuCancelBtn);
   const modeLine = h('span');
   const startNote = h('div', { class: 'cb-startnote' });
@@ -3908,7 +4292,8 @@ function boot(): void {
   const locked = () => active() || preparing();
   /** 계획에 들어가는 입력 전체. 화면 언어는 넣지 않는다 (응답 언어는 넣는다) */
   const semanticSig = () => JSON.stringify([S.mode, autoRoute(), autoRoute() ? [] : [...S.selected], limits().max, titleIn.value, objectiveIn.value, contextIn.value,
-    decisionTexts(), docsPayload(S.docs), stageSel.value, respSel.value, budgetTexts(), S.followUp ? [S.followUp.parentId, fuSummaryIn.value] : null]);
+    decisionTexts(), docsPayload(S.docs), stageSel.value, respSel.value, budgetTexts(),
+    S.followUp ? [S.followUp.parentId, fuSummaryIn.value, ...(S.followUp.authorResponse ? [S.followUp.authorResponse.reviewSnapshotHash] : [])] : null]);
   function semanticEdit(): void {
     budgetHint.textContent = M.budgetHint(BUDGET_FIELDS.some(f => budgetIns[f].value.trim() !== ''));
     if (S.followUp) renderFollowUp();
@@ -4183,7 +4568,9 @@ function boot(): void {
     if (round.length) kids.unshift(h('section', { class: 'cb-round', 'aria-labelledby': `${prefix}round-h` }, h('h3', { id: `${prefix}round-h` }, m.p2.roundTitle), ...round));
     const signals = signalsKids(p, prefix, opened);
     if (signals.length) kids.push(h('section', { class: 'cb-signals', 'aria-labelledby': `${prefix}sig-h` }, h('h3', { id: `${prefix}sig-h` }, m.p2.sigTitle), ...signals));
-    const review = reviewKids(p, interactive);
+    const prov = provenanceKids(p, opened, prefix);
+    if (prov.length) kids.push(h('section', { class: 'cb-prov', 'aria-labelledby': `${prefix}prov-h` }, h('h3', { id: `${prefix}prov-h` }, m.p3.provTitle), ...prov));
+    const review = reviewKids(p, interactive, opened, prefix);
     if (review.length) kids.push(h('section', { class: 'cb-review', 'aria-labelledby': `${prefix}review-h` },
       h('h3', { id: `${prefix}review-h` }, m.reviewTitle), ...review));
     const memo = memoKids(p, interactive, prefix, opened);
@@ -4202,7 +4589,7 @@ function boot(): void {
     return next;
   }
 
-  function reviewKids(p: ConsoleProject, interactive: boolean): Kid[] {
+  function reviewKids(p: ConsoleProject, interactive: boolean, opened: Set<string>, prefix: string): Kid[] {
     const m = M, cr = p.crossReview;
     const local = interactive && S.review?.projectId === p.id ? S.review : null;
     const run = interactive ? S.run : null;
@@ -4245,7 +4632,124 @@ function boot(): void {
             f.rationale ? h('p', null, f.rationale) : null);
         })) : h('p', { class: 'cb-help' }, m.reviewNoFindings)));
     }
+    if (cr) kids.push(...artifactKids(p, cr, opened, prefix));
+    // 저자 응답 요청: 끝난 실제 실행의 완료된 검토에서만, 누를 때 후속 초안만 연다 (실행·비용 없음)
+    if (cr?.status === 'completed' && followUpEligible(p) && p.status !== 'cancelled') {
+      kids.push(authorResponseAffected(p).length
+        ? h('div', { class: 'cb-ar-ask' }, h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'ar-ask', disabled: locked(), onclick: () => startAuthorResponse(p) }, m.p3.arAsk),
+          h('p', { class: 'cb-help' }, m.p3.arAskHelp))
+        : h('p', { class: 'cb-help' }, m.p3.arNone));
+    }
     return kids;
+  }
+  /** 검토자가 읽은 저장 산출물 발췌 (접힌 상자). 읽었다는 것만 밝히고 실행·검증을 주장하지 않는다 */
+  function artifactKids(p: ConsoleProject, cr: ConsoleReview, opened: Set<string>, prefix: string): Kid[] {
+    const m = M, t = m.p3, a = cr.artifactCoverage;
+    if (cr.invalidArtifactCoverage) return [h('p', { class: 'cb-warn' }, t.artInvalid)];
+    if (!a) return [];
+    if (!a.length) return [h('p', { class: 'cb-help' }, t.artNone)];
+    return [evDisclosure(opened, `${prefix}art`, 'cb-quiet cb-art', [h('span', null, t.artTitle(a.length, a.reduce((n, x) => n + x.files.length, 0)))],
+      h('p', { class: 'cb-help' }, t.artNote),
+      ...a.map(x => h('div', { class: 'cb-art-role' }, h('h5', null, expertName(p, x.expertId)),
+        h('ul', { class: 'cb-art-files' }, ...x.files.map(f => h('li', null, artifactFileLine(f, m))), ...x.omitted.map(o => h('li', { class: 'cb-help' }, artifactOmitLine(o, m)))))))];
+  }
+
+  // ── 주장 출처와 채택. 묶음은 펼칠 때만 그리고 PROV_PAGE 개씩 늘려 수천 개를 한꺼번에 그리지 않는다
+  const PROV_PAGE = 50;
+  const provShown = new Map<string, number>();
+  let adopt: null | { projectId: string; claimId: string; phase: 'confirm' | 'posting' | 'reading' | 'done' | 'failed'; note: Text | null } = null;
+  let adoptGen = 0;
+  const adoptBusy = () => adopt?.phase === 'posting' || adopt?.phase === 'reading';
+  function adoptPaint(): void { paintHistory(); keepFocus(renderEvidence); }
+  /** 서버와 같은 조건 (끝난 실제 실행, 취소 아님, 진행 중인 검토·메모 없음). 최종 판단은 서버가 한다 */
+  const adoptable = (p: ConsoleProject) => p.brief.mode === 'live' && REVISION.parentId.test(p.id) && TERMINAL_PROJECT.includes(p.status) && p.status !== 'cancelled'
+    && !reviewBusy(p) && !memoBusy(p);
+  function provenanceKids(p: ConsoleProject, opened: Set<string>, prefix: string): Kid[] {
+    const m = M, t = m.p3;
+    if (p.invalidProvenance) return [h('p', { class: 'cb-warn' }, t.provInvalid)];
+    const pv = p.provenance;
+    if (!pv) return [];
+    const view = provenanceView(pv), groups = provenanceGroups(pv), can = adoptable(p);
+    const mine = adopt?.projectId === p.id ? adopt : null;
+    const kids: Kid[] = [h('p', { class: 'cb-help' }, t.provNote), h('ul', { class: 'cb-prov-summary' }, ...provenanceLines(pv, m).map(x => h('li', null, x))),
+      h('p', { class: 'cb-help' }, t.provMemoNote)];
+    if (!can && groups.hinted.length + groups.proposals.length) kids.push(h('p', { class: 'cb-help' }, t.provAdoptWait));
+    if (mine?.note) kids.push(h('p', { class: mine.phase === 'done' ? 'cb-ok' : 'cb-warn', role: 'status' }, mine.note(m)));
+    const item = (c: LedgerClaim) => {
+      const st = view.standing.get(c.id) ?? 'generated-proposal', hint = c.numericThresholdHint && st === 'generated-proposal';
+      const here = mine?.claimId === c.id ? mine : null;
+      const ref = (r: LedgerClaim['refs'][number]) => `${r.kind === 'document' ? 'doc' : 'source'}:${r.id} — ${t.provRef[r.availability]}`;
+      let action: Kid = null;
+      if (st === 'generated-proposal') {
+        if (c.textTruncated) action = h('p', { class: 'cb-help' }, t.provTruncated);
+        else if (here?.phase === 'posting' || here?.phase === 'reading') action = h('p', { class: 'cb-help', role: 'status' }, here.phase === 'posting' ? t.provAdopting : t.provReading);
+        else if (here?.phase === 'confirm' && can) action = h('div', { class: 'cb-prov-confirm', role: 'group', 'aria-label': t.provAdoptConfirm },
+          h('blockquote', { class: 'cb-claim-text' }, c.text), h('p', { class: 'cb-help' }, t.provAdoptAsk),
+          h('button', { type: 'button', class: 'cb-secondary', 'data-fk': `adopt-yes:${c.id}`, onclick: () => { void adoptClaim(p, c, pv.ledger.snapshot); } }, t.provAdoptConfirm),
+          h('button', { type: 'button', class: 'cb-ghost', 'data-fk': `adopt-no:${c.id}`, onclick: () => { adopt = null; adoptPaint(); } }, t.provAdoptCancel));
+        else if (can) action = h('button', { type: 'button', class: 'cb-ghost', 'data-fk': `adopt:${c.id}`, disabled: adoptBusy(),
+          onclick: () => { if (adoptBusy()) return; adopt = { projectId: p.id, claimId: c.id, phase: 'confirm', note: null }; adoptPaint(); } }, t.provAdopt);
+      }
+      return h('li', { class: `cb-prov-claim is-${st}${hint ? ' is-hint' : ''}` },
+        h('div', { class: 'cb-claim-head' }, h('span', { class: `cb-tag ${st === 'generated-proposal' ? 'is-unval' : 'is-avail'}` }, t.provStanding[st]),
+          c.expertId ? h('strong', null, expertName(p, c.expertId)) : null, hint ? h('span', { class: 'cb-chip d-conditional' }, t.provHint) : null),
+        h('p', { class: 'cb-claim-text' }, c.text),
+        evDisclosure(opened, `${prefix}prov-o:${c.id}`, 'cb-quiet', [h('span', null, t.provOrigin)],
+          h('ul', { class: 'cb-prov-origin' }, h('li', null, t.provOriginName[c.origin]), h('li', null, t.provField(c.field, c.index)),
+            c.expertId ? h('li', null, t.provExpert(expertName(p, c.expertId))) : null,
+            c.adoptedIn ? h('li', null, t.provAdoptedIn(c.adoptedIn.projectId, historyDate(c.adoptedIn.at))) : null,
+            ...view.active.filter(a => a.claimId === c.id).map(a => h('li', null, t.provAdoptedIn(a.projectId, historyDate(a.at)))),
+            c.textTruncated ? h('li', null, t.provTruncated) : null, ...c.refs.map(r => h('li', null, ref(r))))),
+        action);
+    };
+    for (const k of ['hinted', 'adopted', 'proposals', 'stated'] as const) {
+      const list = groups[k];
+      if (!list.length) continue;
+      const key = `${prefix}prov:${k}`, open = opened.has(key);
+      const box = h('details', { class: `cb-disclosure cb-quiet cb-prov-group is-${k}`, open }, h('summary', null, icon('chevron'), h('span', null, `${t.provGroup[k]} (${list.length})`)));
+      if (open) {
+        const shown = provShown.get(key) ?? PROV_PAGE;
+        box.append(h('ol', { class: 'cb-prov-claims' }, ...list.slice(0, shown).map(item)));
+        if (list.length > shown) box.append(h('button', { type: 'button', class: 'cb-ghost', 'data-fk': `prov-more:${k}`, onclick: () => { provShown.set(key, shown + PROV_PAGE); adoptPaint(); } },
+            t.provMore(Math.min(PROV_PAGE, list.length - shown))));
+      }
+      // 펼칠 때만 그린다: 상태가 바뀐 경우에만 다시 그린다 (만들 때 열린 상자의 toggle 은 무시)
+      box.addEventListener('toggle', () => { if (box.open === opened.has(key)) return; if (box.open) opened.add(key); else opened.delete(key); adoptPaint(); });
+      kids.push(box);
+    }
+    return kids;
+  }
+  /** 저장된 상세를 받아 지금 실행과 사용 기록 화면에 같이 반영한다. 읽을 수 없으면 아무것도 바꾸지 않는다 */
+  function acceptHistoryDetail(id: string, data: unknown): ConsoleProject | null {
+    const d = data as HistoryDetail | null;
+    const next = isObj(d) && Array.isArray(d.feedback) ? normalizeProject(d.project) : null;
+    if (!next || next.id !== id) return null;
+    if (H.detail?.project.id === id) { H.detail = d!; H.dirty = true; }
+    const cur = S.run?.project;
+    if (cur && cur.id === id) {
+      const { provenance: _p, invalidProvenance: _i, ...rest } = cur;
+      S.run!.project = { ...rest, ...(next.provenance ? { provenance: next.provenance } : {}), ...(next.invalidProvenance ? { invalidProvenance: true } : {}) };
+    }
+    return next;
+  }
+  /** 채택: 정확한 글·장부 스냅숏·claimId 만 보낸다 (누가·언제는 서버가 정한다). 실패하거나 응답을 모르면 다시 보내기 전에 저장된 상태를 읽는다 */
+  async function adoptClaim(p: ConsoleProject, c: LedgerClaim, snapshot: string): Promise<void> {
+    if (adoptBusy() || !adoptable(p) || c.textTruncated) return;
+    const id = p.id, gen = ++adoptGen;
+    adopt = { projectId: id, claimId: c.id, phase: 'posting', note: null }; adoptPaint();
+    const r = await historyRequest('/' + encodeURIComponent(id) + '/adopt', 'POST', { claimId: c.id, text: c.text, snapshot });
+    if (gen !== adoptGen) return;
+    if (r.status === 200 && acceptHistoryDetail(id, r.data)) { adopt = { projectId: id, claimId: c.id, phase: 'done', note: m => m.p3.provAdopted }; adoptPaint(); return; }
+    const server = isObj(r.data) && typeof r.data.error === 'string' ? clip(r.data.error, 300) : '';
+    const why: Text = r.status === 0 || r.status === 200 ? m => m.p3.provAdoptUnknown : r.status === 404 ? m => m.p3.provAdoptFailed(m.p3.provAdoptForeign)
+      : r.status === 401 || r.status === 403 ? m => m.p3.provAdoptFailed(HT().auth) : m => m.p3.provAdoptFailed(server || String(r.status));
+    adopt = { projectId: id, claimId: c.id, phase: 'reading', note: null }; adoptPaint();
+    const g = await historyRequest('/' + encodeURIComponent(id));
+    if (gen !== adoptGen) return;
+    const next = g.status === 200 ? acceptHistoryDetail(id, g.data) : null;
+    const seen = !!next?.provenance && provenanceView(next.provenance).active.some(a => a.claimId === c.id && a.text === c.text);
+    adopt = { projectId: id, claimId: c.id, phase: seen ? 'done' : 'failed', note: seen ? m => m.p3.provAdoptedSeen : why };
+    adoptPaint();
   }
 
   function renderEvidence(): void {
@@ -4492,6 +4996,43 @@ function boot(): void {
     if (!r) return [];
     const ops = r.reference.opinions;
     const name = (id: string) => ops.find(o => o.expertId === id)?.name ?? expertName(p, id);
+    return [...roundBaseKids(p, r, prefix, opened, name), ...authorPlanKids(p, r.authorResponse, prefix, opened, name)];
+  }
+  /** 저자 응답: 지적마다 저자의 수정·철회·유지와 근거, 없음·일부·거부를 역할의 의견 상태와 따로 보인다. 원래 의견은 바뀌지 않은 이전 기록이다 */
+  function authorPlanKids(p: ConsoleProject, plan: AuthorResponsePlan | undefined, prefix: string, opened: Set<string>, name: NameOf): Kid[] {
+    const m = M, t = m.p3;
+    if (p.invalidAuthorPlan) return [h('p', { class: 'cb-warn' }, t.arPlanInvalid)];
+    if (!plan) return [];
+    const kids: Kid[] = [h('h4', null, t.arTitle), h('p', { class: 'cb-help' }, t.arNote),
+      h('p', { class: 'cb-help' }, t.arCapped(plan.capped.included, plan.capped.eligibleSelected)),
+      plan.unselectedAuthors.length ? h('p', { class: 'cb-help' }, t.arUnselected(plan.unselectedAuthors.map(name).join(', '))) : null,
+      plan.disclosure ? h('p', { class: 'cb-help' }, plan.disclosure) : null];
+    for (const a of plan.authors) {
+      const run = p.experts.find(e => e.expertId === a.expertId), ar = run?.authorResponse;
+      const parsed = ar && !('invalid' in ar) ? ar : null;
+      const state = run?.invalidAuthorResponse ? h('p', { class: 'cb-warn' }, t.arUnreadable)
+        : ar && 'invalid' in ar ? h('p', { class: 'cb-warn' }, t.arInvalid(ar.invalid))
+        : parsed ? h('p', null, h('span', { class: `cb-tag ${parsed.coverage.status === 'complete' ? 'is-avail' : 'is-unval'}` }, t.arStatus[parsed.coverage.status]), ' ', t.arAnswered(parsed.coverage.answered, parsed.coverage.expected))
+        : h('p', { class: 'cb-help' }, t.arPending);
+      kids.push(h('article', { class: 'cb-ar-author', 'aria-label': `${t.arTitle}: ${a.name}` },
+        h('h5', null, a.name),
+        h('p', { class: 'cb-help' }, t.arOriginal(m.direction[a.original.direction], a.original.confidence)), h('p', { class: 'cb-ar-original' }, a.original.summary),
+        state, h('p', { class: 'cb-help' }, t.arSeparate),
+        h('ol', { class: 'cb-findings' }, ...plan.findings.filter(f => a.findingIds.includes(f.findingId)).map(f => {
+          const r = parsed?.responses.find(x => x.findingId === f.findingId);
+          return h('li', { class: 'cb-finding' },
+            h('div', { class: 'cb-finding-head' }, h('span', { class: `cb-chip ${VERDICT_CHIP[f.verdict]}` }, m.verdict[f.verdict]),
+              h('strong', null, m.reviewFinding(name(f.targetExpertId), f.evidenceIndex + 1)), h('span', { class: 'cb-tag' }, m.reviewBy(name(f.reviewerExpertId)))),
+            evDisclosure(opened, `${prefix}ar:${f.findingId}`, 'cb-quiet', [h('span', null, `${t.arEvidence} · ${t.arReviewer}`)],
+              h('blockquote', { class: 'cb-finding-evidence' }, f.evidenceText), f.reviewerRationale ? h('p', null, f.reviewerRationale) : null),
+            r ? h('div', { class: 'cb-ar-answer' }, h('span', { class: `cb-chip is-${r.disposition}` }, t.arDisposition[r.disposition]), ' ', h('span', null, r.rationale))
+              : parsed ? h('p', { class: 'cb-help' }, t.arMissing) : null);
+        }))));
+    }
+    return kids;
+  }
+  function roundBaseKids(p: ConsoleProject, r: ProjectPreviousRound, prefix: string, opened: Set<string>, name: NameOf): Kid[] {
+    const m = M, t = m.p2, ops = r.reference.opinions;
     return [
       h('p', null, h('span', { class: 'cb-tag' }, t.roundOf(r.parentId))),
       h('p', { class: 'cb-help' }, t.roundNote),
@@ -4612,6 +5153,9 @@ function boot(): void {
     if (!fu) return;
     const p = fu.parent, name = (id: string) => expertName(p, id);
     fuParentLine.textContent = m.p2.fuParent(p.brief.title, fu.parentId);
+    const ar = fu.authorResponse;
+    fuAuthorLine.hidden = !ar; fuRolesNote.hidden = !!ar;
+    fuAuthorLine.textContent = ar ? m.p3.fuAuthor(ar.affected.map(name).join(', ')) : '';
     fill(fuDiffList, ...draftRoundLines(p, draftRound(p), m, name).map(x => h('li', null, x)));
     const ops = p.experts.filter(e => e.status === 'completed' && e.opinion && !e.invalidOpinion);
     fill(fuRefs, ops.length ? evDisclosure(S.evOpen, `fu:${fu.parentId}:refs`, 'cb-quiet', [h('span', null, m.p2.roundRefs(ops.length))],
@@ -4643,6 +5187,21 @@ function boot(): void {
     if (b.decision) decisionDetails.open = true;
     if (b.documents?.length) docsDetails.open = true;
     setView('home');
+    renderAll();
+    fuSummaryIn.focus();
+  }
+  /** 저자 응답 요청: 보통 후속 초안을 열고, 반박·부족 지적을 받은 완료 저자만 직접 고르기로 미리 채운다. 아무것도 실행하지 않는다 */
+  function startAuthorResponse(parent: ConsoleProject): void {
+    if (locked() || !authorResponseEligible(parent)) return;
+    const affected = authorResponseAffected(parent);
+    startFollowUp(parent);
+    const fu = S.followUp;
+    if (!fu || fu.parentId !== parent.id) return;
+    fu.authorResponse = { reviewSnapshotHash: parent.crossReview!.snapshotHash, affected };
+    S.selected.clear();
+    const allowed = new Set(catalogue().map(e => e.id));
+    for (const id of affected) if (allowed.has(id) && S.selected.size < limits().max) S.selected.add(id);
+    if (routing()) S.routeMode = 'manual';
     renderAll();
     fuSummaryIn.focus();
   }
@@ -4793,8 +5352,12 @@ function boot(): void {
       if (S.mode !== 'live') S.formErrors.push({ field: 'revision', text: m => m.p2.fuNeedLive });
       if (!change) S.formErrors.push({ field: 'revision', text: m => m.p2.fuNeedSummary });
       else if (change.length > REVISION.changeSummary) S.formErrors.push({ field: 'revision', text: m => m.p2.fuSummaryLong(REVISION.changeSummary) });
+      // 저자 응답: 해당 저자만 직접 고른다 (해당하지 않는 역할·Jev 자동 선택 없음). 서버가 다시 확인한다
+      const ar = fu.authorResponse;
+      if (ar && (auto || f.expertIds.some(id => !ar.affected.includes(id)))) S.formErrors.push({ field: 'revision', text: m => m.p3.fuAuthorOnly });
+      else if (ar && !f.expertIds.length) S.formErrors.push({ field: 'revision', text: m => m.p3.fuAuthorNone });
     }
-    const extras = fu ? { ...wf.extras, revision: { parentId: fu.parentId, changeSummary: change } } : wf.extras;
+    const extras = fu ? { ...wf.extras, revision: { parentId: fu.parentId, changeSummary: change, ...(fu.authorResponse ? { reviewSnapshotHash: fu.authorResponse.reviewSnapshotHash } : {}) } } : wf.extras;
     if (auto) {
       if (!routing()!.ready) S.formErrors.push({ field: 'run', text: m => m.jevUnavailable });
       else if (!routeCredential()) S.formErrors.push({ field: 'run', text: m => m.jevNeedAccess });
@@ -5183,7 +5746,7 @@ function boot(): void {
   void first.then(() => { if (!S.run && recheckable() && !accessTimer) accessTimer = setTimeout(() => refreshAccess(true), ACCESS_RECHECK_MS) as unknown as number; });
 }
 
-const CloudbiteCore = { normalizeMemo, normalizeSignals, normalizeRound, phaseView, signalRows, signalSummary, memoCoverageLines, roundLines, draftRoundLines, followUpEligible, phaseTwoMarkdown, parseDecision, docProblem, docAccept, docsPayload, docsBytes, parseWorkflow, normalizePreview, normalizePmc, normalizeCrossReview, reviewEligible, projectMarkdown, normalizeBootstrap, normalizePool, normalizeRouting, normalizeRoute, suggestTeam, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, artifactContent, domainLabel, DEMO_EXPERTS,
+const CloudbiteCore = { normalizeProvenance, provenanceView, provenanceGroups, provenanceLines, normalizeAuthorPlan, normalizeAuthorResponse, normalizeArtifactCoverage, authorResponseAffected, authorResponseEligible, authorResponseLines, artifactLines, normalizeMemo, normalizeSignals, normalizeRound, phaseView, signalRows, signalSummary, memoCoverageLines, roundLines, draftRoundLines, followUpEligible, phaseTwoMarkdown, parseDecision, docProblem, docAccept, docsPayload, docsBytes, parseWorkflow, normalizePreview, normalizePmc, normalizeCrossReview, reviewEligible, projectMarkdown, normalizeBootstrap, normalizePool, normalizeRouting, normalizeRoute, suggestTeam, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, artifactContent, domainLabel, DEMO_EXPERTS,
   pickLang, withLang, normalizeOwnerSession, DICT, ROLE_KO };
 const hook = (globalThis as { __cloudbiteTestHook?: (core: typeof CloudbiteCore) => void }).__cloudbiteTestHook;
 if (typeof hook === 'function') hook(CloudbiteCore);
