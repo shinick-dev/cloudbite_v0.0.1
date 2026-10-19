@@ -1,5 +1,6 @@
 // Cloudbite HTTP surface (docs/cloudbite/api-contract.md). index.ts calls cloudbiteRoute after its host checks;
 // public-get.ts calls cloudbitePage for the console. Errors are {error} only — never upstream bodies or secrets.
+import { CORPUS } from './cloudbite-corpus.generated';
 import type { CloudbiteBootstrap, CloudbiteRoutingDecision, ProjectBrief, ProjectBudget } from './cloudbite-contract';
 import { CLOUDBITE_EXPERTS } from './cloudbite-personas';
 import { CLOUDBITE_POOL } from './cloudbite-pool';
@@ -44,6 +45,7 @@ export function cloudbitePage(path: string, sec: Record<string, string>): Respon
 export function cloudbiteBootstrap(env: Env): CloudbiteBootstrap {
   const missing = cloudbiteMissing(env, CLOUDBITE_EXPERTS.length);
   return { experts: [...CLOUDBITE_EXPERTS], configuration: { liveReady: missing.length === 0, missing, maxExperts: CB_MAX_EXPERTS, maxConcurrent: cbMaxConcurrent(env), ...(env.CLOUDBITE_HISTORY ? { historyRetentionDays: 30 } : {}),
+    referenceCorpus: { indexSha256: CORPUS.sha256, sources: CORPUS.sources.length, chunks: CORPUS.chunks.length, embeddingConfigured: !!env.CLOUDBITE_EMBEDDING_API_KEY, model: CORPUS.model, dimensions: CORPUS.dimensions, searchesPerExpert: 7 },
     routing: { provider: 'typesafe', model: JEV_MODEL, ready: routingReady(env.TYPESAFE_API_KEY), maxExperts: CB_MAX_EXPERTS } }, pool: CLOUDBITE_POOL };
 }
 

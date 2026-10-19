@@ -4,7 +4,7 @@
 // upstream bodies are never reflected, and a missing key or any upstream failure degrades honestly to the lexical
 // ranker. Semantic similarity is a ranking signal only: it is never claim support or confidence.
 import { CORPUS_DIMENSIONS, CORPUS_MODEL, CORPUS_SCHEMA, type CorpusHit, type CorpusIndex, type CorpusSearchResult, type CorpusSource } from './cloudbite-corpus-contract';
-import { boundedText } from './cloudbite-inference';
+import { boundedText } from './cloudbite-bounded-text';
 import { sha256Hex } from './cloudbite-knowledge';
 import { rankCards, retrievalTokens, type RankableCard } from './cloudbite-retrieval';
 
