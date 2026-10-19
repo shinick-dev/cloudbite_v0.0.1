@@ -28,6 +28,7 @@ Object.defineProperty(globalThis.crypto, 'DigestStream', { configurable: true, v
 const PY = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
 const dir = await mkdtemp(join(tmpdir(), 'cloudbite-files-integration-'));
 const servers = [];
+const workers = [];
 let passed = 0; const ok = (name) => { passed++; console.log('  ok', name); };
 try {
   const root = resolve('.').replace(/\\/g, '/');
@@ -183,14 +184,22 @@ try {
       },
       exec: async (c, sb, cmd) => {
         vm.calls.push(['exec', cmd]);
-        if (cmd.includes('cloudbite-files-bridge v1')) {   // prepare script: owned private dirs + empty placeholders
-          for (const d of [P.base + '/agent', P.state, P.manifests, P.root]) await mkdir(local(d), { recursive: true });
+        if (cmd.includes('case "$(head -c 512')) {   // read-only install probe
+          const mine = await exists(P.base + '/owner') && (await readFile(local(P.base + '/owner'), 'utf8')).startsWith(`cloudbite-files-bridge v1 machine=${MID} `);
+          return { exitCode: mine && await exists(P.agent) && await exists(P.watcher) && await exists(P.capability) && await exists(P.state + '/journal.sqlite3') ? 0 : 43, result: '' };
+        }
+        if (cmd.includes('cloudbite-files-bridge v1') && cmd.includes('mkdir -p "$S"')) {   // prepare: owned private dirs + empty placeholders
+          for (const d of [P.base + '/agent', P.state, P.manifests, P.watchState, P.root]) await mkdir(local(d), { recursive: true });
+          await writeFile(local(P.base + '/owner'), cmd.match(/M="([^"]+)"/)[1]);
           return { exitCode: 0, result: '' };
         }
-        if (cmd.includes('"$B/capability.json.next"') && cmd.includes('mv -f')) {   // ACTIVATE
-          await rename(local(P.agent + '.next'), local(P.agent)); await rename(local(P.capability + '.next'), local(P.capability));
+        if (cmd.includes('cloudbite-files-bridge v1')) return { exitCode: 0, result: '' };   // capability refresh placeholder
+        if (cmd.includes('"$B/capability.json.next"') && cmd.includes('mv -f')) {   // ACTIVATE / capability-only activate
+          for (const f of [P.agent, P.watcher, P.capability]) if (cmd.includes(f.slice(P.base.length + 1) + '.next')) await rename(local(f + '.next'), local(f));
           return { exitCode: 0, result: '' };
         }
+        const w = /python3 -I -B (\S+) --state (\S+) --agent (\S+) --agent-state (\S+) --capability (\S+) --root (\S+) (resume)'$/.exec(cmd);
+        if (w) return watcher(w.slice(1, 7), ['resume']);
         if (cmd.includes('exit 43') && !(await exists(P.agent) && await exists(P.capability))) return { exitCode: 43, result: '' };
         if (cmd.includes('install -m 600 /dev/null') && cmd.includes(P.manifests)) return { exitCode: 0, result: '' };
         const mv = /mv -f (\S+)\.next (\S+) &&/.exec(cmd);
@@ -205,6 +214,27 @@ try {
         if (rmf) await rm(local(rmf[1]), { force: true });
         return last;
       },
+    };
+    // the watcher CLI as the bridge passes it (fixed paths mapped into the local home)
+    const watchArgv = (paths, args) => ['-B', local(paths[0]), '--state', local(paths[1]), '--agent', local(paths[2]), '--agent-state', local(paths[3]),
+      '--capability', local(paths[4]), '--root', local(paths[5]), ...args];
+    const watcher = (paths, args) => new Promise((done) => {
+      execFile(PY, watchArgv(paths, args), { timeout: 60_000, windowsHide: true }, (err, stdout, stderr) => {
+        wire.push(stdout, stderr); vm.runs.push('watch ' + args.join(' '));
+        done({ exitCode: err ? (typeof err.code === 'number' ? err.code : 1) : 0, result: stdout });
+      });
+    });
+    const RUN = /python3 -I -B (\S+) --state (\S+) --agent (\S+) --agent-state (\S+) --capability (\S+) --root (\S+) run --max-runtime (\d+) >>/;
+    vm.spawns = []; vm.workers = [];
+    // spawn: the toolbox session's async exec. With vm.launch set, the submitted run really starts (local python, short
+    // interval) and keeps running in the background like the session would; it is stopped at the end of the test.
+    vm.io.spawn = async (c, sb, session, cmd) => {
+      vm.calls.push(['spawn', session, cmd]); vm.spawns.push(cmd);
+      const m = RUN.exec(cmd); assert.ok(m, cmd);
+      if (!vm.launch) return;
+      const child = execFile(PY, watchArgv(m.slice(1, 7), ['run', '--max-runtime', String(Math.min(Number(m[7]), 120)), '--interval', '2', '--debounce', '0.5']),
+        { timeout: 150_000, windowsHide: true }, (err, stdout, stderr) => { wire.push(stdout, stderr); child.out = stdout; child.code = err ? err.code : 0; child.done = true; });
+      vm.workers.push(child); workers.push(child);
     };
     vm.cli = (...args) => agent(['--state', P.state, '--capability', P.capability, ...args]);
     vm.local = local;
@@ -267,6 +297,43 @@ try {
     assert.equal((await j(r)).error.code, 'ownership_mismatch');
     assert.ok(![...env.objects.values()].some(o => [...o.ctx.storage.m.keys()].some(k => k.startsWith('cap/active'))), 'no grant before ownership is proven');
     ok('Origin exact, cross-site/method/strict-key/body-cap refusals; stopped or unowned machine refused before any grant or write');
+  }
+  // ===== 2b. JSON bodies are read through a byte-bounded stream: no buffering past the cap, whatever the headers say =====
+  {
+    const before = vm.calls.length;
+    const endless = () => {
+      const s = { pulls: 0, cancelled: false };
+      s.body = new ReadableStream({ pull(c) { if (++s.pulls > 100) return c.close(); c.enqueue(new TextEncoder().encode('{"requestId":"' + 'a'.repeat(1000))); }, cancel() { s.cancelled = true; } });
+      return s;
+    };
+    const streamed = (body, h = {}) => new Request(`${base}/api/cloudbite/computer/files/agent/configure`,
+      { method: 'POST', headers: { origin: base, 'content-type': 'application/json', ...h }, body, duplex: 'half' });
+    let s = endless();
+    let r = await route(streamed(s.body), 'files/agent/configure');
+    assert.equal(r.status, 400); assert.ok(s.cancelled, 'chunked oversize body is cancelled'); assert.ok(s.pulls <= 8, `stopped after ~4 KiB (${s.pulls} chunks)`);
+    s = endless();
+    r = await route(streamed(s.body, { 'content-length': '20' }), 'files/agent/configure');
+    assert.equal(r.status, 400); assert.ok(s.cancelled && s.pulls <= 8, 'a forged small Content-Length does not lift the cap');
+    for (const cl of ['5000', 'abc', '-1', '1e3']) {
+      s = endless(); r = await route(streamed(s.body, { 'content-length': cl }), 'files/agent/configure');
+      assert.equal(r.status, 400, cl); assert.ok(s.pulls <= 1, `refused on the header alone (${cl})`);
+    }
+    // multi-byte: under 4096 characters but over 4096 bytes
+    r = await route(preq('files/agent/configure', { requestId: '가'.repeat(2000) }), 'files/agent/configure'); assert.equal(r.status, 400);
+    // malformed UTF-8 fails closed (no replacement-character decoding)
+    const bad = new Uint8Array([...new TextEncoder().encode('{"requestId":"'), 0xff, 0xfe, ...new TextEncoder().encode('"}')]);
+    r = await route(new Request(`${base}/x`, { method: 'POST', headers: { origin: base, 'content-type': 'application/json' }, body: bad }), 'files/agent/configure');
+    assert.equal(r.status, 400);
+    for (const raw of ['', 'null', '[]', '{"requestId":', '{"requestId":"x"} trailing']) {
+      r = await route(preq('files/agent/configure', raw), 'files/agent/configure'); assert.equal(r.status, 400, raw);
+    }
+    const lease = new TextEncoder().encode(JSON.stringify({ leaseId: 'a'.repeat(32) }));
+    let sent = 0;
+    const slow = new ReadableStream({ pull(c) { if (sent >= lease.length) return c.close(); c.enqueue(lease.slice(sent, sent + 5)); sent += 5; } });
+    r = await route(streamed(slow).constructor === Request ? new Request(`${base}/x`, { method: 'POST', headers: { origin: base, 'content-type': 'application/json' }, body: slow, duplex: 'half' }) : null, 'files/close');
+    assert.notEqual(r.status, 400, 'a valid body split into small chunks is reassembled');
+    assert.equal(vm.calls.slice(before).filter(c => c[0] !== 'getSandbox' && !(c[0] === 'exec' && c[1].includes(' close --lease='))).length, 0, 'refused bodies reach no provider step');
+    ok('bounded JSON: chunked/forged-length oversize cancelled at ~4 KiB, bad lengths/UTF-8/JSON refused, small chunks reassembled');
   }
 
   // ===== 3. cross-layer: browser upload → configure → materialize (real agent over loopback) → edit + sync → download =====
@@ -423,14 +490,90 @@ try {
     ok('end wiring: per-item account backup provider (no R2 needed), unconfirmed create → read-only reconcile then honest blocked; no drain hook');
   }
 
+  // ===== 7. continuous autosave: configure launches the real watcher; it survives a stop/start through the resume hook =====
+  {
+    const bucket2 = new MemR2(), env2 = mkEnv(bucket2), proxy2 = await loopback(env2);
+    const vm2 = fakeVm(join(dir, 'home-watch'), proxy2); vm2.launch = true;
+    const route2 = (op, body) => M.filesIntegrationRoute(preq(op, body), env2, op, tag, computerRpc, vm2.io);
+    const folder = (await j(await post(env2, 'files/create', { requestId: uuid(), parentId: 'root', name: 'Work', kind: 'dir' }))).entry;
+    const b = await browserUpload(env2, folder.fileId, 'b.txt', new TextEncoder().encode('draft 1\n'));
+    r = await route2('files/agent/configure', { requestId: uuid() });
+    let c = await j(r); assert.equal(r.status, 200, JSON.stringify(c));
+    assert.deepEqual(c.watcher, { resumed: true, agentResumed: true, launch: 'submitted', running: 'not_observed' }, 'submission is not reported as running');
+    assert.equal(vm2.spawns.length, 1); assert.equal(vm2.calls.find(x => x[0] === 'spawn')[1], 'cloudbite-files-watch');
+    const m = await j(await route2('files/materialize', { requestId: uuid(), fileId: b.fileId }));
+    assert.equal(m.open.state, 'clean', JSON.stringify(m));
+    await route2('files/close', { leaseId: m.open.leaseId });
+    const localB = join(vm2.local(P.root), 'Work', 'b.txt');
+    const saved = async (bytes, label) => {   // the watcher (not a manual sync) uploads the edit; bounded wait
+      for (let i = 0; i < 120; i++) {
+        const e = (await j(await get(env2, `files?parentId=${folder.fileId}&limit=10`))).entries[0];
+        if (e.size === bytes.length && e.currentVersion !== b.versionId) {
+          const body = new Uint8Array(await (await get(env2, `files/content/${b.fileId}?versionId=${e.currentVersion}`)).arrayBuffer());
+          if (hexOf(body) === hexOf(bytes)) return e.currentVersion;
+        }
+        await new Promise(res => setTimeout(res, 500));
+      }
+      assert.fail(`${label}: the running watcher did not save the edit within 60 s; worker out: ${vm2.workers.map(w => w.out).join(' | ')}`);
+    };
+    const v2b = new TextEncoder().encode('edited on the cloud computer, saved by the watcher\n');
+    await writeFile(localB, v2b);
+    const firstSaved = await saved(v2b, 'configure');
+    assert.ok(!vm2.runs.some(x => x.includes('mark-dirty') || / sync$/.test(x)), 'no manual mark-dirty/sync was issued by the test');
+    // idempotent reconfigure: a second run is submitted, but the watcher lock keeps exactly one worker
+    r = await route2('files/agent/configure', { requestId: uuid() }); assert.equal(r.status, 200);
+    c = await j(r); assert.equal(c.watcher.resumed, 'deferred', 'the running worker took the resume request');
+    for (let i = 0; i < 60 && !vm2.workers[1].done; i++) await new Promise(res => setTimeout(res, 250));
+    assert.ok(vm2.workers[1].done && /"code": "watcher_busy"/.test(vm2.workers[1].out), 'the duplicate exited on the lock: ' + vm2.workers[1].out);
+    assert.ok(!vm2.workers[0].done, 'the first worker keeps running');
+    // ordinary stop: the VM processes are gone
+    for (const w of vm2.workers) if (!w.done) w.kill();
+    for (let i = 0; i < 40 && vm2.workers.some(w => !w.done); i++) await new Promise(res => setTimeout(res, 250));
+    const capBefore = JSON.parse(await readFile(vm2.local(P.capability), 'utf8')).token;
+
+    // end wiring with R2: the resume hook exists (still no drain); without R2 it does not
+    assert.deepEqual(Object.keys(W.computerEndHooks(mkEnv(undefined), new MemStorage(), {}, vm2.io)), ['backup'], 'R2 absent: no resume hook, no VM operation');
+    const hooks = W.computerEndHooks(env2, new MemStorage(), {}, vm2.io);
+    assert.deepEqual(Object.keys(hooks).sort(), ['backup', 'resume'], 'resume wired, drain not wired: files_verified stays unavailable');
+    await assert.rejects(hooks.resume(machine, 'not-a-uuid'), (e) => e.code === 'bad_request');
+    await assert.rejects(hooks.resume({ ...machine, labels: {} }, uuid()), (e) => e.code === 'bad_request');
+    await assert.rejects(hooks.resume({ ...machine, status: 'stopped' }, uuid()), (e) => e.code === 'not_running', 'never starts a machine');
+    // a machine that was never set up here is skipped untouched, and no capability is minted
+    const vm3 = fakeVm(join(dir, 'home-fresh'), proxy2); vm3.launch = true;
+    const fence = async () => env2.objects.get(tag).ctx.storage.get('cap/fence');
+    const f0 = await fence();
+    await W.computerEndHooks(env2, new MemStorage(), {}, vm3.io).resume(machine, uuid());
+    assert.deepEqual(vm3.calls.map(x => x[0]), ['getSandbox', 'exec'], 'only the read-only probe'); assert.equal(await fence(), f0);
+    // start of the same machine: fresh capability, watcher resumed and relaunched, autosave continues
+    const callsBefore = vm2.calls.length;
+    await hooks.resume(machine, uuid());
+    const after = vm2.calls.slice(callsBefore);
+    assert.deepEqual(after.filter(x => x[0] === 'upload').map(x => x[1]), [P.capability + '.next'], 'only the capability is refreshed');
+    assert.equal(after.filter(x => x[0] === 'spawn').length, 1);
+    assert.notEqual(JSON.parse(await readFile(vm2.local(P.capability), 'utf8')).token, capBefore, 'the expired-or-old capability was replaced');
+    const v3b = new TextEncoder().encode('after the restart, still autosaved\n');
+    await writeFile(localB, v3b);
+    assert.notEqual(await saved(v3b, 'resume'), firstSaved);
+    // another machine is the writer now: nothing to resume, no VM call, no grant, never promoted back
+    for (const w of vm2.workers) if (!w.done) w.kill();
+    const st = (await j(await get(env2, 'files/status'))).status;
+    await env2.objects.get(tag).svc.advanceWriter(tag, { requestId: 'w-elsewhere', expectedEpoch: st.writerEpoch, machineId: 'sb-elsewhere' });
+    const n = vm2.calls.length, f1 = await fence();
+    await hooks.resume(machine, uuid());
+    assert.equal(vm2.calls.length, n); assert.equal(await fence(), f1);
+    assert.equal((await j(await get(env2, 'files/status'))).status.writerMachine, 'sb-elsewhere');
+    for (let i = 0; i < 40 && vm2.workers.some(w => !w.done); i++) await new Promise(res => setTimeout(res, 250));
+    ok('autosave: configure launches the real watcher (one worker by lock, submission not claimed as running); after a stop the R2-only resume hook refreshes the capability and relaunches it on the same set-up writer only; drain stays unwired');
+  }
   // ===== secrets =====
   const all = wire.join('\n');
-  assert.ok(!all.includes(token) && !/cbfa_[A-Za-z0-9_-]{20,}/.test(all), 'no capability token in any response, log or agent output');
+  assert.ok(!all.includes(token) && !/cbfa_[A-Za-z0-9_-]{20,}/.test(all), 'no capability token in any response, log or agent/watcher output');
   assert.ok(!all.includes('dtn-test-key-not-real'), 'no provider key in any output');
   ok('no capability token or provider key in any response, agent stdout/stderr or route output');
 
   console.log(`${passed} cloudbite-computer-files-integration checks passed (MOCK storage/R2/VM; loopback HTTP; not live evidence)`);
 } finally {
   for (const s of servers) s.close();
+  for (const w of workers) if (!w.done) w.kill();
   await rm(dir, { recursive: true, force: true });
 }

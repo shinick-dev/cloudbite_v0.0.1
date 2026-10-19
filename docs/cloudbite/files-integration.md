@@ -14,7 +14,7 @@ Code:
 
 | Route | Does | Never |
 |---|---|---|
-| `POST files/agent/configure {requestId}` | Proves the recorded running machine is owned (name + every label) and mints the machine capability (`filesAgentGrant`). It then installs the agent and the 0600 capability, and runs agent `init`. | Starts, stops or snapshots a machine. Puts the token in argv, logs or the response. |
+| `POST files/agent/configure {requestId}` | Proves the recorded running machine is owned (name + every label) and mints the machine capability (`filesAgentGrant`). It then installs the agent, the watcher (`FILES_WATCH_SOURCE`) and the 0600 capability, runs agent `init`, runs watcher `resume` (clears pause/draining) and submits one bounded watcher `run` in the toolbox session `cloudbite-files-watch` (see *Watcher*). | Starts, stops or snapshots a machine. Puts the token in argv, logs or the response. Claims the watcher is running. |
 | `POST files/materialize {requestId, fileId, versionId?}` | `filesManifest` (typed DO RPC to `FilesService.resolveManifest`) builds the canonical manifest. The agent `register`s it and then `open`s it with `--lease=<requestId hex>`. The answer carries `open`, `workspace: "~/CloudFiles"` and `launched: false`. | Takes paths from the client. Opens an application. |
 | `POST files/close {leaseId}` | Releases the lease that materialize took. | — |
 | `GET files/agent/status` | Returns agent counts and readiness through a field whitelist. | Reads bodies. Exposes ids, paths or the capability. |
@@ -26,6 +26,28 @@ Behaviour that applies across these routes:
 - **Retries:**
   - The lease id is derived from the `requestId`. A retried materialize therefore replays the same lease (`fetchedBytes: 0`) instead of leaking a second one that would block a safe end.
   - The page keeps the exact body of an unconfirmed request and resends it unchanged.
+- **JSON bodies:** read by `filesRouteJson` as a byte-bounded stream (4096 bytes). A declared `Content-Length` must be decimal and within the cap. A missing or forged length cannot make it buffer more: bytes are counted per chunk and the body is cancelled once over the cap. Malformed UTF-8 (fatal decoder), malformed JSON and unknown keys answer `400 bad_request` before any provider step.
+
+## Watcher (continuous autosave)
+
+Paths, all under the existing private base `~/.cloudbite-files` and covered by the same symlink/owner guards as the agent:
+`agent/files-watch.py` (0700 via the `.next` + activate path), `watch/` (watcher state, lock `watch.lock`), `watch.log` (0600, truncated over 1 MiB). The token stays only in the 0600 `capability.json`; the watcher reads it from there.
+
+- **Launch:** `restDaytona.spawn` (toolbox session create + `runAsync`), never the synchronous `process/execute` that reaps background children. The fixed command is `exec timeout -k 30 <N+30> python3 -I -B … run --max-runtime N >> watch.log 2>&1` with `N = min(6 h, capability lifetime − 30 s)`, at least 60 s. No `nohup`/`setsid`/`&`.
+- **One worker:** the watcher's `watch.lock` makes any second `run` exit `watcher_busy`, so a repeated configure or resume is safe. While a worker holds the lock, `resume` is deferred to it (`resumed: "deferred"`).
+- **Honest reporting:** the answer has `watcher: { resumed, agentResumed, launch: "submitted", running: "not_observed" }`. Submission is not reported as a running process; a lost spawn answer is `503 unknown_outcome`.
+
+## Resume after an ordinary stop/start
+
+`computerEndHooks` adds a `resume` hook **only** when R2 (`CLOUDBITE_FILES_BUCKET`), the files object and a valid gateway are bound. Without them there is no hook and no VM operation.
+
+The hook uses the machine the computer object passes (no call back into the computer object, so no queue cycle):
+1. `requestId` must be a UUID and the owner tag comes from the machine labels; otherwise `bad_request`.
+2. Files `status`: if `writerMachine` is not this machine (including none), it resolves with no VM call and no grant. It never promotes a writer.
+3. The bridge proves ownership and `running` (a stopped machine is `not_running`; nothing is started), then runs a read-only probe. A machine without the owner marker, agent, watcher, capability or state (never set up by configure, or set up before the watcher existed) is skipped untouched; reconfigure installs the watcher.
+4. Otherwise: `filesAgentGrant` for the same writer, refresh only the 0600 capability (exact owner marker required), watcher `resume`, and submit the bounded `run` as above.
+
+A failed or unknown step rejects so the computer object's bounded retry applies. Residual: if the writer is cleared between step 2 and the grant, `filesGrant` would assign this machine (the runtime is outside this change). After a writer-epoch takeover the agent's pinned scope no longer matches and it fails closed until reconfigure.
 
 ## Files page
 
@@ -43,8 +65,8 @@ Behaviour that applies across these routes:
    - Only a backend that declares `eviction_policy == "verified"` may evict. Today that is only the test fake.
    - There is no force bypass.
    - Opening this gate needs live persistence evidence and server-effective pins reaching the agent.
-2. **`files_verified` safe end:** unavailable (`409 files_not_configured`) because no files drain hook is wired; `computerEndHooks` returns `{ backup }` only. Wiring it needs both of these:
-   - the watcher + agent combined `prepare-end` report installed and launched on the machine. The watcher is not installed or launched by these routes, and no background worker runs on the original VM;
+2. **`files_verified` safe end:** unavailable (`409 files_not_configured`) because no files drain hook is wired; `computerEndHooks` returns `{ backup }`, plus `resume` with R2, never `drain`. The watcher is now installed and launched (above), but normal-session sync does not depend on the end gate. Wiring the drain still needs:
+   - a separate re-entry/admission proof for the combined watcher + agent `prepare-end` report;
    - proof that workerd delivers the agent's HTTP calls while the computer DO alarm awaits the drain without deadlock. Those calls include `computerMachine` and `computerEndStatus` on the same DO.
 3. **Safe-end admission barrier:** in place for the browser.
    - While an end is draining or stopping (`uploadsFrozen`), browser `uploads/begin` answers `409 end_in_progress` (retryable).
@@ -82,7 +104,11 @@ It covers:
 - stale epoch;
 - the end barrier;
 - the end API and end wiring;
+- bounded JSON (chunked and forged-length oversize cancelled, bad UTF-8/JSON refused);
+- autosave: configure spawns the real generated watcher as a local background process, which saves an edit with no manual sync; a duplicate exits `watcher_busy`; after the workers are killed (a simulated stop) the resume hook rotates the capability and relaunches, and the next edit is saved; an un-set-up home is only probed; another writer means no VM call;
 - no secret in any output.
+
+`test/cloudbite-computer-files-bridge.mjs` also runs the prepare/activate/probe/refresh/watcher scripts on a throwaway POSIX home (WSL when present): guards, modes, real `resume`, duplicate lock, log without token, symlink refusals.
 
 It is **MOCK** evidence:
 - DO storage and R2 are in-memory doubles.

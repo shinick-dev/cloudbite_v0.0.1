@@ -1,6 +1,7 @@
 // Cloud Files integration: owner browser routes that drive the VM bridge (cloudbite-computer-files-bridge.ts) with the
 // real runtime grant and the canonical catalog manifest. Contract: docs/cloudbite/files-integration.md.
-//   POST files/agent/configure {requestId}               install agent + private capability on the RUNNING owned machine
+//   POST files/agent/configure {requestId}               install agent + watcher + private capability on the RUNNING owned
+//                                                         machine, resume the watcher and submit its bounded background run
 //   POST files/materialize     {requestId,fileId,versionId?}  prepare one file under ~/CloudFiles (no app is launched)
 //   POST files/close           {leaseId}                  release the open lease that materialize took
 //   GET  files/agent/status                               agent counts only (no body, no source download)
@@ -8,9 +9,12 @@
 // not enough). Without the R2 body store, configure/materialize answer store_not_configured before any provider call or
 // capability grant; status answers available:false without a provider call; the catalog listing is unaffected. No route
 // starts, stops or snapshots a machine, and the capability token never appears in a response or a log line.
+// JSON bodies are read through a byte-bounded stream (filesRouteJson), never buffered whole.
 import { computerAccounts, computerLabels, type ComputerAccount, type ComputerMachineRef } from './cloudbite-computer-contract';
 import { cbExec, cbGetSandbox, cbUpload } from './cloudbite-daytona';
+import { restDaytona } from './cloudbite-computer-daytona';
 import { FILES_AGENT_SOURCE } from './cloudbite-computer-files-agent-source';
+import { FILES_WATCH_SOURCE } from './cloudbite-computer-files-watch-source';
 import {
   filesBridgeClose, filesBridgeEndpoint, filesBridgeInstall, filesBridgeMaterialize, filesBridgeStatus,
   type FilesBridgeDeps, type FilesBridgeResult, type FilesManifestEntry,
@@ -22,8 +26,12 @@ export interface FilesMachineRpc {
   computerMachine(tag: string): Promise<{ ok: true; machine: ComputerMachineRef } | { error: unknown; status: number }>;
 }
 /** Provider I/O seam (tests inject recorded fakes; production uses the Daytona REST helpers). */
-export type FilesBridgeIo = Pick<FilesBridgeDeps, 'getSandbox' | 'exec' | 'upload'>;
-const DAYTONA_IO: FilesBridgeIo = { getSandbox: cbGetSandbox, exec: cbExec, upload: cbUpload };
+export type FilesBridgeIo = Pick<FilesBridgeDeps, 'getSandbox' | 'exec' | 'upload' | 'spawn'>;
+export const FILES_DAYTONA_IO: FilesBridgeIo = {
+  getSandbox: cbGetSandbox, exec: cbExec, upload: cbUpload,
+  spawn: (c, sb, sessionId, command) => restDaytona.spawn(c, sb, sessionId, command),
+};
+const DAYTONA_IO = FILES_DAYTONA_IO;
 
 const H = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { ...H, 'content-type': 'application/json' } });
@@ -44,10 +52,14 @@ export function filesBridgeManifestOf(m: FileManifest): FilesManifestEntry[] {
   ];
 }
 
-/** Bridge dependencies for this owner. `machine()` returns only the recorded RUNNING owned machine; nothing starts one. */
-export function filesBridgeDeps(env: FilesEnv, tag: string, computer: FilesMachineRpc, io: FilesBridgeIo = DAYTONA_IO): FilesBridgeDeps {
+/** Bridge dependencies for this owner. `machine()` returns only a RUNNING owned machine; nothing starts one. `current` is
+ *  either the computer object (browser routes: re-read through computerMachine) or a machine already in hand (end hooks
+ *  run inside the computer object's serial queue and must never call back into it). */
+export function filesBridgeDeps(env: FilesEnv, tag: string, current: FilesMachineRpc | ComputerMachineRef,
+  io: FilesBridgeIo = DAYTONA_IO): FilesBridgeDeps {
   const running = async () => {
-    const r = await computer.computerMachine(tag);
+    if (!('computerMachine' in current)) return current.status === 'running' ? current : null;
+    const r = await current.computerMachine(tag);
     return 'ok' in r && r.machine.status === 'running' ? r.machine : null;
   };
   return {
@@ -57,6 +69,7 @@ export function filesBridgeDeps(env: FilesEnv, tag: string, computer: FilesMachi
     labels: (id) => computerLabels(tag, id as ComputerAccount),
     ...io,
     agentSource: FILES_AGENT_SOURCE,
+    watchSource: FILES_WATCH_SOURCE,
     // Re-read right before minting: the grant goes only to the same machine the bridge just proved owned and running.
     grant: async ({ machine, requestId }) => {
       const m = await running();
@@ -66,14 +79,32 @@ export function filesBridgeDeps(env: FilesEnv, tag: string, computer: FilesMachi
   };
 }
 
-async function readJson(req: Request, keys: readonly string[]): Promise<Record<string, unknown> | null> {
+export const FILES_ROUTE_JSON_MAX = 4096;
+const strictUtf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
+
+/** Strict small JSON body: bytes are counted while streaming (a missing or forged Content-Length cannot make it buffer
+ *  more than the cap), an oversized body is cancelled, and malformed UTF-8/JSON or unknown keys are refused. */
+export async function filesRouteJson(req: Request, keys: readonly string[]): Promise<Record<string, unknown> | null> {
   if (!req.headers.get('content-type')?.toLowerCase().startsWith('application/json')) return null;
-  if (Number(req.headers.get('content-length') ?? 0) > 4096) return null;
+  const declared = req.headers.get('content-length');
+  if (declared !== null && (!/^\d{1,12}$/.test(declared) || Number(declared) > FILES_ROUTE_JSON_MAX)) { await req.body?.cancel().catch(() => {}); return null; }
+  if (!req.body) return null;
+  const reader = req.body.getReader(); let n = 0; const parts: Uint8Array[] = [];
+  try {
+    for (;;) {
+      const { done, value } = await reader.read(); if (done) break;
+      n += value.byteLength;
+      if (n > FILES_ROUTE_JSON_MAX) { await reader.cancel().catch(() => {}); return null; }
+      parts.push(value);
+    }
+  } catch { return null; }
+  const bytes = new Uint8Array(n); let at = 0; for (const p of parts) { bytes.set(p, at); at += p.byteLength; }
   let v: unknown;
-  try { const text = await req.text(); if (text.length > 4096) return null; v = JSON.parse(text); } catch { return null; }
+  try { v = JSON.parse(strictUtf8.decode(bytes)); } catch { return null; }
   if (!v || typeof v !== 'object' || Array.isArray(v) || Object.keys(v).some((k) => !keys.includes(k))) return null;
   return v as Record<string, unknown>;
 }
+const readJson = filesRouteJson;
 
 export async function filesIntegrationRoute(req: Request, env: FilesEnv, op: string, tag: string, computer: FilesMachineRpc,
   io: FilesBridgeIo = DAYTONA_IO): Promise<Response | null> {

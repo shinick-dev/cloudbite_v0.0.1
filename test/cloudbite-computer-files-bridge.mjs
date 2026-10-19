@@ -17,6 +17,7 @@ const B = await import(pathToFileURL(join(tmp, 'm.mjs')));
 globalThis.fetch = async (u) => { throw new Error('network forbidden in this test: ' + u); };
 
 const AGENT = readFileSync('images/cloudbite-computer/files-agent.py', 'utf8');
+const WATCH = readFileSync('images/cloudbite-computer/files-watch.py', 'utf8');
 const TOKEN = 'tok_' + 'Zq9'.repeat(14);
 const REQ = '0f8fad5b-d9cb-469f-a165-70867728950e';
 const MACHINE = { id: 'sb-1111', name: 'cloudbite-computer-abc', account: 'primary' };
@@ -37,6 +38,7 @@ function harness(over = {}) {
     gateway: GATEWAY,
     now: () => NOW,
     agentSource: AGENT,
+    watchSource: WATCH,
     machine: async () => { calls.push(['machine']); return 'machine' in over ? over.machine : MACHINE; },
     account: (id) => { calls.push(['account', id]); return over.noAccount ? null : { api: 'https://api.invalid', key: 'PROVIDER-KEY-x' }; },
     labels: () => ({ ...LABELS }),
@@ -50,6 +52,10 @@ function harness(over = {}) {
     upload: async (_c, _sb, path, content) => {
       calls.push(['upload', path, content]);
       if (over.uploadThrows) throw new Error('upload lost');
+    },
+    spawn: async (_c, _sb, session, command) => {
+      calls.push(['spawn', session, command]);
+      if (over.spawnThrows) throw new Error('spawn lost');
     },
     grant: async (req) => {
       calls.push(['grant', req]);
@@ -66,7 +72,7 @@ function harness(over = {}) {
     } };
 }
 
-const providerWrites = (h) => h.calls.filter(c => c[0] === 'exec' || c[0] === 'upload' || c[0] === 'grant');
+const providerWrites = (h) => h.calls.filter(c => c[0] === 'exec' || c[0] === 'upload' || c[0] === 'grant' || c[0] === 'spawn');
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
@@ -107,9 +113,23 @@ test('install: private placeholders, secret only in upload body, atomic activate
   const h = harness();
   const r = await h.run(() => B.filesBridgeInstall(h.deps, { requestId: REQ }));
   assert.equal(r.status, 200, JSON.stringify(r));
-  assert.deepEqual(r.body, { ok: true, installed: true, machineId: MACHINE.id, writerEpoch: 3, expiresAt: NOW + 3600_000 });
-  assert.deepEqual(h.kinds(), ['machine', 'account', 'getSandbox', 'grant', 'exec', 'upload', 'upload', 'exec', 'exec', 'exec']);
-  const [prep, activate, init, status] = h.calls.filter(c => c[0] === 'exec').map(c => c[1]);
+  assert.deepEqual(r.body, { ok: true, installed: true, machineId: MACHINE.id, writerEpoch: 3, expiresAt: NOW + 3600_000,
+    watcher: { resumed: true, agentResumed: false, launch: 'submitted', running: 'not_observed' } });
+  assert.deepEqual(h.kinds(), ['machine', 'account', 'getSandbox', 'grant', 'exec', 'upload', 'upload', 'upload', 'exec', 'exec', 'exec', 'exec', 'spawn']);
+  const [prep, activate, init, status, resume] = h.calls.filter(c => c[0] === 'exec').map(c => c[1]);
+  assert.match(prep, /install -m 600 \/dev\/null "\$B\/agent\/files-watch\.py\.next"/);
+  assert.match(prep, /"\$B\/watch" "\$B\/owner" "\$B\/root-owned" "\$B\/watch\.log" "\$R"; do if \[ -L "\$p" \]; then exit 41/);
+  assert.match(activate, /"\$B\/agent\/files-watch\.py\.next" "\$B\/capability\.json\.next"; do if \[ -L "\$f" \]/);
+  assert.match(activate, /mv -f "\$B\/agent\/files-watch\.py\.next" "\$B\/agent\/files-watch\.py"/);
+  const W = B.FILES_BRIDGE_PATHS;
+  const watchArgs = `python3 -I -B ${W.watcher} --state ${W.watchState} --agent ${W.agent} --agent-state ${W.state} --capability ${W.capability} --root ${W.root}`;
+  assert.equal(resume, `bash -c 'test -f ${W.watcher} && test ! -L ${W.watcher} && test -f ${W.agent} || exit 43; ${watchArgs} resume'`);
+  const [, session, run] = h.calls.find(c => c[0] === 'spawn');
+  assert.equal(session, B.FILES_WATCH_SESSION);
+  // capability lifetime 3600 s minus the kill grace bounds the run; the outer timeout adds only the grace
+  assert.ok(run.endsWith(`exec timeout -k 30 3600 ${watchArgs} run --max-runtime 3570 >> "$G" 2>&1'`), run);
+  assert.match(run, /for p in \/home\/daytona\/\.local\/share\/cloudbite-files \S+files-watch\.py "\$G"; do if \[ -L "\$p" \]; then exit 41/);
+  assert.match(run, /-gt 1048576 \]; then : > "\$G"; fi/);
   assert.match(prep, /umask 077/);
   assert.match(prep, /install -m 600 \/dev\/null "\$B\/capability\.json\.next"/);
   assert.match(prep, /if \[ -L "\$p" \]; then exit 41/);
@@ -122,9 +142,10 @@ test('install: private placeholders, secret only in upload body, atomic activate
   assert.match(init, /init --root \/home\/daytona\/CloudFiles --workspace-id=w_owner --machine-id=sb-1111 --writer-epoch=3$/);
   assert.match(status, /--capability \/home\/daytona\/\.local\/share\/cloudbite-files\/capability\.json status$/);
   const uploads = h.calls.filter(c => c[0] === 'upload');
-  assert.deepEqual(uploads.map(u => u[1]), [B.FILES_BRIDGE_PATHS.agent + '.next', B.FILES_BRIDGE_PATHS.capability + '.next']);
+  assert.deepEqual(uploads.map(u => u[1]), [B.FILES_BRIDGE_PATHS.agent + '.next', B.FILES_BRIDGE_PATHS.watcher + '.next', B.FILES_BRIDGE_PATHS.capability + '.next']);
   assert.equal(uploads[0][2], AGENT);
-  const cap = JSON.parse(uploads[1][2]);
+  assert.equal(uploads[1][2], WATCH);
+  const cap = JSON.parse(uploads[2][2]);
   assert.deepEqual(Object.keys(cap).sort(), ['endpoint', 'expiresAt', 'machineId', 'schema', 'token', 'workspaceId', 'writerEpoch']);
   assert.equal(cap.endpoint, ENDPOINT);
   assert.deepEqual(h.calls.find(c => c[0] === 'grant')[1], { machine: MACHINE, requestId: REQ });
@@ -133,8 +154,8 @@ test('install: private placeholders, secret only in upload body, atomic activate
   assert.ok(!JSON.stringify(r).includes(TOKEN) && !h.logs.join('\n').includes(TOKEN));
   assert.ok(!JSON.stringify(h.calls.filter(c => c[0] === 'exec')).includes('PROVIDER-KEY'));
   // scope: no HOME-wide scans, no recursive deletes, only bridge-owned paths written
-  for (const [, cmd] of h.calls.filter(c => c[0] === 'exec')) {
-    assert.ok(!/\b(find|du|ls -R|chown|sudo)\b|rm -rf|~\//.test(cmd), cmd);
+  for (const [, cmd] of h.calls.filter(c => c[0] === 'exec' || c[0] === 'spawn').map(c => [c[0], c[0] === 'exec' ? c[1] : c[2]])) {
+    assert.ok(!/\b(find|du|ls -R|chown|sudo|nohup|setsid|disown)\b|rm -rf|~\/|&\s*$/.test(cmd), cmd);
     for (const m of cmd.matchAll(/\/home\/daytona\/[^\s"';]*/g))
       assert.ok(m[0].startsWith(B.FILES_BRIDGE_PATHS.base) || m[0] === B.FILES_BRIDGE_PATHS.root, m[0]);
   }
@@ -194,6 +215,99 @@ test('install refuses bad capability grants and unowned workspace, without uploa
   assert.equal((await B.filesBridgeInstall(unknown.deps, { requestId: REQ })).body.error.code, 'install_failed');
 });
 
+test('install launches the watcher honestly: resume first, bounded async run, failures never claim running', async () => {
+  for (const deps of [{ watchSource: 'print(1)' }, { watchSource: '#!/usr/bin/env python3\n' + 'x'.repeat(300 * 1024) }, { spawn: undefined }]) {
+    const h = harness({ deps });
+    assert.equal((await B.filesBridgeInstall(h.deps, { requestId: REQ })).body.error.code, 'not_configured');
+    assert.deepEqual(h.calls, [], 'refused before any provider call or grant');
+  }
+  const OK = { exitCode: 0, result: '{"ok": true, "transportConfigured": true}' };
+  // watcher resume refused (e.g. a pinned config from another layout): no background run is submitted
+  const refused = harness({ exec: [OK, OK, OK, OK, { exitCode: 2, result: '{"ok": false, "code": "config_mismatch"}' }] });
+  const rr = await B.filesBridgeInstall(refused.deps, { requestId: REQ });
+  assert.equal(rr.status, 409); assert.equal(rr.body.error.code, 'config_mismatch');
+  assert.ok(!refused.kinds().includes('spawn'));
+  // a watcher that holds the lock defers the resume to its next tick; the second run then exits on the lock
+  const deferred = harness({ exec: [OK, OK, OK, OK, { exitCode: 0, result: '{"deferred": true, "ok": true}' }] });
+  const d = await B.filesBridgeInstall(deferred.deps, { requestId: REQ });
+  assert.deepEqual(d.body.watcher, { resumed: 'deferred', agentResumed: null, launch: 'submitted', running: 'not_observed' });
+  const resumed = harness({ exec: [OK, OK, OK, OK, { exitCode: 0, result: '{"agentCode": null, "agentResumed": true, "draining": false, "ok": true}' }] });
+  assert.equal((await B.filesBridgeInstall(resumed.deps, { requestId: REQ })).body.watcher.agentResumed, true);
+  // the submission outcome is unknown: reported as such (retryable), never as installed + running
+  const lost = harness({ spawnThrows: true });
+  const l = await B.filesBridgeInstall(lost.deps, { requestId: REQ });
+  assert.equal(l.status, 503); assert.equal(l.body.error.code, 'unknown_outcome');
+  // repeated configure: same fixed command into the same session (the watcher lock keeps one worker)
+  const twice = harness();
+  await B.filesBridgeInstall(twice.deps, { requestId: REQ }); await B.filesBridgeInstall(twice.deps, { requestId: REQ });
+  const spawns = twice.calls.filter(c => c[0] === 'spawn');
+  assert.equal(spawns.length, 2); assert.equal(spawns[0][2], spawns[1][2]); assert.equal(spawns[0][1], spawns[1][1]);
+  // lifetime: whole seconds, never past 6 h nor the capability (minus the kill grace), never below the minimum
+  assert.equal(B.filesBridgeWatchRuntime(NOW + 10 * 3600_000, NOW), 6 * 3600);
+  assert.equal(B.filesBridgeWatchRuntime(NOW + 600_000, NOW), 570);
+  assert.equal(B.filesBridgeWatchRuntime(NOW + 61_000, NOW), 60);
+  const short = harness({ grant: { ok: true, body: { ...GRANT, expiresAt: NOW + 600_000 } } });
+  await B.filesBridgeInstall(short.deps, { requestId: REQ });
+  assert.match(short.calls.find(c => c[0] === 'spawn')[2], /timeout -k 30 600 .* run --max-runtime 570 >>/);
+  for (const n of [59, 6 * 3600 + 1, 1.5, NaN]) assert.throws(() => B.filesBridgeWatchRunScript(n), /bad runtime/);
+});
+
+test('resume: only a machine this bridge set up; capability refresh + watcher resume + bounded run; secret only in upload', async () => {
+  const OK = { exitCode: 0, result: '{"ok": true}' };
+  const h = harness({ exec: [OK, OK, OK, { exitCode: 0, result: '{"agentCode": null, "agentResumed": true, "draining": false, "ok": true}' }] });
+  const r = await h.run(() => B.filesBridgeResume(h.deps, { requestId: REQ }));
+  assert.equal(r.status, 200, JSON.stringify(r));
+  assert.deepEqual(r.body, { ok: true, resumed: true, machineId: MACHINE.id, writerEpoch: 3, expiresAt: NOW + 3600_000,
+    watcher: { resumed: true, agentResumed: true, launch: 'submitted', running: 'not_observed' } });
+  assert.deepEqual(h.kinds(), ['machine', 'account', 'getSandbox', 'exec', 'grant', 'exec', 'upload', 'exec', 'exec', 'spawn']);
+  const [probe, refresh, activate, resume] = h.calls.filter(c => c[0] === 'exec').map(c => c[1]);
+  assert.equal(probe, B.FILES_BRIDGE_SCRIPTS.probe(MACHINE.id));
+  assert.ok(!/mkdir|install|rm |mv |>/.test(probe.replace(/2>\/dev\/null/g, '')), 'the probe writes nothing');
+  assert.match(probe, /"cloudbite-files-bridge v1 machine=sb-1111 workspace="\*\) exit 0;; esac; exit 43'$/);
+  assert.equal(refresh, B.FILES_BRIDGE_SCRIPTS.refresh(MACHINE.id, 'w_owner'));
+  assert.ok(refresh.indexOf('exit 44') < refresh.indexOf('install -m 600'), 'owner marker checked before the placeholder');
+  assert.ok(!/mkdir/.test(refresh), 'refresh never creates the install');
+  assert.equal(activate, B.FILES_BRIDGE_SCRIPTS.activateCapability);
+  assert.equal(resume, B.FILES_BRIDGE_SCRIPTS.watchResume);
+  assert.deepEqual(h.calls.filter(c => c[0] === 'upload').map(c => c[1]), [B.FILES_BRIDGE_PATHS.capability + '.next'], 'only the capability is replaced');
+  for (const c of h.calls) if (!(c[0] === 'upload')) assert.ok(!JSON.stringify(c).includes(TOKEN), c[0]);
+  assert.ok(!JSON.stringify(r).includes(TOKEN) && !h.logs.join('\n').includes(TOKEN));
+  assert.ok(!h.kinds().some(k => /start|stop|snapshot|delete/i.test(k)));
+
+  // never set up here (or set up for another machine): skipped before any grant or write
+  const fresh = harness({ exec: [{ exitCode: 43, result: '' }] });
+  assert.deepEqual((await B.filesBridgeResume(fresh.deps, { requestId: REQ })).body, { ok: true, skipped: 'not_installed' });
+  assert.deepEqual(fresh.kinds(), ['machine', 'account', 'getSandbox', 'exec']);
+  const linked = harness({ exec: [{ exitCode: 41, result: '' }] });
+  assert.equal((await B.filesBridgeResume(linked.deps, { requestId: REQ })).body.error.code, 'install_failed');
+  assert.ok(!linked.kinds().includes('grant'));
+  const probeLost = harness({ exec: [new Error('timeout')] });
+  assert.equal((await B.filesBridgeResume(probeLost.deps, { requestId: REQ })).body.error.code, 'unknown_outcome');
+  assert.ok(!probeLost.kinds().includes('grant'));
+  // a different writer or a refused grant: nothing written
+  const conflict = harness({ exec: [OK], grant: { error: { code: 'writer_conflict' }, status: 409 } });
+  assert.equal((await B.filesBridgeResume(conflict.deps, { requestId: REQ })).body.error.code, 'writer_conflict');
+  assert.ok(!conflict.kinds().includes('upload') && !conflict.kinds().includes('spawn'));
+  const foreignBase = harness({ exec: [OK, { exitCode: 44, result: '' }] });
+  assert.equal((await B.filesBridgeResume(foreignBase.deps, { requestId: REQ })).body.error.code, 'base_exists_unowned');
+  assert.ok(!foreignBase.kinds().includes('upload'));
+  const swapped = harness({ exec: [OK, OK, { exitCode: 45, result: '' }] });
+  assert.equal((await B.filesBridgeResume(swapped.deps, { requestId: REQ })).body.error.code, 'install_failed');
+  assert.ok(!swapped.kinds().includes('spawn'));
+  const spawnLost = harness({ exec: [OK, OK, OK, OK], spawnThrows: true });
+  assert.equal((await B.filesBridgeResume(spawnLost.deps, { requestId: REQ })).body.error.code, 'unknown_outcome');
+  for (const over of [{ machine: null }, { sandbox: { state: 'stopped' } }, { sandbox: { labels: {} } }]) {
+    const n = harness(over);
+    assert.ok(['not_running', 'ownership_mismatch'].includes((await B.filesBridgeResume(n.deps, { requestId: REQ })).body.error.code));
+    assert.deepEqual(providerWrites(n), [], 'never starts or touches a machine that is not running and owned');
+  }
+  const bad = harness();
+  assert.equal((await B.filesBridgeResume(bad.deps, { requestId: 'x' })).body.error.code, 'bad_request');
+  assert.equal((await B.filesBridgeResume({ ...bad.deps, spawn: undefined }, { requestId: REQ })).body.error.code, 'not_configured');
+  assert.deepEqual(bad.calls, []);
+  assert.throws(() => B.filesBridgeProbeScript('-x'), /bad identifier/);
+  assert.throws(() => B.filesBridgeRefreshScript('sb', "w'x"), /bad identifier/);
+});
 const FILE = { kind: 'file', fileId: 'f_abc', path: 'docs/a.txt', versionId: 'v_1', size: 3, sha256: 'a'.repeat(64) };
 const DIR = { kind: 'dir', fileId: 'f_dir', path: 'docs' };
 
@@ -374,6 +488,57 @@ test('install shell scripts on a throwaway POSIX home: private modes, idempotent
     share: '41', same_share: 'y', sub: '41', same_sub: 'y', markerlink: '41', same_markerlink: 'y' }, p.stdout + p.stderr);
 });
 
+test('watcher wiring on a throwaway POSIX home: probe/refresh guards, real agent + watcher CLI, one worker, private log', async () => {
+  const shell = process.platform !== 'win32' ? ['bash', ['-s']]
+    : spawnSync('wsl', ['-d', 'Ubuntu', '--', 'true']).status === 0 ? ['wsl', ['-d', 'Ubuntu', '--', 'bash', '-s']] : null;
+  if (!shell) { skips.push('POSIX watcher wiring (no bash/WSL on this host)'); return; }
+  const host = (f) => process.platform !== 'win32' ? join(process.cwd(), f)
+    : spawnSync('wsl', ['-d', 'Ubuntu', '--', 'wslpath', '-a', join(process.cwd(), f).replace(/\\/g, '/')], { encoding: 'utf8' }).stdout.trim();
+  const S = B.FILES_BRIDGE_SCRIPTS, sub = (s) => s.replaceAll('/home/daytona', '$T');
+  const D = '$T/.local/share/cloudbite-files';
+  const cap = JSON.stringify({ schema: B.FILES_CAPABILITY_SCHEMA, endpoint: 'http://127.0.0.1:9' + B.FILES_AGENT_PREFIX, token: TOKEN,
+    machineId: 'sb-1111', workspaceId: 'w_owner', writerEpoch: 3, expiresAt: Date.now() + 3600_000 });
+  const RUN = sub(S.watchRun(60));
+  const tree = 'tree() { (cd "$T" && find . -printf "%p %y %m %s\\n" | sort | md5sum); }';
+  const script = [
+    `set -u; export T; mode() { stat -c %a "$1"; }; ${tree}`,
+    'T=$(mktemp -d)', 'before=$(tree)',
+    sub(S.probe('sb-1111')), 'echo probe0=$?',
+    sub(S.refresh('sb-1111', 'w_owner')), 'echo refresh0=$? same_refresh0=$([ "$before" = "$(tree)" ] && echo y || echo n)',
+    sub(S.watchRun(60)), 'echo run0=$? same_run0=$([ "$before" = "$(tree)" ] && echo y || echo n)',
+    sub(S.prepare('sb-1111', 'w_owner')), 'echo prep=$? mode_watch=$(mode ' + D + '/watch) mode_wnext=$(mode ' + D + '/agent/files-watch.py.next)',
+    `cat '${host('images/cloudbite-computer/files-agent.py')}' > ${D}/agent/files-agent.py.next`,
+    `cat '${host('images/cloudbite-computer/files-watch.py')}' > ${D}/agent/files-watch.py.next`,
+    `printf '%s' '${cap}' > ${D}/capability.json.next`,
+    sub(S.activate), `echo act=$? mode_w=$(mode ${D}/agent/files-watch.py)`,
+    sub(S.probe('sb-1111')), 'echo probe_noinit=$?',
+    `python3 -I -B ${D}/agent/files-agent.py --state ${D}/state init --root $T/CloudFiles --workspace-id=w_owner --machine-id=sb-1111 --writer-epoch=3 >/dev/null; echo init=$?`,
+    sub(S.probe('sb-1111')), 'echo probe1=$?',
+    sub(S.probe('sb-2222')), 'echo probe_other=$?',
+    'before=$(tree)', sub(S.refresh('sb-1111', 'w_other')), 'echo refresh_other=$? same_other=$([ "$before" = "$(tree)" ] && echo y || echo n)',
+    sub(S.refresh('sb-1111', 'w_owner')), `echo refresh1=$? mode_cnext=$(mode ${D}/capability.json.next)`,
+    `printf '%s' '${cap}' > ${D}/capability.json.next`, sub(S.activateCapability), `echo actcap=$? mode_cap=$(mode ${D}/capability.json) cnext=$(ls ${D}/capability.json.next 2>/dev/null | wc -l)`,
+    // real watcher CLI: resume with no running worker resumes the agent; then one bounded background run
+    `out=$(${sub(S.watchResume)}); echo resume1=$?; case "$out" in *'"agentResumed": true'*'"ok": true'*) echo resumed=y;; *) echo resumed=n;; esac`,
+    `(${RUN}) & sleep 4`,
+    `${RUN}; echo dup=$?`,
+    `out=$(${sub(S.watchResume)}); case "$out" in *'"deferred": true'*) echo deferred=y;; *) echo deferred=n;; esac`,
+    `pkill -TERM -f "$T/.local/share/cloudbite-files/agent/files-watch.py --state"; wait`,
+    `echo busy=$(grep -c '"code": "watcher_busy"' ${D}/watch.log) stopped=$(grep -c '"stopped": "terminated"' ${D}/watch.log) mode_log=$(mode ${D}/watch.log)`,
+    `echo leak=$(grep -c '${TOKEN}' ${D}/watch.log)`,
+    `rm -f ${D}/watch.log; echo outside > $T/target; ln -s $T/target ${D}/watch.log`, RUN, 'echo linklog=$? target=$(cat $T/target)',
+    `rm -f ${D}/watch.log; mv ${D}/agent/files-watch.py $T/w.py`, RUN, 'echo nowatch=$?',
+    `mv $T/w.py ${D}/agent/files-watch.py; rm -f ${D}/capability.json; ln -s $T/target ${D}/capability.json`, sub(S.probe('sb-1111')), 'echo probe_link=$?',
+    'rm -rf "$T"',
+  ].join('\n') + '\n';
+  const p = spawnSync(shell[0], shell[1], { input: script, encoding: 'utf8', timeout: 120_000 });
+  const out = Object.fromEntries(p.stdout.split(/\s+/).filter(t => /^[a-z_0-9]+=/.test(t)).map(t => t.split('=')));
+  assert.deepEqual(out, { probe0: '43', refresh0: '43', same_refresh0: 'y', run0: '43', same_run0: 'y',
+    prep: '0', mode_watch: '700', mode_wnext: '600', act: '0', mode_w: '600', probe_noinit: '43', init: '0', probe1: '0', probe_other: '43',
+    refresh_other: '44', same_other: 'y', refresh1: '0', mode_cnext: '600', actcap: '0', mode_cap: '600', cnext: '0',
+    resume1: '0', resumed: 'y', dup: '2', deferred: 'y', busy: '1', stopped: '1', mode_log: '600', leak: '0',
+    linklog: '41', target: 'outside', nowatch: '43', probe_link: '41' }, p.stdout + p.stderr);
+});
 let passed = 0;
 for (const [name, fn] of tests) { await fn(); passed++; console.log('ok', name); }
 for (const s of skips) console.log('skip', s);
