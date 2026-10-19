@@ -4,16 +4,18 @@
 // resources. Long work (start, snapshot, resize) is polled by the DO alarm, never held in one Worker request. A hot resize only
 // increases CPU/RAM of the running machine (processes, desktop sessions and snapshots stay); it is pending until a later GET
 // observes the new allocation, and an unanswered request is reconciled by GET, never re-sent.
+// Own captures are kept in a bounded history; one verified active capture may be selected as the template of a FUTURE new
+// machine (same account, machine absent, re-checked active right before create). Selection never touches the current machine.
 import { DurableObject } from 'cloudflare:workers';
 import { COMPUTER_PROBE_COMMAND, computerToolCatalog, parseComputerProbe, type ComputerProbe } from './cloudbite-computer-tools';
 import type { Dt } from './lab';
 import {
-  COMPUTER_ACCOUNTS, COMPUTER_AUTO_STOP_MINUTES, COMPUTER_DESKTOP_HEALTH, COMPUTER_DESKTOP_PATH, COMPUTER_DESKTOP_PORT,
+  COMPUTER_ACCOUNTS, COMPUTER_AUTO_STOP_MINUTES, COMPUTER_SNAPSHOT_HISTORY_MAX, COMPUTER_DESKTOP_HEALTH, COMPUTER_DESKTOP_PATH, COMPUTER_DESKTOP_PORT,
   COMPUTER_OWNER_TAG, COMPUTER_POLL_MS, COMPUTER_REQUEST_ID, COMPUTER_SESSION_MS, COMPUTER_SNAPSHOT_NAME, COMPUTER_START_SCRIPT,
   COMPUTER_TICKET_MS, COMPUTER_TICKET_PARAM, ComputerError, computerAccounts, computerErrorBody, computerLabels, computerName,
   computerProxySuffixes, isAccount,
   type ComputerAccount, type ComputerAccountConfig, type ComputerEnv, type ComputerErrorCode, type ComputerMachineRef, type ComputerSnapshotView,
-  type ComputerPerformance, type ComputerState, type ComputerStatus, type DesktopStatus,
+  type ComputerPerformance, type ComputerSnapshotHistoryState, type ComputerSnapshots, type ComputerState, type ComputerStatus, type DesktopStatus,
 } from './cloudbite-computer-contract';
 import { ComputerDaytonaError, computerUpstreamOrigin, restDaytona, type ComputerDaytona, type ComputerSandbox, type ComputerSnapshotInfo } from './cloudbite-computer-daytona';
 import {
@@ -39,11 +41,20 @@ interface Machine {
   created: 'pending' | 'unknown' | 'owned';
   region: string | null; cpu: number | null; memoryGiB: number | null; diskGiB: number | null;
   sandbox?: { toolboxProxyUrl?: string };
+  /** Own capture this machine was created from; null/absent = the prepared image. */
+  template?: string | null;
 }
 /** requestId ledger entry: `fp` binds the id to its arguments; `error` is the definite refusal replayed for that id. */
 interface Op { id: string; kind: string; fp?: string; error?: { code: ComputerErrorCode; status: number } }
 /** A capture is ours only if Daytona names our sandbox as its source, or it appeared after our preflight saw the name free. */
-interface SnapshotRec extends ComputerSnapshotView { polls: number; requestedAt?: number; sourceId?: string; preflightAbsent?: boolean }
+interface SnapshotRec extends ComputerSnapshotView { polls: number; requestedAt?: number; sourceId?: string; preflightAbsent?: boolean; account?: ComputerAccount }
+/** One own capture in the bounded history. `mirror` is the last latest-capture state copied in, so a GET re-check is not overwritten. */
+interface SnapHist {
+  name: string; account: ComputerAccount; sourceId: string; requestedAt: number; state: ComputerSnapshotHistoryState;
+  error: ComputerErrorCode | null; checkedAt: number | null; mirror?: string;
+}
+/** The selected template of a future new machine; requestedAt pins it to one capture even if the name is later reused. */
+interface Template { account: ComputerAccount; name: string; requestedAt: number }
 /** One hot CPU/RAM increase. requesting = written before the POST; unknown = unanswered; pending = answered, not yet observed. */
 interface ResizeRec { cpu: number; memoryGiB: number; state: 'requesting' | 'unknown' | 'pending' | 'done' | 'failed'; error: ComputerErrorCode | null; polls: number }
 /** Last cgroup sample of one machine run; a null sample is cached too, so a failing sample is not retried in a burst. */
@@ -54,6 +65,8 @@ interface Rec {
   status: ComputerStatus; error: ComputerErrorCode | null;
   sessionEndsAt: number | null;
   snapshot: SnapshotRec | null;
+  snapshots?: SnapHist[];
+  template?: Template | null;
   desktop: DesktopStatus; desktopLaunches: number; desktopLaunchAt: number | null;
   /** Bumped whenever a machine run ends: previews, cookies and probes of an earlier run are stale. */
   desktopEpoch: number;
@@ -75,6 +88,8 @@ const SNAPSHOT_BUSY = ['waiting_stop', 'requesting', 'unknown', 'snapshotting'];
 const RESIZE_PENDING = ['requesting', 'unknown', 'pending'];
 const RESIZE_MAX_POLLS = 60; // answered increase: about 10 minutes of alarms before it is reported unconfirmed
 const RESIZE_KEYS = new Set(['requestId', 'cpu', 'memoryGiB', 'acknowledgeCost']);
+const SELECT_KEYS = new Set(['requestId', 'account', 'name']);
+const RECHECK_MS = 60_000, RECHECK_MAX = 3; // explicit GET: at most 3 active captures re-read, each at most once a minute
 const LABELS: Record<ComputerAccount, string> = { primary: 'Primary', secondary: 'Secondary', tertiary: 'Tertiary' };
 const WAKING = new Set(['creating', 'starting', 'restoring', 'pulling_snapshot', 'pending_build', 'building_snapshot', 'resuming']);
 
@@ -107,8 +122,8 @@ export class ComputerService {
     this.queue = r.catch(() => {});
     return r;
   }
-  private async load(): Promise<Rec> { return { ...fresh(), ...(await this.d.store.get<Rec>(KEY)) }; }
-  private save(r: Rec) { return this.d.store.put(KEY, r); }
+  private async load(): Promise<Rec> { const r = { ...fresh(), ...(await this.d.store.get<Rec>(KEY)) }; this.track(r); return r; }
+  private save(r: Rec) { this.track(r); return this.d.store.put(KEY, r); }
   private account(id: ComputerAccount): ComputerAccountConfig | null { return computerAccounts(this.d.env).find((a) => a.id === id) ?? null; }
   private dt(a: ComputerAccountConfig): Dt { return { api: a.api, key: a.key }; }
 
@@ -124,6 +139,80 @@ export class ComputerService {
       configuredAccounts: COMPUTER_ACCOUNTS.map((id) => ({ id, label: LABELS[id], available: configured.some((a) => a.id === id) })),
       ready: r.status === 'running' && r.desktop === 'ready',
       tools: computerToolCatalog(r.probe ?? null),
+      template: r.template ? { account: r.template.account, name: r.template.name } : null,
+    };
+  }
+
+  /**
+   * Mirror the latest capture into the history once its request was sent (sourceId recorded). Legacy records without an
+   * account are attributed only when their source is the current machine. A collision is never our capture: it is dropped.
+   */
+  private track(r: Rec) {
+    const list = (r.snapshots ??= []);
+    const s = r.snapshot;
+    if (s?.sourceId && s.requestedAt) {
+      const account = s.account ?? (r.machine?.id === s.sourceId ? r.machine.account : null);
+      let h = account ? list.find((x) => x.account === account && x.name === s.name) ?? null : null;
+      if (h && h.requestedAt !== s.requestedAt) { this.dropHist(r, h); h = null; } // the name was reused by a newer capture
+      if (account && s.error === 'snapshot_exists') { if (h) this.dropHist(r, h); }
+      else if (account) {
+        const mirror = `${s.state}:${s.error ?? ''}`;
+        const state: ComputerSnapshotHistoryState = s.state === 'waiting_stop' ? 'requesting' : s.state;
+        if (!h) (r.snapshots ??= []).unshift({ name: s.name, account, sourceId: s.sourceId, requestedAt: s.requestedAt, state, error: s.error as ComputerErrorCode | null, checkedAt: null, mirror });
+        else if (h.mirror !== mirror) { h.state = state; h.error = s.error as ComputerErrorCode | null; h.mirror = mirror; }
+      }
+    }
+    if (r.template && !this.template(r)) r.template = null;
+    // Bounded: the oldest unselected entries go first; the selected template is never dropped by the bound.
+    const all = r.snapshots ?? [];
+    for (let i = all.length - 1; all.length > COMPUTER_SNAPSHOT_HISTORY_MAX && i >= 0; i--) if (!this.isTemplate(r, all[i])) all.splice(i, 1);
+  }
+  private isTemplate(r: Rec, h: SnapHist) {
+    const t = r.template;
+    return !!t && t.account === h.account && t.name === h.name && t.requestedAt === h.requestedAt;
+  }
+  private template(r: Rec, account?: ComputerAccount): SnapHist | null {
+    if (!r.template || (account && r.template.account !== account)) return null;
+    return (r.snapshots ?? []).find((h) => this.isTemplate(r, h)) ?? null;
+  }
+  private dropHist(r: Rec, h: SnapHist) {
+    if (this.isTemplate(r, h)) r.template = null;
+    r.snapshots = (r.snapshots ?? []).filter((x) => x !== h);
+  }
+
+  /**
+   * Fresh read-only check of one own capture. true = active and not proven foreign; false = definitely unusable now;
+   * undefined = no answer (nothing is concluded). A proven foreign source removes the entry and marks the latest capture.
+   */
+  private async recheck(r: Rec, h: SnapHist): Promise<boolean | undefined> {
+    const a = this.account(h.account); if (!a) return undefined;
+    let info: ComputerSnapshotInfo | null;
+    try { info = await this.d.daytona.getSnapshot(this.dt(a), h.name); } catch { return undefined; }
+    h.checkedAt = this.d.now();
+    if (!info) { h.state = 'missing'; h.error = 'snapshot_missing'; return false; }
+    const src = (info as ComputerSnapshotInfo & { sourceSandboxId?: string | null }).sourceSandboxId;
+    if (typeof src === 'string' && src && src !== h.sourceId) {
+      const s = r.snapshot;
+      if (s && s.name === h.name && s.requestedAt === h.requestedAt) { s.state = 'error'; s.error = 'snapshot_exists'; }
+      this.dropHist(r, h);
+      return false;
+    }
+    if (info.state === 'active') { h.state = 'active'; h.error = null; return true; }
+    if (['error', 'build_failed'].includes(info.state ?? '')) { h.state = 'error'; h.error = 'provider_error'; }
+    return false; // other provider states (pending, removing, ...) are not usable now
+  }
+
+  private snapshotsView(r: Rec): ComputerSnapshots {
+    const t = this.template(r), m = r.machine;
+    return {
+      items: (r.snapshots ?? []).map((h) => ({
+        name: h.name, account: h.account, requestedAt: new Date(h.requestedAt).toISOString(), state: h.state, error: h.error,
+        checkedAt: h.checkedAt === null ? null : new Date(h.checkedAt).toISOString(), selected: h === t, selectable: h.state === 'active' && h !== t,
+      })),
+      selected: t ? { account: t.account, name: t.name } : null,
+      latest: r.snapshot ? { name: r.snapshot.name, state: r.snapshot.state, error: r.snapshot.error } : null,
+      machine: { status: r.status, account: m?.account ?? null, id: m?.id ?? null, template: m?.template ?? null },
+      historyMax: COMPUTER_SNAPSHOT_HISTORY_MAX,
     };
   }
 
@@ -181,14 +270,14 @@ export class ComputerService {
    * ledger write. A replay with the same arguments reads current state, or returns the original definite error; other
    * arguments are a conflict. An action that ends in unknown_outcome before accepting anything leaves no entry.
    */
-  private async once<T>(r: Rec, requestId: unknown, kind: string, args: string, f: () => Promise<T>): Promise<T | ComputerState> {
+  private async once<T>(r: Rec, requestId: unknown, kind: string, args: string, f: () => Promise<T>, replay?: () => T): Promise<T | ComputerState> {
     if (typeof requestId !== 'string' || !COMPUTER_REQUEST_ID.test(requestId)) throw new ComputerError('bad_request', 400);
     const id = requestId.toLowerCase(), fp = `${kind}:${args}`;
     const seen = r.ops.find((o) => o.id === id);
     if (seen) {
       if (seen.fp ? seen.fp !== fp : seen.kind !== kind) throw new ComputerError('request_conflict');
       if (seen.error) throw new ComputerError(seen.error.code, seen.error.status);
-      return this.view(r);
+      return replay ? replay() : this.view(r);
     }
     const entry: Op = { id, kind, fp };
     r.ops.push(entry);
@@ -266,18 +355,26 @@ export class ComputerService {
   }
 
   private async create(r: Rec, a: ComputerAccountConfig) {
-    if (!a.prepared) { r.error = 'missing_image'; throw new ComputerError('missing_image'); }
-    const dt = this.dt(a);
-    let snap; try { snap = await this.d.daytona.getSnapshot(dt, a.snapshot); } catch { throw new ComputerError('unknown_outcome', 503); }
-    if (!snap || snap.state !== 'active') { r.error = 'missing_image'; throw new ComputerError('missing_image'); }
+    const dt = this.dt(a), t = this.template(r, a.id);
+    if (t) {
+      // A selected own capture of this account, re-read right before the create; never a silent fallback to the prepared image.
+      const ok = await this.recheck(r, t);
+      if (ok === undefined) throw new ComputerError('unknown_outcome', 503);
+      if (!ok) throw new ComputerError('template_unavailable');
+    } else {
+      if (!a.prepared) { r.error = 'missing_image'; throw new ComputerError('missing_image'); }
+      let snap; try { snap = await this.d.daytona.getSnapshot(dt, a.snapshot); } catch { throw new ComputerError('unknown_outcome', 503); }
+      if (!snap || snap.state !== 'active') { r.error = 'missing_image'; throw new ComputerError('missing_image'); }
+    }
+    const source = t ? t.name : a.snapshot;
     const name = computerName(r.ownerTag!, a.id);
-    r.machine = { account: a.id, name, id: null, created: 'pending', region: null, cpu: null, memoryGiB: null, diskGiB: null };
+    r.machine = { account: a.id, name, id: null, created: 'pending', region: null, cpu: null, memoryGiB: null, diskGiB: null, template: t ? t.name : null };
     r.status = 'starting'; r.error = null; r.reconcilePolls = 0; r.sessionEndsAt = this.d.now() + COMPUTER_SESSION_MS; r.desktop = 'not_running';
     await this.save(r); // ledger before mutation
     // Resources come from the prepared snapshot; no image/cpu/memory/disk here. Persistent: autoDeleteInterval -1.
     // Raw REST POST /sandbox takes `env`; `envVars` is only the SDK option name and the wire API ignores it.
     // https://www.daytona.io/docs/en/sandboxes/#environment-variables
-    const body = { name, snapshot: a.snapshot, labels: computerLabels(r.ownerTag!, a.id), public: false,
+    const body = { name, snapshot: source, labels: computerLabels(r.ownerTag!, a.id), public: false,
       autoStopInterval: COMPUTER_AUTO_STOP_MINUTES, autoDeleteInterval: -1, env: { VNC_RESOLUTION: '1920x1080' } };
     try {
       const sb = await this.d.daytona.create(dt, body);
@@ -360,7 +457,7 @@ export class ComputerService {
         const a = this.account(r.machine.account); if (!a) throw new ComputerError('not_configured');
         let existing; try { existing = await this.d.daytona.getSnapshot(this.dt(a), name); } catch { throw new ComputerError('unknown_outcome', 503); }
         if (existing) throw new ComputerError('snapshot_exists');
-        r.snapshot = { name, state: 'waiting_stop', error: null, polls: 0 };
+        r.snapshot = { name, state: 'waiting_stop', error: null, polls: 0, account: r.machine.account };
         // Container snapshots are cold: stop first (filesystem only, no RAM), then the alarm requests the capture.
         if (r.status === 'running' || r.status === 'starting') await this.stopMachine(r);
         else if (r.status === 'stopped') await this.requestSnapshot(r);
@@ -481,6 +578,44 @@ export class ComputerService {
       } finally {
         await this.save(r); await this.schedule(r);
       }
+    });
+  }
+
+  /** Own capture history. Provider reads only: the machine refresh plus a bounded re-check of active captures. */
+  snapshots(ownerTag: string) {
+    return this.run(async (r) => {
+      this.bind(r, ownerTag);
+      if (r.machine) await this.refresh(r);
+      const now = this.d.now();
+      const due = (r.snapshots ?? []).filter((h) => h.state === 'active' && (h.checkedAt === null || now < h.checkedAt || now - h.checkedAt >= RECHECK_MS))
+        .sort((x, y) => (x.checkedAt ?? 0) - (y.checkedAt ?? 0)).slice(0, RECHECK_MAX);
+      for (const h of due) await this.recheck(r, h);
+      return this.snapshotsView(r);
+    });
+  }
+
+  /**
+   * Choose (or with name null, clear) the template of a FUTURE new machine. Only an own active capture that a fresh read still
+   * shows active; no provider mutation of any kind, and the current machine is never changed or restarted.
+   */
+  selectSnapshot(ownerTag: string, body: Record<string, unknown>) {
+    return this.run(async (r) => {
+      this.bind(r, ownerTag);
+      const input: Record<string, unknown> = body && typeof body === 'object' ? body : {};
+      if (Object.keys(input).some((k) => !SELECT_KEYS.has(k)) || !isAccount(input.account)
+        || (input.name !== null && (typeof input.name !== 'string' || !COMPUTER_SNAPSHOT_NAME.test(input.name)))) throw new ComputerError('bad_request', 400);
+      const account = input.account, name = input.name as string | null;
+      return this.once(r, input.requestId, 'select', `${account}/${name ?? ''}`, async () => {
+        if (name === null) { if (r.template?.account === account) r.template = null; return this.snapshotsView(r); }
+        const h = (r.snapshots ?? []).find((x) => x.account === account && x.name === name);
+        if (!h || h.state !== 'active') throw new ComputerError('snapshot_not_selectable');
+        if (!this.account(account)) throw new ComputerError('not_configured');
+        const ok = await this.recheck(r, h);
+        if (ok === undefined) throw new ComputerError('unknown_outcome', 503); // nothing concluded: the id stays usable
+        if (!ok) throw new ComputerError('snapshot_not_selectable');
+        r.template = { account, name, requestedAt: h.requestedAt };
+        return this.snapshotsView(r);
+      }, () => this.snapshotsView(r));
     });
   }
 
@@ -693,6 +828,8 @@ export class CloudbiteComputer extends DurableObject<ComputerEnv> {
   computerStop(ownerTag: string, body: { requestId?: unknown }) { return this.svc.stop(ownerTag, body); }
   computerExtend(ownerTag: string, body: { requestId?: unknown }) { return this.svc.extend(ownerTag, body); }
   computerSnapshot(ownerTag: string, body: { requestId?: unknown; name?: unknown }) { return this.svc.snapshot(ownerTag, body); }
+  computerSnapshots(ownerTag: string) { return this.svc.snapshots(ownerTag); }
+  computerSelectSnapshot(ownerTag: string, input: Record<string, unknown>) { return this.svc.selectSnapshot(ownerTag, input); }
   computerLaunch(ownerTag: string) { return this.svc.launch(ownerTag); }
   computerRedeemTicket(ticket: string) { return this.svc.redeemTicket(ticket); }
   computerDesktopUpstream(cookie: string) { return this.svc.desktopUpstream(cookie); }
