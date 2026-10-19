@@ -16,6 +16,13 @@ every file's size/SHA-256/mode is compared. Finally the restore is deleted and t
 a fresh ownership proof, polled until 404. Intent is written to the ledger before every create/delete; an unknown create is
 reconciled by exact name + labels and never re-sent. Only resources recorded in the ledger are ever addressed.
 The key is read from DAYTONA_API_KEY only and never written to argv, files or output.
+
+Budget (monotonic clock): the phase limit minus the cleanup reserve bounds all work, and cumulative machine active time
+(wall-clock from create intent, so startup and an unknown create count, until confirmed stopped/absent) is capped by
+activeCpuSeconds minus a stop reserve. Every create, upload, command, manager call and capture wait is checked first and
+its SDK/subprocess timeout is clamped to what remains; provider auto-stop/TTL/auto-delete are derived from the remainder.
+An exhausted budget stops new work and new resources; cleanup of ledger-proven resources still runs. Active time is a
+started-to-stopped measurement, not provider-billed CPU usage.
 """
 import argparse
 import hashlib
@@ -41,7 +48,9 @@ ROOT = "/home/daytona/cbbak"
 REMOTE_SCRIPT = "/tmp/cbbak_probe.py"
 CAPS = {"cpu": 1, "memory": 1, "disk": 3, "gpu": 0}
 LIMITS = {"maxSandboxes": 2, "maxSnapshots": 1, "maxSyntheticBytes": 32 * 1024 * 1024, "phaseSeconds": 30 * 60,
-          "activeCpuSeconds": 15 * 60, "tickSeconds": 10, "cleanupReserveSeconds": 6 * 60}
+          "activeCpuSeconds": 15 * 60, "tickSeconds": 10, "cleanupReserveSeconds": 6 * 60,
+          "stopReserveSeconds": 90, "minStepSeconds": 30, "restoreNeedSeconds": 240, "autoStopMaxMinutes": 5}
+TIMEOUTS = {"create": 180, "upload": 120, "exec": 300, "stop": 60, "node": 240}
 HERE = os.path.dirname(os.path.abspath(__file__))
 NODE_DRIVER = os.path.join(HERE, "cloudbite-end-backup-probe.mjs")
 
@@ -188,6 +197,75 @@ class Unknown(Exception):
     """An outcome is unknown: reconcile by exact lookup, never re-send."""
 
 
+class BudgetExhausted(Refused):
+    """The phase or active-machine budget cannot cover the next step: no new work or resource; cleanup still runs."""
+
+
+class Budget:
+    """Monotonic phase budget plus cumulative machine active time. A machine's active interval opens at create intent
+    (startup and an unknown create count) and closes only when it is confirmed stopped or absent; an interval left open
+    keeps growing with the clock. This is a started-to-stopped wall-clock measurement, not provider-billed CPU usage."""
+
+    def __init__(self, clock=time.monotonic, limits=LIMITS):
+        self.clock, self.limits = clock, limits
+        self.t0 = clock()
+        self.active = {}
+
+    def elapsed(self):
+        return self.clock() - self.t0
+
+    def open(self, role):
+        if role not in self.active:
+            self.active[role] = [self.clock(), None]
+
+    def close(self, role):
+        if role in self.active and self.active[role][1] is None:
+            self.active[role][1] = self.clock()
+
+    def open_roles(self):
+        return sorted(r for r, (_s, e) in self.active.items() if e is None)
+
+    def active_used(self):
+        now = self.clock()
+        return sum((e if e is not None else now) - s for s, e in self.active.values())
+
+    def work_left(self):
+        return self.limits["phaseSeconds"] - self.limits["cleanupReserveSeconds"] - self.elapsed()
+
+    def active_left(self):
+        return self.limits["activeCpuSeconds"] - self.limits["stopReserveSeconds"] - self.active_used()
+
+    def timeout(self, step, cap, active=False, need=None):
+        """Seconds the next step may take (an int >= minStepSeconds, never 0 = 'no timeout'), or BudgetExhausted."""
+        left = min(self.work_left(), self.active_left()) if active else self.work_left()
+        if left < max(self.limits["minStepSeconds"], need or 0):
+            raise BudgetExhausted("%s: budget exhausted (work %ds, active %ds left)"
+                                  % (step, max(0, self.work_left()), max(0, self.active_left())))
+        return int(min(cap, left))
+
+    def stop_timeout(self, cap):
+        """Stop/cleanup is never refused for budget; it is kept inside the phase when the phase still allows it."""
+        return int(max(10, min(cap, self.limits["phaseSeconds"] - self.elapsed())))
+
+    def before_create(self, role, need=None):
+        """(create timeout, provider auto-stop minutes, TTL minutes) for a new machine, or BudgetExhausted."""
+        if self.open_roles():
+            raise BudgetExhausted("create %s: active time of %s is still open; budget uncertain" % (role, self.open_roles()))
+        t = self.timeout("create " + role, TIMEOUTS["create"], active=True, need=need)
+        auto_stop = min(self.limits["autoStopMaxMinutes"], int(self.active_left() // 60))
+        ttl = int((self.limits["phaseSeconds"] - self.elapsed()) // 60)
+        if auto_stop < 1 or ttl < 1:
+            raise BudgetExhausted("create %s: no room for provider auto-stop/TTL" % role)
+        return t, auto_stop, ttl
+
+    def report(self):
+        now = self.clock()
+        return {"measure": "wall-clock from create intent to confirmed stopped/absent; not provider-billed CPU usage",
+                "elapsed": round(now - self.t0, 1), "activeUsed": round(self.active_used(), 1),
+                "machines": {r: {"seconds": round((e if e is not None else now) - s, 1), "closed": e is not None}
+                             for r, (s, e) in self.active.items()}}
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *a, **k):
         return None
@@ -313,8 +391,9 @@ class Ledger:
 
     @classmethod
     def new(cls, path, run_id):
-        return cls(path, {"schema": "cloudbite.end-backup-probe.v1", "runId": run_id, "account": "env:DAYTONA_API_KEY",
-                          "limits": LIMITS, "caps": CAPS, "base": BASE_SNAPSHOT, "createdAt": _now(),
+        return cls(path, {"schema": "cloudbite.end-backup-probe.v2", "runId": run_id, "account": "env:DAYTONA_API_KEY",
+                          "limits": LIMITS, "timeouts": TIMEOUTS, "caps": CAPS, "base": BASE_SNAPSHOT, "createdAt": _now(),
+                          "probe": {"py": _sha(os.path.abspath(__file__)), "mjs": _sha(NODE_DRIVER)},
                           "resources": [], "steps": [], "timings": {}, "result": None})
 
     @classmethod
@@ -353,31 +432,40 @@ class Phase:
 # ---------------------------------------------------------------- sandbox lifecycle (SDK) with ledger intent
 
 class Machines:
-    def __init__(self, ledger, rest):
-        from daytona import Daytona, DaytonaConfig
-        self.client = Daytona(DaytonaConfig(api_key=os.environ["DAYTONA_API_KEY"], target="us", otel_enabled=False))
+    def __init__(self, ledger, rest, budget=None, client=None, params=None, sleep=time.sleep):
+        if client is None:
+            from daytona import Daytona, DaytonaConfig
+            client = Daytona(DaytonaConfig(api_key=os.environ["DAYTONA_API_KEY"], target="us", otel_enabled=False))
+        self.client, self.params, self.sleep = client, params, sleep
         self.ledger, self.rest, self.objs = ledger, rest, {}
+        self.budget = budget or Budget()
 
-    def create(self, role, snapshot):
+    def create(self, role, snapshot, need=None):
         L = self.ledger
         if sum(1 for r in L.data["resources"] if r["kind"] == "sandbox") >= LIMITS["maxSandboxes"]:
             raise Refused("sandbox budget exhausted")
-        if any(r["state"] in ("intent", "unknown") for r in L.data["resources"]):
+        if any(r["state"] in ("intent", "unknown", "delete-unknown") for r in L.data["resources"]):
             raise Refused("an earlier outcome is unknown; no new test resource")
-        from daytona import CreateSandboxFromSnapshotParams
+        timeout, auto_stop, ttl = self.budget.before_create(role, need)
+        if self.params is None:
+            from daytona import CreateSandboxFromSnapshotParams
+            self.params = CreateSandboxFromSnapshotParams
         run = L.data["runId"]
         rec = {"kind": "sandbox", "role": role, "name": "%s%s-%s" % (PREFIX, run, role[:3]),
                "labels": {"owner": OWNER_LABEL, "cbbak-probe-run": run, "cbbak-role": role},
-               "snapshot": snapshot, "state": "intent", "intentAt": _now(), "id": None}
+               "snapshot": snapshot, "state": "intent", "intentAt": _now(), "id": None,
+               "provider": {"autoStopMinutes": auto_stop, "autoDeleteMinutes": ttl, "ttlMinutes": ttl, "timeout": timeout}}
         if self.rest.sandbox(rec["name"]) is not None:
             raise Refused("a sandbox named %s already exists outside this ledger" % rec["name"])
         L.data["resources"].append(rec)
         L.save()
-        params = CreateSandboxFromSnapshotParams(snapshot=snapshot, name=rec["name"], labels=rec["labels"],
-                                                 auto_stop_interval=15, auto_delete_interval=40, ttl_minutes=45,
-                                                 ephemeral=False)
+        # TTL counts from creation, so the provider destroys the machine by the phase end even if this process dies;
+        # auto-delete-after-stop is no longer than TTL; idle auto-stop fits the remaining active budget
+        params = self.params(snapshot=snapshot, name=rec["name"], labels=rec["labels"], auto_stop_interval=auto_stop,
+                             auto_delete_interval=ttl, ttl_minutes=ttl, ephemeral=False)
+        self.budget.open(role)
         try:
-            sb = self.client.create(params, timeout=180)
+            sb = self.client.create(params, timeout=timeout)
             rec.update(id=sb.id, state="created", createdAt=_now())
             self.objs[sb.id] = sb
         except Exception as exc:
@@ -391,6 +479,7 @@ class Machines:
                 rec.update(id=found["id"], state="created", reconciled=True)
             elif found is None and isinstance(status, int) and 400 <= status < 500 and status not in (408, 429):
                 rec["state"] = "refused"
+                self.budget.close(role)
                 L.save()
                 raise Refused("sandbox create refused: HTTP %s %s" % (status, rec["error"]["message"][:100]))
             else:
@@ -412,18 +501,23 @@ class Machines:
             self.objs[rec["id"]] = self.client.get(rec["id"])
         return self.objs[rec["id"]]
 
-    def exec_json(self, rec, cmd, timeout=300):
-        r = self.sb(rec).process.exec(cmd, timeout=timeout)
+    def upload(self, rec, data, path):
+        self.sb(rec).fs.upload_file(data, path, timeout=self.budget.timeout("upload " + rec["role"], TIMEOUTS["upload"], True))
+
+    def exec_json(self, rec, cmd):
+        r = self.sb(rec).process.exec(cmd, timeout=self.budget.timeout("exec " + rec["role"], TIMEOUTS["exec"], True))
         try:
             return json.loads((r.result or "").strip().splitlines()[-1])
         except (ValueError, IndexError):
             return {"ok": False, "exit": r.exit_code, "unparsed": True}
 
     def stop(self, rec):
-        self.sb(rec).stop(timeout=60)
+        self.sb(rec).stop(timeout=self.budget.stop_timeout(TIMEOUTS["stop"]))
         info = self.rest.sandbox(rec["id"])
         state = (info or {}).get("state")
         rec["stoppedState"] = state
+        if state == "stopped":
+            self.budget.close(rec["role"])
         self.ledger.save()
         return state
 
@@ -434,6 +528,7 @@ class Machines:
         info = self.rest.sandbox(rec["id"])
         if info is None or info.get("state") == "destroyed":
             rec.update(state="deleted", deletedAt=_now(), absence="already-absent")
+            self.budget.close(rec["role"])
             self.ledger.save()
             return "deleted"
         if not sandbox_owned(info, rec):
@@ -443,16 +538,17 @@ class Machines:
         rec.update(state="deleting", deleteIntentAt=_now())
         self.ledger.save()
         try:
-            self.client.delete(self.sb(rec), timeout=120, wait=True)
+            self.client.delete(self.sb(rec), timeout=self.budget.stop_timeout(120), wait=True)
         except Exception as exc:
             rec["deleteError"] = {"type": type(exc).__name__, "status": getattr(exc, "status_code", None), "message": sanitize(exc)}
         for _ in range(24):
             info = self.rest.sandbox(rec["id"])
             if info is None or info.get("state") == "destroyed":
                 rec.update(state="deleted", deletedAt=_now(), absence="404" if info is None else "destroyed")
+                self.budget.close(rec["role"])
                 self.ledger.save()
                 return "deleted"
-            time.sleep(5)
+            self.sleep(5)
         rec["state"] = "delete-unknown"
         self.ledger.save()
         return "delete-unknown"
@@ -461,8 +557,10 @@ class Machines:
 # ---------------------------------------------------------------- manager (compiled actual source, via Node)
 
 class Manager:
-    def __init__(self, ledger, outdir, source_id):
-        self.ledger, self.outdir, self.source_id = ledger, outdir, source_id
+    runner = staticmethod(subprocess.run)
+
+    def __init__(self, ledger, outdir, source_id, budget):
+        self.ledger, self.outdir, self.source_id, self.budget = ledger, outdir, source_id, budget
         run = ledger.data["runId"]
         self.owner = "probe" + run
         self.store = os.path.join(outdir, "manager-store-%s.json" % run)
@@ -470,7 +568,9 @@ class Manager:
         self.module = None
 
     def _node(self, *argv):
-        r = subprocess.run(["node", NODE_DRIVER, *argv], capture_output=True, text=True, encoding="utf8", timeout=240)
+        step = "manager " + (argv[argv.index("--op") + 1] if "--op" in argv else argv[0])
+        timeout = self.budget.timeout(step, TIMEOUTS["node"])
+        r = self.runner(["node", NODE_DRIVER, *argv], capture_output=True, text=True, encoding="utf8", timeout=timeout)
         line = (r.stdout or "").strip().splitlines()
         out = json.loads(line[-1]) if line else {"error": "no output", "exit": r.returncode}
         if r.returncode != 0 or (isinstance(out, dict) and out.get("error")):
@@ -500,7 +600,7 @@ class Manager:
 
 # ---------------------------------------------------------------- live run
 
-def snapshot_cleanup(ledger, rest):
+def snapshot_cleanup(ledger, rest, sleep=time.sleep):
     """Delete only the ledger's one test snapshot, after a fresh exact ownership proof by id; poll until 404."""
     rec = ledger.res("snapshot")
     src = ledger.res("source")
@@ -544,16 +644,20 @@ def snapshot_cleanup(ledger, rest):
             ledger.save()
             return "deleted"
         rec["lastState"] = info.get("state")
-        time.sleep(5)
+        sleep(5)
     rec["state"] = "delete-unknown"
     ledger.save()
     return "delete-unknown"
 
 
-def run_live(ledger, outdir):
-    t0 = time.time()
-    deadline = t0 + LIMITS["phaseSeconds"]
-    rest = Rest(os.path.join(outdir, "rest-ops-%s.jsonl" % ledger.data["runId"]))
+def run_live(ledger, outdir, budget=None, rest=None, make_machines=None, make_manager=None, sleep=time.sleep):
+    """make_machines(ledger, rest, budget) / make_manager(ledger, outdir, source_id, budget) default to the real SDK and
+    Node driver; the offline suite passes fakes with a fake clock."""
+    budget = budget or Budget()
+    t0 = budget.clock()
+    rest = rest or Rest(os.path.join(outdir, "rest-ops-%s.jsonl" % ledger.data["runId"]))
+    make_machines = make_machines or (lambda L, r, b: Machines(L, r, b, sleep=sleep))
+    make_manager = make_manager or Manager
     want = expected_manifest()
     if want["bytes"] > LIMITS["maxSyntheticBytes"]:
         raise Refused("synthetic data exceeds the cap")
@@ -567,14 +671,13 @@ def run_live(ledger, outdir):
             if not base_ok(base):
                 raise Refused("public base snapshot metadata differs from the verified values")
             ledger.data["baseId"] = base["id"]
-            machines = Machines(ledger, rest)
+            machines = make_machines(ledger, rest, budget)
 
         with Phase(ledger, "sourceCreate"):
             src = machines.create("source", BASE_SNAPSHOT)
-            active_from = time.time()
         with Phase(ledger, "sourceWrite"):
             with open(os.path.abspath(__file__), encoding="utf8") as f:
-                machines.sb(src).fs.upload_file(f.read().encode("utf8"), REMOTE_SCRIPT)
+                machines.upload(src, f.read().encode("utf8"), REMOTE_SCRIPT)
             wrote = machines.exec_json(src, "python3 %s --gen write --root %s" % (REMOTE_SCRIPT, ROOT))
             man = wrote.get("manifest") or {}
             ledger.step("sourceWrite", ms=wrote.get("ms"), bytes=man.get("bytes"), mismatches=wrote.get("mismatches"),
@@ -584,12 +687,11 @@ def run_live(ledger, outdir):
                 raise Refused("source write did not match the synthetic spec")
         with Phase(ledger, "sourceStop"):
             state = machines.stop(src)
-            ledger.data["activeCpuSecondsSource"] = round(time.time() - active_from, 1)
-            ledger.step("sourceStopped", state=state)
+            ledger.step("sourceStopped", state=state, active=budget.report())
             if state != "stopped":
                 raise Refused("source is not confirmed stopped (%s)" % state)
 
-        mgr = Manager(ledger, outdir, src["id"])
+        mgr = make_manager(ledger, outdir, src["id"], budget)
         with Phase(ledger, "managerBuild"):
             ledger.data["manager"] = mgr.build()
         with Phase(ledger, "managerBegin"):
@@ -604,8 +706,8 @@ def run_live(ledger, outdir):
         snap = ledger.res("snapshot")
         with Phase(ledger, "capture"):
             ticks, last = 0, None
-            while time.time() < deadline - LIMITS["cleanupReserveSeconds"]:
-                last = mgr.run("tick")
+            while True:
+                last = mgr.run("tick")         # budget-checked; exhaustion ends the capture wait
                 ticks += 1
                 item, led = mgr.item()
                 done = next((d for d in led.get("done") or [] if d["name"] == snap["name"]), None)
@@ -615,7 +717,7 @@ def run_live(ledger, outdir):
                     ledger.save()
                 if last.get("state") in ("active", "failed", "blocked") or (item and item["state"] == "unconfirmed"):
                     break
-                time.sleep(LIMITS["tickSeconds"])
+                sleep(max(0, min(LIMITS["tickSeconds"], budget.work_left())))
             item, led = mgr.item()
             ledger.step("managerResult", ticks=ticks, status=last, item=item and {k: item[k] for k in ("name", "id", "state", "why", "polls")},
                         done=led.get("done"))
@@ -639,11 +741,11 @@ def run_live(ledger, outdir):
             if out != "deleted":
                 raise Unknown("source deletion not confirmed; no restore machine will be created")
         with Phase(ledger, "restoreCreate"):
-            rst = machines.create("restore", snap["name"])
-            active_from = time.time()
+            # create + upload + verify + stop must fit the remaining work and active budget, or nothing is allocated
+            rst = machines.create("restore", snap["name"], need=LIMITS["restoreNeedSeconds"])
         with Phase(ledger, "restoreVerify"):
             with open(os.path.abspath(__file__), encoding="utf8") as f:
-                machines.sb(rst).fs.upload_file(f.read().encode("utf8"), REMOTE_SCRIPT)
+                machines.upload(rst, f.read().encode("utf8"), REMOTE_SCRIPT)
             ver = machines.exec_json(rst, "python3 %s --gen verify --root %s" % (REMOTE_SCRIPT, ROOT))
             got = ver.get("manifest") or {"files": {}, "dirs": {}, "links": {}, "bytes": 0}
             vs_source = compare(ledger.data["sourceManifest"], got)
@@ -654,8 +756,10 @@ def run_live(ledger, outdir):
             ledger.save()
         with Phase(ledger, "restoreStop"):
             machines.stop(rst)
-            ledger.data["activeCpuSecondsRestore"] = round(time.time() - active_from, 1)
         ledger.data["result"] = "verified" if ledger.data["restoreVerify"]["ok"] else "restore-mismatch"
+    except BudgetExhausted as exc:
+        ledger.data["result"] = "budget-exhausted"
+        ledger.data["refusal"] = sanitize(exc)
     except Refused as exc:
         ledger.data["result"] = "refused"
         ledger.data["refusal"] = sanitize(exc)
@@ -670,17 +774,18 @@ def run_live(ledger, outdir):
         ledger.data["failure"] = {"type": type(exc).__name__, "status": getattr(exc, "status_code", None), "message": sanitize(exc)}
     finally:
         ledger.save()
-        cleanup(ledger, rest, machines)
-        ledger.data["timings"]["total"] = round(time.time() - t0, 1)
+        cleanup(ledger, rest, machines, sleep=sleep)    # never budget-gated: owned resources are always cleaned
+        ledger.data["activeWall"] = budget.report()
+        ledger.data["timings"]["total"] = round(budget.clock() - t0, 1)
         ledger.save()
     return ledger.data
 
 
-def cleanup(ledger, rest, machines=None):
+def cleanup(ledger, rest, machines=None, sleep=time.sleep):
     out = {}
     with Phase(ledger, "cleanup"):
         try:
-            machines = machines or Machines(ledger, rest)
+            machines = machines or Machines(ledger, rest, sleep=sleep)
             for rec in [r for r in ledger.data["resources"] if r["kind"] == "sandbox"]:
                 if rec["state"] in ("intent", "unknown") and not rec.get("id"):
                     found = rest.sandbox(rec["name"])
@@ -694,7 +799,7 @@ def cleanup(ledger, rest, machines=None):
         except Exception as exc:
             out["sandboxError"] = sanitize(exc)
         try:
-            out["snapshot"] = snapshot_cleanup(ledger, rest)
+            out["snapshot"] = snapshot_cleanup(ledger, rest, sleep)
         except Exception as exc:
             out["snapshotError"] = sanitize(exc)
         remaining = []
@@ -710,7 +815,13 @@ def dry_run():
     want = expected_manifest()
     return {"mode": "dry-run", "network": False, "credentialPresent": bool(os.environ.get("DAYTONA_API_KEY")),
             "account": "env:DAYTONA_API_KEY (no fallback)", "base": BASE_SNAPSHOT, "baseMustMatch": BASE_EXPECT,
-            "caps": CAPS, "limits": LIMITS, "synthetic": {"bytes": want["bytes"], "files": len(want["files"]),
+            "caps": CAPS, "limits": LIMITS, "timeoutCaps": TIMEOUTS,
+            "budget": "monotonic; work <= phaseSeconds - cleanupReserveSeconds; active (create intent -> confirmed "
+                      "stopped/absent, not billed CPU) <= activeCpuSeconds - stopReserveSeconds; every step's timeout "
+                      "clamped to the remainder; restore create needs restoreNeedSeconds; cleanup never budget-gated",
+            "providerBackstops": "autoStop = min(autoStopMaxMinutes, active minutes left); ttl = autoDelete = phase "
+                                 "minutes left at create",
+            "synthetic": {"bytes": want["bytes"], "files": len(want["files"]),
                                                           "dirs": len(want["dirs"]), "links": len(want["links"])},
             "creates": ["sandbox %s<run>-sou (labels owner/run/role)" % PREFIX,
                         "snapshot cbak-probe<run>... via the compiled manager (POST /sandbox/{source}/snapshot)",
