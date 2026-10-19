@@ -5,6 +5,9 @@
 //   node tools/build-cloudbite-console.mjs && node test/cloudbite-workflow-ui.mjs
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { build } from 'esbuild';
 import { CLOUDBITE_JS } from '../src/cloudbite-page.ts';
 
 let pass = 0;
@@ -483,7 +486,7 @@ const DMEMO = { summary: 'Prefer waiting one quarter.',
 const COVERAGE = { teamSize: 2, completed: 2, statusCounts: { completed: 2 }, statedDirections: { support: 1, conditional: 0, concern: 1, abstain: 0 },
   experts: [{ expertId: 'x1', summaryTruncated: true, evidenceIncluded: [0], evidenceTotal: 1, itemsTruncated: 0, assumptionsIncluded: 1, assumptionsTotal: 1, nextActionsIncluded: 1, nextActionsTotal: 1 }],
   documents: [{ id: 'doc-1', includedBytes: 10, originalBytes: 20, truncated: true }],
-  brief: { objectiveTruncated: false, contextTruncated: false, decisionItemsTruncated: 0, decisionItemsOmitted: 2 },
+  brief: { objectiveTruncated: false, contextTruncated: false, decisionItemsTruncated: 0, decisionItemsOmitted: 2, revisionTruncated: false },
   reviews: { included: 0, total: 0, truncated: 0, omitted: 0, reports: 0 }, packets: { included: 1, total: 2, truncated: 0, omitted: 1, invalid: 0, metadataOnly: 1 },
   fullReportsReviewed: false, sourcePagesReviewed: false, promptBytes: 4000 };
 const MEMO_DONE = { version: 'cloudbite-memo/v1', status: 'completed', attempts: 1, execution: 'server-nosana', startedAt: 5, completedAt: 6, language: 'en', coverage: COVERAGE, memo: DMEMO };
@@ -534,6 +537,7 @@ async function finishedRun(handlers = {}, done = (b) => doneProject(b)) {
     '/api/cloudbite/projects': (init) => { brief = JSON.parse(init.body); return json(201, { project: runningProject(brief), accessToken: 'proj-tok' }); },
     '/api/cloudbite/projects/proj-1': () => json(200, handlers.read ? handlers.read(brief) : done(brief)),
     ...(handlers.memo ? { '/api/cloudbite/projects/proj-1/memo': (init) => handlers.memo(init, brief) } : {}),
+    ...(handlers.review ? { '/api/cloudbite/projects/proj-1/review': (init) => handlers.review(init, brief) } : {}),
   }));
   await goLive(env); await selectTwo(env);
   await click(env, 'start'); await click(env, 'start');
@@ -606,8 +610,102 @@ await test('결정 메모 거부·잠김: 409 는 읽어서 그대로, 429·예�
   const reads = conflict.requests.filter(r => r.url === '/api/cloudbite/projects/proj-1' && !r.init.method).length;
   await click(conflict, 'memo-run');
   assert.ok(conflict.requests.filter(r => r.url === '/api/cloudbite/projects/proj-1' && !r.init.method).length > reads, '409 → read the saved state');
-  assert.ok(section(conflict, 'cb-memo').textContent.includes('project is no longer current'));
-  assert.equal(conflict.fk('memo-run'), undefined);
+  assert.ok(section(conflict, 'cb-memo').textContent.includes(EN.p2.memoDeferred('project is no longer current')));
+  assert.ok(conflict.fk('memo-run'), 'a 409 the GET confirms as untried keeps the first paid attempt (user click only)');
+  assert.equal(memoPosts(conflict).length, 1, 'no automatic resubmit');
+  // 409 뒤 GET 도 확인하지 못하면 모르는 결과다: 유료 버튼을 다시 내지 않는다
+  let after409 = false;
+  const blind = await finishedRun({ memo: () => { after409 = true; return json(409, { error: 'busy' }); },
+    read: (b) => { if (after409) throw new Error('offline'); return doneProject(b); } });
+  await click(blind, 'memo-run');
+  assert.ok(!blind.fk('memo-run'), 'unconfirmed 409 outcome stays GET-only');
+  assert.ok(blind.fk('memo-check')); assert.equal(memoPosts(blind).length, 1);
+});
+
+// ───────── 메모 ↔ 교차 검토 상호 배제 (서버는 겹치면 409, 예약 없음)
+const CR_RUNNING = { status: 'running', snapshotHash: 'h', startedAt: 4, reports: [], execution: 'server-nosana' };
+const CR_DONE = { status: 'completed', snapshotHash: 'h', startedAt: 4, completedAt: 5, reports: [], execution: 'server-nosana' };
+const MEMO_RUNNING = { version: 'cloudbite-memo/v1', status: 'running', attempts: 1, execution: 'server-nosana', startedAt: 6 };
+const deferred = () => { let release; const wait = new Promise(r => { release = r; }); return { wait, release }; };
+const reviewPosts = (env) => env.requests.filter(r => r.url === '/api/cloudbite/projects/proj-1/review');
+
+await test('상호 배제: 교차 검토 POST 가 걸려 있는 동안 메모 버튼·요청이 없고, 검토가 끝나면 첫 유료 메모를 한 번 걸 수 있다', async () => {
+  const gate = deferred();
+  let state = {};
+  const env = await finishedRun({
+    review: (_i, b) => gate.wait.then(() => json(202, doneProject(b, { crossReview: CR_RUNNING, updatedAt: 4 }))),
+    memo: (_i, b) => json(202, doneProject(b, { crossReview: CR_DONE, memo: MEMO_RUNNING, updatedAt: 6 })),
+    read: (b) => doneProject(b, state),
+  });
+  assert.ok(env.fk('memo-run') && env.fk('review-run'));
+  const staleMemo = env.fk('memo-run');
+  await click(env, 'review-run');
+  staleMemo.click(); await env.flush();
+  assert.equal(memoPosts(env).length, 0, 'the handler refuses too (an old button reference sends nothing)');
+  assert.ok(!env.fk('memo-run'), 'no memo button while this screen\'s review POST is pending');
+  assert.ok(!env.fk('memo-check'), 'the local review is polled; no extra check button');
+  assert.ok(section(env, 'cb-memo').textContent.includes(EN.p2.memoWaitReview));
+  gate.release(); await env.flush();
+  assert.ok(!env.fk('memo-run'), 'still running on the server');
+  assert.equal(memoPosts(env).length, 0);
+  state = { crossReview: CR_DONE, updatedAt: 5 };
+  await env.advance(3000);
+  assert.ok(!section(env, 'cb-review').textContent.includes(EN.reviewRunning), 'review settled');
+  assert.ok(env.fk('memo-run'), 'memo offered once the review finished');
+  await click(env, 'memo-run');
+  assert.equal(memoPosts(env).length, 1); assert.equal(reviewPosts(env).length, 1);
+  assert.ok(!env.fk('review-run'));
+});
+
+await test('상호 배제: 메모 POST 가 걸려 있는 동안 교차 검토 버튼·요청이 없고, 메모가 끝나면 검토를 걸 수 있다', async () => {
+  const gate = deferred();
+  const env = await finishedRun({
+    memo: (_i, b) => gate.wait.then(() => json(200, doneProject(b, { memo: MEMO_DONE, updatedAt: 6 }))),
+    review: (_i, b) => json(202, doneProject(b, { memo: MEMO_DONE, crossReview: CR_RUNNING, updatedAt: 7 })),
+  });
+  const staleReview = env.fk('review-run');
+  await click(env, 'memo-run');
+  assert.ok(!env.fk('review-run'), 'no review button while the memo POST is pending');
+  staleReview.click(); await env.flush();
+  assert.ok(section(env, 'cb-review').textContent.includes(EN.p2.reviewWaitMemo));
+  assert.equal(reviewPosts(env).length, 0);
+  gate.release(); await env.flush();
+  assert.ok(section(env, 'cb-memo').textContent.includes('Prefer waiting one quarter.'));
+  assert.ok(env.fk('review-run'), 'review offered after the memo settled');
+  await click(env, 'review-run');
+  assert.equal(reviewPosts(env).length, 1); assert.equal(memoPosts(env).length, 1);
+});
+
+await test('상호 배제: 다른 곳에서 건 검토 중 메모 409 (예약 없음) → GET 으로 확인, 끝난 뒤 첫 유료 시도가 남고 늦은 옛 상태는 버린다', async () => {
+  const REASON = 'a cross-review is running for this project; request the decision memo after it finishes';
+  let state = {}, posts = 0;
+  const env = await finishedRun({
+    memo: (_i, b) => { posts++; if (posts === 1) { state = { crossReview: CR_RUNNING, updatedAt: 4 }; return json(409, { error: REASON }); }
+      return json(202, doneProject(b, { crossReview: CR_DONE, memo: MEMO_RUNNING, updatedAt: 6 })); },
+    read: (b) => doneProject(b, state),
+  });
+  await click(env, 'memo-run');
+  const memo = () => section(env, 'cb-memo').textContent;
+  assert.ok(memo().includes(EN.p2.memoDeferred(REASON)), 'states the server did not start it');
+  assert.ok(!memo().includes(EN.p2.memoOneAttempt), 'not presented as the spent attempt');
+  assert.ok(memo().includes(EN.p2.memoWaitReview)); assert.ok(!env.fk('memo-run'));
+  assert.ok(section(env, 'cb-review').textContent.includes(EN.reviewServerRunning), 'external review shown as running');
+  assert.ok(!env.fk('review-run'));
+  await click(env, 'memo-check');
+  assert.ok(!env.fk('memo-run'), 'still waiting'); assert.equal(memoPosts(env).length, 1, 'check is GET-only');
+  state = { crossReview: CR_DONE, updatedAt: 5 };
+  await click(env, 'memo-check');
+  assert.ok(env.fk('memo-run'), 'first paid attempt preserved after the review finished');
+  state = { crossReview: CR_RUNNING, updatedAt: 4 };
+  await env.advance(10000);
+  assert.ok(env.fk('memo-run'), 'no timer re-reads or re-POSTs on its own'); assert.equal(memoPosts(env).length, 1);
+  await click(env, 'memo-run');
+  assert.equal(memoPosts(env).length, 2, 'only the user click sends the first real attempt');
+  assert.ok(memo().includes(EN.p2.memoRunning) || memo().includes(EN.p2.memoServerRunning));
+  assert.ok(!env.fk('memo-run'));
+  // 늦게 도착한 옛 상태 (updatedAt 4, 검토 진행 중) 는 지금 상태(6)를 덮지 않는다
+  await env.advance(3000);
+  assert.ok(!section(env, 'cb-review').textContent.includes(EN.reviewServerRunning), 'stale running review discarded');
 });
 
 await test('관찰 신호: 자체 확신도 옆에 실제 수, 관찰 안 된 칸은 UNKNOWN (0 아님), 빠진 패킷 id 와 검토 범위를 보인다', async () => {
@@ -632,6 +730,29 @@ await test('관찰 신호: 자체 확신도 옆에 실제 수, 관찰 안 된 �
   const none = await finishedRun();
   assert.ok(section(none, 'cb-signals').textContent.includes(EN.p2.sigMissing), 'no signals → UNKNOWN, not zero');
   assert.ok(!/accuracy score|calibrated \d/i.test(sig.textContent));
+});
+
+await test('메모 범위 revisionTruncated: 서버 memoMessages 의 실제 모양을 그대로 지키고, 줄였으면 KO/EN 화면·내보내기에 밝히며, 빠지면 false 가 아니라 거절', async () => {
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const out = await build({ stdin: { contents: "export { memoMessages } from './cloudbite-memo';", resolveDir: path.join(repo, 'src'), loader: 'ts' }, bundle: true, write: false, format: 'esm', platform: 'neutral' });
+  const sm = await import('data:text/javascript;base64,' + Buffer.from(out.outputFiles[0].text).toString('base64'));
+  const b = (changeSummary) => ({ title: 'T', objective: 'O', context: 'C', expertIds: ['x1', 'x2'], mode: 'live', requestId: 'r', revision: { parentId: PARENT, changeSummary },
+    decision: { options: ['Ship now', 'Wait a quarter'], constraints: [], successCriteria: [], knownFacts: [], assumptions: [], unknowns: [] } });
+  const done = [{ expertId: 'x1', name: 'Expert 1', opinion: opinionOf('support', 70, ['E']) }, { expertId: 'x2', name: 'Expert 2', opinion: opinionOf('concern', 55, ['F']) }];
+  const real = (cs) => JSON.parse(JSON.stringify(sm.memoMessages(b(cs), done).coverage));
+  const long = real('변경 '.repeat(800)), short = real('Budget halved');
+  assert.equal(long.brief.revisionTruncated, true); assert.equal(short.brief.revisionTruncated, false);
+  for (const [cov, want] of [[long, true], [short, false]]) {
+    const n = core.normalizeMemo({ ...MEMO_DONE, coverage: cov });
+    assert.ok(n, 'real server coverage is readable');
+    assert.deepEqual(plain(n.coverage), cov, 'kept field-for-field');
+    for (const D of [EN, KO]) assert.equal(core.memoCoverageLines(n.coverage, D).includes(D.p2.memoCovRevision), want);
+    const raw = doneProject({ title: 'T', objective: 'O', context: '', expertIds: ['x1', 'x2'], mode: 'live', requestId: 'r' }, { memo: { ...MEMO_DONE, coverage: cov } });
+    for (const D of [EN, KO]) assert.equal(core.markdownReport(core.normalizeProject(raw), false, D).includes(D.p2.memoCovRevision), want, 'export');
+  }
+  const { revisionTruncated: _, ...missing } = short.brief;
+  for (const brief of [missing, { ...short.brief, revisionTruncated: 'false' }, { ...short.brief, revisionTruncated: 0 }])
+    assert.equal(core.normalizeMemo({ ...MEMO_DONE, coverage: { ...short, brief } }), null, 'missing or non-boolean is unreadable, not false');
 });
 
 await test('내보내기: Markdown 에 메모·신호(UNKNOWN)·이전 라운드·빠진 부분이 실제 저장값으로만 들어간다', () => {

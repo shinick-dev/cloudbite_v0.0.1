@@ -17,13 +17,16 @@ The UI only shows what the server stored. It never builds a memo or round itself
     - It is the current live run in this tab and the run has finished. It is not cancelled and has at least one completed, valid opinion.
     - The memo cap allows it. `usage.memo.available > 0` when the server reports usage; otherwise `brief.budget.maxMemoCalls !== 0`.
     - The server has never tried a memo for this project (`memo` is absent, or `idle` with `attempts: 0`).
-    - This screen has not sent a memo request for this project already.
-- **One attempt only.** After any request (success, refusal, error or an unknown outcome) the paid button does not come back for that project. To run another round, start a follow-up, which creates a new project.
+    - This screen has not sent a memo request for this project already, except one the server refused with a 409 that a GET then confirmed as untried (below).
+    - No cross-review is running for this project, from this screen or as reported by the server.
+- **Memo and cross-review never overlap.** The server refuses either one with a 409 while the other runs, and reserves nothing. The console mirrors this in both the buttons and the request handlers: while a memo is running (or being read) there is no *Run cross-review* button, only a note; while a cross-review is running there is no memo button, only a note. If the review was started elsewhere (so this screen does not poll it), the memo section offers *Check memo status*, which only does a GET.
+- **One attempt only.** After any request (success, refusal, error or an unknown outcome) the paid button does not come back for that project. To run another round, start a follow-up, which creates a new project. The only exception is a definite 409 followed by a GET that shows no memo attempt (`memo` absent, or `idle` with `attempts: 0`): the server did not start or reserve anything, so the console says so and keeps the first paid attempt. The button returns once nothing else is running; it is sent only when the user clicks it, never automatically.
 - **Unknown outcome (network failure or timeout).**
   - The POST is not sent again.
   - The console reads `GET /api/cloudbite/projects/:id` and shows what is stored.
   - If no memo record exists yet, it says so and offers *Check memo status*, which only ever does a GET.
-- **409** (running, ineligible, deleted or not current): the console reads the project and shows either the stored state or the server's reason.
+- **409** (running, ineligible, deleted or not current): the console reads the project and shows either the stored state or the server's reason. If that GET itself fails, the outcome is treated as unknown (GET-only, no paid button).
+- **Late responses:** a project read older than the one already shown (lower `updatedAt`) is discarded, so a slow read cannot bring back a finished review as running.
 - **Other refusals** (`429` budget, `503` not configured, `410`, `401`): the server's reason is shown and nothing is retried.
 - **Running:** the console checks with a read every 3 s, and stops after 40 checks with a notice.
 - **Rendering:**
@@ -31,7 +34,7 @@ The UI only shows what the server stored. It never builds a memo or round itself
   - Recommendation, labelled as *a derived interpretation of the opinions, not a vote count, accuracy or calibrated confidence*. It shows the exact option IDs and text supplied.
   - Option comparison table: benefits, risks and conditions for each option. Each claim lists its attributed experts and references.
   - Dissent, critical unknowns, what would change the recommendation, and next actions.
-  - Input coverage and omissions: what was shortened or omitted, plus the note that full reports and source pages were not read.
+  - Input coverage and omissions: what was shortened or omitted, plus the note that full reports and source pages were not read. When `coverage.brief.revisionTruncated` is true, it also states that the follow-up change summary was shortened for the memo input (KO/EN, and in the Markdown export). The field is required: a coverage object without a boolean `revisionTruncated` is treated as unreadable, not as `false`.
 - **References** are shown by kind:
   - opinion evidence item
   - document
@@ -106,6 +109,8 @@ The UI only shows what the server stored. It never builds a memo or round itself
 - the memo request payload and headers
 - one attempt only, with no resubmit after a network failure (reads only)
 - 409, 429, budget-0, failed, needs-options and cancelled states
+- memo/cross-review mutual exclusion in both directions with a held POST (buttons and handlers), and a definite 409 confirmed untried keeping the first paid attempt until the user clicks; stale late reads discarded
+- `revisionTruncated` from real server `memoMessages` coverage (true and false), KO/EN lines and export, and missing or non-boolean values rejected
 - UNKNOWN versus 0
 - review coverage
 - the follow-up payload: new `requestId`, `revision`, copied fields, no auto-run, and parent 404 or delete clearing

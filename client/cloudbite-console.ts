@@ -152,6 +152,10 @@ const P2_EN = {
   memoNotFound: 'The server has no memo record for this project yet. The earlier request is not sent again; check again later.',
   memoCheck: 'Check memo status',
   memoRequestFailed: (e: string) => `The memo request was refused: ${e}`,
+  memoDeferred: (e: string) => `The server did not start the memo and shows no memo attempt for this project, so it can still be requested${e ? `: ${e}` : '.'}`,
+  memoReadFailed: 'Could not read the saved project status. This check sends no memo request; try again.',
+  memoWaitReview: 'A cross-review is running for this project. The memo can be requested after it finishes.',
+  reviewWaitMemo: 'A decision memo is running for this project. The cross-review can be requested after it finishes.',
   memoInvalid: 'The server returned a decision memo this console cannot read, so it is not shown.',
   memoPollStopped: 'Stopped checking the memo status. Reopen the project from History to see the saved result.',
   memoFailed: (e: string) => `The decision memo failed${e ? `: ${e}` : '.'}`,
@@ -177,6 +181,7 @@ const P2_EN = {
   memoCovDocs: (t: number, n: number) => `Documents: ${t} supplied, ${n} shortened for the memo input.`,
   memoCovExperts: (n: number) => `${plural(n, 'opinion')} shortened for the memo input.`,
   memoCovBrief: (n: number, o: number) => `Brief: ${n} decision items shortened, ${o} omitted.`,
+  memoCovRevision: 'Follow-up change summary: shortened for the memo input.',
   memoCovLimits: 'The memo did not read full reports or original source pages.',
   refOpinion: (name: string, n: number) => `${name} · evidence ${n}`,
   refDocument: (id: string, name: string) => `Document ${id}${name ? ` · ${name}` : ''}`,
@@ -253,6 +258,10 @@ const P2_KO: typeof P2_EN = {
   memoNotFound: '서버에 아직 이 프로젝트의 메모 기록이 없습니다. 앞선 요청은 다시 보내지 않습니다. 나중에 다시 확인하세요.',
   memoCheck: '메모 상태 확인',
   memoRequestFailed: (e) => `메모 요청이 거절되었습니다: ${e}`,
+  memoDeferred: (e) => `서버가 메모를 시작하지 않았고 이 프로젝트의 메모 시도 기록도 없어 아직 요청할 수 있습니다${e ? `: ${e}` : '.'}`,
+  memoReadFailed: '저장된 프로젝트 상태를 읽지 못했습니다. 이 확인은 메모 요청을 보내지 않습니다. 다시 시도하세요.',
+  memoWaitReview: '이 프로젝트의 교차 검토가 진행 중입니다. 끝난 뒤 메모를 요청할 수 있습니다.',
+  reviewWaitMemo: '이 프로젝트의 결정 메모가 진행 중입니다. 끝난 뒤 교차 검토를 요청할 수 있습니다.',
   memoInvalid: '서버가 이 콘솔이 읽을 수 없는 결정 메모를 보내 표시하지 않습니다.',
   memoPollStopped: '메모 상태 확인을 멈췄습니다. 사용 기록에서 프로젝트를 다시 열어 저장된 결과를 보세요.',
   memoFailed: (e) => `결정 메모가 실패했습니다${e ? `: ${e}` : '.'}`,
@@ -278,6 +287,7 @@ const P2_KO: typeof P2_EN = {
   memoCovDocs: (t, n) => `문서: ${t}개 제공, 메모 입력에서 ${n}개 줄임.`,
   memoCovExperts: (n) => `메모 입력에서 의견 ${n}개를 줄였습니다.`,
   memoCovBrief: (n, o) => `브리프: 결정 항목 ${n}개 줄임, ${o}개 뺌.`,
+  memoCovRevision: '후속 라운드 변경 요약: 메모 입력에서 줄임.',
   memoCovLimits: '메모는 전체 보고서나 원문 출처 페이지를 읽지 않았습니다.',
   refOpinion: (name, n) => `${name} · 근거 ${n}`,
   refDocument: (id, name) => `문서 ${id}${name ? ` · ${name}` : ''}`,
@@ -1951,7 +1961,7 @@ function memoCoverage(raw: unknown): MemoCoverage | null {
   if (!isObj(raw) || !isInt(raw.teamSize) || !isInt(raw.completed) || !isInt(raw.promptBytes) || raw.fullReportsReviewed !== false || raw.sourcePagesReviewed !== false) return null;
   const sd = raw.statedDirections, sc = raw.statusCounts, br = raw.brief;
   if (!isObj(sd) || !DIRECTIONS.every(d => isInt(sd[d])) || !isObj(sc) || !Object.entries(sc).every(([k, n]) => EXPERT_STATUSES.includes(k as ExpertStatus) && isInt(n))) return null;
-  if (!isObj(br) || !isBool(br.objectiveTruncated) || !isBool(br.contextTruncated) || !isInt(br.decisionItemsTruncated) || !isInt(br.decisionItemsOmitted)) return null;
+  if (!isObj(br) || !isBool(br.objectiveTruncated) || !isBool(br.contextTruncated) || !isInt(br.decisionItemsTruncated) || !isInt(br.decisionItemsOmitted) || !isBool(br.revisionTruncated)) return null;
   const reviews = section(raw.reviews), packets = section(raw.packets);
   if (!reviews || !packets || !isObj(raw.reviews) || !isInt(raw.reviews.reports) || !isObj(raw.packets) || !isInt(raw.packets.invalid) || !isInt(raw.packets.metadataOnly)) return null;
   const experts = every(raw.experts, PROJECT_MAX, e => isObj(e) && typeof e.expertId === 'string' && isBool(e.summaryTruncated) && Array.isArray(e.evidenceIncluded) && e.evidenceIncluded.every(x => isInt(x))
@@ -1962,7 +1972,7 @@ function memoCoverage(raw: unknown): MemoCoverage | null {
     ? { id: clip(d.id, 40), includedBytes: d.includedBytes, originalBytes: d.originalBytes, truncated: d.truncated } : null);
   if (!experts || !documents) return null;
   return { teamSize: raw.teamSize, completed: raw.completed, statusCounts: sc as MemoCoverage['statusCounts'], statedDirections: sd as Record<OpinionDirection, number>, experts, documents,
-    brief: { objectiveTruncated: br.objectiveTruncated, contextTruncated: br.contextTruncated, decisionItemsTruncated: br.decisionItemsTruncated, decisionItemsOmitted: br.decisionItemsOmitted },
+    brief: { objectiveTruncated: br.objectiveTruncated, contextTruncated: br.contextTruncated, decisionItemsTruncated: br.decisionItemsTruncated, decisionItemsOmitted: br.decisionItemsOmitted, revisionTruncated: br.revisionTruncated },
     reviews: { ...reviews, reports: raw.reviews.reports }, packets: { ...packets, invalid: raw.packets.invalid, metadataOnly: raw.packets.metadataOnly },
     fullReportsReviewed: false, sourcePagesReviewed: false, promptBytes: raw.promptBytes };
 }
@@ -2130,6 +2140,7 @@ function memoCoverageLines(c: MemoCoverage, m: Messages): string[] {
     t.memoCovDocs(c.documents.length, c.documents.filter(d => d.truncated).length),
     t.memoCovExperts(shortened),
     t.memoCovBrief(c.brief.decisionItemsTruncated + (c.brief.objectiveTruncated ? 1 : 0) + (c.brief.contextTruncated ? 1 : 0), c.brief.decisionItemsOmitted),
+    ...(c.brief.revisionTruncated ? [t.memoCovRevision] : []),
     t.memoCovLimits,
   ];
 }
@@ -2752,8 +2763,9 @@ function boot(): void {
     /** 이 화면에서 건 교차 검토 요청의 상태. 서버가 보낸 project.crossReview 와 따로 둔다 (실패를 완료로 꾸미지 않는다) */
     review: null as null | { projectId: string; phase: 'running' | 'failed'; error: Text | null; polls: number },
     /** 이 화면에서 건 결정 메모 요청. 한 프로젝트에 한 번만 보내며, 이 값이 있으면 그 프로젝트에 유료 버튼을 다시 내지 않는다.
-     *  unknown = 응답을 확인하지 못함(다시 보내지 않고 읽기만 한다), reading = 저장 상태를 읽는 중, settled = 서버 상태를 받았다 */
-    memo: null as null | { projectId: string; phase: 'running' | 'reading' | 'unknown' | 'failed' | 'settled'; error: Text | null; polls: number },
+     *  unknown = 응답을 확인하지 못함(다시 보내지 않고 읽기만 한다), reading = 저장 상태를 읽는 중, settled = 서버 상태를 받았다.
+     *  blocked 만 예외다: 서버가 409 로 시작하지 않았고 GET 으로 시도 기록이 없음을 확인했다 (예약 없음) → 유료 버튼을 다시 낼 수 있다 */
+    memo: null as null | { projectId: string; phase: 'running' | 'reading' | 'unknown' | 'failed' | 'blocked' | 'settled'; error: Text | null; polls: number },
     /** 사용 기록에서 시작한 후속 라운드 초안: 부모 id 와 서버가 읽어 준 부모 프로젝트(참고·비교용), 사용자가 쓰는 바뀐 점 요약 */
     followUp: null as null | { parentId: string; parent: ConsoleProject; changeSummary: string },
     /** 실제 실행 전 준비한 계획. body 는 미리보기에 보낸 바로 그 JSON 문자열이며, 실행은 이 문자열을 그대로 보낸다 (기본값을 덧붙이지 않는다).
@@ -4179,6 +4191,17 @@ function boot(): void {
     return kids;
   }
 
+  // 메모와 교차 검토는 서로 겹치지 않는다 (서버도 409 로 거절하고 아무것도 예약하지 않는다): 한쪽이 이 화면이나 서버에서 진행 중이면 다른 쪽 버튼을 내지 않는다
+  const reviewBusy = (p: ConsoleProject) => (S.review?.projectId === p.id && S.review.phase === 'running') || p.crossReview?.status === 'running';
+  const memoBusy = (p: ConsoleProject) => (S.memo?.projectId === p.id && (S.memo.phase === 'running' || S.memo.phase === 'reading')) || p.memo?.status === 'running';
+  /** 늦게 도착한 옛 프로젝트 상태는 버린다 (서버는 검토·메모가 바뀔 때마다 updatedAt 을 올린다). 남긴 쪽을 돌려준다 */
+  function newer(next: ConsoleProject): ConsoleProject {
+    const cur = S.run!.project;
+    if (cur && cur.id === next.id && next.updatedAt < cur.updatedAt) return cur;
+    S.run!.project = next;
+    return next;
+  }
+
   function reviewKids(p: ConsoleProject, interactive: boolean): Kid[] {
     const m = M, cr = p.crossReview;
     const local = interactive && S.review?.projectId === p.id ? S.review : null;
@@ -4201,7 +4224,8 @@ function boot(): void {
     if (cr?.disclosure) kids.push(h('p', { class: 'cb-help' }, cr.disclosure));
     // 버튼은 실제로 걸 수 있을 때만 (서버는 프로젝트마다 한 번만 시도한다): 이미 결과가 있거나 진행 중이면 없다
     if (interactive && !cr && !p.invalidCrossReview && !running) {
-      if (canAsk) kids.push(h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'review-run', onclick: () => { void runCrossReview(); } },
+      if (canAsk && memoBusy(p)) kids.push(h('p', { class: 'cb-help', role: 'status' }, m.p2.reviewWaitMemo));
+      else if (canAsk) kids.push(h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'review-run', onclick: () => { void runCrossReview(); } },
         local?.phase === 'failed' ? m.reviewRetry : m.reviewBtn));
       else if (run?.mode === 'live' && TERMINAL_PROJECT.includes(p.status) && !reviewEligible(p)) kids.push(h('p', { class: 'cb-help' }, m.reviewNeed));
     }
@@ -4234,7 +4258,7 @@ function boot(): void {
   /** 사용자가 누를 때만 교차 검토를 건다 (자동·유료 재시도 없음). 프로젝트 bearer 와 같은 출처 요청, 빈 JSON 본문 {} */
   async function runCrossReview(): Promise<void> {
     const run = S.run, p = run?.project;
-    if (!run || !p || run.mode !== 'live' || !run.accessToken || active() || !reviewEligible(p) || p.crossReview || S.review?.phase === 'running') return;
+    if (!run || !p || run.mode !== 'live' || !run.accessToken || active() || !reviewEligible(p) || p.crossReview || S.review?.phase === 'running' || memoBusy(p)) return;
     const gen = S.gen, id = p.id;
     S.review = { projectId: id, phase: 'running', error: null, polls: 0 };
     renderEvidence();
@@ -4262,14 +4286,14 @@ function boot(): void {
   function adoptReview(gen: number, id: string, body: unknown, invalid: () => void): void {
     const next = normalizeProject(isObj(body) && isObj(body.project) ? body.project : body);
     if (!next || next.id !== id || !S.run?.project) return invalid();
-    S.run.project = next;
-    if (next.crossReview?.status === 'running') {
+    const cur = newer(next);
+    if (cur.crossReview?.status === 'running') {
       const polls = (S.review?.projectId === id ? S.review.polls : 0) + 1;
       if (polls > 30) { S.review = { projectId: id, phase: 'failed', error: m => m.reviewPollStopped, polls }; renderAll(); return; }
       S.review = { projectId: id, phase: 'running', error: null, polls };
       clearTimeout(reviewTimer);
       reviewTimer = setTimeout(() => { void reviewRead(gen, id, null); }, 3000) as unknown as number;
-    } else if (next.crossReview || next.invalidCrossReview) S.review = null;
+    } else if (cur.crossReview || cur.invalidCrossReview) S.review = null;
     else S.review = { projectId: id, phase: 'failed', error: m => m.reviewInvalid, polls: 0 };
     renderAll();
   }
@@ -4288,7 +4312,7 @@ function boot(): void {
     try { body = await res.json(); } catch { /* 아래에서 형식 오류 */ }
     if (gen !== S.gen || S.run?.project?.id !== id) return;
     const next = normalizeProject(body);
-    if (why && next && next.id === id && !next.crossReview && !next.invalidCrossReview) { S.run!.project = next; return failed(m => m.reviewRequestFailed(why(m))); }
+    if (why && next && next.id === id && !next.crossReview && !next.invalidCrossReview) { newer(next); return failed(m => m.reviewRequestFailed(why(m))); }
     adoptReview(gen, id, body, () => failed(m => m.reviewInvalid));
   }
 
@@ -4348,15 +4372,20 @@ function boot(): void {
     else if (local?.phase === 'reading') kids.push(h('p', { class: 'cb-help', role: 'status' }, t.memoReading));
     else if (local?.phase === 'unknown') kids.push(h('p', { class: 'cb-warn', role: 'alert' }, (local.error ?? (mm => mm.p2.memoNetwork))(m)),
       h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'memo-check', disabled: !mine, onclick: () => { void memoRead(S.gen, p.id, null); } }, t.memoCheck));
-    else if (local?.phase === 'failed' && local.error) kids.push(h('p', { class: 'cb-warn', role: 'alert' }, local.error(m)));
+    else if ((local?.phase === 'failed' || local?.phase === 'blocked') && local.error) kids.push(h('p', { class: 'cb-warn', role: 'alert' }, local.error(m)));
     if (pm?.status === 'failed') kids.push(h('p', { class: 'cb-warn' }, t.memoFailed(pm.error ?? '')));
     if (pm?.status === 'needs-options') kids.push(h('p', { class: 'cb-warn' }, t.memoNeedsOptions(pm.reason ?? '')));
     if (pm?.status === 'completed' && pm.memo)
       kids.push(h('p', { class: 'cb-ok' }, t.memoDone(hhmm(pm.completedAt ?? pm.startedAt ?? 0), pm.language ? m.wfLangName[pm.language] : '')), ...memoView(p, pm.memo, prefix, opened));
     // 유료 버튼: 지금 실행에서, 서버가 아직 한 번도 시도하지 않았고, 이 화면도 보낸 적이 없을 때만 (사용 기록은 그리기만 한다)
-    if (interactive && mine && memoUntried(p) && !p.invalidMemo && !local && !running) {
+    // blocked: 서버가 409 로 아무것도 시도·예약하지 않았음을 GET 으로 확인했다 → 첫 유료 시도를 그대로 남긴다
+    if (interactive && mine && memoUntried(p) && !p.invalidMemo && (!local || local.phase === 'blocked') && !running) {
       const why = memoBlocked(p);
       if (why || active()) kids.push(h('p', { class: 'cb-help' }, why ? why(m) : t.memoIdle));
+      else if (reviewBusy(p)) kids.push(h('p', { class: 'cb-help', role: 'status' }, t.memoWaitReview),
+        // 이 화면이 조회하지 않는 (다른 곳에서 건) 검토는 GET 으로만 다시 읽는다
+        S.review?.projectId === p.id && S.review.phase === 'running' ? null
+          : h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'memo-check', onclick: () => { void memoRead(S.gen, p.id, null); } }, t.memoCheck));
       else kids.push(h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'memo-run', onclick: () => { void runMemo(); } }, t.memoBtn),
         h('p', { class: 'cb-help' }, t.memoOneAttempt));
     } else if (!interactive && memoUntried(p) && !p.invalidMemo) kids.push(h('p', { class: 'cb-help' }, t.memoNone));
@@ -4365,7 +4394,7 @@ function boot(): void {
   }
   async function runMemo(): Promise<void> {
     const run = S.run, p = run?.project;
-    if (!run || !p || run.mode !== 'live' || !run.accessToken || active() || memoBlocked(p) || S.memo?.projectId === p.id || !memoUntried(p)) return;
+    if (!run || !p || run.mode !== 'live' || !run.accessToken || active() || memoBlocked(p) || (S.memo?.projectId === p.id && S.memo.phase !== 'blocked') || !memoUntried(p) || reviewBusy(p)) return;
     const gen = S.gen, id = p.id;
     S.memo = { projectId: id, phase: 'running', error: null, polls: 0 };
     renderEvidence();
@@ -4382,7 +4411,13 @@ function boot(): void {
       return memoRead(gen, id, null);
     }
     if (!here()) return;
-    if (res.status === 409) { const msg = await errorText(res); return memoRead(gen, id, msg); }
+    // 409 는 서버가 시작하지 않았다는 뜻일 수 있다 (예: 교차 검토 진행 중, 예약 없음). 짐작하지 않고 GET 으로 확인한다
+    if (res.status === 409) {
+      let body: unknown = null;
+      try { body = await res.json(); } catch { /* 본문 없음 */ }
+      const msg = await errorText(res, false, { body }), reason = isObj(body) ? str(body.error, 200) : '';
+      return memoRead(gen, id, msg, m => m.p2.memoDeferred(reason));
+    }
     if (!res.ok) { const msg = await errorText(res); return failed(m => m.p2.memoRequestFailed(msg(m))); }
     let body: unknown = null;
     try { body = await res.json(); } catch { /* 아래에서 형식 오류 */ }
@@ -4393,37 +4428,45 @@ function boot(): void {
   function adoptMemo(gen: number, id: string, body: unknown, invalid: () => void): void {
     const next = normalizeProject(isObj(body) && isObj(body.project) ? body.project : body);
     if (!next || next.id !== id || !S.run?.project) return invalid();
-    S.run.project = next;
-    if (next.memo?.status === 'running') {
+    const cur = newer(next);
+    if (cur.memo?.status === 'running') {
       const polls = (S.memo?.projectId === id ? S.memo.polls : 0) + 1;
       if (polls > 40) { S.memo = { projectId: id, phase: 'failed', error: m => m.p2.memoPollStopped, polls }; renderAll(); return; }
       S.memo = { projectId: id, phase: 'running', error: null, polls };
       clearTimeout(memoTimer);
       memoTimer = setTimeout(() => { void memoRead(gen, id, null); }, 3000) as unknown as number;
-    } else if (!memoUntried(next) || next.invalidMemo) S.memo = { projectId: id, phase: 'settled', error: null, polls: 0 };
+    } else if (!memoUntried(cur) || cur.invalidMemo) S.memo = { projectId: id, phase: 'settled', error: null, polls: 0 };
     else S.memo = { projectId: id, phase: 'unknown', error: m => m.p2.memoNotFound, polls: 0 };
     renderAll();
   }
-  /** GET 으로만 다시 읽는다 (유료 POST 를 다시 보내지 않는다). why 는 409 의 서버 설명 */
-  async function memoRead(gen: number, id: string, why: Text | null): Promise<void> {
+  /** GET 으로만 다시 읽는다 (유료 POST 를 다시 보내지 않는다). why 는 409 의 서버 설명, deferred 는 그 뒤 시도 기록이 없을 때 보일 문구.
+   *  409 뒤이거나, 이 화면이 보낸 요청이 없거나(prev 없음) 이미 blocked 일 때만, 시도 기록이 없으면 유료 버튼을 남긴다 */
+  async function memoRead(gen: number, id: string, why: Text | null, deferred?: Text): Promise<void> {
     const run = S.run;
     if (gen !== S.gen || run?.project?.id !== id || !run.accessToken) return;
     const here = () => gen === S.gen && S.run?.project?.id === id;
     const unknown = (msg: Text) => { if (!here()) return; S.memo = { projectId: id, phase: 'unknown', error: msg, polls: 0 }; keepFocus(renderAll); };
     const prev = S.memo?.projectId === id ? S.memo : null;
+    const safe = !why && (!prev || prev.phase === 'blocked');
+    const keep = (msg: Text) => { if (!here()) return; S.memo = { projectId: id, phase: 'blocked', error: msg, polls: 0 }; keepFocus(renderAll); };
     if (prev?.phase !== 'running') { S.memo = { projectId: id, phase: 'reading', error: prev?.error ?? null, polls: prev?.polls ?? 0 }; renderEvidence(); }
     let res: Response;
     try {
       res = await fetch(`/api/cloudbite/projects/${encodeURIComponent(id)}`, { credentials: 'same-origin', cache: 'no-store', headers: { authorization: `Bearer ${run.accessToken}` } });
-    } catch { return unknown(m => m.p2.memoNetwork); }
+    } catch { return safe ? keep(m => m.p2.memoReadFailed) : unknown(m => m.p2.memoNetwork); }
     if (!here()) return;
-    if (!res.ok) { const msg = await errorText(res); return unknown(m => m.p2.memoRequestFailed((why ?? msg)(m))); }
+    if (!res.ok) { const msg = await errorText(res); return safe ? keep(m => m.withServer(m.p2.memoReadFailed, msg(m))) : unknown(m => m.p2.memoRequestFailed((why ?? msg)(m))); }
     let body: unknown = null;
     try { body = await res.json(); } catch { /* 아래에서 형식 오류 */ }
     if (!here()) return;
     const next = normalizeProject(body);
-    if (why && next && next.id === id && memoUntried(next) && !next.invalidMemo) {
-      S.run!.project = next; S.memo = { projectId: id, phase: 'failed', error: m => m.p2.memoRequestFailed(why(m)), polls: 0 }; renderAll(); return;
+    if ((why || safe) && next && next.id === id) {
+      const cur = newer(next);
+      if (memoUntried(cur) && !cur.invalidMemo) {
+        S.memo = why ? { projectId: id, phase: 'blocked', error: deferred ?? (m => m.p2.memoRequestFailed(why(m))), polls: 0 }
+          : prev ? { ...prev, phase: 'blocked' } : null;
+        renderAll(); return;
+      }
     }
     adoptMemo(gen, id, body, () => unknown(m => m.p2.memoInvalid));
   }
