@@ -1,6 +1,6 @@
 // Generated file — do not edit. Sources: client/cloudbite-computer.ts · client/cloudbite-computer.css
 // Rebuild: node tools/build-cloudbite-computer.mjs (--check verifies it is current)
-// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 ccb2fb45ef0cbd3dad47860c4ef96542362525a32e97408e730eb8eff96823a5 · css sha256 62187bac5bf4cc9c48f060e1c0aa99a72891eee6153e696c9713bee516e90e0c
+// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 82e2b3e1811f8e0ce36e9d218565c68fb539d564eb4f1d22e5f97a0318249a5c · css sha256 62187bac5bf4cc9c48f060e1c0aa99a72891eee6153e696c9713bee516e90e0c
 // Routing (runtime): GET CLOUDBITE_COMPUTER_PATH → CLOUDBITE_COMPUTER_HTML, CLOUDBITE_COMPUTER_JS_PATH → CLOUDBITE_COMPUTER_JS (text/javascript),
 // CLOUDBITE_COMPUTER_CSS_PATH → CLOUDBITE_COMPUTER_CSS (text/css). CSP script-src 'self'; style-src 'self' suffices (no inline).
 // The script calls /api/cloudbite/computer/* (sign-in under /api/cloudbite/computer/auth/*) same-origin and links out only to the gateway and k.shinick.dev.
@@ -429,7 +429,7 @@ export const CLOUDBITE_COMPUTER_JS = [
   "    cancel: \"Cancel\",",
   "    reviewStale: \"The machine or prices changed. Review again before applying.\",",
   "    resizePending: (s) => `A size change to ${s} is in progress. Press Check now to see when the machine reports it.`,",
-  "    resizeFailed: (c) => `The last size change failed: ${c}`,",
+  "    resizeFailed: (c) => c === \"resize_unavailable\" ? \"Live CPU/RAM increases are unavailable for this account. Use a separate CPU or GPU job for extra compute.\" : `The last size change failed: ${c}`,",
   "    resizeCheck: \"Press Check now to see whether the last size change was applied before asking for another.\",",
   "    resizeDone: (s) => `The machine reports ${s}.`,",
   "    gpuTitle: \"Remote GPU jobs\",",
@@ -663,7 +663,7 @@ export const CLOUDBITE_COMPUTER_JS = [
   "    cancel: \"취소\",",
   "    reviewStale: \"머신이나 가격이 바뀌었습니다. 적용하기 전에 다시 확인하세요.\",",
   "    resizePending: (s) => `${s}(으)로 크기를 바꾸는 중입니다. 머신이 보고했는지 지금 확인을 눌러 보세요.`,",
-  "    resizeFailed: (c) => `마지막 크기 변경 실패: ${c}`,",
+  "    resizeFailed: (c) => c === \"resize_unavailable\" ? \"현재 계정은 실행 중 CPU·RAM 증설을 지원하지 않습니다. 추가 연산은 별도 CPU·GPU 작업으로 실행하세요.\" : `마지막 크기 변경 실패: ${c}`,",
   "    resizeCheck: \"다른 변경을 요청하기 전에 지금 확인을 눌러 마지막 크기 변경이 적용됐는지 보세요.\",",
   "    resizeDone: (s) => `머신이 ${s}(으)로 보고합니다.`,",
   "    gpuTitle: \"원격 GPU 작업\",",
