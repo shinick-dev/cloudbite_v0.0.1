@@ -56,7 +56,8 @@ import { defaultResponseLanguage } from './cloudbite-workflow';
 import { previousRoundWorkOrderRules, previousRoundWorkspaceFiles, ROUND_VERSION, type ProjectPreviousRound } from './cloudbite-revision';
 import { artifactPacketsFor, buildArtifactPacket, type StoredArtifact } from './cloudbite-artifact-review';
 import { buildProvenanceLedger, emptyProvenanceState, parseProvenanceState, validateAdoption, applyAdoption, memoProvenanceContext } from './cloudbite-provenance';
-import { authorResponseWorkspaceFiles, authorResponseWorkOrderRules, parseAuthorResponse, authorResponseArtifact, verifyAuthorResponsePlan } from './cloudbite-author-response';
+import { authorResponseWorkspaceFiles, authorResponseWorkOrderRules, parseAuthorResponse, authorResponseArtifact, verifyAuthorResponsePlan, validateCollectedAuthorResponse,
+  AUTHOR_RESPONSE_LIMITS, AUTHOR_RESPONSE_PATHS, type AuthorResponsePlan } from './cloudbite-author-response';
 import { renderProvenanceWorkspace } from './cloudbite-provenance';
 import { importPmc, isPmcImportError, parsePmcIdentifier, PMC_LIMITS, type PmcImport } from './cloudbite-pmc';
 import { CB_RUNNER_PY, RUNNER_DIAGNOSTIC_MAX, runnerCapability, runnerFailureMessage } from './cloudbite-runner';
@@ -242,12 +243,17 @@ export class CloudbiteProject extends DurableObject<Env> {
       state: parseProvenanceState(s.provenance, s.p.id) ?? emptyProvenanceState(s.p.id) };
   }
 
-  /** No project bearer token can adopt a claim: actor/owner are supplied by the authenticated history route only. */
+  /**
+   * No project bearer token can adopt a claim: actor/owner come from the authenticated history route only, and the
+   * recorded actor/time are the server's. Like feedback, only the project's own history actor adopts: an owner session
+   * that can read another browser's project cannot adopt on that user's behalf.
+   */
   async historyAdopt(actor: string, owner: boolean, raw: unknown): Promise<HistoryDetail | CbFail> {
     const now = this.clock();
     const result = await this.ctx.storage.transaction(async tx => {
       const p = await tx.get<ProjectRecord>('project');
       if (!p || p.purgeAt <= now || !p.history || p.history.deleted || (!owner && p.history.actor !== actor)) return fail(404, 'project not found');
+      if (p.history.actor !== actor) return fail(403, "only the project's own user can adopt its claims");
       if (p.brief.mode !== 'live' || !TERMINAL_PROJECT.has(p.status) || p.status === 'cancelled') return fail(409, 'adoption needs a finished live project');
       const m = await tx.get<unknown>([...p.runs.map(r => `expert:${r}`), 'provenance', 'round', 'memo', CROSS_REVIEW]);
       const memo = m.get('memo') as MemoRecord | undefined, cr = m.get(CROSS_REVIEW) as CrossReviewRecord | undefined;
@@ -357,6 +363,8 @@ export class CloudbiteProject extends DurableObject<Env> {
     if (!catalogue.length) return fail(503, 'expert catalogue is not integrated yet');
     const brief = validateBrief(rawBrief, catalogue);
     if (isInvalid(brief)) return fail(400, brief.invalid);
+    const bound = await this.roundBinding(brief, opts.round);
+    if (bound) return bound;
     const plan = this.plan(brief, routing, opts.maxExperts, opts.round);
     if (isCbFail(plan)) return plan;
     const b = plan.budget, live = brief.mode === 'live';
@@ -373,6 +381,24 @@ export class CloudbiteProject extends DurableObject<Env> {
     };
   }
 
+  /**
+   * Shared by preview and create: the API built round from its own history read of the parent (the body's parentId
+   * alone is never authority, and a body can never supply a round or an author-response plan). Plan integrity is
+   * binding, not authorization. An author-response child runs live only.
+   */
+  private async roundBinding(brief: ProjectBrief, round: ProjectPreviousRound | undefined): Promise<CbFail | null> {
+    if (!brief.revision && !round) return null;
+    if (!round || !brief.revision || round.version !== ROUND_VERSION || round.parentId !== brief.revision.parentId
+      || JSON.stringify(round.newRoles) !== JSON.stringify(brief.expertIds)) return fail(400, 'the revision parent was not authorized for this brief');
+    if (new TextEncoder().encode(JSON.stringify(round)).byteLength > ROUND_MAX_BYTES) return fail(400, 'previous-round reference exceeds its bound');
+    if (!brief.revision.reviewSnapshotHash) return round.authorResponse ? fail(400, 'an author-response plan needs an explicit review snapshot') : null;
+    if (brief.mode !== 'live') return fail(400, 'an author response runs only as a live project');
+    const plan = round.authorResponse;
+    if (!plan || plan.crossReview.snapshotHash !== brief.revision.reviewSnapshotHash || plan.parentId !== round.parentId || !(await verifyAuthorResponsePlan(plan))
+      || plan.roles.length !== brief.expertIds.length || brief.expertIds.some(id => !plan.roles.includes(id))) return fail(400, 'the author-response plan is not bound to this brief');
+    return null;
+  }
+
   async create(projectId: string, rawBrief: unknown, historyActor?: string, routing?: CloudbiteRoutingDecision, opts: CreateOptions = {}): Promise<{ project: ProjectRun; accessToken: string } | CbFail> {
     if (!PROJECT_ID.test(projectId)) return fail(400, 'invalid project id');
     const catalogue = this.catalogue();
@@ -381,16 +407,9 @@ export class CloudbiteProject extends DurableObject<Env> {
     if (isInvalid(brief)) return fail(400, brief.invalid);
     if (projectId !== await cbProjectId(brief.requestId)) return fail(400, 'project id does not match requestId');
     const round = opts.round;
-    if (!opts.replayOnly && (brief.revision || round)) {
-      // The API built round from its own history read of the parent; the body's parentId alone is never authority.
-      if (!round || !brief.revision || round.version !== ROUND_VERSION || round.parentId !== brief.revision.parentId
-        || JSON.stringify(round.newRoles) !== JSON.stringify(brief.expertIds)) return fail(400, 'the revision parent was not authorized for this brief');
-      if (new TextEncoder().encode(JSON.stringify(round)).byteLength > ROUND_MAX_BYTES) return fail(400, 'previous-round reference exceeds its bound');
-      if (brief.revision.reviewSnapshotHash) {
-        if (!round.authorResponse || round.authorResponse.crossReview.snapshotHash !== brief.revision.reviewSnapshotHash
-          || round.authorResponse.parentId !== round.parentId || !(await verifyAuthorResponsePlan(round.authorResponse))
-          || brief.expertIds.some(id => !round.authorResponse!.roles.includes(id))) return fail(400, 'the author-response plan is not bound to this brief');
-      } else if (round.authorResponse) return fail(400, 'an author-response plan needs an explicit review snapshot');
+    if (!opts.replayOnly) {
+      const bound = await this.roundBinding(brief, round);
+      if (bound) return bound;
     }
     const token = `cbt_${rand(32)}`;
     const [tokenHash, briefHash] = await Promise.all([cbHash(token), cbHash(JSON.stringify(brief))]);
@@ -870,7 +889,7 @@ export class CloudbiteProject extends DurableObject<Env> {
     const reviews = s.cr && s.cr.review.status !== 'running' ? s.cr.review.reports : [];
     return { team: s.experts.map((e) => ({ expertId: e.run.expertId, name: e.run.name, status: e.run.status })),
       ...(reviews.length ? { reviews } : {}), ...(packets.length ? { packets } : {}),
-      provenance: memoProvenanceContext(this.provenanceView(s).ledger, this.provenanceView(s).state, defaultResponseLanguage(s.p.brief)) };
+      provenance: (({ ledger, state }) => memoProvenanceContext(ledger, state, defaultResponseLanguage(s.p.brief)))(this.provenanceView(s)) };
   }
 
   // ── 'pmc-import' instance: POST /api/cloudbite/pmc/import (Worker has checked Origin, JSON body and actor authority) ──
@@ -1212,19 +1231,13 @@ export class CloudbiteProject extends DurableObject<Env> {
         }
         let extra: string[] = [];
         try { const m = JSON.parse(manifest ?? '{}'); if (Array.isArray(m.files)) extra = m.files.filter(extraArtifactPath); } catch {}
-        extra = [...new Set(extra)].filter(path => path !== 'out/author-response.json').slice(0, CB_ARTIFACT_FILES - 2);
+        const plan = (await this.ctx.storage.get<ProjectPreviousRound>('round'))?.authorResponse;
+        // An author-response round keeps one of the artifact slots for the application-generated response file.
+        extra = [...new Set(extra)].filter(path => path !== AUTHOR_RESPONSE_PATHS.output).slice(0, CB_ARTIFACT_FILES - (plan ? 3 : 2));
         const contents: Array<[string, string]> = [['out/result.json', result!], ['out/report.md', report]];
         for (const path of extra) { const t = await read(path, 32 * 1024).catch(() => null); if (t !== null) contents.push([path, t]); }
-        const round = await this.ctx.storage.get<ProjectPreviousRound>('round');
-        let authorResponse: ExpertRun['authorResponse'];
-        if (round?.authorResponse) {
-          const raw = await read('out/author-response.json', 32 * 1024).catch(() => null);
-          authorResponse = parseAuthorResponse(raw, round.authorResponse, e.run.expertId);
-          if (!('invalid' in authorResponse)) {
-            const artifact = authorResponseArtifact(round.authorResponse, authorResponse);
-            contents.push([artifact.path, artifact.content]);
-          }
-        }
+        const authorResponse = plan && await this.collectAuthorResponse(plan, e.run.expertId,
+          await read(AUTHOR_RESPONSE_PATHS.output, AUTHOR_RESPONSE_LIMITS.replyBytes).catch(() => null), contents);
         // The runner's retrieval audit (reserved path, not in the manifest). Missing and oversize are recorded as such.
         let audit: AuditRecord;
         try { const k = await read('out/knowledge.json', EVIDENCE_PACKET_LIMITS.auditBytes); audit = k === null ? {} : { content: k }; }
@@ -1245,6 +1258,24 @@ export class CloudbiteProject extends DurableObject<Env> {
       default:
         await release(() => {});
     }
+  }
+
+  /**
+   * The runner's raw sibling {responses} is untrusted: it is parsed against the stored plan (whose hash is rechecked),
+   * and the canonical artifact is generated here and revalidated before it is stored. A missing, oversize or invalid
+   * reply is recorded as {invalid} beside the opinion, which stays valid on its own; partial/none coverage stays visible.
+   */
+  private async collectAuthorResponse(plan: AuthorResponsePlan, expertId: string, raw: string | null, contents: Array<[string, string]>): Promise<NonNullable<ExpertRun['authorResponse']>> {
+    if (!(await verifyAuthorResponsePlan(plan))) return { invalid: 'the stored author-response plan does not match its hash' };
+    if (raw === null) return { invalid: `${AUTHOR_RESPONSE_PATHS.output} missing or too large` };
+    const parsed = parseAuthorResponse(raw, plan, expertId);
+    if ('invalid' in parsed) return { invalid: parsed.invalid };
+    let artifact: { path: string; content: string };
+    try { artifact = authorResponseArtifact(plan, parsed); } catch { return { invalid: 'author-response artifact exceeds its bound' }; }
+    const checked = await validateCollectedAuthorResponse(plan, expertId, artifact.content);
+    if ('invalid' in checked) return { invalid: checked.invalid };
+    contents.push([artifact.path, artifact.content]);
+    return checked;
   }
 
   // Simulated run: no fetch, no sandbox. Every row says [demo].

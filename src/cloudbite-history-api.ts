@@ -83,7 +83,7 @@ export async function historyRoute(req: Request, env: Env, url: URL, owner: () =
       const raw = await boundedText(req, 8 * 1024);
       b = JSON.parse(raw);
       if (!b || typeof b !== 'object' || Array.isArray(b)) throw new Error();
-    } catch { return json({ error: 'feedback must be a JSON object within 8 KiB' }, 400); }
+    } catch { return json({ error: `${m[2] === '/adopt' ? 'adoption' : 'feedback'} must be a JSON object within 8 KiB` }, 400); }
     if (m[2] === '/adopt') {
       const r = await project.historyAdopt(actor, isOwner, b);
       return isCbFail(r) ? json({ error: r.error }, r.status) : json(r);

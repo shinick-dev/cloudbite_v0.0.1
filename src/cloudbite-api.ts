@@ -118,6 +118,7 @@ async function prepareProject(req: Request, env: Env, input: unknown, visitor: V
 async function revisionRound(env: Env, brief: ProjectBrief, actor: string | undefined): Promise<ProjectPreviousRound | CbFail> {
   if (!brief.revision) return { error: 'not a revision', status: 400 };
   if (!actor) return { error: 'follow-up rounds need project history, which is not configured', status: 503 };
+  if (brief.revision.reviewSnapshotHash && brief.mode !== 'live') return { error: 'an author response runs only as a live project', status: 400 };
   const parentId = brief.revision.parentId, owner = actor === 'owner';
   let read: HistoryDetail | CbFail;
   try { read = PROJECT_ID.test(parentId) ? await env.CLOUDBITE!.getByName(parentId).historyRead(actor, owner) as HistoryDetail | CbFail : { error: 'parent project not found', status: 404 }; }
