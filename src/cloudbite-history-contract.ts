@@ -1,4 +1,5 @@
 import type { ProjectRun, ProjectStatus } from './cloudbite-contract';
+import type { HumanReviewDetail } from './cloudbite-human-review';
 
 export const HISTORY_DAYS = 30;
 export const HISTORY_TTL = HISTORY_DAYS * 86400_000;
@@ -14,7 +15,9 @@ export interface HistoryRow {
   model: string; roles: HistoryRole[]; experts: HistoryExpertSignal[]; feedback: HistoryFeedback[];
 }
 export type HistoryListRow = Omit<HistoryRow, 'actor' | 'roles' | 'experts' | 'feedback' | 'revision' | 'deleted'> & { expertCount: number; feedbackCount: number; browser?: string };
-export interface HistoryDetail { project: ProjectRun; model: string; roles: HistoryRole[]; feedback: HistoryFeedback[]; reports?: Record<string, string>; expiresAt: number; canFeedback: boolean }
+export interface HistoryDetail { project: ProjectRun; model: string; roles: HistoryRole[]; feedback: HistoryFeedback[]; reports?: Record<string, string>; expiresAt: number; canFeedback: boolean;
+  /** Person-entered rubric reviews (sidecar; absent before this feature or when history is not live). */
+  humanReview?: HumanReviewDetail }
 export interface HistoryList { rows: HistoryListRow[]; next: string | null; owner: boolean; retentionDays: number }
 export interface HistoryReport {
   sampleLimit: number; analyzed: number; live: number; demoExcluded: number; pending: number;
