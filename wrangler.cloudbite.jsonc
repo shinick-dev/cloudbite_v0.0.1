@@ -35,7 +35,7 @@
     // Daytona API for Cloudbite's own organization/key (secret CLOUDBITE_DAYTONA_API_KEY). Optional snapshot with python3.
     "CLOUDBITE_DAYTONA_API_URL": "https://app.daytona.io/api",
     "CLOUDBITE_DAYTONA_SNAPSHOT": "",
-    "CLOUDBITE_COMPUTER_SNAPSHOT": "cloudbite-computer-d2e6a902c06d",
+    "CLOUDBITE_COMPUTER_SNAPSHOT": "cloudbite-computer-3d400ff85b2e",
     "CLOUDBITE_COMPUTER_GATEWAY_ORIGIN": "https://cloudbite-desktop.ai-gongbu.workers.dev",
     "CLOUDBITE_COMPUTER_PROXY_SUFFIXES": ".daytonaproxy01.net,.proxy.daytona.works"
   },

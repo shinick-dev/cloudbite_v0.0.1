@@ -49,7 +49,8 @@ REQUIRED_TOOLS = ("claude-code", "codex", "opencode", "cursor-agent", "antigravi
 TAR_FILTER = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
 
 APT_PACKAGES = ("chromium", "dbus", "dbus-x11", "python3-dbus", "gnome-keyring", "libsecret-1-0",
-                "xdg-utils", "ca-certificates", "xz-utils")
+                "xdg-utils", "ca-certificates", "xz-utils", "ibus", "ibus-hangul",
+                "ibus-gtk", "ibus-gtk3", "fonts-noto-cjk", "locales", "xdotool")
 
 NODE = {
     "version": "22.20.0",
@@ -123,6 +124,9 @@ esac
 """ + TOOLS_PATH_SH + """\
 export DISABLE_AUTOUPDATER=1
 export BROWSER=/usr/local/bin/cloudbite-browser
+export GTK_IM_MODULE=ibus
+export QT_IM_MODULE=ibus
+export XMODIFIERS=@im=ibus
 if [ -S "/tmp/cloudbite-dbus-$(id -u)/bus" ]; then
   DBUS_SESSION_BUS_ADDRESS="unix:path=/tmp/cloudbite-dbus-$(id -u)/bus"; export DBUS_SESSION_BUS_ADDRESS
   XDG_RUNTIME_DIR="/tmp/cloudbite-dbus-$(id -u)"; export XDG_RUNTIME_DIR
@@ -512,6 +516,25 @@ def desktop_entry(name, exec_line, terminal):
             "Icon=applications-internet\nCategories=Network;\n")
 
 
+def align_legacy_tools(base="/usr/local/share/nvm/current/bin", local="/usr/local/bin"):
+    """Keep cached base-image CLI paths usable; preserve each original symlink."""
+    for exe in ("claude", "codex", "opencode"):
+        old, target = os.path.join(base, exe), os.path.join(local, exe)
+        if not os.path.islink(old) or not os.path.exists(target):
+            continue
+        original = os.readlink(old)
+        if original == target:
+            continue
+        backup = old + ".cloudbite-base"
+        if not os.path.lexists(backup):
+            os.symlink(original, backup)
+        temp = old + ".cloudbite-next"
+        if os.path.lexists(temp):
+            os.remove(temp)
+        os.symlink(target, temp)
+        os.replace(temp, old)
+
+
 def install_scripts(src):
     os.makedirs(BIN, exist_ok=True)
     for name, target in (("start-desktop.py", "cloudbite-start-desktop"),
@@ -522,6 +545,12 @@ def install_scripts(src):
     os.makedirs(ROOT + "/lib", exist_ok=True)
     shutil.copyfile(os.path.join(src, "install_selkies.py"), ROOT + "/lib/install_selkies.py")
     shutil.copyfile(os.path.join(src, "keyring-default.py"), ROOT + "/lib/keyring-default.py")
+    shutil.copyfile(os.path.join(src, "configure-input.py"), ROOT + "/lib/configure-input.py")
+    shutil.copyfile(os.path.join(src, "shell-rc.sh"), ROOT + "/lib/shell-rc.sh")
+    shutil.copyfile(os.path.join(src, "shell.sh"), BIN + "/cloudbite-shell")
+    os.chmod(BIN + "/cloudbite-shell", 0o755)
+    shutil.copyfile(os.path.join(src, "terminal-wrapper.sh"), "/usr/local/bin/xfce4-terminal")
+    os.chmod("/usr/local/bin/xfce4-terminal", 0o755)
     write("/etc/profile.d/cloudbite-computer.sh", PROFILE_SH)
     write("/etc/profile.d/zz-cloudbite-tools.sh", "# CloudBite computer: pinned agent CLIs first.\n" + TOOLS_PATH_SH)
     with open("/etc/bash.bashrc", "a") as fh:
@@ -534,8 +563,16 @@ def install_scripts(src):
                         [(t, "cloudbite-browser.desktop") for t in BROWSER_MIME])
     write("/usr/share/xfce4/helpers/cloudbite-browser.desktop", XFCE_HELPER)
     merge_settings_file("/etc/xdg/xfce4/helpers.rc", None, [("WebBrowser", "cloudbite-browser")])
+    write("/usr/share/xfce4/helpers/cloudbite-terminal.desktop",
+          "[Desktop Entry]\nVersion=1.0\nType=X-XFCE-Helper\nX-XFCE-Category=TerminalEmulator\n"
+          "Name=CloudBite Terminal\nIcon=utilities-terminal\nNoDisplay=true\n"
+          "X-XFCE-Binaries=xfce4-terminal;\n"
+          "X-XFCE-Commands=/usr/local/bin/xfce4-terminal;\n"
+          "X-XFCE-CommandsWithParameter=/usr/local/bin/xfce4-terminal -x %s;\n")
+    merge_settings_file("/etc/xdg/xfce4/helpers.rc", None, [("TerminalEmulator", "cloudbite-terminal")])
     write(BIN + "/cloudbite-sign-in", SIGN_IN_SH, 0o755)
     os.makedirs(TOOLS_DIR, exist_ok=True)
+    align_legacy_tools()
     for exe in TOOL_EXES:
         link = f"{TOOLS_DIR}/{exe}"
         if os.path.lexists(link):
@@ -544,6 +581,8 @@ def install_scripts(src):
             os.symlink("/usr/local/bin/" + exe, link)
     launchers = ROOT + "/share/launchers"
     os.makedirs(launchers, exist_ok=True)
+    write(launchers + "/terminal-cloudbite.desktop",
+          desktop_entry("Terminal", "/usr/local/bin/xfce4-terminal", False), 0o755)
     for app_id, name, url in WEB_APPS:
         assert url.startswith("https://")
         write(f"{launchers}/web-{app_id}.desktop",
@@ -551,10 +590,10 @@ def install_scripts(src):
     for exe, name in (("claude", "Claude Code"), ("codex", "Codex"), ("opencode", "OpenCode"),
                       ("cursor-agent", "Cursor Agent"), ("agy", "Antigravity CLI")):
         write(f"{launchers}/cli-{exe}.desktop",
-              desktop_entry(name, f"xfce4-terminal --title '{name}' -e 'bash -lc \"{TOOLS_DIR}/{exe}; exec bash\"'", False), 0o755)
+              desktop_entry(name, f"/usr/local/bin/xfce4-terminal --title '{name}' -e 'bash -lc \"{TOOLS_DIR}/{exe}; exec bash\"'", False), 0o755)
     for sign_id, name, arg in SIGN_IN:
         write(f"{launchers}/signin-{sign_id}.desktop",
-              desktop_entry(name, f"xfce4-terminal --title '{name}' -e '{BIN}/cloudbite-sign-in {arg}'", False), 0o755)
+              desktop_entry(name, f"/usr/local/bin/xfce4-terminal --title '{name}' -e '{BIN}/cloudbite-sign-in {arg}'", False), 0o755)
 
 
 COMMANDS = {"claude-code": "claude", "codex": "codex", "opencode": "opencode",
