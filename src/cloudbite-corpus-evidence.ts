@@ -12,15 +12,11 @@ export function corpusReceipt(result: CorpusSearchResult): CorpusReceipt {
     hits: result.hits.map(h => ({ chunkId: h.chunkId, sha256: h.sha256 })) };
 }
 
-let verdict: boolean | undefined;
-/** True only when the deployed index passes full local validation (no network) and has a source for this role. The
- *  verdict is remembered only for the deeply frozen index; an invalid deployment disables original search, not the expert. */
+let verdict: Promise<boolean> | undefined;
+/** Share the in-flight validation as well as its verdict when experts are admitted in parallel. */
 export async function corpusAvailableFor(expertId: string): Promise<boolean> {
-  let valid = verdict;
-  if (valid === undefined) {
-    try { await validateCorpusIndex(CORPUS); valid = true; } catch { valid = false; }
-    if (Object.isFrozen(CORPUS)) verdict = valid;
-  }
+  const validate = async () => { try { await validateCorpusIndex(CORPUS); return true; } catch { return false; } };
+  const valid = await (Object.isFrozen(CORPUS) ? verdict ??= validate() : validate());
   return valid && CORPUS.sources.some(s => s.roles.includes(expertId));
 }
 

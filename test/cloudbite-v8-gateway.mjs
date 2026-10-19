@@ -54,6 +54,19 @@ async function fixture(name, edit = () => {}) {
 }
 const M = await load(await fixture('valid'));
 const MI = await load(await fixture('invalid', ix => { ix.sources[0].attribution = 'x'.repeat(501); }));
+// Parallel expert admission shares one immutable-index validation, including while its digest is still pending.
+const singleAdmission = await load(join(tmp, 'valid.mjs'));
+const originalDigest = crypto.subtle.digest;
+let indexDigests = 0;
+crypto.subtle.digest = function (...args) { indexDigests++; return originalDigest.apply(this, args); };
+try {
+  assert.equal(await singleAdmission.corpusAvailableFor(RA), true);
+  const oneValidation = indexDigests; indexDigests = 0;
+  const available = await Promise.all(Array.from({length: 16}, (_, i) => M.corpusAvailableFor(i % 2 ? RA : RB)));
+  assert.ok(available.every(Boolean));
+  assert.equal(indexDigests, oneValidation, 'concurrent admission must not rehash the entire index for every expert');
+} finally { crypto.subtle.digest = originalDigest; }
+
 assert.deepEqual((await M.validateCorpusIndex(M.CORPUS)).sources, 3);
 await assert.rejects(MI.validateCorpusIndex(MI.CORPUS));
 assert.ok(Object.isFrozen(M.CORPUS) && Object.isFrozen(MI.CORPUS), 'the deployed index is deep-frozen at import');
