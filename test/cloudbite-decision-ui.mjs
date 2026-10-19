@@ -65,7 +65,7 @@ await test('근거 파일 내용: BOM·CRLF 정리, 제어 문자·깨진 UTF-8 
   const six = Array.from({ length: 6 }, () => ({ content: 'x' }));
   assert.match(acc('h.txt', 'y', six).error(EN), /at most 6 files/);
   assert.deepEqual(plain(core.docsPayload([{ key: 4, name: 'b', content: 'B' }, { key: 9, name: 'c', content: 'C' }])),
-    [{ id: 'doc-1', name: 'b', content: 'B' }, { id: 'doc-2', name: 'c', content: 'C' }], 'ids follow the remaining order; key and origin are not sent');
+    [{ id: 'doc-1', name: 'b', content: 'B' }, { id: 'doc-2', name: 'c', content: 'C' }], 'ids follow the remaining order; key is not sent and an absent origin stays absent');
 });
 
 const opinion = (direction, evidence = ['ev-0', 'ev-1']) => ({ direction, confidence: 70, summary: `${direction} summary`, evidence, assumptions: [], nextActions: [] });
@@ -148,13 +148,19 @@ class Node_ {
   }
 }
 const json = (status, body) => Promise.resolve({ ok: status >= 200 && status < 300, status, json: async () => body });
-function fakeEnv(fetchImpl, { boot = CATALOGUE, globals = {} } = {}) {
+/** 계획 미리보기 기본 응답: 보낸 팀을 그대로 돌려주는 올바른 ProjectPreview. 미리보기 요청은 env.previews 에 따로 모은다 */
+const PREVIEW_OK = (url, init) => {
+  const b = JSON.parse(init.body), n = b.expertIds.length;
+  return json(200, { expertIds: b.expertIds, assignments: [], budget: { maxExperts: n, maxModelCalls: n * 8 + 4, maxReviewCalls: 3, maxMemoCalls: 1 },
+    envelope: { sandboxMaximum: n, nosanaMaximum: n * 8 + 4, expertMaximum: n * 8, reviewMaximum: 3, memoMaximum: 1, jevCalls: b.routing ? 1 : 0 }, warnings: [] });
+};
+function fakeEnv(fetchImpl, { boot = CATALOGUE, globals = {}, preview = PREVIEW_OK } = {}) {
   const timers = new Map(); let seq = 0, now = 0;
   const doc = { readyState: 'complete', activeElement: null, createElement: (t) => new Node_(doc, t), getElementById: (id) => id === 'cloudbite' ? root : null,
     listeners: {}, addEventListener(t, f) { (this.listeners[t] ||= []).push(f); } };
   doc.documentElement = new Node_(doc, 'html');
   const root = new Node_(doc, 'div'); root.id = 'cloudbite'; doc.body = new Node_(doc, 'body'); doc.body.append(root);
-  const requests = [];
+  const requests = [], previews = [];
   const ctx = vm.createContext({
     document: doc, crypto: globalThis.crypto, CSS: { escape: (s) => s }, URL, URLSearchParams, Blob,
     setTimeout: (fn, ms) => { const id = ++seq; timers.set(id, { at: now + (ms || 0), fn }); return id; },
@@ -162,6 +168,7 @@ function fakeEnv(fetchImpl, { boot = CATALOGUE, globals = {} } = {}) {
     fetch: (url, init = {}) => {
       if (String(url).startsWith('/api/cloudbite/owner/')) return json(200, { authenticated: false, hasCredentials: false });
       if (url === '/api/cloudbite/bootstrap') return json(200, boot);
+      if (url === '/api/cloudbite/preview') { previews.push({ url, init }); return preview(url, init, previews.length); }
       requests.push({ url, init }); return fetchImpl(url, init, requests.length);
     },
     ...globals,
@@ -181,7 +188,7 @@ function fakeEnv(fetchImpl, { boot = CATALOGUE, globals = {} } = {}) {
   const byText = (tag, text) => all().find(n => n.tagName === tag && n.textContent.trim() === text);
   const fk = (k) => all().find(n => n.getAttribute('data-fk') === k);
   const byId = (id) => all().find(n => n.id === id);
-  return { root, doc, requests, flush, advance, all, byText, fk, byId };
+  return { root, doc, requests, previews, flush, advance, all, byText, fk, byId };
 }
 const CATALOGUE = {
   experts: ['x1', 'x2', 'x3'].map((id, i) => ({ id, name: `Expert ${i + 1}`, domain: 'd', summary: 's', prompt: 'p', tools: [], outputs: [], source: {} })),
@@ -305,6 +312,11 @@ function liveServer({ review, final = projectRaw({ evidenceClaims: CLAIMS }) } =
     return json(404, {});
   };
 }
+/** 시작 버튼: 실제 실행은 계획 준비 → 이 계획으로 실행 두 걸음이라, 계획이 준비되면 한 번 더 누른다 */
+const go = async (env) => {
+  env.fk('start').click(); await env.flush();
+  if (['Run this plan', '이 계획으로 실행'].includes(env.fk('start').textContent.trim())) { env.fk('start').click(); await env.flush(); }
+};
 const posted = (env, url) => env.requests.filter(r => r.url === url && r.init.method === 'POST').map(r => JSON.parse(r.init.body));
 
 await test('Jev 경로 묻기와 프로젝트 만들기는 같은 decision·documents 를 보낸다 (doc id 는 빼고 남은 순서)', async () => {
@@ -313,7 +325,7 @@ await test('Jev 경로 묻기와 프로젝트 만들기는 같은 decision·docu
   await pickFiles(env, [file('drop.txt', 'Drop me'), file('keep.md', 'Keep me')]);
   env.fk(docKeyOf(env, 'drop.txt')).click(); await env.flush();
   await setValue(env, 'cb-dec-options', 'A\nB'); await setValue(env, 'cb-dec-successCriteria', '  Profit  ');
-  env.fk('start').click(); await env.flush();
+  await go(env);
   const [route] = posted(env, '/api/cloudbite/route'), [create] = posted(env, '/api/cloudbite/projects');
   const decision = { options: ['A', 'B'], constraints: [], successCriteria: ['Profit'], knownFacts: [], assumptions: [], unknowns: [] };
   const documents = [{ id: 'doc-1', name: 'keep.md', content: 'Keep me' }];
@@ -325,7 +337,7 @@ await test('Jev 경로 묻기와 프로젝트 만들기는 같은 decision·docu
 await test('직접 고른 실제 실행: 선택 필드를 쓰지 않으면 보내지 않는다 (예전 본문 그대로)', async () => {
   const env = fakeEnv(liveServer({ review: () => json(500, {}) }));
   await goLive(env); await selectTwo(env);
-  env.fk('start').click(); await env.flush();
+  await go(env);
   const [create] = posted(env, '/api/cloudbite/projects');
   assert.ok(create, 'project created');
   assert.equal('decision' in create, false); assert.equal('documents' in create, false);
@@ -336,7 +348,7 @@ async function finishedLive(review, final) {
   await goLive(env);
   await pickFiles(env, [file('notes.md', DOCS[0].content)]);
   await selectTwo(env);
-  env.fk('start').click(); await env.flush(); await env.advance(1500);
+  await go(env); await env.advance(1500);
   return env;
 }
 const panelOf = (env) => env.all().find(n => n.className === 'cb-panel cb-evidence');
@@ -415,7 +427,7 @@ await test('교차 검토 409·진행 중: 서버의 지금 상태를 다시 읽
     return liveServer({ final })(url, init);
   });
   await goLive(env); await selectTwo(env);
-  env.fk('start').click(); await env.flush(); await env.advance(1500);
+  await go(env); await env.advance(1500);
   env.fk('review-run').click(); await env.flush();
   assert.match(panelOf(env).textContent, /Cross-review running…/);
   await env.advance(3000);
@@ -430,7 +442,7 @@ await test('교차 검토 응답 전에 새 실행을 시작하면 늦은 응답
   const env = await finishedLive(() => new Promise(r => { release = r; }));
   env.fk('review-run').click(); await env.flush();
   env.fk('setup').click(); await env.flush();
-  env.fk('start').click(); await env.flush();
+  await go(env);
   release({ ok: true, status: 200, json: async () => projectRaw({ crossReview: REVIEW }) }); await env.flush();
   assert.ok(!/Reviewer: Expert 2/.test(panelOf(env).textContent), 'late review response ignored');
   assert.equal(env.requests.filter(r => r.url === '/api/cloudbite/projects' && r.init.method === 'POST').length, 2);
@@ -440,7 +452,7 @@ await test('끝났지만 완료 전문가가 2명 미만이면 버튼 대신 이
   const one = projectRaw({ status: 'partial', experts: [run(1, 'completed'), run(2, 'failed')] });
   const env = fakeEnv(liveServer({ final: one, review: () => json(500, {}) }));
   await goLive(env); await selectTwo(env);
-  env.fk('start').click(); await env.flush();
+  await go(env);
   assert.ok(!env.fk('review-run'));
   await env.advance(1500);
   assert.ok(!env.fk('review-run'));

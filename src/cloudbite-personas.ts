@@ -1,10 +1,12 @@
-import type { ExpertDefinition, ExpertOpinion, OpinionDirection, ProjectBrief } from './cloudbite-contract';
+import type { ExpertAssignment, ExpertDefinition, ExpertOpinion, OpinionDirection, ProjectBrief } from './cloudbite-contract';
 import { PROJECT_MAX_EXPERTS } from './cloudbite-catalogue-limits';
 import { STA_EXPERT, staKnowledgeFiles } from './cloudbite-sta';
 import { PHASE_ONE_PACKS, type PhaseOneKnowledgePack } from './cloudbite-phase-one-data';
 import { KNOWLEDGE_PACKS, knowledgeSourcePath } from './cloudbite-knowledge-registry';
 import { knowledgeDigest, knowledgeWorkspaceFiles, PEER_REVIEW_STATEMENT, REVIEW_ROLE_IDS } from './cloudbite-knowledge';
 import { decisionWorkOrderRules, decisionWorkspaceFiles, validateDecisionData } from './cloudbite-decision';
+import { decisionOptionIds, defaultResponseLanguage, projectStage, validateExpertAssignment, validateWorkflowData } from './cloudbite-workflow';
+import { assignmentWorkOrderSection, PERSPECTIVE_IDS } from './cloudbite-workorders';
 
 // Cloudbite expert personas and per-expert workspace packs.
 //
@@ -623,12 +625,14 @@ export function validateProjectBrief(brief: unknown): ProjectBrief {
   }
   const extra = validateDecisionData(input);
   if ('invalid' in extra) throw new Error(`brief.${extra.invalid}`);
-  return { title, objective, context, expertIds: [...seen], mode: input.mode, requestId, ...extra };
+  const workflow = validateWorkflowData(input);
+  if ('invalid' in workflow) throw new Error(`brief.${workflow.invalid}`);
+  return { title, objective, context, expertIds: [...seen], mode: input.mode, requestId, ...extra, ...workflow };
 }
 
-/** project.json keeps the original brief fields; decision data has its own files. */
+/** project.json keeps the original brief fields; decision data has its own files and the budget is runtime-only. */
 function projectJson(brief: ProjectBrief): ProjectBrief {
-  const { decision: _decision, documents: _documents, ...rest } = brief;
+  const { decision: _decision, documents: _documents, budget: _budget, ...rest } = brief;
   return rest;
 }
 
@@ -830,6 +834,8 @@ function projectFile(brief: ProjectBrief): string {
     '',
     fenced(brief.context),
     '',
+    ...(brief.stage ? ['## Stated project stage', '', fenced(brief.stage), ''] : []),
+    ...(brief.revision ? ['## Revision note', '', fenced(`Revises project ${brief.revision.parentId} (user claim, not verified).\n${brief.revision.changeSummary}`), ''] : []),
     '<!-- END UNTRUSTED PROJECT DATA -->',
     '',
   ].join('\n');
@@ -837,7 +843,7 @@ function projectFile(brief: ProjectBrief): string {
 
 type WorkSpec = Pick<RoleProfile, 'mission' | 'questions' | 'artifacts'>;
 
-function workOrderFile(expert: ExpertDefinition, profile: WorkSpec, brief: ProjectBrief, rules: string[] = []): string {
+function workOrderFile(expert: ExpertDefinition, profile: WorkSpec, brief: ProjectBrief, rules: string[] = [], assignment = ''): string {
   const decisionRules = decisionWorkOrderRules(brief);
   const peers = brief.expertIds.filter(id => id !== expert.id).map(id => findExpert(id)?.name ?? id);
   return [
@@ -849,6 +855,7 @@ function workOrderFile(expert: ExpertDefinition, profile: WorkSpec, brief: Proje
     '',
     `Apply the ${expert.name} role to the project described in PROJECT.md. ${profile.mission}`,
     '',
+    ...(assignment ? [assignment] : []),
     '## Scope',
     '',
     'In scope:',
@@ -919,12 +926,22 @@ function instructionsFile(expert: ExpertDefinition, knowledge = false, decision 
   ].join('\n');
 }
 
-export function buildExpertWorkspace(expert: ExpertDefinition, brief: ProjectBrief): Array<{path:string;content:string}> {
+/**
+ * Optional `assignment` (from buildExpertAssignments) must belong to this expert, the brief's stage and its decision
+ * snapshot; it becomes a trusted WORKORDER.md section, which the runner reads into its initial context.
+ */
+export function buildExpertWorkspace(expert: ExpertDefinition, brief: ProjectBrief, assignment?: ExpertAssignment): Array<{path:string;content:string}> {
   // The catalog is authoritative: caller-supplied persona fields are ignored.
   const known = expert && typeof expert === 'object' ? findExpert(expert.id) : undefined;
   if (!known) throw new Error('unknown expert');
   const clean = validateProjectBrief(brief);
   if (!clean.expertIds.includes(known.id)) throw new Error('expert is not selected in this brief');
+  let section = '';
+  if (assignment !== undefined) {
+    const checked = validateExpertAssignment(assignment, { expertId: known.id, stage: projectStage(clean), optionIds: decisionOptionIds(clean.decision), perspectiveIds: PERSPECTIVE_IDS });
+    if ('invalid' in checked) throw new Error(checked.invalid);
+    section = assignmentWorkOrderSection(checked, defaultResponseLanguage(clean));
+  }
 
   if (known.id === STA_EXPERT.id) {
     const knowledge = staKnowledgeFiles(`${clean.title}\n${clean.objective}\n${clean.context}`);
@@ -933,14 +950,14 @@ export function buildExpertWorkspace(expert: ExpertDefinition, brief: ProjectBri
       { path: 'PERSONA.md', content: known.prompt },
       { path: 'PROJECT.md', content: projectFile(clean) },
       { path: 'project.json', content: JSON.stringify(projectJson(clean)) },
-      { path: 'WORKORDER.md', content: staDecisionRules(clean, '# STA work order\nApply PERSONA.md to PROJECT.md. Read KNOWLEDGE.md; search further using the knowledge action. Explain the answer first, then evidence, missing inputs, minimal edits and verification. Use [source:ID] in evidence. Never claim a PrimeTime run or signoff. Write supporting analysis to out/timing-review.md if useful. The runner writes out/knowledge.json as an audit of retrieved references; do not write it yourself.') },
+      { path: 'WORKORDER.md', content: staDecisionRules(clean, section, '# STA work order\nApply PERSONA.md to PROJECT.md. Read KNOWLEDGE.md; search further using the knowledge action. Explain the answer first, then evidence, missing inputs, minimal edits and verification. Use [source:ID] in evidence. Never claim a PrimeTime run or signoff. Write supporting analysis to out/timing-review.md if useful. The runner writes out/knowledge.json as an audit of retrieved references; do not write it yourself.') },
       { path: 'RESULT.schema.json', content: JSON.stringify(expertOpinionSchema()) },
       ...knowledge,
       ...decisionWorkspaceFiles(clean),
     ]);
   }
   const pack = PACK_BY_ID.get(known.id);
-  if (pack) return checkWorkspaceFiles(knowledgeWorkspace(known, pack, clean));
+  if (pack) return checkWorkspaceFiles(knowledgeWorkspace(known, pack, clean, section));
   const profile = PROFILE_BY_ID.get(known.id)!;
 
   const files = [
@@ -948,7 +965,7 @@ export function buildExpertWorkspace(expert: ExpertDefinition, brief: ProjectBri
     { path: 'PERSONA.md', content: personaFile(known, profile) },
     { path: 'PROJECT.md', content: projectFile(clean) },
     { path: 'project.json', content: JSON.stringify(projectJson(clean), null, 2) + '\n' },
-    { path: 'WORKORDER.md', content: workOrderFile(known, profile, clean) },
+    { path: 'WORKORDER.md', content: workOrderFile(known, profile, clean, [], section) },
     { path: 'RESULT.schema.json', content: JSON.stringify(expertOpinionSchema(), null, 2) + '\n' },
     { path: 'provenance.json', content: JSON.stringify({ expertId: known.id, ...provenance(profile) }, null, 2) + '\n' },
     ...decisionWorkspaceFiles(clean),
@@ -956,13 +973,14 @@ export function buildExpertWorkspace(expert: ExpertDefinition, brief: ProjectBri
   return checkWorkspaceFiles(files);
 }
 
-/** The STA work order is a single paragraph; decision rules are appended only when decision data is present. */
-function staDecisionRules(brief: ProjectBrief, order: string): string {
+/** The STA work order is a single paragraph; assignment and decision rules are appended only when present. */
+function staDecisionRules(brief: ProjectBrief, assignment: string, order: string): string {
   const rules = decisionWorkOrderRules(brief);
-  return rules.length ? `${order}\n\n## Decision and evidence rules\n\n${bullets(rules)}\n` : order;
+  const base = assignment ? `${order}\n\n${assignment}` : order;
+  return rules.length ? `${base}\n\n## Decision and evidence rules\n\n${bullets(rules)}\n` : base;
 }
 
-function knowledgeWorkspace(expert: ExpertDefinition, pack: PhaseOneKnowledgePack, brief: ProjectBrief) {
+function knowledgeWorkspace(expert: ExpertDefinition, pack: PhaseOneKnowledgePack, brief: ProjectBrief, assignment = '') {
   const profile = PROFILE_BY_ID.get(pack.expertId);
   const reviewer = REVIEW_ROLE_IDS.has(pack.expertId);
   const rules = [
@@ -977,7 +995,7 @@ function knowledgeWorkspace(expert: ExpertDefinition, pack: PhaseOneKnowledgePac
     { path: 'PERSONA.md', content: knowledgePersonaFile(expert, pack, profile) },
     { path: 'PROJECT.md', content: projectFile(brief) },
     { path: 'project.json', content: JSON.stringify(projectJson(brief), null, 2) + '\n' },
-    { path: 'WORKORDER.md', content: workOrderFile(expert, pack, brief, rules) },
+    { path: 'WORKORDER.md', content: workOrderFile(expert, pack, brief, rules, assignment) },
     { path: 'RESULT.schema.json', content: JSON.stringify(expertOpinionSchema(), null, 2) + '\n' },
     { path: 'provenance.json', content: JSON.stringify({ expertId: expert.id, ...knowledgeProvenance(pack, profile) }, null, 2) + '\n' },
     ...knowledgeWorkspaceFiles(pack, `${brief.title}\n${brief.objective}\n${brief.context}`, reviewer),

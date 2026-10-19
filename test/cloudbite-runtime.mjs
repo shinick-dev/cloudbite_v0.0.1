@@ -536,7 +536,8 @@ await check('registry bounds active live projects; unsupported workspace pack is
   const r = await call(w2, 'POST', '/api/cloudbite/projects', { body: brief(), headers: admin });
   globalThis.__badWorkspace = false;
   assert.equal(r.status, 503); assert.match(r.j.error, /workspace pack unavailable/); assert.equal(w2.fetches.length, 0);
-  assert.deepEqual(await w2.ns.getByName('registry').storage.get('reg'), {});
+  // The plan (including workspace validation) now fails before any live slot is taken.
+  assert.deepEqual((await w2.ns.getByName('registry').storage.get('reg')) ?? {}, {});
 });
 
 await check('validators: workspace paths and opinion schema', async () => {
@@ -586,6 +587,30 @@ await check('Jev routing API: authenticated, actor-bound, cached and authoritati
   assert.equal((await call(w, 'POST', `/api/cloudbite/projects/${created.j.project.id}/cancel`, { body: {}, headers: { origin: w.env.ORIGIN, authorization: 'Bearer ' + created.j.accessToken } })).status, 200);
   assert.equal((await call(w, 'DELETE', `/api/cloudbite/history/${created.j.project.id}`, { headers: admin })).status, 200);
   assert.equal((await w.ns.getByName(created.j.project.id).storage.get('project')).routing, undefined, 'history deletion also erases the new routing metadata');
+});
+
+await check('Jev preview and create: the cached decision, workflow fields forwarded, Jev calls disclosed (2 automatic, 0 manual)', async () => {
+  const w = freshWorld({ M: REAL, env: { TYPESAFE_API_KEY: 'TYPESAFE-TEST-KEY' } });
+  const query = { title: 'Frontend release', objective: 'Review the browser state flow.', context: '', requestId: 'jev-api-test-v2a',
+    stage: 'validation', responseLanguage: 'en', budget: { maxExperts: 3, maxModelCalls: 30, maxReviewCalls: 1, maxMemoCalls: 1 } };
+  const routed = await call(w, 'POST', '/api/cloudbite/route', { body: query, headers: admin });
+  assert.equal(routed.status, 200, routed.text); assert.equal(w.jev.length, 1);
+  const auto = { ...query, mode: 'demo', routing: 'jev', expertIds: routed.j.expertIds };
+  const pv = await call(w, 'POST', '/api/cloudbite/preview', { body: auto, headers: admin });
+  assert.equal(pv.status, 200, pv.text);
+  assert.deepEqual(pv.j.expertIds, routed.j.expertIds); assert.equal(pv.j.envelope.jevCalls, 2); assert.equal(pv.j.envelope.sandboxMaximum, 0, 'demo starts no sandbox');
+  assert.ok(pv.j.assignments.every((a) => a.source === 'jev-coverage' && a.stage === 'validation'));
+  assert.equal(w.jev.length, 1, 'preview reads the cached decision'); assert.equal(w.posts, 0); assert.equal(w.nosana.length, 0);
+  const manual = await call(w, 'POST', '/api/cloudbite/preview', { body: { ...query, mode: 'demo', expertIds: routed.j.expertIds }, headers: admin });
+  assert.equal(manual.status, 200, manual.text); assert.equal(manual.j.envelope.jevCalls, 0); assert.ok(manual.j.assignments.every((a) => a.source === 'manual-scope'));
+  assert.equal((await call(w, 'POST', '/api/cloudbite/preview', { body: { ...auto, stage: 'launch' }, headers: admin })).status, 409, 'a changed workflow field is a different routing query');
+  w.env.CLOUDBITE_HISTORY = { getByName: () => ({ upsert: async () => ({ ok: true }) }) };
+  const created = await call(w, 'POST', '/api/cloudbite/projects', { body: auto, headers: admin });
+  assert.equal(created.status, 201, created.text);
+  const b = created.j.project.brief;
+  assert.equal(b.stage, 'validation'); assert.equal(b.responseLanguage, 'en'); assert.deepEqual(b.budget, query.budget);
+  assert.deepEqual(created.j.project.assignments, pv.j.assignments, 'create stores the plan the preview showed');
+  assert.equal(created.j.project.usage.jevCalls, 2); assert.equal(w.jev.length, 1);
 });
 
 await check('Jev routing API: missing key, provider error and direct auto-create do not start jobs or leak keys', async () => {
@@ -1055,7 +1080,10 @@ await check('two accounts: experts are pinned before create, spread over both or
   assert.deepEqual([...w.deletes].sort(), ex.map((e) => e.run.sandboxId).sort());
   for (const c of await cleanups(obj)) { assert.ok(c.done); const e = ex.find((x) => x.run.id === c.run); assert.equal(c.account, e.int.account); assert.equal(c.binding, e.int.binding); }
   const read = await call(w, 'GET', `/api/cloudbite/projects/${created.j.project.id}`, { headers: { authorization: 'Bearer ' + created.j.accessToken } });
-  assert.ok(!/binding|"account"|secondary/.test(read.text), 'account assignment stays internal');
+  // Evidence packets/signals carry a retrieval `binding` (audit vs knowledge pack), unrelated to account credentials.
+  const { evidencePackets: _packets, evidenceSignals: _signals, ...pub } = JSON.parse(read.text);
+  assert.ok(!/binding|"account"|secondary/.test(JSON.stringify(pub)), 'account assignment stays internal');
+  assert.ok(!/"account"|secondary/.test(read.text) && ex.every((e) => !read.text.includes(e.int.binding)), 'no account or credential binding in evidence views');
   for (const [, text] of [...allText(w), ['read', read.text]]) for (const s of SECRETS) assert.ok(!text.includes(s));
   assert.deepEqual(await w.ns.getByName('registry').storage.get('reg'), {});
 });
@@ -1185,7 +1213,9 @@ await check('three organizations: each expert completes its real Python runner a
     assert.ok(c.done); assert.equal(c.account,e.int.account); assert.equal(c.binding,e.int.binding);
   }
   const read = await call(w, 'GET', `/api/cloudbite/projects/${created.j.project.id}`, { headers: { authorization:'Bearer '+created.j.accessToken } });
-  assert.ok(!/"binding"|"account"|daytonaAccounts/.test(read.text));
+  const { evidencePackets: _packets, evidenceSignals: _signals, ...pub } = JSON.parse(read.text); // retrieval `binding` is not an account
+  assert.ok(!/"binding"|"account"|daytonaAccounts/.test(JSON.stringify(pub)));
+  assert.ok(!/"account"|daytonaAccounts/.test(read.text) && ex.every((e) => !read.text.includes(e.int.binding)));
   for (const [,text] of [...allText(w),['read',read.text]]) for (const s of SECRETS) assert.ok(!text.includes(s));
 });
 
