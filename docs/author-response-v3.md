@@ -63,7 +63,9 @@ new child project, with that child's own normal budget, and answer each finding 
    - spoofed IDs, or IDs belonging to another author;
    - duplicate IDs;
    - an unknown disposition;
-   - an empty rationale, or one longer than 600 characters;
+   - an empty rationale, or one longer than 600 UTF-16 units (JavaScript string length; an astral character such
+     as an emoji counts 2). The runner's Python pre-check counts the same units, so a rationale the runner accepts
+     is never rejected here for length;
    - more entries than the author was assigned;
    - a clearly wrong script for the plan's language (category `language`).
 
@@ -72,6 +74,16 @@ new child project, with that child's own normal budget, and answer each finding 
    `validateCollectedAuthorResponse(plan, expertId, content)` re-validates a collected artifact. It checks the plan
    hash and these exact bindings: parent, plan hash, snapshot hash, author and original-opinion hash. It also checks
    that the stored coverage matches the responses.
+
+   **Two schemas, one path.** In the sandbox the runner writes the *raw* model value `{"responses":[...]}` to
+   `out/author-response.json`. That raw file is untrusted. The collector reads it, parses it with
+   `parseAuthorResponse` against the trusted, hash-verified plan, and then writes the canonical app-bound artifact
+   from `authorResponseArtifact` (kind, generatedBy, planSha256, bindings, coverage) to the **same public path**.
+   `validateCollectedAuthorResponse` validates that stored canonical artifact, never the raw runner file; calling it
+   on the raw file always fails by design. The DO already performs this parse-then-regenerate step.
+
+   The canonical artifact may be shown to a later cross-review as an ordinary artifact. That is legitimate: it is
+   untrusted data there like any other artifact, carries no execution or verification claim, and is not skipped.
 
 ## Limits and non-claims
 

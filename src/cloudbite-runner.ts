@@ -280,7 +280,7 @@ def author_response_problem(value):
         fid = r['findingId']
         if not isinstance(fid, str) or fid not in expected or fid in seen: return 'unknown, foreign or duplicate authorResponse findingId'
         if r['disposition'] not in ('revise', 'withdraw', 'maintain'): return 'invalid authorResponse disposition'
-        if not isinstance(r['rationale'], str) or not r['rationale'].strip() or len(r['rationale']) > 600: return 'authorResponse rationale must contain 1-600 characters'
+        if not isinstance(r['rationale'], str) or not r['rationale'].strip() or len(r['rationale'].encode('utf-16-le', 'surrogatepass')) // 2 > 600: return 'authorResponse rationale must contain 1-600 UTF-16 units (the app counts JavaScript string length)'
         seen.add(fid); prose.append(r['rationale'])
     if language and language_integrity(prose, language)[0] == 'mismatch': return 'authorResponse rationale must use the selected response language'
     return None

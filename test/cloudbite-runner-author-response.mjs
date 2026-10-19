@@ -74,6 +74,18 @@ try {
   assert.equal(reserved.read('done'), 'ok'); assert.ok(reserved.events.some(e => /reserved/.test(e)));
   assert.deepEqual(JSON.parse(reserved.read('author-response.json')), response); checks++;
 
+  // Rationale length is counted in UTF-16 units, as the app's JavaScript validator does (astral characters count 2).
+  const prefix = 'I revise this as a proposal ', astral = prefix + '\u{1F600}'.repeat((600 - prefix.length) / 2);
+  assert.equal(astral.length, 600); assert.ok([...astral].length < 600);
+  const atLimit = { responses: [{ ...response.responses[0], rationale: astral }] };
+  const boundary = await run(() => final(atLimit));
+  assert.equal(boundary.messages.length, 1); assert.equal(boundary.read('done'), 'ok');
+  assert.deepEqual(JSON.parse(boundary.read('author-response.json')), atLimit); checks++;
+  const over = await run(n => n === 1 ? final({ responses: [{ ...response.responses[0], rationale: astral + 'x' }] }) : final());
+  assert.equal(over.messages.length, 2); assert.equal(over.read('done'), 'ok');
+  assert.ok(over.events.some(e => /1-600 UTF-16 units/.test(e)));
+  assert.deepEqual(JSON.parse(over.read('author-response.json')), response); checks++;
+
   const ordinary = await run(() => final(), false);
   assert.equal(ordinary.read('done'), 'ok'); assert.equal(ordinary.read('author-response.json'), null); checks++;
   console.log(`cloudbite-runner-author-response: ${checks} execution scenarios passed`);

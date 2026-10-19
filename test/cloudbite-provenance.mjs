@@ -148,6 +148,70 @@ const find = (l, f) => l.claims.find(f);
   ok(ko.language === 'ko' && /지시나 권한이 아님/.test(ko.text) && /독립 검증이 아니다/.test(ko.text), 'KO non-authority rules');
 }
 
+// ── rendering under every budget: an item line always sits under its own section header (F1) ──
+{
+  const HEAD = {
+    en: { criteria: 'User-stated success criteria (exact):', constraints: 'User-stated constraints (exact):', adopted: 'User-adopted (not verified):', proposals: 'Generated threshold-like proposals (not requirements, not adopted):', limits: 'Limits:' },
+    ko: { criteria: '사용자가 직접 쓴 성공 기준(원문):', constraints: '사용자가 직접 쓴 제약(원문):', adopted: '사용자 채택 항목(검증 아님):', proposals: '생성된 기준값 형태 제안(요구사항 아님, 채택되지 않음):', limits: '한계:' },
+  };
+  const longCrit = 'Users finish onboarding without help '.repeat(25).slice(0, 900);
+  const exp1 = [{ expertId: 'e1', name: 'E1', opinion: op({ evidence: ['Observed drop-off'], nextActions: ['>=80% done'] }) }];
+  const exp2 = [{ expertId: 'e1', name: 'E1', opinion: op({ nextActions: ['>=80% done', 'Keep p95 latency under 300 ms', 'Add >=5 regression tests'] }) }, { expertId: 'e2', name: 'E2', opinion: op({ nextActions: ['At least 3 pilot sites', 'Ship within 2 weeks'] }) }];
+  const cases = [];
+  const reproL = ledger(brief({ decision: { ...brief().decision, successCriteria: [longCrit], constraints: [] } }), exp1);
+  cases.push(['repro', reproL, m.emptyProvenanceState('proj-1')]);
+  const richL = ledger(brief({ decision: { ...brief().decision, successCriteria: [longCrit, ...CRITERIA], constraints: ['No new headcount', 'Budget ' + 'x'.repeat(400)] } }), exp2);
+  let richS = m.emptyProvenanceState('proj-1');
+  for (const c of richL.claims.filter((x) => x.origin === 'generated-opinion' && x.numericThresholdHint).slice(0, 2)) richS = m.applyAdoption(richS, m.validateAdoption(richL, richS, { claimId: c.id, text: c.text, snapshot: richL.snapshot }, server()));
+  ok(richS.adoptions.length === 2, 'sweep fixture has adopted and generated threshold claims');
+  cases.push(['rich-adopted', richL, richS], ['rich-none', richL, m.emptyProvenanceState('proj-1')]);
+  const enc = new TextEncoder();
+  let budgets = 0;
+  for (const [name, l, s] of cases) {
+    const active = m.effectiveAdoptions(l, s).active;
+    const expected = (line) => {
+      if (/^- \+\d+ more proposals not listed$/.test(line)) return 'proposals';
+      const c = l.claims.find((x) => line.startsWith(`- ${x.id} `));
+      assert.ok(c, `${name}: item line names a ledger claim: ${line.slice(0, 40)}`);
+      const st = m.claimStanding(c, active);
+      return st === 'user-adopted' ? 'adopted' : st === 'generated-proposal' ? 'proposals' : c.kind === 'success-criterion' ? 'criteria' : 'constraints';
+    };
+    for (const language of ['en', 'ko']) for (let max = 512; max < 4000; max++) {
+      const ctx = m.provenancePromptContext(l, s, { language, maxBytes: max });
+      const text = ctx.text, rows = text.split('\n');
+      assert.ok(enc.encode(text).length === ctx.bytes && ctx.bytes <= max, `${name}/${language}/${max}: within budget`);
+      assert.ok(rows[rows.length - 1].startsWith(HEAD[language].limits) && /factsVerified=false sourcesRetrieved=false$/.test(rows[rows.length - 1]), `${name}/${language}/${max}: limits line intact and last`);
+      const headers = Object.entries(HEAD[language]).filter(([k]) => k !== 'limits');
+      let current = null, seen = 0, markers = 0;
+      for (const row of rows) {
+        const h = headers.find(([, v]) => v === row);
+        if (h) { current = h[0]; continue; }
+        if (row.startsWith('- ')) { assert.equal(current, expected(row), `${name}/${language}/${max}: item under wrong header: ${row.slice(0, 50)}`); seen++; }
+        const sm = /^\[omitted (\d+) more lines of this section for the byte budget\]$/.exec(row);
+        if (sm) { assert.ok(current, `${name}/${language}/${max}: section marker has a header`); markers += +sm[1]; }
+        if (row.startsWith('[omitted ') && row.includes(' in total ')) current = null;
+      }
+      const total = /\[omitted (\d+) lines in total for the byte budget(?:; sections omitted whole: ([a-z, ]+))?\]/.exec(text);
+      assert.equal(ctx.truncated, ctx.omittedLines > 0 || !text.includes(language === 'en' ? 'not independent verification' : '독립 검증이 아니다'), `${name}/${language}/${max}: truncated flag honest`);
+      assert.equal(!!total, ctx.omittedLines > 0, `${name}/${language}/${max}: omission disclosed iff lines omitted`);
+      if (total) {
+        assert.equal(+total[1], ctx.omittedLines, `${name}/${language}/${max}: disclosed count matches`);
+        const wholeNames = total[2] ? total[2].split(', ') : [];
+        assert.ok(markers + wholeNames.length <= ctx.omittedLines, `${name}/${language}/${max}: per-section markers do not over-count`);
+        for (const k of wholeNames) assert.ok(!rows.includes(HEAD[language][k]), `${name}/${language}/${max}: section named omitted whole is absent`);
+      }
+      assert.ok(text.includes(language === 'en' ? 'never requirements' : '요구사항이 아니다'), `${name}/${language}/${max}: proposals-not-requirements rule kept`);
+      budgets++;
+    }
+  }
+  ok(budgets === 3 * 2 * 3488, 'swept maxBytes 512..3999 EN/KO for every fixture');
+  const repro = m.provenancePromptContext(reproL, m.emptyProvenanceState('proj-1'), { language: 'en', maxBytes: 791 }).text;
+  const rows = repro.split('\n'), gen = rows.findIndex((r) => r.includes('">=80% done"'));
+  ok(gen === -1 || rows.slice(0, gen).reverse().find((r) => r.endsWith(':') && !r.startsWith('- ')) === HEAD.en.proposals, 'reviewer repro (maxBytes 791): generated threshold is never listed under User-adopted');
+  const tight = m.provenancePromptContext(richL, richS, { language: 'ko', maxBytes: 512 });
+  ok(tight.bytes <= 512 && tight.truncated && /한계: /.test(tight.text) && /sections omitted whole/.test(tight.text), 'KO at 512 bytes: compact rules, limits kept unclipped, omitted sections named');
+}
+
 // ── memo: optional provenance context, existing callers unchanged ──
 {
   const completed = experts();

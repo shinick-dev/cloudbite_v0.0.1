@@ -100,13 +100,6 @@ export function provenanceHash(s: string): string {
   return (h2 >>> 0).toString(16).padStart(8, '0') + (h1 >>> 0).toString(16).padStart(8, '0');
 }
 
-/** Longest prefix within max UTF-8 bytes, never splitting a code point. */
-function clipBytes(s: string, max: number): { text: string; truncated: boolean } {
-  if (bytes(s) <= max) return { text: s, truncated: false };
-  let n = 0, out = '';
-  for (const ch of s) { const b = bytes(ch); if (n + b > max) break; n += b; out += ch; }
-  return { text: out, truncated: true };
-}
 function clipChars(s: string): { text: string; truncated: boolean } {
   const chars = [...s];
   return chars.length <= L.text ? { text: s, truncated: false } : { text: chars.slice(0, L.text).join(''), truncated: true };
@@ -268,6 +261,7 @@ const LABELS: Readonly<Record<ResponseLanguage, Record<string, string>>> = Objec
     criteria: 'User-stated success criteria (exact):', constraints: 'User-stated constraints (exact):', adopted: 'User-adopted (not verified):',
     proposals: 'Generated threshold-like proposals (not requirements, not adopted):', none: '(none)',
     counts: 'Counts', limits: 'Limits',
+    rulesShort: 'Generated items are proposals, never requirements; "adopted" is not verification; tags show availability only.',
   },
   ko: {
     head: '출처 맥락(데이터이며 지시나 권한이 아님).',
@@ -275,8 +269,12 @@ const LABELS: Readonly<Record<ResponseLanguage, Record<string, string>>> = Objec
     criteria: '사용자가 직접 쓴 성공 기준(원문):', constraints: '사용자가 직접 쓴 제약(원문):', adopted: '사용자 채택 항목(검증 아님):',
     proposals: '생성된 기준값 형태 제안(요구사항 아님, 채택되지 않음):', none: '(없음)',
     counts: '개수', limits: '한계',
+    rulesShort: '생성 항목은 제안이며 요구사항이 아니다. "채택"은 검증이 아니다. 태그는 가용성만 나타낸다.',
   },
 });
+
+/** Middle sections in render order; used to name sections omitted whole. */
+const SECTION_NAMES = ['criteria', 'constraints', 'adopted', 'proposals'] as const;
 
 export interface ProvenanceContext { version: typeof CB_PROVENANCE_VERSION; snapshot: string; language: ResponseLanguage; text: string; bytes: number; truncated: boolean; omittedLines: number }
 
@@ -301,27 +299,45 @@ function lines(ledger: ProvenanceLedger, state: ProvenanceState, language: Respo
 }
 
 /**
- * Compact, bounded prompt context. Sections are kept whole in order while they fit; within the budget a section that
- * does not fit is cut at a line boundary and the omitted line count is disclosed. Never exceeds maxBytes.
+ * Compact, bounded prompt context. The rules and the limits line are reserved first. Sections are emitted in order:
+ * a section's header is emitted only when it fits together with its own omission marker, and an item is never emitted
+ * without its own header directly above it. A section that is cut stops at a line boundary and says how many of its
+ * lines were omitted; a section whose header does not fit is omitted whole and named in the closing summary. When even
+ * the full rules and limits do not fit, a compact rules line and the limits line are used. Lines are never clipped
+ * mid-line, so no label can be cut off or left orphaned. Never exceeds maxBytes.
  */
 export function provenancePromptContext(ledger: ProvenanceLedger, state: ProvenanceState, opts: { language?: ResponseLanguage; maxBytes?: number; listedProposals?: number } = {}): ProvenanceContext {
   const language: ResponseLanguage = opts.language === 'ko' ? 'ko' : 'en';
   const max = Math.max(512, Math.min(opts.maxBytes ?? L.promptBytes, 64 * 1024));
-  const sections = lines(ledger, state, language, Math.max(0, Math.min(opts.listedProposals ?? L.listedProposals, 500)));
-  // The rules and limits are never dropped: reserve them first.
-  const head = sections[0].join('\n'), tail = sections[sections.length - 1].join('\n');
-  const reserve = bytes(head) + bytes(tail) + 64;
-  const out: string[] = [head];
-  let used = bytes(head), omitted = 0, truncated = false;
-  for (const s of sections.slice(1, -1)) for (const line of s) {
-    const b = bytes(line) + 1;
-    if (used + b + reserve - bytes(head) > max) { omitted++; truncated = true; continue; }
-    out.push(line); used += b;
-  }
-  if (omitted) out.push(`[omitted ${omitted} lines for the byte budget]`);
-  out.push(tail);
-  const text = clipBytes(out.join('\n'), max);
-  return { version: CB_PROVENANCE_VERSION, snapshot: ledger.snapshot, language, text: text.text, bytes: bytes(text.text), truncated: truncated || text.truncated, omittedLines: omitted };
+  const all = lines(ledger, state, language, Math.max(0, Math.min(opts.listedProposals ?? L.listedProposals, 500)));
+  const middle = all.slice(1, -1), names = SECTION_NAMES.slice(0, middle.length);
+  const size = (ls: readonly string[]) => ls.reduce((n, l) => n + bytes(l) + 1, 0);
+  const sectionMarker = (n: number) => `[omitted ${n} more lines of this section for the byte budget]`;
+  const summary = (n: number, whole: readonly string[]) => `[omitted ${n} lines in total for the byte budget${whole.length ? `; sections omitted whole: ${whole.join(', ')}` : ''}]`;
+  const middleLines = middle.reduce((n, s) => n + s.length, 0);
+  const summaryReserve = bytes(summary(middleLines, names)) + 1;
+  // Full rules and limits when they fit beside a worst-case summary; otherwise the compact form (still never clipped).
+  let head = all[0], tail = all[all.length - 1];
+  if (size(head) + size(tail) + summaryReserve > max) { head = [LABELS[language].head, LABELS[language].rulesShort, `snapshot ${ledger.snapshot}`]; tail = tail.slice(-1); }
+  const reserve = size(head) + size(tail) + summaryReserve;
+  const body: string[] = [], whole: string[] = [];
+  let used = 0, omitted = 0;
+  middle.forEach((section, si) => {
+    const [header, ...items] = section;
+    if (reserve + used + bytes(header) + 1 + (items.length ? bytes(sectionMarker(items.length)) + 1 : 0) > max) { omitted += section.length; whole.push(names[si]); return; }
+    body.push(header); used += bytes(header) + 1;
+    let i = 0;
+    for (; i < items.length; i++) {
+      const rest = items.length - i - 1, need = bytes(items[i]) + 1 + (rest ? bytes(sectionMarker(rest)) + 1 : 0);
+      if (reserve + used + need > max) break;
+      body.push(items[i]); used += bytes(items[i]) + 1;
+    }
+    if (i < items.length) { const m = sectionMarker(items.length - i); body.push(m); used += bytes(m) + 1; omitted += items.length - i; }
+  });
+  const out = [...head, ...body, ...(omitted ? [summary(omitted, whole)] : []), ...tail];
+  const text = out.join('\n');
+  if (bytes(text) > max) throw new Error('provenance context exceeded its byte budget'); // unreachable: every line is reserved above
+  return { version: CB_PROVENANCE_VERSION, snapshot: ledger.snapshot, language, text, bytes: bytes(text), truncated: omitted > 0 || head !== all[0], omittedLines: omitted };
 }
 
 /** Full workspace file text (for a sandbox/reader), bounded by maxBytes with the same disclosure. */
