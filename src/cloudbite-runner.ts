@@ -95,6 +95,19 @@ PEER_STATEMENT = '${PEER_REVIEW_STATEMENT}'
 BUDGET_RULES = ('Each reply is limited to about ${CB_INFERENCE_MAX_TOKENS} tokens; a longer reply is cut off and rejected as invalid JSON.\n'
                 'Keep every reply one compact JSON object under 2500 characters. In final keep the report under 100 words,\n'
                 'the summary under 300 characters, and each list to 1-3 short items under 120 characters.')
+# Constructive review guidance for every role and route (prompt text only; no field or check enforces it).
+CONSTRUCTIVE_RULES = ('Help the user evolve the project: start from the strongest feasible approach within the stated constraints.\n'
+                      'Raise only material concerns, prioritized, at most three; having none is a valid answer, so never invent\n'
+                      'issues to fill a format and never force a positive direction. For each concern say whether it is missing\n'
+                      'information, observed adverse evidence, a trade-off or an actual constraint; give its impact, a concrete\n'
+                      'change (scope, design, wording or example), the smallest proportionate check and the observation that\n'
+                      'would change your recommendation. Unknowns are not evidence of failure; make the opinion conditional only\n'
+                      'when missing information is decisive. Ask at most three clarifying questions, only when the answer would\n'
+                      'change the recommendation, and offer a reversible next step meanwhile. Any threshold, customer or scope you\n'
+                      'suggest is a labeled proposal, never a user requirement; give an early-stage idea no launch or sign-off gate.\n'
+                      'nextActions hold the actionable steps; the report holds the detail and one revised project proposal.\n'
+                      'Stay within your role, the stated stage and the response language. Security, privacy, medical and other\n'
+                      'actual safety constraints and the citation and source rules still apply in full.')
 REPAIRS = ${CB_RUNNER_REPAIRS}
 DIAGNOSTIC_SCHEMA = '${RUNNER_DIAGNOSTIC_SCHEMA}'
 FINAL_TURN = ('This is the last turn. Reply with only the compact final JSON object now: no python, no write, no text\n'
@@ -499,7 +512,8 @@ summary 1-${OPINION.summary} characters, each list 1-${OPINION.items} non-empty 
 out/result.json, out/report.md, out/manifest.json and out/done are reserved: the final action saves them
 automatically. Never write them; use write only for supporting files such as out/analysis.md.
 Confidence is your own self-assessment, not calibrated accuracy. Use a tool when it helps; you may send final
-as soon as one useful tool result supports your opinion. You have %d turns; the last turn must be final."""
+as soon as one useful tool result supports your opinion. You have %d turns; the last turn must be final.
+""" + CONSTRUCTIVE_RULES
 
 
 def finish(status, opinion=None, report='', error='', author_response=None):
