@@ -56,6 +56,19 @@ export function retrievalTokens(text: string): string[] {
   return out;
 }
 
+/** Each Hangul query token mapped to the distinct Hangul query words (by text) whose bigrams produced it. */
+function hangulTokenWords(q: string): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const m of norm(q).matchAll(/[가-힣]+/g)) {
+    for (const t of retrievalTokens(m[0])) {
+      const ws = out.get(t) ?? [];
+      if (!ws.includes(m[0])) ws.push(m[0]);
+      out.set(t, ws);
+    }
+  }
+  return out;
+}
+
 export interface RankableCard { id: string; term: string; summary: string; match: string[]; source_ids: string[] }
 export interface RankedCard {
   id: string; index: number;
@@ -83,6 +96,7 @@ export function rankCards(cards: readonly RankableCard[], query: string, maxQuer
   const seen = new Set<string>();
   for (const t of retrievalTokens(q)) { if (seen.size >= queryTokens) break; seen.add(t); }
   const qt = [...seen].sort();
+  const hangulWords = hangulTokenWords(q);
   const docs = cards.map(c => retrievalTokens(cardText(c)));
   const n = cards.length;
   const avgdl = (docs.reduce((s, d) => s + d.length, 0) / (n || 1)) || 1;
@@ -99,8 +113,8 @@ export function rankCards(cards: readonly RankableCard[], query: string, maxQuer
     let exact = 0;
     for (const t of card.match) if (termMatches(q, t)) { const nt = norm(t); exact += termWeight(nt); if (!terms.includes(nt)) terms.push(nt); }
     const doc = docs[index], dl = doc.length;
-    let bm = 0, ascii = 0, hangul = 0;
-    const hits: string[] = [];
+    let bm = 0, ascii = 0;
+    const hits: string[] = [], words = new Set<string>();
     for (const t of qt) {
       const w = idf.get(t);
       if (w === undefined) continue;
@@ -109,10 +123,11 @@ export function rankCards(cards: readonly RankableCard[], query: string, maxQuer
       if (!tf) continue;
       bm += (w / 1e6) * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / avgdl));
       hits.push(t);
-      if (/^[가-힣]/.test(t)) hangul++; else ascii++;
+      if (/^[가-힣]/.test(t)) for (const w of hangulWords.get(t) ?? []) words.add(w); else ascii++;
     }
-    // one shared Hangul bigram is too weak to count as a content hit on its own
-    if (!(ascii >= 1 || hangul >= 2)) { bm = 0; hits.length = 0; }
+    // Hangul content needs evidence from two different query words: the overlapping bigrams of one word (결과로 →
+    // 결과 + 과로) are a single piece of evidence, and the cross-morpheme bigram is often an unrelated word
+    if (!(ascii >= 1 || words.size >= 2)) { bm = 0; hits.length = 0; }
     const content = bm > 0 ? q3(contentCap * bm / (bm + contentCap)) : 0;
     const score = exact * 1000 + content;
     if (score > 0) ranked.push({ id: card.id, index, score, exact, content, terms, contentTerms: hits.slice(0, RETRIEVAL_PARAMS.contentTerms) });
@@ -335,6 +350,15 @@ def retrieval_tokens(text):
     return out
 
 
+def retrieval_hangul_words(q):
+    out = {}
+    for w in re.findall(r'[가-힣]+', retrieval_norm(q)):
+        for t in retrieval_tokens(w):
+            ws = out.setdefault(t, [])
+            if w not in ws: ws.append(w)
+    return out
+
+
 def retrieval_card_text(c):
     t, s = c.get('term'), c.get('summary')
     return '%s\n%s' % (t if isinstance(t, str) else '', s if isinstance(s, str) else '')
@@ -347,6 +371,7 @@ def rank_cards(cards, query, max_query=12000):
         if len(seen) >= RETRIEVAL_QUERY_TOKENS: break
         if t not in seen: seen.append(t)
     qt = sorted(seen)
+    hangul_words = retrieval_hangul_words(q)
     docs = [retrieval_tokens(retrieval_card_text(c)) for c in cards]
     n = len(cards)
     avgdl = (sum(len(d) for d in docs) / (n or 1)) or 1
@@ -365,16 +390,16 @@ def rank_cards(cards, query, max_query=12000):
                 if nt not in terms: terms.append(nt)
         doc = docs[index]
         dl = len(doc)
-        bm, ascii_hits, hangul_hits, hits = 0, 0, 0, []
+        bm, ascii_hits, hits, words = 0, 0, [], set()
         for t in qt:
             if t not in idf: continue
             tf = doc.count(t)
             if not tf: continue
             bm += (idf[t] / 1e6) * (tf * (RETRIEVAL_K1 + 1)) / (tf + RETRIEVAL_K1 * (1 - RETRIEVAL_B + RETRIEVAL_B * dl / avgdl))
             hits.append(t)
-            if re.match(r'[가-힣]', t): hangul_hits += 1
+            if re.match(r'[가-힣]', t): words.update(hangul_words.get(t, []))
             else: ascii_hits += 1
-        if not (ascii_hits >= 1 or hangul_hits >= 2):
+        if not (ascii_hits >= 1 or len(words) >= 2):
             bm, hits = 0, []
         content = math.floor(RETRIEVAL_CAP * bm / (bm + RETRIEVAL_CAP) * 1000 + 0.5) if bm > 0 else 0
         score = exact * 1000 + content

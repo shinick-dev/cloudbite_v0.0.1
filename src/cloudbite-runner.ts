@@ -148,6 +148,11 @@ knowledge_trace = []
 # Follow-up searches that found nothing: kept as evidence gaps for the final, never as citable sources.
 knowledge_gaps = []
 retrieved_sources = set()
+# Citable IDs that came only from an orientation-fallback initial selection, not from any query hit (citation_hint labels them).
+orientation_sources = set()
+searched_sources = set()
+# The manifest's initial-selection strategy; None for a legacy manifest without a retrieval record.
+initial_strategy = None
 project_document_ids = set()
 
 
@@ -418,7 +423,7 @@ def load_language():
 
 
 def load_knowledge():
-    global knowledge
+    global knowledge, initial_strategy
     path = os.path.join(ROOT, 'knowledge', 'manifest.json')
     if not os.path.isfile(path): return
     with open(path, encoding='utf-8') as f: manifest = json.loads(f.read(8000))
@@ -442,6 +447,7 @@ def load_knowledge():
     # The reason stays 'initial selection'; strategy discloses a no-hit orientation fallback. Older manifests have none.
     retrieval = manifest.get('retrieval')
     strategy = retrieval.get('strategy') if isinstance(retrieval, dict) and retrieval.get('strategy') in (LEXICAL_STRATEGY, 'orientation-fallback') else None
+    initial_strategy = strategy
     record_knowledge([c for c in docs['cards'] if c['id'] in initial], 'initial selection', strategy)
     if generic:
         activity('status', 'curated role knowledge loaded: %d cards, %d source records; unvalidated, no evaluation answers' % counts)
@@ -453,8 +459,10 @@ def record_knowledge(cards, reason, strategy=None):
     ids = {i for c in cards for i in c['source_ids']}
     sources = [s for s in knowledge['sources'] if s['id'] in ids or any(a in ids for a in s.get('aliases', []))]
     for s in sources:
-        retrieved_sources.add(s['id'])
-        retrieved_sources.update(s.get('aliases', []))
+        ids = [s['id']] + list(s.get('aliases', []))
+        retrieved_sources.update(ids)
+        if strategy == 'orientation-fallback': orientation_sources.update(ids)
+        elif strategy == LEXICAL_STRATEGY: searched_sources.update(ids)
     entry = {'reason': reason, 'cardIds': [c['id'] for c in cards], 'sourceIds': [s['id'] for s in sources]}
     if strategy: entry['strategy'] = strategy
     knowledge_trace.append(entry)
@@ -554,8 +562,10 @@ def finish(status, opinion=None, report='', error='', author_response=None):
                      'provenance': knowledge['manifest']['provenance'], 'retrievals': knowledge_trace,
                      'sources': [s for s in knowledge['sources'] if s['id'] in used],
                      'citationIdsValidated': True, 'sourcePagesFetched': False,
-                     'retrieval': {'schema': RETRIEVAL_SCHEMA, 'strategy': LEXICAL_STRATEGY, 'semantic': 'interface-only',
-                                   'representation': 'authored-synthesis', 'noHitSearches': len(knowledge_gaps)}}
+                     # initialStrategy is the manifest's (None for a legacy manifest); followUpStrategy is the runner's search.
+                     # Orientation-fallback initial sources stay citable as before; their entries carry the strategy.
+                     'retrieval': {'schema': RETRIEVAL_SCHEMA, 'initialStrategy': initial_strategy, 'followUpStrategy': LEXICAL_STRATEGY,
+                                   'semantic': 'interface-only', 'representation': 'authored-synthesis', 'noHitSearches': len(knowledge_gaps)}}
             if knowledge['generic']:
                 review = knowledge['manifest'].get('peerReview')
                 audit.update({'schema': KNOWLEDGE_SCHEMA, 'expertId': knowledge['manifest']['expertId'], 'evaluation': 'unvalidated',
@@ -670,7 +680,10 @@ def citation_hint():
         docs += '\nEvidence gaps from no-hit searches (state them; do not cite for them): ' + '; '.join(g[:120] for g in knowledge_gaps[-3:]) + '.'
     if not ids:
         return '\nNo retrieved source IDs are available. Do not invent a citation or imply a source was verified.' + docs
-    return ('\nRetrieved citation tokens: ' + ', '.join('[source:%s]' % i for i in ids) +
+    oriented = orientation_sources - searched_sources
+    if any(i in oriented for i in ids):
+        docs = '\nTokens marked (orientation) came only from the initial orientation cards, not from a search hit for any claim.' + docs
+    return ('\nRetrieved citation tokens: ' + ', '.join('[source:%s]%s' % (i, ' (orientation)' if i in oriented else '') for i in ids) +
             '. Use a token only if that retrieved source supports the claim; otherwise state the evidence gap. Card IDs are not source IDs.' + docs)
 
 
