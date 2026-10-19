@@ -18,6 +18,7 @@ import {CLOUDBITE_COMPUTER_LATENCY_HTML,CLOUDBITE_COMPUTER_LATENCY_JS,CLOUDBITE_
 import {CLOUDBITE_COMPUTER_COSTS_HTML,CLOUDBITE_COMPUTER_COSTS_JS,CLOUDBITE_COMPUTER_COSTS_CSS} from './cloudbite-computer-costs-page';
 import {latencyPing,latencyBackend} from './cloudbite-computer-latency';
 import {computerCosts} from './cloudbite-computer-costs';
+import {filesAgentRoute,filesBrowserRoute,type FilesEnv} from './cloudbite-computer-files-runtime';
 
 const API = '/api/cloudbite/computer';
 const PAGE = '/cloudbite/computer';
@@ -48,6 +49,8 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
     if(url.origin!==env.CLOUDBITE_GATEWAY_URL || !env.CLOUDBITE_COMPUTER_NESTED)return error('not_found',404);
     return env.CLOUDBITE_COMPUTER_NESTED.get(env.CLOUDBITE_COMPUTER_NESTED.idFromName('owner')).fetch(req);
   }
+  // Machine file agent: gateway host + scoped bearer capability only; owner cookies are never consulted.
+  const filesAgent=await filesAgentRoute(req,env as FilesEnv,url);if(filesAgent)return filesAgent;
   if(p===COMPUTER_DESKTOP_PATH || p.startsWith(COMPUTER_DESKTOP_PATH+'/')) {
     if(env.CLOUDBITE_CANONICAL_ONLY!=='1' || !gateway || url.origin!==gateway || url.origin===env.ORIGIN || url.hostname===env.RP_ID || url.origin===env.CLOUDBITE_PUBLIC_ORIGIN || !env.CLOUDBITE_COMPUTER) return error('not_found',404);
     const computer=env.CLOUDBITE_COMPUTER.get(env.CLOUDBITE_COMPUTER.idFromName('owner'));
@@ -126,6 +129,7 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
   const op=p.slice(API.length+1);
   const computer=env.CLOUDBITE_COMPUTER.get(env.CLOUDBITE_COMPUTER.idFromName('owner'));
   const tag=await computerOwnerTag();
+  const files=await filesBrowserRoute(req,env as FilesEnv,url,op,tag,admin!==null);if(files)return files;
   if(req.method==='GET' && op==='snapshots'){const result=await computer.computerSnapshots(tag);return json(result,'status' in result&&typeof result.status==='number'?result.status:200);}
   if(req.method==='GET' && op==='latency/ping'){const result=latencyPing();return json(result.body,result.status);}
   if(req.method==='GET' && op==='latency/backend'){

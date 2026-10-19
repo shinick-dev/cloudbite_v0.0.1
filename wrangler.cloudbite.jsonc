@@ -49,7 +49,10 @@
       { "name": "CLOUDBITE_COMPUTER", "class_name": "CloudbiteComputer" },
       { "name": "CLOUDBITE_COMPUTER_NESTED", "class_name": "CloudbiteComputerNested" },
       { "name": "CLOUDBITE_COMPUTER_ACCESS", "class_name": "CloudbiteComputerAccess" },
-      { "name": "CLOUDBITE_COMPUTER_INPUT", "class_name": "CloudbiteComputerInput" }
+      { "name": "CLOUDBITE_COMPUTER_INPUT", "class_name": "CloudbiteComputerInput" },
+      // Cloud Files catalog (src/cloudbite-computer-files-runtime.ts). Blob bodies need an optional R2 binding
+      // CLOUDBITE_FILES_BUCKET that is intentionally absent until the owner activates R2; status then reports not_configured.
+      { "name": "CLOUDBITE_COMPUTER_FILES", "class_name": "CloudbiteComputerFiles" }
     ]
   },
   "migrations": [
@@ -59,7 +62,8 @@
     { "tag": "v3", "new_sqlite_classes": ["CloudbiteHistory"] },
     { "tag": "v4", "new_sqlite_classes": ["CloudbiteComputer", "CloudbiteComputerNested"] },
     { "tag": "v5", "new_sqlite_classes": ["CloudbiteComputerAccess"] },
-    { "tag": "v6", "new_sqlite_classes": ["CloudbiteComputerInput"] }
+    { "tag": "v6", "new_sqlite_classes": ["CloudbiteComputerInput"] },
+    { "tag": "v7", "new_sqlite_classes": ["CloudbiteComputerFiles"] }
   ],
   "observability": { "enabled": true, "traces": { "enabled": true, "head_sampling_rate": 1 } },
   "env": {
@@ -82,7 +86,8 @@
       { "name": "CLOUDBITE_COMPUTER", "class_name": "CloudbiteComputer" },
       { "name": "CLOUDBITE_COMPUTER_NESTED", "class_name": "CloudbiteComputerNested" },
       { "name": "CLOUDBITE_COMPUTER_ACCESS", "class_name": "CloudbiteComputerAccess" },
-      { "name": "CLOUDBITE_COMPUTER_INPUT", "class_name": "CloudbiteComputerInput" }
+      { "name": "CLOUDBITE_COMPUTER_INPUT", "class_name": "CloudbiteComputerInput" },
+      { "name": "CLOUDBITE_COMPUTER_FILES", "class_name": "CloudbiteComputerFiles" }
         ]
       }
     }
