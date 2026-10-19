@@ -1,6 +1,6 @@
 // 만든 파일 — 직접 고치지 말 것. 소스: client/cloudbite-console.ts · client/cloudbite-console.css
 // 다시 만들기: node tools/build-cloudbite-console.mjs (--check 로 최신인지 확인)
-// esbuild 0.28.1 transform (ES2022, 묶지 않음) · ts sha256 9a3486626f592b5e650235f290405cbb5c5bb361f6204f631d030375e3ae2970 · css sha256 0195d1d3ad113019ae413741314f4014126f2910d2d2c5b60232c2d702503324
+// esbuild 0.28.1 transform (ES2022, 묶지 않음) · ts sha256 fe932d573e7fadd09660e48988dc056264e27e529774dba13448328cb2d6cafe · css sha256 0195d1d3ad113019ae413741314f4014126f2910d2d2c5b60232c2d702503324
 // 라우팅(런타임 담당): GET / 와 /cloudbite → CLOUDBITE_HTML, CLOUDBITE_JS_PATH → CLOUDBITE_JS (text/javascript),
 // CLOUDBITE_CSS_PATH → CLOUDBITE_CSS (text/css). CSP 는 script-src 'self'; style-src 'self' 면 충분하다 (인라인 없음).
 export const CLOUDBITE_JS_PATH = "/cloudbite/console.js";
@@ -4031,7 +4031,17 @@ export const CLOUDBITE_JS = [
   "    for (const rep of cr.reports) for (const f of rep.findings) {",
   "      const basis = cr.textAvailability?.find((x) => x.reviewerExpertId === rep.reviewerExpertId && x.targetExpertId === f.targetExpertId && x.evidenceIndex === f.evidenceIndex);",
   "      out.push(`- ${m.reviewBy(name(rep.reviewerExpertId))} · ${m.verdict[f.verdict]} · ${m.reviewFinding(name(f.targetExpertId), f.evidenceIndex + 1)}${basis ? ` (${t.revBasis[basis.textBasis]})` : \"\"}${f.rationale ? ` — ${f.rationale}` : \"\"}`);",
+  "      if (f.claimSupport) {",
+  "        const cs = f.claimSupport;",
+  "        out.push(`  - ${m.p4.supportTitle}: ${m.p4.supportStatus[cs.status]} — ${cs.rationale}`, `  - ${m.p4.supportNote}`, `  - ${cs.packetSha256} (${cs.citedText})`);",
+  "        for (const q of cs.quotes) out.push(`  - ${q.ref} · ${q.textOrigin} · L${q.startLine}–${q.endLine} · ${q.sourceSha256}`, `    > ${q.quote}`);",
+  "      }",
   "    }",
+  "  }",
+  "  if (p.quantitativeChecks?.length || p.invalidQuantitative) {",
+  "    out.push(\"\", `## ${m.p4.records}`, m.p4.note);",
+  "    if (p.invalidQuantitative) out.push(m.p4.invalid);",
+  "    for (const q of p.quantitativeChecks ?? []) out.push(\"\", `### ${q.id}`, JSON.stringify(q, null, 2));",
   "  }",
   "  out.push(\"\", `## ${t.memoTitle}`);",
   "  const pm = p.memo;",

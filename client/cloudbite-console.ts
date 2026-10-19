@@ -1895,6 +1895,11 @@ function normalizeQuantitative(raw: unknown, projectId: string): QuantitativeChe
     if (!isObj(r) || typeof r.id !== 'string' || !/^qc_[0-9a-f]{32}$/.test(r.id) || ids.has(r.id) || r.projectId !== projectId
       || r.execution !== 'app-deterministic' || !isInt(r.createdAt) || !isObj(r.request) || !isObj(r.result)
       || !['arithmetic', 'csv-summary'].includes(String(r.request.kind)) || !['completed', 'error'].includes(String(r.result.status))) return null;
+    if (!Number.isFinite(new Date(r.createdAt).getTime()) || r.result.schema !== 'cloudbite.quantitative.v1' || r.result.engine !== 'cloudbite-quantitative'
+      || r.result.kind !== r.request.kind || (r.result.inputSha256 !== null && (typeof r.result.inputSha256 !== 'string' || !SHA256.test(r.result.inputSha256)))) return null;
+    if (r.result.status === 'completed' && (typeof r.result.inputSha256 !== 'string' || !SHA256.test(r.result.inputSha256))) return null;
+    if (r.result.status === 'completed' && r.result.kind === 'arithmetic' && (!isObj(r.result.result) || num(r.result.result.value) === null || typeof r.result.result.unit !== 'string')) return null;
+    if (r.result.status === 'completed' && r.result.kind === 'csv-summary' && (!isObj(r.result.rows) || !isInt(r.result.rows.included) || !isInt(r.result.rows.excluded))) return null;
     try { if (JSON.stringify(r.request).length > 12 * 1024 || JSON.stringify(r.result).length > 64 * 1024) return null; } catch { return null; }
     if (r.request.kind === 'arithmetic' && (typeof r.request.expression !== 'string' || !isObj(r.request.variables))) return null;
     if (r.request.kind === 'csv-summary' && typeof r.request.column !== 'string') return null;

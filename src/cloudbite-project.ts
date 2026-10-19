@@ -661,8 +661,9 @@ export class CloudbiteProject extends DurableObject<Env> {
     await Promise.all(reviewers.map(async ({ reviewer: r, ids }) => {
       const peers = completed.filter((c) => ids.has(c.expertId));
       const artifacts = artifactPacketsFor(s.p.id, r.expertId, peers, storedArtifacts);
-      const reply = await this.reviewInference(cfg, reviewMessages(r, peers, s.p.brief, catalogue.find(e => e.id === r.expertId), packets, artifacts)).catch((): InferenceResult => ({ error: 'inference upstream unavailable', status: 504 }));
-      const report = 'error' in reply ? { invalid: reply.error } : parseReviewReply(reply.content, r, peers, { language, claimSupportContext: buildClaimSupportContext(s.p.brief, peers, packets) });
+      const claimSupportContext = buildClaimSupportContext(s.p.brief, peers, packets);
+      const reply = await this.reviewInference(cfg, reviewMessages(r, peers, s.p.brief, catalogue.find(e => e.id === r.expertId), packets, artifacts, claimSupportContext)).catch((): InferenceResult => ({ error: 'inference upstream unavailable', status: 504 }));
+      const report = 'error' in reply ? { invalid: reply.error } : parseReviewReply(reply.content, r, peers, { language, claimSupportContext });
       if ('invalid' in report) failures.push(`${r.expertId}: ${report.invalid}`);
       else reports.push(report);
     }));
