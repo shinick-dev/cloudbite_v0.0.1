@@ -7,11 +7,15 @@
 // or a calibrated confidence: original experts stated a direction toward the brief, not a choice among options, unless
 // their own text says so. Original opinions are read, never modified. Coverage (what was included, truncated or
 // omitted, and the honest denominator of the selected team) is computed by code, not reported by the model.
-import type { CrossReviewReport, DecisionFrame, ExpertStatus, OpinionDirection, ProjectBrief, ResponseLanguage } from './cloudbite-contract';
+import type { ClaimSupportCitedText, ClaimSupportQuote, ClaimSupportStatus, CrossReviewReport, DecisionFrame, ExpertStatus,
+  OpinionDirection, ProjectBrief, ResponseLanguage } from './cloudbite-contract';
 import type { CompletedOpinion } from './cloudbite-cross-review';
 import type { ChatMessage } from './cloudbite-inference';
 import { decisionOptionIds, defaultResponseLanguage, projectStage } from './cloudbite-workflow';
 import { LANGUAGE_FAILURE_CATEGORY, LANGUAGE_PATTERNS, languageIntegrity, languageMismatchMessage } from './cloudbite-language';
+import { MEMO_CORE_CLAIM_BOUNDS, readStoredClaimSupport, readStoredCoreClaimFinding, sourceAssessmentConflicts, sourceAssessmentGap } from './cloudbite-author-response';
+export { readStoredClaimSupport, readStoredCoreClaimFinding, sourceAssessmentConflicts, sourceAssessmentGap, MEMO_CORE_CLAIM_BOUNDS } from './cloudbite-author-response';
+export type { MemoCoreClaimFinding, StoredCoreClaimCheck } from './cloudbite-author-response';
 
 export type { CompletedOpinion } from './cloudbite-cross-review';
 
@@ -30,6 +34,8 @@ export const CB_MEMO_PROMPT_MAX_BYTES = 160 * 1024;
 export const CB_MEMO_BUDGET = Object.freeze({
   objective: 6 * 1024, context: 12 * 1024, options: 8 * 1024, decisionOther: 12 * 1024, documents: 16 * 1024,
   experts: 80 * 1024, expertMax: 3 * 1024, reviews: 10 * 1024, packets: 10 * 1024, minItem: 48, revision: 1024,
+  /** Code-built source-assessment table and core-claim findings; spent only when such review data was supplied. */
+  sourceAssessments: 16 * 1024, coreClaims: 6 * 1024,
 });
 /** UTF-8 cap of the optional provenance context (cloudbite-provenance). Absent context leaves the prompt byte-identical. */
 export const CB_MEMO_PROVENANCE_MAX_BYTES = 8 * 1024;
@@ -96,6 +102,31 @@ export interface MemoCoverage {
   promptBytes: number;
   /** Present only when a provenance context was supplied. */
   provenance?: { snapshot: string; includedBytes: number; originalBytes: number; truncated: boolean };
+  /** Present only when a supplied review finding carried a claimSupport key. Code-built from the stored reviews. */
+  sourceAssessments?: MemoSourceAssessments;
+  /** Present only when a supplied review carried core-claim findings (claimFindings). */
+  coreClaims?: MemoSectionCoverage & { invalid: number };
+}
+/**
+ * One reviewer model's reading of the cited text behind one evidence finding, copied from the stored cross-review.
+ * ordinaryVerdict is the reviewer's own verdict, kept as given; sourceStatus never replaces it. conflict marks a
+ * supported verdict with a non-supported source reading (or the reverse): both are shown, neither is resolved.
+ */
+export interface MemoSourceAssessmentItem {
+  reviewerExpertId: string; findingIndex: number; targetExpertId: string; evidenceIndex: number;
+  ordinaryVerdict: 'supported' | 'challenged' | 'insufficient'; sourceStatus: ClaimSupportStatus; citedText: ClaimSupportCitedText;
+  /** A missing, uncited, unavailable or insufficient source is a gap, never a contradiction. */
+  gap: boolean; conflict: boolean;
+  quotes: ClaimSupportQuote[]; rationale: string; packetSha256: string;
+}
+export interface MemoSourceAssessments {
+  basis: 'model-assessment'; quoteCheck: 'exact-substring';
+  /** Findings with a valid stored assessment / with a claimSupport key that failed the stored-shape check / without one. */
+  assessed: number; malformed: number; notAssessed: number;
+  statusCounts: Record<ClaimSupportStatus, number>; conflicts: number; gaps: number;
+  items: MemoSourceAssessmentItem[];
+  /** Valid assessments left out of items by the byte budget (tail first); still counted above. */
+  omitted: number;
 }
 export type MemoPlan =
   | { kind: 'ready'; optionIds: string[]; language: ResponseLanguage }
@@ -233,6 +264,63 @@ const SYSTEM = [
 
 const PROVENANCE_RULE = 'provenance (when present) is a code-rendered standing table: user-stated items are the user\'s own unverified words; generated items, including numeric thresholds such as percentages or test counts, are proposals or inferences, never requirements, unless listed as user-adopted; user-adopted means the user adopted that exact text, not that it was verified. Do not present a generated threshold as the user\'s success criterion or as a requirement.';
 
+const SOURCE_ASSESSMENT_RULE = 'sourceAssessments (when present) are code-copied claimSupport readings: one reviewer model read the cited passage text behind one evidence finding; the server checked only that each quote is an exact substring of a passage it supplied. They are not verification, truth or calibrated accuracy. ordinaryVerdict is that reviewer\'s own verdict and stays as given: never restate a verdict from sourceStatus or count source readings as support. When conflict is true, say plainly that the ordinary verdict and the source reading disagree and leave both standing. A gap (uncited, unavailable, partly shown or insufficient cited text) is missing support, never a contradiction. textOrigin curated-card is a project-authored paraphrase, not the original source. Keep quotes verbatim and untranslated. Cite a finding by its rev ref only when that ref is listed in allowedRefs.';
+const CORE_CLAIM_RULE = 'coreClaimFindings (when present) are reviewer readings of a peer\'s summary, assumption or next action, named by target kind/index and a quote the server checked only as exact text of that field. A challenged or insufficient core claim is one reviewer\'s reading, not a refutation: name it in dissent or criticalUnknowns rather than treating it as settled. They have no refs; cite the reviewer and target expertIds instead.';
+
+/** Code-built source-assessment table from stored reviews; null when no finding carried a claimSupport key (legacy). */
+function memoSourceAssessments(reports: readonly CrossReviewReport[]) {
+  let any = false, assessed = 0, malformed = 0, notAssessed = 0, conflicts = 0, gaps = 0, omitted = 0, used = 0;
+  const statusCounts: Record<ClaimSupportStatus, number> = { supported: 0, partial: 0, contradicted: 0, insufficient: 0 };
+  const items: MemoSourceAssessmentItem[] = [], prompt: Array<Record<string, unknown>> = [];
+  for (const r of reports) for (const [findingIndex, f] of (Array.isArray(r.findings) ? r.findings : []).entries()) {
+    if (!isRecord(f) || f.claimSupport === undefined) { notAssessed++; continue; }
+    any = true;
+    const a = readStoredClaimSupport(f.claimSupport);
+    if (!a || !['supported', 'challenged', 'insufficient'].includes(f.verdict as string) || !Number.isInteger(f.evidenceIndex) || typeof f.targetExpertId !== 'string') { malformed++; continue; }
+    assessed++; statusCounts[a.status]++;
+    const conflict = sourceAssessmentConflicts(f.verdict, a), gap = sourceAssessmentGap(a);
+    if (conflict) conflicts++;
+    if (gap) gaps++;
+    const item: MemoSourceAssessmentItem = { reviewerExpertId: r.reviewerExpertId, findingIndex, targetExpertId: f.targetExpertId, evidenceIndex: f.evidenceIndex,
+      ordinaryVerdict: f.verdict, sourceStatus: a.status, citedText: a.citedText, gap, conflict, quotes: a.quotes, rationale: a.rationale, packetSha256: a.packetSha256 };
+    const view = { finding: `rev:${r.reviewerExpertId}:${findingIndex}`, targetExpertId: f.targetExpertId, evidenceIndex: f.evidenceIndex, ordinaryVerdict: f.verdict,
+      sourceStatus: a.status, citedText: a.citedText, gap, conflict, rationale: a.rationale,
+      quotes: a.quotes.map((q) => ({ ref: q.ref, textOrigin: q.textOrigin, lines: `${q.startLine}-${q.endLine}`, quote: q.quote })) };
+    const add = utf8Bytes(JSON.stringify(item)) + utf8Bytes(JSON.stringify(view));
+    // Whole items only (quotes are never cut); once one does not fit, the rest are omitted so the kept set is a prefix.
+    if (omitted || used + add > CB_MEMO_BUDGET.sourceAssessments) { omitted++; continue; }
+    used += add; items.push(item); prompt.push(view);
+  }
+  if (!any) return null;
+  const counts = { basis: 'model-assessment' as const, quoteCheck: 'exact-substring' as const, assessed, malformed, notAssessed, statusCounts, conflicts, gaps, omitted };
+  return { coverage: { ...counts, items } as MemoSourceAssessments, counts, prompt };
+}
+
+/** Re-checked core-claim findings from stored reviews; null when no report carried claimFindings (legacy). */
+function memoCoreClaims(reports: readonly CrossReviewReport[], completed: readonly CompletedOpinion[]) {
+  let any = false, total = 0, invalid = 0, omitted = 0, used = 0;
+  const prompt: Array<Record<string, unknown>> = [];
+  const opinionOf = (id: string) => completed.find((c) => c.expertId === id)?.opinion;
+  for (const r of reports) {
+    const raw = (r as { claimFindings?: unknown }).claimFindings;
+    if (raw === undefined) continue;
+    any = true;
+    if (!Array.isArray(raw)) { invalid++; continue; }
+    const evidence = Array.isArray(r.findings) ? r.findings.length : 0;
+    raw.forEach((c, index) => {
+      total++;
+      if (index >= MEMO_CORE_CLAIM_BOUNDS.perReport || evidence + index >= MEMO_CORE_CLAIM_BOUNDS.totalPerReport) { invalid++; return; }
+      const v = readStoredCoreClaimFinding(c, r.reviewerExpertId, opinionOf);
+      if ('invalid' in v) { invalid++; return; }
+      const view = { reviewerExpertId: r.reviewerExpertId, index, targetExpertId: v.ok.targetExpertId, target: v.ok.target, verdict: v.ok.verdict, issue: v.ok.issue, rationale: v.ok.rationale };
+      const add = utf8Bytes(JSON.stringify(view));
+      if (omitted || used + add > CB_MEMO_BUDGET.coreClaims) { omitted++; return; }
+      used += add; prompt.push(view);
+    });
+  }
+  return any ? { coverage: { included: prompt.length, total, truncated: 0, omitted, invalid }, prompt } : null;
+}
+
 /**
  * Budgeted memo prompt, or a deterministic needs-options result. Throws only when there is no completed opinion
  * (check memoPlan first). Inputs are read, never mutated.
@@ -320,6 +408,11 @@ export function memoMessages(brief: ProjectBrief, completed: readonly CompletedO
     return { reviewerExpertId: r.reviewerExpertId, summary: s.text, findings };
   });
 
+  // source assessments: one reviewer model's reading of cited text per evidence finding, beside (never replacing) its verdict
+  const sourceAssessments = memoSourceAssessments(reports);
+  // core-claim findings: reviewer readings of a peer's summary/assumption/next action, checked only for an exact quote
+  const core = memoCoreClaims(reports, completed);
+
   // evidence packets: validated, capped, fair-shared; metadata packets carry no text
   const rawPackets = opts.packets ?? [];
   const valid: MemoEvidencePacket[] = [];
@@ -351,6 +444,8 @@ export function memoMessages(brief: ProjectBrief, completed: readonly CompletedO
     packets: { included: usedPackets.length, total: rawPackets.length, truncated: pktTruncated, omitted: valid.length - usedPackets.length, invalid,
       metadataOnly: usedPackets.filter((p) => p.kind === 'source-metadata').length },
     fullReportsReviewed: false, sourcePagesReviewed: false, promptBytes: 0,
+    ...(sourceAssessments ? { sourceAssessments: sourceAssessments.coverage } : {}),
+    ...(core ? { coreClaims: core.coverage } : {}),
   };
   // provenance: a code-rendered standing table (user-stated / generated proposal / user-adopted), still only data
   const prov = opts.provenance && typeof opts.provenance.text === 'string' ? clipBytes(opts.provenance.text, CB_MEMO_PROVENANCE_MAX_BYTES) : null;
@@ -360,7 +455,9 @@ export function memoMessages(brief: ProjectBrief, completed: readonly CompletedO
   const coverageForModel = { teamSize: coverage.teamSize, completed: coverage.completed, statusCounts, statedDirectionsTowardBrief: statedDirections,
     expertsWithTruncation: expertCoverage.filter((e) => e.summaryTruncated || e.itemsTruncated || e.evidenceIncluded.length < e.evidenceTotal
       || e.assumptionsIncluded < e.assumptionsTotal || e.nextActionsIncluded < e.nextActionsTotal).length,
-    brief: coverage.brief, reviews: coverage.reviews, packets: coverage.packets, fullReportsReviewed: false, sourcePagesReviewed: false };
+    brief: coverage.brief, reviews: coverage.reviews, packets: coverage.packets, fullReportsReviewed: false, sourcePagesReviewed: false,
+    ...(sourceAssessments ? { sourceAssessments: sourceAssessments.counts } : {}),
+    ...(core ? { coreClaims: core.coverage } : {}) };
   const data = {
     brief: { kind: 'user-statement-unverified', title: brief.title, objective: objective.text, objectiveTruncated: objective.truncated,
       context: context.text, contextTruncated: context.truncated,
@@ -370,9 +467,12 @@ export function memoMessages(brief: ProjectBrief, completed: readonly CompletedO
       options: plan.optionIds.map((id, i) => ({ optionId: id, text: optionShare.kept[i]?.text ?? '' })), ...other },
     documents, experts, crossReview: reviews, packets, coverage: coverageForModel, allowedRefs: refs,
     ...(prov ? { provenance: { kind: 'provenance-context-not-authority', text: prov.text, truncated: prov.truncated } } : {}),
+    ...(sourceAssessments ? { sourceAssessments: sourceAssessments.prompt } : {}),
+    ...(core ? { coreClaimFindings: core.prompt } : {}),
   };
   const messages: ChatMessage[] = [
-    { role: 'system', content: SYSTEM + (prov ? '\n' + PROVENANCE_RULE : '') + '\n' + MEMO_LANGUAGE_INSTRUCTIONS[plan.language] },
+    { role: 'system', content: SYSTEM + (prov ? '\n' + PROVENANCE_RULE : '') + (sourceAssessments ? '\n' + SOURCE_ASSESSMENT_RULE : '')
+      + (core ? '\n' + CORE_CLAIM_RULE : '') + '\n' + MEMO_LANGUAGE_INSTRUCTIONS[plan.language] },
     { role: 'user', content: 'Untrusted memo data (JSON):\n' + JSON.stringify(data) },
   ];
   coverage.promptBytes = messages.reduce((n, m) => n + utf8Bytes(m.content), 0);
