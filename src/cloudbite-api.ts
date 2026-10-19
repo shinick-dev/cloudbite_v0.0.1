@@ -7,6 +7,7 @@ import { CLOUDBITE_CSS, CLOUDBITE_CSS_PATH, CLOUDBITE_HTML, CLOUDBITE_JS, CLOUDB
 import { CLOUDBITE_ACCESS_HTML, CLOUDBITE_ACCESS_CSS, CLOUDBITE_ACCESS_QR, CLOUDBITE_REQUEST_HTML, CLOUDBITE_REQUESTS_HTML, CLOUDBITE_ACCESS_JS } from './cloudbite-access-page';
 import { CB_ACTIVITY_BODY_MAX, CB_COMPLETE_BODY_MAX, CB_CREATE_BODY_MAX, CB_INFERENCE_BODY_MAX, CB_MAX_EXPERTS, cbMaxConcurrent, cloudbiteMissing } from './cloudbite-config';
 import { cbHash, cbProjectId, isCbFail, type CbFail } from './cloudbite-project';
+import type { PmcImportErrorCode } from './cloudbite-pmc';
 import { authorizeRoundParent, buildProjectRound, isRoundFail, type ProjectPreviousRound } from './cloudbite-revision';
 import type { CloudbiteAccessSession } from './cloudbite-access-contract';
 import type { HistoryDetail } from './cloudbite-history-contract';
@@ -59,6 +60,9 @@ async function readJson(req: Request, max: number): Promise<{ ok: unknown } | { 
 const result = (json: Json, r: unknown) => (isCbFail(r) ? json({ error: r.error }, r.status) : json(r));
 const isJsonObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const PMC_BODY_MAX = 1024;
+/** The leaf's typed failure codes (PmcImportErrorCode), which the console localizes; exhaustive by construction. */
+const PMC_PUBLIC_ERRORS: ReadonlySet<string> = new Set(Object.keys({ invalid_identifier: 1, not_found: 1, identity_mismatch: 1, source_unavailable: 1,
+  rate_limited: 1, timeout: 1, too_large: 1, redirect_blocked: 1, invalid_xml: 1, upstream_error: 1 } satisfies Record<PmcImportErrorCode, 1>));
 /** Optional workflow fields an automatic (Jev) create forwards into the routing query exactly as sent. */
 const ROUTED_FIELDS = ['decision', 'documents', 'stage', 'responseLanguage', 'budget', 'revision'] as const;
 
@@ -287,8 +291,13 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     const actor = owner ? 'owner' : 'v_' + await cbHash('cloudbite-pmc-actor|' + visitor!.id);
     const r = await ns.getByName('pmc-import').pmcImport(actor, b.ok.identifier);
     if (!isCbFail(r)) return json(r);
-    const response = json({ error: r.error, code: r.code }, r.status);
-    if (r.retryAfterSeconds !== undefined) response.headers.set('retry-after', String(r.retryAfterSeconds));
+    // Typed failures speak the browser's PmcImportError shape; the service guard (busy / hourly limit) is a rate limit
+    // to the user, with the actual cause kept in reason. Anything else stays a generic refusal.
+    const error = PMC_PUBLIC_ERRORS.has(r.code) ? r.code as PmcImportErrorCode : r.code === 'busy' || r.code === 'hourly_limit' ? 'rate_limited' : null;
+    if (!error) return json({ error: r.error }, r.status);
+    const retry = r.retryAfterSeconds !== undefined && Number.isInteger(r.retryAfterSeconds) && r.retryAfterSeconds >= 1 ? r.retryAfterSeconds : undefined;
+    const response = json({ error, message: r.error, ...(error !== r.code ? { reason: r.code } : {}), ...(retry !== undefined ? { retryAfterSeconds: retry } : {}) }, r.status);
+    if (retry !== undefined) response.headers.set('retry-after', String(retry));
     return response;
   }
 

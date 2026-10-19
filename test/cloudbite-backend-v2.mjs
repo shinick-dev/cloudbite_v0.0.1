@@ -441,9 +441,9 @@ await test('PMC import: owner or approved visitor only, POST with {identifier}, 
   assert.equal((await pmc({ identifier: 'PMC123456' }, { ...OWNER, origin: 'https://evil.test' })).status, 403);
   assert.equal((await pmc({ identifier: 'PMC123456', url: 'https://x' })).status, 400);
   const url = await pmc({ identifier: 'https://evil.test/PMC1' });
-  assert.equal(url.status, 400); assert.equal(url.data.code, 'invalid_identifier'); assert.equal(P.calls.length, 0);
+  assert.equal(url.status, 400); assert.equal(url.data.error, 'invalid_identifier'); assert.equal(typeof url.data.message, 'string'); assert.equal(P.calls.length, 0);
   const r = await pmc({ identifier: 'PMC123456' }, { ...OWNER, cookie: 'cb_session=SECRET-COOKIE', authorization: 'Bearer SECRET' });
-  assert.ok(r.status >= 400 && r.data.code, r.text);
+  assert.ok(r.status >= 400 && r.data.error === 'not_found', r.text);
   assert.equal(P.calls.length, 1);
   assert.equal(P.calls[0].headers.get('cookie'), null); assert.equal(P.calls[0].headers.get('authorization'), null);
   assert.ok(!P.calls[0].url.includes(TOKEN));
@@ -453,18 +453,132 @@ await test('PMC import: owner or approved visitor only, POST with {identifier}, 
   const st = w.store('pmc-import').m.get('pmc'); assert.equal(st.busy, undefined, 'lease released');
   for (let i = 2; i < 10; i++) await pmc({ identifier: 'PMC12345' + i });
   const limited = await pmc({ identifier: 'PMC999999' });
-  assert.equal(limited.status, 429); assert.equal(limited.data.code, 'hourly_limit'); assert.ok(Number(limited.headers.get('retry-after')) > 0);
+  assert.equal(limited.status, 429); assert.equal(limited.data.error, 'rate_limited'); assert.equal(limited.data.reason, 'hourly_limit'); assert.ok(Number(limited.headers.get('retry-after')) > 0);
   assert.equal(P.calls.length, 10);
   // One import at a time: an unexpired lease answers busy without a fetch.
   const s = w.store('pmc-import').m, held = s.get('pmc'); held.busy = { claim: 'other', until: Date.now() + 60_000 }; held.calls = {}; s.set('pmc', held);
   const busy = await pmc({ identifier: 'PMC111111' });
-  assert.equal(busy.status, 429); assert.equal(busy.data.code, 'busy'); assert.equal(P.calls.length, 10);
+  assert.equal(busy.status, 429); assert.equal(busy.data.error, 'rate_limited'); assert.equal(busy.data.reason, 'busy'); assert.equal(P.calls.length, 10);
   // Approved visitor: own hourly bucket.
   delete held.busy; s.set('pmc', held);
   const v = await visitor(w);
   const vr = await pmc({ identifier: 'PMC222222' }, { cookie: v.cookie });
-  assert.ok(vr.data?.code, vr.text); assert.notEqual(vr.status, 401); assert.equal(P.calls.length, 11);
+  assert.ok(vr.data?.error === 'not_found', vr.text); assert.notEqual(vr.status, 401); assert.equal(P.calls.length, 11);
   assert.ok(Object.keys(s.get('pmc').calls).some((k) => k.startsWith('v_')), 'visitor counted under its own actor');
+});
+
+await test('PMC import: typed failures use the console contract {error: code, message, retryAfterSeconds?} with Retry-After; refusals stay generic', async () => {
+  const w = world();
+  const pmc = (body, headers = OWNER) => call(w, 'POST', '/api/cloudbite/pmc/import', { headers, body });
+  const PMC_ERRORS = ['invalid_identifier', 'not_found', 'identity_mismatch', 'source_unavailable', 'rate_limited', 'timeout', 'too_large', 'redirect_blocked', 'invalid_xml', 'upstream_error'];
+  // Refusals before any external call keep the generic {error} shape and fetch nothing.
+  for (const [r, status] of [[await pmc({ identifier: 'PMC123456' }, {}), 401], [await pmc({ identifier: 'PMC123456' }, { ...OWNER, origin: 'https://evil.test' }), 403],
+    [await call(w, 'GET', '/api/cloudbite/pmc/import', { headers: OWNER }), 405]]) {
+    assert.equal(r.status, status, r.text); assert.deepEqual(Object.keys(r.data), ['error']); assert.ok(!PMC_ERRORS.includes(r.data.error));
+  }
+  assert.equal(P.calls.length, 0, 'unauthorized: no PMC fetch'); assert.equal(N.calls.length, 0, 'unauthorized: no provider call');
+  const bad = await pmc({ identifier: '10.1000/<script>' });
+  assert.equal(bad.status, 400); assert.equal(bad.data.error, 'invalid_identifier'); assert.equal(P.calls.length, 0, 'bad identifier: no external fetch');
+  // 422: the actual leaf failure code and its bounded message; no Retry-After.
+  P.reply = () => new Response(`<?xml version="1.0"?><OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/"><responseDate>x</responseDate><request>x</request><error code="cannotDisseminateFormat">UPSTREAM-BODY-TEXT</error></OAI-PMH>`, { status: 200, headers: { 'content-type': 'application/xml' } });
+  const una = await pmc({ identifier: 'PMC123456' });
+  assert.equal(una.status, 422, una.text); assert.equal(una.data.error, 'source_unavailable'); assert.match(una.data.message, /reusable full text/);
+  assert.equal(una.data.retryAfterSeconds, undefined); assert.equal(una.headers.get('retry-after'), null); assert.ok(!una.text.includes('UPSTREAM-BODY-TEXT'), 'upstream body not reflected');
+  assert.equal(una.data.code, undefined, 'no second machine-code field');
+  // 429 service guard: rate_limited with the actual cause in reason, retryAfterSeconds in the body and the header.
+  const s = w.store('pmc-import').m, held = s.get('pmc');
+  held.busy = { claim: 'other', until: Date.now() + 30_000 }; s.set('pmc', held);
+  const before = P.calls.length, busy = await pmc({ identifier: 'PMC111111' });
+  assert.equal(busy.status, 429); assert.equal(busy.data.error, 'rate_limited'); assert.equal(busy.data.reason, 'busy'); assert.equal(typeof busy.data.message, 'string');
+  assert.ok(Number.isInteger(busy.data.retryAfterSeconds) && busy.data.retryAfterSeconds >= 1 && busy.data.retryAfterSeconds <= 30);
+  assert.equal(busy.headers.get('retry-after'), String(busy.data.retryAfterSeconds)); assert.equal(P.calls.length, before, 'busy: no fetch');
+  delete held.busy; held.calls = { owner: Array.from({ length: 10 }, () => Date.now() - 60_000) }; s.set('pmc', held);
+  const hourly = await pmc({ identifier: 'PMC111112' });
+  assert.equal(hourly.status, 429); assert.equal(hourly.data.error, 'rate_limited'); assert.equal(hourly.data.reason, 'hourly_limit');
+  assert.ok(hourly.data.retryAfterSeconds > 3000 && hourly.data.retryAfterSeconds <= 3600); assert.equal(hourly.headers.get('retry-after'), String(hourly.data.retryAfterSeconds));
+  assert.equal(P.calls.length, before, 'hourly limit: no fetch');
+  for (const r of [bad, una, busy, hourly]) assert.ok(PMC_ERRORS.includes(r.data.error), r.text);
+});
+
+// ── cross-review language ──
+const longEn = 'The reviewer read the cited evidence item against the stated summary and found the reasoning consistent with the plan, the constraints and the success criteria.';
+const longKo = '검토자는 인용된 근거 항목을 요약과 대조해 읽었고, 계획과 제약 조건 및 성공 기준에 비추어 추론이 일관된다고 판단했습니다.';
+const reviewIn = (rationale, summary) => (kind, req) => {
+  if (kind !== 'review') return 'turn reply';
+  const data = JSON.parse(req.messages[1].content.replace(/^[^\n]*\n/, ''));
+  return JSON.stringify({ summary, findings: data.peers.map((p) => ({ targetExpertId: p.expertId, evidenceIndex: 0, verdict: 'supported', rationale })) });
+};
+await test('cross-review: replies are checked against the brief\'s response language; one paid attempt, opinions preserved', async () => {
+  const w = world(), ko = '파일럿 계획을 진행해야 할까요?';
+  const x = await finished(w, { b: brief({ objective: ko }) });
+  const opinionsBefore = JSON.stringify((await read(w, x)).data.experts.map((r) => r.opinion));
+  N.reply = reviewIn(longEn, 'An English review summary of the opinions that were assigned to this reviewer.');
+  const r = await review(w, x);
+  assert.equal(r.status, 200, r.text); assert.equal(r.data.crossReview.status, 'failed');
+  assert.match(r.data.crossReview.error, /not written in the selected language \(ko\)/); assert.ok(!r.data.crossReview.error.includes('reasoning consistent'), 'reply text not echoed');
+  const calls = N.calls.length;
+  assert.ok(calls >= 1);
+  assert.equal((await review(w, x)).data.crossReview.status, 'failed'); assert.equal(N.calls.length, calls, 'no second paid attempt');
+  assert.equal(JSON.stringify((await read(w, x)).data.experts.map((r) => r.opinion)), opinionsBefore, 'expert opinions preserved');
+  // Selected English on a Korean objective: English replies pass.
+  const en = await finished(w, { b: brief({ objective: ko, responseLanguage: 'en' }) });
+  const e = await review(w, en);
+  assert.equal(e.status, 200, e.text); assert.equal(e.data.crossReview.status, 'completed', e.text);
+  // Korean narrative with a quoted English source original is accepted.
+  const k = await finished(w, { b: brief({ objective: ko }) });
+  N.reply = reviewIn(longKo + ' 출처 원문 "The vendor quote covers support for twelve months with a fixed price and agreed service level terms" 을 그대로 인용했습니다.', '배정된 의견들을 근거와 대조해 검토한 요약입니다.');
+  const q = await review(w, k);
+  assert.equal(q.status, 200, q.text); assert.equal(q.data.crossReview.status, 'completed', q.text);
+});
+
+// ── memo / cross-review mutual exclusion ──
+const tick = () => new Promise((r) => setTimeout(r, 20));
+await test('race: a running memo blocks starting a cross-review (409 before reservation or call); afterwards the review runs', async () => {
+  const w = world(), x = await finished(w);
+  N.memoIds = x.created.brief.expertIds; N.hold = gate();
+  const m = memo(w, x);
+  await tick();
+  const budget = JSON.stringify(w.store(x.id).m.get('budget'));
+  const r = await review(w, x);
+  assert.equal(r.status, 409, r.text); assert.match(r.data.error, /decision memo is running/);
+  assert.equal(w.store(x.id).m.has('cross-review'), false, 'no review claim'); assert.equal(JSON.stringify(w.store(x.id).m.get('budget')), budget, 'nothing reserved');
+  assert.equal(N.calls.length, 1, 'only the memo call');
+  N.hold.resolve(); N.hold = null;
+  const done = await m;
+  assert.equal(done.status, 200, done.text); assert.equal(done.data.memo.status, 'completed', 'the single paid memo is kept');
+  const after = await review(w, x);
+  assert.equal(after.status, 200, after.text); assert.equal(after.data.crossReview.status, 'completed');
+  assert.equal(after.data.memo.status, 'completed', 'a finished memo stays readable');
+});
+
+await test('race: a running cross-review blocks starting a memo (409 before reservation or call); afterwards the memo runs', async () => {
+  const w = world(), x = await finished(w);
+  N.memoIds = x.created.brief.expertIds; N.hold = gate();
+  const r = review(w, x);
+  await tick();
+  const calls = N.calls.length, budget = JSON.stringify(w.store(x.id).m.get('budget'));
+  assert.ok(calls >= 1);
+  const m = await memo(w, x);
+  assert.equal(m.status, 409, m.text); assert.match(m.data.error, /cross-review is running/);
+  assert.equal(w.store(x.id).m.has('memo'), false, 'no memo claim'); assert.equal(JSON.stringify(w.store(x.id).m.get('budget')), budget, 'nothing reserved');
+  assert.equal(N.calls.length, calls, 'no memo call');
+  N.hold.resolve(); N.hold = null;
+  assert.equal((await r).data.crossReview.status, 'completed');
+  const after = await memo(w, x);
+  assert.equal(after.status, 200, after.text); assert.equal(after.data.memo.status, 'completed', 'memo inputs now include the finished review');
+  assert.equal(N.calls.filter((c) => c.kind === 'memo').length, 1);
+  // A stale running claim of the other operation does not block forever once it is past its window.
+  const y = await finished(w);
+  N.memoIds = y.created.brief.expertIds; N.hold = gate();
+  const stuck = review(w, y);
+  await tick();
+  offset += 60 * 60_000;
+  const late = memo(w, y);
+  await tick();
+  assert.equal(w.store(y.id).m.get('memo')?.memo.status, 'running', 'a stale review no longer blocks the memo claim');
+  N.hold.resolve(); N.hold = null;
+  assert.notEqual((await late).status, 409);
+  await stuck;
 });
 
 // ── history ──

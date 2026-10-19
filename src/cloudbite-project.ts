@@ -52,6 +52,7 @@ import {
   validateMemoPacket, type DecisionMemo, type MemoCoverage, type MemoEvidencePacket, type MemoInputOptions, type ProjectMemo,
 } from './cloudbite-memo';
 import { buildExpertAssignments } from './cloudbite-workorders';
+import { defaultResponseLanguage } from './cloudbite-workflow';
 import { previousRoundWorkOrderRules, previousRoundWorkspaceFiles, ROUND_VERSION, type ProjectPreviousRound } from './cloudbite-revision';
 import { importPmc, isPmcImportError, parsePmcIdentifier, PMC_LIMITS, type PmcImport } from './cloudbite-pmc';
 import { CB_RUNNER_PY, RUNNER_DIAGNOSTIC_MAX, runnerCapability, runnerFailureMessage } from './cloudbite-runner';
@@ -547,6 +548,9 @@ export class CloudbiteProject extends DurableObject<Env> {
       const [p, cur] = await Promise.all([tx.get<ProjectRecord>('project'), tx.get<CrossReviewRecord>(CROSS_REVIEW)]);
       if (!live(p, now)) return fail(404, 'project not found');
       if (cur) return cur;
+      // A live (non-stale) running memo snapshots finished reviews: starting one now would change its inputs and discard that paid call.
+      const memo = await tx.get<MemoRecord>('memo');
+      if (memo?.memo.status === 'running' && settleStaleMemo(memo.memo, now) === memo.memo) return fail(409, 'a decision memo is running for this project; start the cross-review after it finishes');
       // Reserve every reviewer call with the claim, before any provider call; the budget may trim the planned reviewers.
       const usage = await this.ledgerIn(tx, p);
       if (!usage) return fail(409, budgetDenialMessage('invalid-usage'));
@@ -564,12 +568,14 @@ export class CloudbiteProject extends DurableObject<Env> {
     if (isCbFail(claimed)) return claimed;
     if (!('reserved' in claimed)) return this.existingReview(claimed, tokenHash);
     const reviewers = planned.assignments.slice(0, claimed.reserved.length).map((a) => ({ reviewer: completed.find((c) => c.expertId === a.reviewerExpertId)!, ids: new Set(a.peers.map((x) => x.expertId)) }));
+    // Replies must be in the brief's response language (quoted source originals stay allowed by the leaf parser).
+    const language = defaultResponseLanguage(s.p.brief);
 
     const reports: CrossReviewReport[] = [], failures: string[] = [];
     await Promise.all(reviewers.map(async ({ reviewer: r, ids }) => {
       const peers = completed.filter((c) => ids.has(c.expertId));
       const reply = await this.reviewInference(cfg, reviewMessages(r, peers, s.p.brief, catalogue.find(e => e.id === r.expertId), packets)).catch((): InferenceResult => ({ error: 'inference upstream unavailable', status: 504 }));
-      const report = 'error' in reply ? { invalid: reply.error } : parseReviewReply(reply.content, r, peers);
+      const report = 'error' in reply ? { invalid: reply.error } : parseReviewReply(reply.content, r, peers, { language });
       if ('invalid' in report) failures.push(`${r.expertId}: ${report.invalid}`);
       else reports.push(report);
     }));
@@ -692,6 +698,9 @@ export class CloudbiteProject extends DurableObject<Env> {
       const [p, cur] = await Promise.all([tx.get<ProjectRecord>('project'), tx.get<MemoRecord>('memo')]);
       if (!live(p, now)) return fail(404, 'project not found');
       if (cur) return cur;
+      // A live (non-stale) cross-review finishing during the memo would change its inputs and discard this paid call: never overlap.
+      const cr = await tx.get<CrossReviewRecord>(CROSS_REVIEW);
+      if (cr?.review.status === 'running' && cr.review.startedAt + CB_CROSS_REVIEW_STALE > now) return fail(409, 'a cross-review is running for this project; request the decision memo after it finishes');
       const usage = await this.ledgerIn(tx, p);
       const r = usage ? reserveBudget(usage, { phase: 'memo', seq: usage.memo + 1 }) : null;
       if (!r?.ok) return fail(429, r ? r.message : budgetDenialMessage('invalid-usage'));
