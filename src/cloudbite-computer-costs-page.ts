@@ -1,6 +1,6 @@
 // Generated file — do not edit. Sources: client/cloudbite-computer-costs.ts · client/cloudbite-computer-costs.css
 // Rebuild: node tools/build-cloudbite-computer-costs.mjs (--check verifies it is current)
-// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 df3de80808ac7781c4ede9729ed2751f80484b0f880d3440f23e0c80ec677b2d · css sha256 3157b42b46f248fea30b1f1f27c18d28d6e2b11ee03e7dc052fb56e507ffe58a
+// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 538963b9f014d2f1d41c2b3378e609d117f9da0ba26654c54f1042c3db886241 · css sha256 3157b42b46f248fea30b1f1f27c18d28d6e2b11ee03e7dc052fb56e507ffe58a
 // Routing (runtime): GET CLOUDBITE_COMPUTER_COSTS_PATH → CLOUDBITE_COMPUTER_COSTS_HTML, CLOUDBITE_COMPUTER_COSTS_JS_PATH → CLOUDBITE_COMPUTER_COSTS_JS (text/javascript),
 // CLOUDBITE_COMPUTER_COSTS_CSS_PATH → CLOUDBITE_COMPUTER_COSTS_CSS (text/css). CSP script-src 'self'; style-src 'self' suffices (no inline).
 // The script calls only GET /api/cloudbite/computer/costs same-origin with the existing cookie; it links to /cloudbite/computer and fixed official pricing pages.
@@ -328,7 +328,7 @@ export const CLOUDBITE_COMPUTER_COSTS_JS = [
   "  };",
   "}",
   "const money = (v) => `${v < 0 ? \"-\" : \"\"}$${Math.abs(v) < 1 && v !== 0 ? Math.abs(v).toFixed(4) : Math.abs(v).toFixed(2)}`;",
-  "const amount = (v) => v === null ? \"?\" : String(Number(v.toFixed(2)));",
+  "const amount = (v, unknown) => v === null ? unknown : String(Number(v.toFixed(2)));",
   "function h(tag, cls = \"\", ...kids) {",
   "  const el = document.createElement(tag);",
   "  if (cls) el.className = cls;",
@@ -422,6 +422,8 @@ export const CLOUDBITE_COMPUTER_COSTS_JS = [
   "    brand.textContent = d.brand;",
   "    brandSub.textContent = d.sub;",
   "    backLink.textContent = d.back;",
+  "    backLink.setAttribute(\"href\", `${COMPUTER_PATH}?lang=${lang}`);",
+  "    signIn.setAttribute(\"href\", `${COMPUTER_PATH}?lang=${lang}`);",
   "    h1.textContent = d.h1;",
   "    lead.textContent = d.lead;",
   "    refreshBtn.textContent = S.loading ? d.refreshing : d.refresh;",
@@ -462,7 +464,7 @@ export const CLOUDBITE_COMPUTER_COSTS_JS = [
   "      const list = h(\"ul\", \"cc-list\");",
   "      if (!a.sandboxes.length) list.append(h(\"li\", \"cc-muted\", d.noSandboxes));",
   "      for (const s of a.sandboxes) {",
-  "        const spec = d.spec(amount(s.cpu), amount(s.memoryGiB), amount(s.diskGiB)) + (s.gpu ? d.gpu(s.gpu) : \"\");",
+  "        const spec = d.spec(amount(s.cpu, d.unknown), amount(s.memoryGiB, d.unknown), amount(s.diskGiB, d.unknown)) + (s.gpu ? d.gpu(s.gpu) : \"\");",
   "        const li = h(",
   "          \"li\",",
   "          \"cc-sb\",",
@@ -480,11 +482,11 @@ export const CLOUDBITE_COMPUTER_COSTS_JS = [
   "    else if (a.usage.status === \"unavailable\") q.append(h(\"p\", \"cc-fine cc-bad\", d.quotaUnavailable(a.usage.error)));",
   "    else for (const r of a.usage.regions) {",
   "      const dl = h(\"dl\", \"cc-facts\");",
-  "      const row = (k, u) => fact(dl, k, d.quotaRow(amount(u.used), amount(u.quota)));",
+  "      const row = (k, u) => fact(dl, k, d.quotaRow(amount(u.used, d.unknown), amount(u.quota, d.unknown)));",
   "      row(d.cpu, r.cpu);",
   "      row(d.ram, r.memoryGiB);",
   "      row(d.disk, r.diskGiB);",
-  "      q.append(h(\"p\", \"cc-fine\", `${r.regionId}${r.sandboxClass ? ` · ${r.sandboxClass}` : \"\"}${r.maxCpuPerSandbox !== null ? ` · ${d.maxCpu(amount(r.maxCpuPerSandbox))}` : \"\"}`), dl);",
+  "      q.append(h(\"p\", \"cc-fine\", `${r.regionId}${r.sandboxClass ? ` · ${r.sandboxClass}` : \"\"}${r.maxCpuPerSandbox !== null ? ` · ${d.maxCpu(amount(r.maxCpuPerSandbox, d.unknown))}` : \"\"}`), dl);",
   "    }",
   "    box.append(q);",
   "    return box;",

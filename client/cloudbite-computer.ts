@@ -146,7 +146,7 @@ const DICT = {
     phoneDone: 'Passkey saved for this phone. Next time, sign in with it.', phoneCancelled: 'Passkey setup was cancelled. Nothing was changed.',
     phoneExists: 'This phone already has a Cloudbite passkey.', phoneDevice: 'This phone did not create a passkey.', phoneUnsupported: 'This browser cannot create passkeys.',
     phoneFailed: 'The passkey was not saved.', phoneUnknown: 'The server did not confirm the passkey, so treat it as not saved. Sign in with it once before relying on it.',
-    sessionFailed: 'Could not check the session.', netErr: 'Network error — nothing was confirmed.', httpErr: (n: number) => `Server answered ${n}.`,
+    sessionFailed: 'Could not check the session.', checkAgain: 'Check connection again', offline: 'You are offline. Reconnect, then check again. No request is resent automatically.', stale: 'Machine state could not be confirmed. Refresh before opening the desktop or starting a new action.', netErr: 'Network error — nothing was confirmed.', httpErr: (n: number) => `Server answered ${n}.`,
     machine: 'Machine', status: {
       absent: 'No machine yet', starting: 'Starting', running: 'Running', stopped: 'Stopped', stopping: 'Stopping',
       snapshotting: 'Saving environment', error: 'Error', unknown: 'State unknown',
@@ -258,7 +258,7 @@ const DICT = {
     phoneDone: '이 휴대폰의 패스키를 저장했습니다. 다음부터 이것으로 로그인하세요.', phoneCancelled: '패스키 설정을 취소했습니다. 바뀐 것은 없습니다.',
     phoneExists: '이 휴대폰에는 이미 Cloudbite 패스키가 있습니다.', phoneDevice: '휴대폰이 패스키를 만들지 않았습니다.', phoneUnsupported: '이 브라우저는 패스키를 만들 수 없습니다.',
     phoneFailed: '패스키를 저장하지 않았습니다.', phoneUnknown: '서버가 패스키를 확인해 주지 않았으므로 저장되지 않은 것으로 보세요. 믿고 쓰기 전에 한 번 로그인해 보세요.',
-    sessionFailed: '세션을 확인하지 못했습니다.', netErr: '네트워크 오류 — 확인된 것은 없습니다.', httpErr: (n: number) => `서버 응답 ${n}.`,
+    sessionFailed: '세션을 확인하지 못했습니다.', checkAgain: '접속 다시 확인', offline: '인터넷 연결이 끊겼습니다. 연결 후 다시 확인하세요. 이전 요청을 자동으로 재전송하지 않습니다.', stale: '머신 상태를 확인하지 못했습니다. 데스크톱을 열거나 새 작업을 실행하기 전에 새로고침하세요.', netErr: '네트워크 오류 — 확인된 것은 없습니다.', httpErr: (n: number) => `서버 응답 ${n}.`,
     machine: '머신', status: {
       absent: '머신 없음', starting: '시작 중', running: '실행 중', stopped: '중지됨', stopping: '중지 중',
       snapshotting: '환경 저장 중', error: '오류', unknown: '상태 모름',
@@ -384,10 +384,14 @@ function errorCode(body: unknown): string {
 }
 
 async function call(path: string, body?: unknown): Promise<Reply> {
+  // Bound read-only checks, including body reads; never replay mutations on timeout.
+  const controller = body === undefined ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 30_000) : null;
+  try {
   let res: Response;
   try {
     res = await fetch(path, body === undefined
-      ? { method: 'GET', credentials: 'same-origin', cache: 'no-store' }
+      ? { method: 'GET', credentials: 'same-origin', cache: 'no-store', signal: controller!.signal }
       : { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   } catch { return { ok: false, status: 0, code: '' }; }
   let parsed: unknown = null, date = NaN;
@@ -395,6 +399,7 @@ async function call(path: string, body?: unknown): Promise<Reply> {
   try { date = Date.parse(res.headers.get('date') ?? ''); } catch { /* no headers */ }
   if (res.ok && !(isObj(parsed) && parsed.error !== undefined && parsed.error !== null)) return { ok: true, status: res.status, body: parsed, date };
   return { ok: false, status: res.ok ? 502 : res.status, code: errorCode(parsed) };
+  } finally { if (timer !== null) clearTimeout(timer); }
 }
 
 function normalizeState(raw: unknown): MachineState | null {
@@ -644,7 +649,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
   const S = {
     auth: 'checking' as 'checking' | 'in' | 'out' | 'failed', hasCredentials: false, authBusy: false, authMsg: null as Msg,
     pairing: pair.present, paired: false, enrollBusy: false, enrollMsg: null as Msg,
-    state: null as MachineState | null, loading: false, loadMsg: null as Msg,
+    state: null as MachineState | null, stateFresh: false, offline: navigator.onLine === false, loading: false, loadMsg: null as Msg,
     account: '' as AccountId | '', op: null as Op | null, opMsg: null as Msg,
     // expired: this page saw the paid session run out (never set by an explicit Stop); extendCheck: an Extend answer still needs the new end time
     expired: false, extendCheck: false,
@@ -663,6 +668,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
   let skew = 0, shownPhase: Phase = 'none', expiryChecked = '';
   // bumped on sign-out and on every selection change, so an answer that arrives late is dropped instead of drawn
   let perfSeq = 0, sbSeq = 0, candSeq = 0, gpuSeq = 0;
+  let sessionSeq = 0, authEpoch = 0, launchSeq = 0;
 
   // ── skeleton ──
   const brandSub = h('span', 'cc-sub');
@@ -683,7 +689,10 @@ function mount(root: HTMLElement, pair: PairLink): void {
   authMsg.setAttribute('role', 'status');
   const signInBtn = button('cc-btn cc-primary', () => { void login(); });
   const setupNote = h('p', 'cc-muted'), setupLink = link('cc-text-link', OWNER_SETUP_PATH, false);
-  const authCard = h('section', 'cc-card cc-auth', authTitle, authLead, signInBtn, h('div', '', setupNote, setupLink), authMsg);
+  const recheckBtn = button('cc-btn', () => { void recoverConnection(); });
+  const authCard = h('section', 'cc-card cc-auth', authTitle, authLead, h('div', 'cc-actions', signInBtn, recheckBtn), h('div', '', setupNote, setupLink), authMsg);
+  const connectionMsg = h('p', 'cc-msg');
+  connectionMsg.setAttribute('role', 'status');
 
   const statusPill = h('span', 'cc-pill'), statusLead = h('p', 'cc-muted'), machineH = h('h2');
   const facts = h('dl', 'cc-facts');
@@ -816,7 +825,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
   const footer = h('footer', 'cc-footer', signOutBtn);
 
   const signedIn = h('div', 'cc-grid', phoneCard, machineCard, perfCard, gpuCard, h('div', 'cc-side', termCard, snapCard, keysCard, nestedCard), appsCard);
-  const main = h('main', 'cc-main', h1, lead, authCard, signedIn, footer);
+  const main = h('main', 'cc-main', h1, lead, connectionMsg, authCard, signedIn, footer);
   root.replaceChildren(header, main);
 
   // ── render ──
@@ -836,6 +845,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
     langNav.setAttribute('aria-label', d.langLabel);
     for (const b of langBtns) b.setAttribute('aria-pressed', String(b.getAttribute('lang') === lang));
     h1.textContent = d.h1; lead.textContent = d.lead;
+    setMsg(connectionMsg, S.offline ? { text: () => d.offline, kind: 'warn' } : S.auth === 'in' && !S.stateFresh && !S.loading && S.state ? { text: () => d.stale, kind: 'warn' } : null);
 
     // auth
     authCard.hidden = S.auth === 'in';
@@ -846,6 +856,8 @@ function mount(root: HTMLElement, pair: PairLink): void {
     signInBtn.textContent = S.authBusy ? d.signingIn : d.signIn;
     signInBtn.disabled = S.authBusy || S.auth === 'checking';
     signInBtn.hidden = S.auth === 'out' && !S.hasCredentials;
+    recheckBtn.textContent = d.checkAgain;
+    recheckBtn.disabled = S.authBusy || S.auth === 'checking' || S.pairing || S.offline;
     setupNote.textContent = d.noKey; setupLink.textContent = d.setupLink;
     setupNote.parentElement!.hidden = !(S.auth === 'out' && !S.hasCredentials);
     setMsg(authMsg, S.auth === 'checking' ? { text: () => (S.pairing ? d.pairing : d.checking), kind: 'info' } : S.authMsg);
@@ -902,14 +914,14 @@ function mount(root: HTMLElement, pair: PairLink): void {
     accountNote.hidden = !(needAccount && !accounts.some(a => a.available)) && !(accountGone && status === 'stopped');
     accountNote.textContent = accountGone ? d.accountMissing(machineAccount?.label || m?.account || '?') : d.noAccounts;
 
-    const busy = !!S.op;
+    const busy = !!S.op || S.authBusy || S.offline || !S.stateFresh;
     startBtn.hidden = !(status === 'absent' || status === 'stopped' || (status === 'error' && !m));
     startBtn.textContent = S.op?.kind === 'start' && S.op.phase === 'sending' ? d.starting : status === 'stopped' ? d.resume : d.start;
-    startBtn.disabled = busy || (status === 'stopped' ? accountGone : !S.account);
+    startBtn.disabled = busy || !S.stateFresh || S.offline || S.authBusy || (status === 'stopped' ? accountGone : !S.account);
     openBtn.hidden = status !== 'running';
     openBtn.textContent = S.launching ? d.opening : d.open;
     // after the local deadline the desktop stays closed until the server answers again
-    openBtn.disabled = S.launching || !st?.ready || phase === 'over';
+    openBtn.disabled = S.launching || !st?.ready || phase === 'over' || !S.stateFresh || S.offline || S.authBusy;
     openBtn.title = phase === 'over' ? d.sessionChecking : st?.ready ? '' : d.notReady;
     stopBtn.hidden = !(status === 'running' || status === 'starting' || (status === 'error' && !!m));
     stopBtn.textContent = S.op?.kind === 'stop' && S.op.phase === 'sending' ? d.stopping : d.stop;
@@ -926,7 +938,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
     retryBtn.textContent = d.retry; forgetBtn.textContent = d.forget;
     retryBtn.hidden = forgetBtn.hidden = S.op?.phase !== 'uncertain';
 
-    if (phase === 'over') S.launchUrl = '';
+    if (phase === 'over' || S.offline || !S.stateFresh) S.launchUrl = '';
     launchBox.hidden = !S.launchUrl && !S.launchMsg;
     setMsg(launchMsg, S.launchUrl ? { text: () => d.openReady, kind: 'ok' } : S.launchMsg);
     launchLink.hidden = !S.launchUrl;
@@ -1158,7 +1170,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
   function stopPoll(): void { if (pollTimer !== null) { clearTimeout(pollTimer); pollTimer = null; } }
   function schedule(): void {
     stopPoll();
-    if (S.auth !== 'in' || document.visibilityState !== 'visible' || !pendingWork() || polls >= POLL_MAX) return;
+    if (S.auth !== 'in' || S.offline || document.visibilityState !== 'visible' || !pendingWork() || polls >= POLL_MAX) return;
     pollTimer = setTimeout(() => { pollTimer = null; polls++; void loadState(); }, polls < POLL_FAST_COUNT ? POLL_FAST_MS : POLL_SLOW_MS);
   }
   // ── paid-session clock: display only. It never extends, starts or stops anything; the server owns the deadline ──
@@ -1200,8 +1212,23 @@ function mount(root: HTMLElement, pair: PairLink): void {
     expiryChecked = ends; S.expired = true; S.launchUrl = '';
     polls = 0; render(); void loadState();
   }
+  async function recoverConnection(): Promise<void> {
+    if (S.offline || S.authBusy || S.pairing || S.auth === 'checking' || S.loading) return;
+    polls = 0;
+    if (S.auth === 'in') await loadState();
+    else { S.auth = 'checking'; render(); await checkSession(); }
+  }
+  globalThis.addEventListener?.('offline', () => {
+    S.offline = true; S.stateFresh = false; S.launchUrl = ''; loadSeq++; S.loading = false;
+    launchSeq++; S.launching = false;
+    stopPoll(); stopClock(); render();
+  });
+  globalThis.addEventListener?.('online', () => {
+    S.offline = false; render();
+    if (document.visibilityState === 'visible') void recoverConnection();
+  });
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') { polls = 0; if (S.auth === 'in') void loadState(); }
+    if (document.visibilityState === 'visible') { void recoverConnection(); }
     else { stopPoll(); stopClock(); }
   });
 
@@ -1227,6 +1254,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
   // ── server calls ──
   function signedOut(): void {
     stopPoll(); stopClock(); resetCapacity();
+    authEpoch++; sessionSeq++; loadSeq++; launchSeq++; S.stateFresh = false; S.loading = false; S.launching = false;
     S.auth = 'out'; S.state = null; S.expired = false; S.extendCheck = false; S.launchUrl = ''; S.paired = false; S.enrollMsg = null;
     void checkSession();
   }
@@ -1242,7 +1270,9 @@ function mount(root: HTMLElement, pair: PairLink): void {
   }
 
   async function checkSession(): Promise<boolean> {
+    const seq = ++sessionSeq, epoch = authEpoch;
     const r = await call(`${AUTH_API}/session`);
+    if (seq !== sessionSeq || epoch !== authEpoch) return false;
     if (!r.ok || !isObj(r.body)) { S.auth = 'failed'; S.authMsg = { text: () => (r.ok ? T().sessionFailed : r.status === 0 ? T().netErr : `${T().sessionFailed} ${T().httpErr(r.status)}`), kind: 'warn' }; S.hasCredentials = true; render(); return false; }
     const authed = r.body.authenticated === true;
     S.hasCredentials = r.body.hasCredentials === true || (authed && r.body.hasCredentials === undefined);
@@ -1305,15 +1335,17 @@ function mount(root: HTMLElement, pair: PairLink): void {
   }
 
   async function loadState(): Promise<void> {
+    if (S.auth !== 'in' || S.offline) return;
     const seq = ++loadSeq;
     S.loading = true; render();
     const r = await call(`${API}/state`);
-    if (seq !== loadSeq) return;
+    if (seq !== loadSeq || S.auth !== 'in') return;
     S.loading = false;
+    S.stateFresh = false;
     if (r.ok) {
       if (Number.isFinite(r.date)) { const k = r.date - Date.now(); skew = Math.abs(k) > 5000 ? k : 0; } // Date has 1 s resolution
       const st = normalizeState(r.body);
-      if (st) { applyState(st); S.loadMsg = null; }
+      if (st) { applyState(st); S.stateFresh = true; S.loadMsg = null; }
       else S.loadMsg = { text: () => T().stateFailed, kind: 'warn' };
     } else if (r.status === 401 || r.status === 403) { signedOut(); return; }
     else S.loadMsg = { text: () => `${T().stateFailed} ${r.status === 0 ? T().netErr : r.code ? T().rejected(r.code) : T().httpErr(r.status)}`, kind: 'warn' };
@@ -1321,7 +1353,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
   }
 
   function begin(kind: OpKind, extra: Record<string, unknown>): void {
-    if (S.op) return; // one mutation at a time; an uncertain one must be retried or forgotten first
+    if (S.op || S.auth !== 'in' || S.authBusy || S.offline || !S.stateFresh) return; // never start from stale state
     let requestId: string;
     try { requestId = uuid(); } catch { S.opMsg = { text: () => T().netErr, kind: 'warn' }; render(); return; }
     S.launchUrl = ''; S.launchMsg = null;
@@ -1503,10 +1535,13 @@ function mount(root: HTMLElement, pair: PairLink): void {
   }
 
   async function launch(): Promise<void> {
-    if (S.launching || S.state?.status !== 'running' || sessionPhase() === 'over') return;
+    if (S.launching || S.auth !== 'in' || S.authBusy || S.offline || !S.stateFresh || S.state?.status !== 'running' || sessionPhase() === 'over') return;
+    const epoch = authEpoch, seq = ++launchSeq;
     S.launching = true; S.launchUrl = ''; S.launchMsg = null; render();
     const r = await call(`${API}/launch`, {});
+    if (seq !== launchSeq || epoch !== authEpoch || S.auth !== 'in' || S.authBusy) return;
     S.launching = false;
+    if (S.offline || !S.stateFresh) { render(); return; }
     if (r.ok && sessionPhase() === 'over') { render(); return; } // a ticket that arrives after the deadline is not offered
     if (r.ok) {
       const url = isObj(r.body) ? safeDesktopUrl(r.body.url) : null;
@@ -1518,8 +1553,10 @@ function mount(root: HTMLElement, pair: PairLink): void {
 
   async function loadJobs(): Promise<void> {
     if (S.jobsLoading) return;
+    const epoch = authEpoch;
     S.jobsLoading = true; S.jobsMsg = null; render();
     const r = await call(`${API}/nested/jobs`);
+    if (epoch !== authEpoch || S.auth !== 'in') return;
     S.jobsLoading = false;
     if (r.ok && isObj(r.body) && Array.isArray(r.body.jobs)) {
       S.jobs = r.body.jobs.filter(isObj).slice(0, 50).map(j => ({ id: str(j.id, 80), provider: str(j.provider, 20), status: str(j.status, 40) }));
@@ -1552,6 +1589,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
 
   async function logout(): Promise<void> {
     if (S.authBusy) return;
+    authEpoch++; sessionSeq++; loadSeq++; launchSeq++; S.loading = false; S.launching = false; S.launchUrl = '';
     S.authBusy = true; stopPoll(); stopClock(); render();
     const r = await call(`${AUTH_API}/logout`, {});
     S.authBusy = false;

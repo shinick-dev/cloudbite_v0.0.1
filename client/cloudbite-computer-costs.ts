@@ -143,7 +143,7 @@ function normalize(raw: unknown): View | null {
 }
 
 const money = (v: number): string => `${v < 0 ? '-' : ''}$${Math.abs(v) < 1 && v !== 0 ? Math.abs(v).toFixed(4) : Math.abs(v).toFixed(2)}`;
-const amount = (v: number | null): string => (v === null ? '?' : String(Number(v.toFixed(2))));
+const amount = (v: number | null, unknown: string): string => (v === null ? unknown : String(Number(v.toFixed(2))));
 
 type Kid = Node | string | null | undefined | false;
 function h<K extends keyof HTMLElementTagNameMap>(tag: K, cls = '', ...kids: Kid[]): HTMLElementTagNameMap[K] {
@@ -214,6 +214,8 @@ function mount(root: HTMLElement): void {
     document.title = d.title; document.documentElement.lang = lang;
     langBtns.forEach((b, i) => b.setAttribute('aria-pressed', String((['en', 'ko'] as Lang[])[i] === lang)));
     brand.textContent = d.brand; brandSub.textContent = d.sub; backLink.textContent = d.back;
+    backLink.setAttribute('href', `${COMPUTER_PATH}?lang=${lang}`);
+    signIn.setAttribute('href', `${COMPUTER_PATH}?lang=${lang}`);
     h1.textContent = d.h1; lead.textContent = d.lead;
     refreshBtn.textContent = S.loading ? d.refreshing : d.refresh; refreshBtn.disabled = S.loading;
     refreshBtn.setAttribute('aria-busy', String(S.loading));
@@ -253,7 +255,7 @@ function mount(root: HTMLElement): void {
       const list = h('ul', 'cc-list');
       if (!a.sandboxes.length) list.append(h('li', 'cc-muted', d.noSandboxes));
       for (const s of a.sandboxes) {
-        const spec = d.spec(amount(s.cpu), amount(s.memoryGiB), amount(s.diskGiB)) + (s.gpu ? d.gpu(s.gpu) : '');
+        const spec = d.spec(amount(s.cpu, d.unknown), amount(s.memoryGiB, d.unknown), amount(s.diskGiB, d.unknown)) + (s.gpu ? d.gpu(s.gpu) : '');
         const li = h('li', 'cc-sb',
           h('div', 'cc-sb-head', h('strong', '', s.name || s.id), h('span', `cc-pill cc-p-${s.phase}`, d.phase[s.phase])),
           h('p', 'cc-fine', `${spec}${s.region ? ` · ${s.region}` : ''}${s.computer ? ` · ${d.computer}` : ''}`),
@@ -268,9 +270,9 @@ function mount(root: HTMLElement): void {
     else if (a.usage.status === 'unavailable') q.append(h('p', 'cc-fine cc-bad', d.quotaUnavailable(a.usage.error)));
     else for (const r of a.usage.regions) {
       const dl = h('dl', 'cc-facts');
-      const row = (k: string, u: Used) => fact(dl, k, d.quotaRow(amount(u.used), amount(u.quota)));
+      const row = (k: string, u: Used) => fact(dl, k, d.quotaRow(amount(u.used, d.unknown), amount(u.quota, d.unknown)));
       row(d.cpu, r.cpu); row(d.ram, r.memoryGiB); row(d.disk, r.diskGiB);
-      q.append(h('p', 'cc-fine', `${r.regionId}${r.sandboxClass ? ` · ${r.sandboxClass}` : ''}${r.maxCpuPerSandbox !== null ? ` · ${d.maxCpu(amount(r.maxCpuPerSandbox))}` : ''}`), dl);
+      q.append(h('p', 'cc-fine', `${r.regionId}${r.sandboxClass ? ` · ${r.sandboxClass}` : ''}${r.maxCpuPerSandbox !== null ? ` · ${d.maxCpu(amount(r.maxCpuPerSandbox, d.unknown))}` : ''}`), dl);
     }
     box.append(q);
     return box;

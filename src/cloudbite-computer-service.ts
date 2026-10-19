@@ -199,6 +199,7 @@ export class ComputerService {
     }
     if (info.state === 'active') { h.state = 'active'; h.error = null; return true; }
     if (['error', 'build_failed'].includes(info.state ?? '')) { h.state = 'error'; h.error = 'provider_error'; }
+    else { h.state = 'unknown'; h.error = null; }
     return false; // other provider states (pending, removing, ...) are not usable now
   }
 
@@ -587,7 +588,7 @@ export class ComputerService {
       this.bind(r, ownerTag);
       if (r.machine) await this.refresh(r);
       const now = this.d.now();
-      const due = (r.snapshots ?? []).filter((h) => h.state === 'active' && (h.checkedAt === null || now < h.checkedAt || now - h.checkedAt >= RECHECK_MS))
+      const due = (r.snapshots ?? []).filter((h) => ['active', 'unknown'].includes(h.state) && (h.checkedAt === null || now < h.checkedAt || now - h.checkedAt >= RECHECK_MS))
         .sort((x, y) => (x.checkedAt ?? 0) - (y.checkedAt ?? 0)).slice(0, RECHECK_MAX);
       for (const h of due) await this.recheck(r, h);
       return this.snapshotsView(r);

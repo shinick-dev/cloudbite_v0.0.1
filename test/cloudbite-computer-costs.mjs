@@ -233,7 +233,7 @@ await test('page: 401 shows the main sign-in link only; no WebAuthn, no retry lo
   const p = await page({ route: () => json(401, { error: { code: 'unauthorized' } }) });
   assert.equal(p.requests.length, 1); assert.equal(p.requests[0].url, '/api/cloudbite/computer/costs');
   assert.equal(p.requests[0].init.credentials, 'same-origin'); assert.equal(p.requests[0].init.headers, undefined);
-  const a = p.all().find((e) => e.tagName === 'A' && e.shown() && e.getAttribute('href') === '/cloudbite/computer' && /Sign in/.test(e.textContent));
+  const a = p.all().find((e) => e.tagName === 'A' && e.shown() && e.getAttribute('href') === '/cloudbite/computer?lang=en' && /Sign in/.test(e.textContent));
   assert.ok(a); assert.match(p.text(), /not signed in/); assert.equal(p.btn('Refresh'), undefined);
 });
 
@@ -262,6 +262,7 @@ await test('page: renders estimates apart from balances, unavailable not zero, e
   p.all().find((e) => e.tagName === 'BUTTON' && e.textContent === 'KO').click();
   assert.equal(p.doc.documentElement.lang, 'ko'); assert.match(p.text(), /예상 시간당 비용/); assert.match(p.text(), /확인 불가/);
   assert.equal(p.requests.length, 2, 'language switch does not refetch');
+  assert.ok(p.all().filter(e=>e.tagName==='A' && (e.getAttribute('href')||'').startsWith('/cloudbite/computer')).every(e=>e.getAttribute('href')==='/cloudbite/computer?lang=ko'));
 });
 
 await test('page: malformed server answer and non-finite balance are shown as unexpected, never as numbers', async () => {
