@@ -14,13 +14,13 @@ import { sha256Hex } from './cloudbite-knowledge';
 export const CLAIM_SUPPORT_SCHEMA = 'cloudbite.claim-support-packet/v1';
 export const CLAIM_SUPPORT_STATUSES = ['supported', 'partial', 'contradicted', 'insufficient'] as const;
 export const CLAIM_SUPPORT_LIMITS = Object.freeze({
-  totalBytes: 24 * 1024, slots: 6, citationsPerSlot: 4, passages: 16, passageBytes: 4096, minPassageBytes: 200,
+  totalBytes: 24 * 1024, slots: 6, citationsPerSlot: 4, passages: 16, passageBytes: 4096, minPassageBytes: 200, refBytes: 96,
   quotesPerFinding: 3, quoteMin: 8, quoteMax: 300, rationale: 400,
 });
 
 export interface ClaimSupportPeer { expertId: string; opinion: ExpertOpinion }
 export interface ClaimSupportCitation {
-  /** Citation as written in the peer's evidence: doc:ID or source:ID. */
+  /** Citation as written in the peer's evidence: doc:ID or source:ID; kind:#sha256:HEX (SHA-256 of the written ref) when it exceeds refBytes. */
   ref: string;
   availability: TextAvailability;
   /** included / truncated: text is in a passage; omitted: available but cut by the packet bounds; unavailable: no text. */
@@ -54,9 +54,11 @@ export interface ClaimSupportContext {
   slots: ClaimSupportSlot[];
   passages: ClaimSupportPassage[];
   omitted: {
-    slots: Array<{ targetExpertId: string; evidenceIndex: number; reason: 'slot-limit' }>;
+    slots: Array<{ targetExpertId: string; evidenceIndex: number; reason: 'slot-limit' | 'byte-budget' }>;
     passages: Array<{ ref: string; reason: 'passage-limit' | 'byte-budget' }>;
     truncatedPassages: number;
+    /** Omitted slots / passage-limit passages counted but not listed above because the listing itself exceeded the byte bound. */
+    unlistedSlots: number; unlistedPassages: number;
   };
   /** Fixed statements carried with the data. */
   notes: string[];
@@ -72,6 +74,7 @@ const NOTES = [
   'Passages are exact server-held excerpts. curated-card text is a project-authored paraphrase, not original source text.',
   'imported-original-excerpt is original wording the user imported earlier; it was not re-fetched and is still user-supplied.',
   'Source titles, URLs and licenses are metadata, not text, and are never passages. Omitted or truncated text was not shown.',
+  `A citation ref written as doc:#sha256:HEX or source:#sha256:HEX stands for a cited ID longer than ${CLAIM_SUPPORT_LIMITS.refBytes} bytes; HEX is the SHA-256 of the ref as written, and the ID itself is not shown.`,
   'A support status is one reviewer model\'s reading of these passages, not verification, and not calibrated accuracy.',
 ];
 
@@ -105,6 +108,22 @@ function leadingExcerpt(s: string, max: number): string {
   return out;
 }
 const lineOf = (s: string, offset: number) => s.slice(0, offset).split('\n').length;
+/** 1-based line of the last code unit in [start, end) (a trailing newline belongs to the line it ends); start's line when empty. */
+const lastLineOf = (s: string, start: number, end: number) => lineOf(s, end > start ? end - 1 : start);
+/** Citation as written, or kind:#sha256:HEX of it when its JSON-escaped size exceeds refBytes. */
+const boundRef = (ref: string) => jsonBytes(ref) - 2 <= CLAIM_SUPPORT_LIMITS.refBytes ? ref
+  : (ref.startsWith('doc:') ? 'doc:' : 'source:') + '#sha256:' + sha256Hex(ref);
+/** Appended to the body JSON: ,"bytes":N,"sha256":"<64 hex>" with N <= totalBytes (at most 5 digits). */
+const META_BYTES = 90;
+/** Per-passage allowance for fields that grow once text is placed (offset/line digits, truncated, citation text labels). */
+const PLACE_SLACK = 64;
+/** Largest n in [0, max] with fits(n), given fits is monotone (true up to some n); -1 when even 0 does not fit. */
+function maxFit(max: number, fits: (n: number) => boolean): number {
+  if (!fits(0)) return -1;
+  let lo = 0, hi = max;
+  while (lo < hi) { const mid = Math.ceil((lo + hi) / 2); if (fits(mid)) lo = mid; else hi = mid - 1; }
+  return lo;
+}
 
 interface Candidate { key: string; kind: ClaimSupportPassage['kind']; textOrigin: ClaimSupportTextOrigin; source: string; preTruncated: boolean; citations: string[]; slotIds: string[] }
 
@@ -118,19 +137,35 @@ function canonicalSource(expertId: string, id: string): string {
  * Deterministic bounded claim-support packet for one reviewer's peers. Slots: cited evidence first, then uncited,
  * round-robin by evidence index across peers (peer order breaks ties), at most CLAIM_SUPPORT_LIMITS.slots; the rest are
  * disclosed in omitted.slots. packets are matched to peers by expertId; a peer without a packet has no curated card
- * text. Inputs are never mutated; the result is deeply frozen and at most totalBytes of canonical JSON.
+ * text. Inputs are never mutated; the result is deeply frozen and its full JSON (JSON.stringify of the result, bytes
+ * and sha256 included) is at most totalBytes of UTF-8. Every part counts against that bound: citation refs are capped
+ * at refBytes (longer ones become kind:#sha256:HEX markers); when even the metadata does not fit, the omitted listings
+ * collapse into unlisted counts and then trailing slots move to omitted.slots ('byte-budget').
  */
 export function buildClaimSupportContext(brief: ProjectBrief, peers: readonly ClaimSupportPeer[], packets?: readonly EvidencePacket[]): ClaimSupportContext {
   const L = CLAIM_SUPPORT_LIMITS;
   const seen = new Set<string>(), uniquePeers = peers.filter((p) => !seen.has(p.expertId) && !!seen.add(p.expertId));
-  const docs = new Map((brief.documents ?? []).map((d) => [d.id, d]));
   const all = uniquePeers.flatMap((p, peerOrder) => {
     const refs = evidenceReferences(brief, p.opinion, applicationPack(p.expertId));
     return p.opinion.evidence.map((_, i) => ({ peer: p, peerOrder, i, refs: refs.filter((r) => r.evidenceIndex === i) }));
   }).sort((a, b) => (a.refs.length ? 0 : 1) - (b.refs.length ? 0 : 1) || a.i - b.i || a.peerOrder - b.peerOrder);
-  const chosen = all.slice(0, L.slots);
-  const omittedSlots = all.slice(L.slots).map((x) => ({ targetExpertId: x.peer.expertId, evidenceIndex: x.i, reason: 'slot-limit' as const }))
-    .sort((a, b) => uniquePeers.findIndex((p) => p.expertId === a.targetExpertId) - uniquePeers.findIndex((p) => p.expertId === b.targetExpertId) || a.evidenceIndex - b.evidenceIndex);
+  for (let k = Math.min(L.slots, all.length); k >= 0; k--) {
+    const ctx = packetWithSlots(brief, all, k, packets);
+    if (ctx) return ctx;
+  }
+  throw new Error('claim-support packet metadata cannot fit its byte bound'); // unreachable: k = 0 carries only notes and counts
+}
+
+type SlotChoice = { peer: ClaimSupportPeer; peerOrder: number; i: number; refs: ReturnType<typeof evidenceReferences> };
+
+/** The packet for the first k slots of all, or undefined when its metadata alone exceeds the byte bound. */
+function packetWithSlots(brief: ProjectBrief, all: readonly SlotChoice[], k: number, packets?: readonly EvidencePacket[]): ClaimSupportContext | undefined {
+  const L = CLAIM_SUPPORT_LIMITS, budget = L.totalBytes - META_BYTES;
+  const docs = new Map((brief.documents ?? []).map((d) => [d.id, d]));
+  const chosen = all.slice(0, k);
+  const omittedSlots = all.slice(k).map((x, j) => ({ targetExpertId: x.peer.expertId, evidenceIndex: x.i, peerOrder: x.peerOrder, reason: k + j < L.slots ? 'byte-budget' as const : 'slot-limit' as const }))
+    .sort((a, b) => a.peerOrder - b.peerOrder || a.evidenceIndex - b.evidenceIndex)
+    .map(({ peerOrder: _, ...s }) => s);
 
   const candidates = new Map<string, Candidate>();
   const slotCites: Array<{ slot: Omit<ClaimSupportSlot, 'citedText' | 'citations'>; cites: Array<{ ref: string; availability: TextAvailability; keys: string[] }> }> = [];
@@ -145,7 +180,7 @@ export function buildClaimSupportContext(brief: ProjectBrief, peers: readonly Cl
       return key;
     };
     for (const r of x.refs.slice(0, L.citationsPerSlot)) {
-      const ref = (r.kind === 'document' ? 'doc:' : 'source:') + r.id;
+      const ref = boundRef((r.kind === 'document' ? 'doc:' : 'source:') + r.id);
       let availability = r.availability;
       const keys: string[] = [];
       if (r.kind === 'document' && availability === 'supplied-project-text') {
@@ -171,10 +206,14 @@ export function buildClaimSupportContext(brief: ProjectBrief, peers: readonly Cl
   // Passage IDs are assigned in first-citation order; text is cut to fit the shared byte budget.
   const ordered = [...candidates.values()];
   const kept = ordered.slice(0, L.passages);
-  const publicRef = (key: string) => key.startsWith('card:') ? 'card:' + key.split(':')[2] : key;
-  const omittedPassages: ClaimSupportContext['omitted']['passages'] = ordered.slice(L.passages).map((c) => ({ ref: publicRef(c.key), reason: 'passage-limit' }));
+  const publicRef = (key: string) => boundRef(key.startsWith('card:') ? 'card:' + key.split(':')[2] : key);
+  type OmittedPassage = ClaimSupportContext['omitted']['passages'][number];
+  const limitCut: OmittedPassage[] = ordered.slice(L.passages).map((c) => ({ ref: publicRef(c.key), reason: 'passage-limit' }));
+  const budgetCut = (c: Candidate): OmittedPassage => ({ ref: publicRef(c.key), reason: 'byte-budget' });
   const passageIds = new Map(kept.map((c, i) => [c.key, `p${i + 1}`]));
-  const draft = (passages: ClaimSupportPassage[]): Omit<ClaimSupportContext, 'bytes' | 'sha256'> => {
+  let listedSlots = omittedSlots.length, listedLimit = limitCut.length;
+  // placed: byte-budget cuts already decided; pending: kept candidates not yet decided, sized as if they were cut too.
+  const draft = (passages: ClaimSupportPassage[], placed: OmittedPassage[], pending: readonly Candidate[]): Omit<ClaimSupportContext, 'bytes' | 'sha256'> => {
     const included = new Map(passages.map((p) => [p.passageId, p]));
     return {
       schema: CLAIM_SUPPORT_SCHEMA,
@@ -189,26 +228,42 @@ export function buildClaimSupportContext(brief: ProjectBrief, peers: readonly Cl
         return { ...slot, citedText, citations };
       }),
       passages,
-      omitted: { slots: omittedSlots, passages: [...omittedPassages], truncatedPassages: passages.filter((p) => p.truncated).length },
+      omitted: { slots: omittedSlots.slice(0, listedSlots), passages: [...limitCut.slice(0, listedLimit), ...placed, ...pending.map(budgetCut)],
+        truncatedPassages: passages.filter((p) => p.truncated).length, unlistedSlots: omittedSlots.length - listedSlots, unlistedPassages: limitCut.length - listedLimit },
       notes: NOTES,
     };
   };
-  const size = (passages: ClaimSupportPassage[]) => utf8(JSON.stringify(draft(passages))) + 100; // + bytes/sha256 fields
-  const passages: ClaimSupportPassage[] = [];
+  const size = (passages: ClaimSupportPassage[], placed: OmittedPassage[], pending: readonly Candidate[]) => utf8(JSON.stringify(draft(passages, placed, pending)));
+
+  // Metadata first: with no passage text, every kept candidate disclosed as cut must fit. Listings collapse into counts
+  // (slots first) before the caller drops a slot.
+  const bare = () => size([], [], kept) <= budget;
+  const fitSlots = maxFit(omittedSlots.length, (n) => { listedSlots = n; listedLimit = limitCut.length; return bare(); });
+  if (fitSlots >= 0) listedSlots = fitSlots;
+  else {
+    listedSlots = 0;
+    const fitLimit = maxFit(limitCut.length, (n) => { listedLimit = n; return bare(); });
+    if (fitLimit < 0) return undefined;
+    listedLimit = fitLimit;
+  }
+
+  // Invariant: size(passages, placed, kept.slice(i)) <= budget before step i, so cutting candidate i keeps it, and a
+  // placed passage is kept only when the whole draft still fits.
+  const passages: ClaimSupportPassage[] = [], placed: OmittedPassage[] = [];
   for (const [i, c] of kept.entries()) {
-    const passageId = passageIds.get(c.key)!;
-    const empty: ClaimSupportPassage = { passageId, kind: c.kind, textOrigin: c.textOrigin, ref: publicRef(c.key),
+    const rest = kept.slice(i + 1);
+    const empty: ClaimSupportPassage = { passageId: passageIds.get(c.key)!, kind: c.kind, textOrigin: c.textOrigin, ref: publicRef(c.key),
       citations: c.citations, slotIds: c.slotIds, text: '', sha256: sha256Hex(''),
       location: { startOffset: 0, endOffset: 0, startLine: 1, endLine: 1, totalChars: c.source.length, totalLines: c.source.split('\n').length, sourceSha256: sha256Hex(c.source) }, truncated: true };
-    const remaining = L.totalBytes - size([...passages, empty]);
+    const remaining = budget - size([...passages, empty], placed, rest) - PLACE_SLACK;
     const share = Math.min(L.passageBytes, Math.floor(remaining / (kept.length - i)));
-    if (share < L.minPassageBytes) { omittedPassages.push({ ref: publicRef(c.key), reason: 'byte-budget' }); continue; }
-    const text = leadingExcerpt(c.source, share);
-    if (!text.trim()) { omittedPassages.push({ ref: publicRef(c.key), reason: 'byte-budget' }); continue; }
-    passages.push({ ...empty, text, sha256: sha256Hex(text), truncated: text.length < c.source.length || c.preTruncated,
-      location: { ...empty.location, endOffset: text.length, endLine: lineOf(c.source, text.length) } });
+    const text = share >= L.minPassageBytes ? leadingExcerpt(c.source, share) : '';
+    const p: ClaimSupportPassage = { ...empty, text, sha256: sha256Hex(text), truncated: text.length < c.source.length || c.preTruncated,
+      location: { ...empty.location, endOffset: text.length, endLine: text ? lastLineOf(c.source, 0, text.length) : 1 } };
+    if (text.trim() && size([...passages, p], placed, rest) <= budget) passages.push(p);
+    else placed.push(budgetCut(c));
   }
-  const body = draft(passages);
+  const body = draft(passages, placed, []);
   const json = JSON.stringify(body);
   return deepFreeze({ ...body, bytes: utf8(json), sha256: sha256Hex(json) });
 }
@@ -219,6 +274,7 @@ export const CLAIM_SUPPORT_SYSTEM = [
   'textOrigin: curated-card is a project-authored paraphrase, never the original source; imported-original-excerpt is original wording the user imported earlier (not re-fetched); user-document and workspace-field are user statements. A source title, URL or ID is not text and is never support.',
   `For EVERY finding add claimSupport: {"status": "supported"|"partial"|"contradicted"|"insufficient", "quotes": [{"passageId": string, "quote": string}], "rationale": string}. quotes: 0-${CLAIM_SUPPORT_LIMITS.quotesPerFinding}, each copied character-for-character (${CLAIM_SUPPORT_LIMITS.quoteMin}-${CLAIM_SUPPORT_LIMITS.quoteMax} characters) from one passage whose slotIds include the slot of that finding's targetExpertId/evidenceIndex; never paraphrase, join or fix a quote. rationale at most ${CLAIM_SUPPORT_LIMITS.rationale} characters.`,
   'supported, partial and contradicted each require at least one quote that bears on the claim. Use insufficient when the slot is not in claimSupport.slots, is uncited, its cited text is unavailable, omitted or truncated before the relevant part, or the passages neither support nor contradict it. A missing or uncited source is a gap, never a contradiction; do not invent sources or text.',
+  `claimSupport is bounded: at most ${CLAIM_SUPPORT_LIMITS.slots} slots, ${CLAIM_SUPPORT_LIMITS.citationsPerSlot} citations per slot (omittedCitations counts the rest), ${CLAIM_SUPPORT_LIMITS.passages} passages of at most ${CLAIM_SUPPORT_LIMITS.passageBytes} bytes, and ${CLAIM_SUPPORT_LIMITS.totalBytes} bytes in all. omitted lists the slots and passages that were cut (unlistedSlots / unlistedPassages count cuts not listed); cut text was not shown and is a gap, not evidence.`,
 ].join('\n');
 
 export type ClaimSupportParse = { ok: ClaimSupportAssessment } | { invalid: string };
@@ -251,7 +307,7 @@ export function checkClaimSupport(raw: unknown, targetExpertId: string, evidence
     dup.add(passageId + '\u0000' + quote);
     const start = passage.location.startOffset + at, end = start + quote.length;
     out.push({ passageId, ref: passage.ref, textOrigin: passage.textOrigin, quote, sourceSha256: passage.location.sourceSha256,
-      startOffset: start, endOffset: end, startLine: passage.location.startLine + lineOf(passage.text, at) - 1, endLine: passage.location.startLine + lineOf(passage.text, at + quote.length) - 1 });
+      startOffset: start, endOffset: end, startLine: passage.location.startLine + lineOf(passage.text, at) - 1, endLine: passage.location.startLine + lastLineOf(passage.text, at, at + quote.length) - 1 });
   }
   if (status !== 'insufficient' && !out.length) return { invalid: 'claimSupport status other than insufficient requires an exact quote' };
   return { ok: { status: status as ClaimSupportStatus, quotes: out, rationale: clean(rationale, L.rationale), basis: 'model-assessment', quoteCheck: 'exact-substring',

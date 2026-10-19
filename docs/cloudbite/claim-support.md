@@ -43,9 +43,22 @@ Deterministic, deeply frozen, `bytes`/`sha256` of its canonical JSON. Schema `cl
   `sha256` of that excerpt, `location` (`startOffset`/`endOffset` in UTF-16 code units, 1-based lines,
   `totalChars`/`totalLines`, `sourceSha256` of the full source) and `truncated`. Cuts are listed in
   `omitted.passages` (`passage-limit` / `byte-budget`) and `omitted.truncatedPassages`.
-- **Bounds** (`CLAIM_SUPPORT_LIMITS`): 24 KiB total canonical JSON per reviewer, 4 KiB per passage, 200-byte minimum
-  share. This is added once per reviewer call on top of the existing prompt; the project documents already in
-  `project.documents` are unchanged (no snapshot change).
+  `endLine` is the line of the last covered character: an excerpt or quote ending with `\n` ends on the line that
+  newline terminates, not the empty line after it. `endOffset` stays the exact exclusive UTF-16 end.
+- **Bounds** (`CLAIM_SUPPORT_LIMITS`): the full serialized packet — `JSON.stringify(ctx)` with slots, citations,
+  passage metadata, omission listings, notes, `bytes` and `sha256` — is at most 24 KiB of UTF-8 per reviewer; 4 KiB per
+  passage, 200-byte minimum share. `bytes`/`sha256` describe the canonical JSON of the packet without those two fields.
+  Every part counts against the bound, in this order:
+  - a citation ref (as written in peer evidence) longer than `refBytes` (96 bytes, JSON-escaped) is shown as
+    `doc:#sha256:HEX` / `source:#sha256:HEX`, HEX being the SHA-256 of the ref as written; its availability and
+    `unavailable`/`omitted` text label are unchanged, and a note explains the marker;
+  - metadata is sized first with every kept passage counted as a `byte-budget` cut; if even that does not fit, the
+    `omitted.slots` listing and then the `passage-limit` listing collapse into `omitted.unlistedSlots` /
+    `omitted.unlistedPassages` counts, and only then trailing slots move to `omitted.slots` with reason `byte-budget`;
+  - passage text is placed only when the whole packet still fits; otherwise that passage is a `byte-budget` cut and
+    its citations say `omitted` (never `included`/`available`).
+  This is added once per reviewer call on top of the existing prompt; the project documents already in
+  `project.documents` are unchanged (no snapshot change). `CLAIM_SUPPORT_SYSTEM` states these limit values.
 - Citations are parsed from peer evidence only. Text inside documents (including `[doc:ID]`, fake passage IDs or
   instructions) never creates passages, bindings or system text; it is untrusted data in the user message.
 

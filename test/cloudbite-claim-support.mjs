@@ -11,7 +11,7 @@ import { build } from 'esbuild';
 
 const tmp = mkdtempSync(join(tmpdir(), 'cloudbite-claim-support-'));
 const entry = `export * from './src/cloudbite-claim-support.ts'; export * from './src/cloudbite-cross-review.ts'; export * from './src/cloudbite-evidence-packet.ts';
-export { CLOUDBITE_EXPERTS, phaseOnePack } from './src/cloudbite-personas.ts'; export { knowledgeWorkspaceFiles, REVIEW_ROLE_IDS } from './src/cloudbite-knowledge.ts';`;
+export { CLOUDBITE_EXPERTS, phaseOnePack, validateExpertOpinion } from './src/cloudbite-personas.ts'; export { knowledgeWorkspaceFiles, REVIEW_ROLE_IDS } from './src/cloudbite-knowledge.ts';`;
 const bundle = await build({ stdin: { contents: entry, resolveDir: process.cwd(), loader: 'ts' }, bundle: true, write: false, format: 'esm', platform: 'node' });
 writeFileSync(join(tmp, 'm.mjs'), bundle.outputFiles[0].text);
 const M = await import(pathToFileURL(join(tmp, 'm.mjs')));
@@ -60,7 +60,8 @@ const parse = (r, ctx = CTX, extra = {}) => M.parseReviewReply(r, reviewer, [pee
 await check('builder: exact server passages with sha256/location, original-vs-curated origins, no metadata passages, frozen, bounded, deterministic', () => {
   const before = structuredClone({ B0, peerA, peerB });
   assert.equal(CTX.schema, 'cloudbite.claim-support-packet/v1');
-  assert.ok(CTX.slots.length <= 6 && CTX.bytes <= 24 * 1024 && utf8(JSON.stringify(CTX)) <= 24 * 1024 + 120);
+  assert.ok(CTX.slots.length <= 6 && CTX.bytes <= 24 * 1024 && utf8(JSON.stringify(CTX)) <= M.CLAIM_SUPPORT_LIMITS.totalBytes);
+  assert.deepEqual([CTX.omitted.unlistedSlots, CTX.omitted.unlistedPassages], [0, 0]);
   const doc1 = passageOf(CTX, 'doc:doc-1');
   assert.equal(doc1.text, PILOT); assert.equal(doc1.sha256, sha(PILOT)); assert.equal(doc1.location.sourceSha256, sha(PILOT));
   assert.equal(doc1.kind, 'document'); assert.equal(doc1.textOrigin, 'user-document'); assert.equal(doc1.truncated, false);
@@ -171,10 +172,13 @@ await check('truncation: a large document is cut to an exact leading excerpt, di
   const b = brief({ documents: [{ id: 'doc-1', name: 'big.md', content: big }, ...Array.from({ length: 20 }, (_, i) => ({ id: `doc-${i + 2}`, name: `d${i}.md`, content: `Doc ${i + 2} `.repeat(400) }))] });
   const many = { expertId: A.id, name: A.name, opinion: op(['Big [doc:doc-1]', ...Array.from({ length: 7 }, (_, i) => `[doc:doc-${3 * i + 2}] [doc:doc-${3 * i + 3}] [doc:doc-${3 * i + 4}] [doc:doc-1] [doc:doc-${3 * i + 2}] [doc:doc-21]`)]) };
   const ctx = M.buildClaimSupportContext(b, [many]);
-  assert.ok(ctx.bytes <= 24 * 1024 && utf8(JSON.stringify(ctx)) <= 24 * 1024 + 120, String(ctx.bytes));
+  assert.ok(ctx.bytes <= 24 * 1024 && utf8(JSON.stringify(ctx)) <= M.CLAIM_SUPPORT_LIMITS.totalBytes, String(ctx.bytes));
   assert.equal(ctx.slots.length, 6); assert.equal(ctx.omitted.slots.length, 2);
   const p = passageOf(ctx, 'doc:doc-1');
   assert.ok(p.truncated && big.startsWith(p.text) && p.text.length < big.length && p.text.endsWith('\n'));
+  // The excerpt ends with a newline: its last covered line is the line that newline ends, not the next one.
+  assert.equal(p.location.endLine, p.text.split('\n').length - 1);
+  assert.equal(big.split('\n')[p.location.endLine - 1] + '\n', p.text.slice(p.text.lastIndexOf('\n', p.text.length - 2) + 1));
   assert.equal(p.location.totalChars, big.length); assert.equal(p.location.sourceSha256, sha(big)); assert.equal(p.sha256, sha(p.text));
   assert.ok(ctx.omitted.truncatedPassages >= 1);
   assert.ok(slotOf(ctx, A.id, 1).omittedCitations >= 1, 'citations beyond four per slot are disclosed');
@@ -239,6 +243,123 @@ await check('uncited honest absence and slots outside the packet are insufficien
   const out = parse(reply([finding(B.id, 3, { status: 'insufficient', quotes: [], rationale: 'Not in the packet.' })]));
   assert.equal(out.findings[0].claimSupport.citedText, 'not-in-packet');
   assert.match(parse(reply([finding(B.id, 3, { status: 'partial', quotes: [], rationale: 'r' })])).invalid, /requires an exact quote/);
+});
+
+const LIM = M.CLAIM_SUPPORT_LIMITS;
+const deepFrozen = (v) => !v || typeof v !== 'object' || (Object.isFrozen(v) && Object.values(v).every(deepFrozen));
+const peers3 = M.CLOUDBITE_EXPERTS.slice(0, 3);
+const reviewer3 = { expertId: M.CLOUDBITE_EXPERTS[3].id, name: 'R', opinion: op(['x']) };
+// Full serialized packet, bytes/sha256 included, plus stable hash, freeze, and the identical object in the prompt.
+const assertBounded = (ctx, b, ps) => {
+  const full = JSON.stringify(ctx);
+  assert.ok(utf8(full) <= LIM.totalBytes, `full JSON ${utf8(full)} > ${LIM.totalBytes}`);
+  assert.equal(ctx.sha256, sha(JSON.stringify((({ bytes, sha256, ...rest }) => rest)(ctx))));
+  assert.equal(ctx.bytes, utf8(JSON.stringify((({ bytes, sha256, ...rest }) => rest)(ctx))));
+  assert.ok(deepFrozen(ctx));
+  assert.equal(M.buildClaimSupportContext(b, ps).sha256, ctx.sha256);
+  const m = M.reviewMessages(reviewer3, ps, b, undefined, [], undefined, ctx);
+  assert.ok(m[1].content.includes(full) && JSON.parse(m[1].content.replace(/^[^\n]*\n/, '')).claimSupport.sha256 === ctx.sha256);
+};
+
+await check('B1 worst case: escape-heavy unknown citation IDs (3 peers x 12 x 588 chars) stay within the full-JSON bound as sha markers', () => {
+  const id = '\u0001'.repeat(140), item = Array.from({ length: 4 }, (_, k) => `[doc:${id}${k}]`).join('');
+  const o = op(Array(12).fill(item));
+  assert.ok('ok' in M.validateExpertOpinion(o) && item.length === 588, 'the runner accepts this opinion');
+  const b = brief({ documents: Array.from({ length: 6 }, (_, i) => ({ id: `doc-${i + 1}`, name: 'd', content: '\u0001'.repeat(4000) })) });
+  const ps = peers3.map((e) => ({ expertId: e.id, name: e.name, opinion: o }));
+  const ctx = M.buildClaimSupportContext(b, ps, []);
+  assertBounded(ctx, b, ps);
+  assert.equal(ctx.slots.length, 6); assert.equal(ctx.omitted.slots.length, 30); assert.equal(ctx.omitted.unlistedSlots, 0);
+  assert.ok(ctx.omitted.slots.every((s) => s.reason === 'slot-limit'));
+  assert.equal(ctx.passages.length, 0, 'unknown IDs never become passages');
+  for (const s of ctx.slots) {
+    assert.equal(s.citedText, 'unavailable'); assert.equal(s.citations.length, 4);
+    s.citations.forEach((c, k) => {
+      assert.equal(c.ref, 'doc:#sha256:' + sha(`doc:${id}${k}`), 'marker is the SHA-256 of the ref as written');
+      assert.deepEqual([c.availability, c.text, c.passageIds], ['unknown-id', 'unavailable', []]);
+    });
+  }
+  assert.ok(ctx.notes.some((n) => /doc:#sha256:HEX/.test(n) && n.includes(`${LIM.refBytes} bytes`)));
+  // Such a slot can only be insufficient.
+  const pr = (r) => M.parseReviewReply(r, reviewer3, ps, { claimSupportContext: ctx });
+  assert.match(pr(reply([finding(ps[0].expertId, 0, { status: 'supported', quotes: [], rationale: 'r' })])).invalid, /requires an exact quote/);
+  assert.equal(pr(reply([finding(ps[0].expertId, 0, { status: 'insufficient', quotes: [], rationale: 'Unknown citation.' }, { verdict: 'insufficient' })])).findings[0].claimSupport.citedText, 'unavailable');
+  // A short unknown ID is shown as written.
+  const short = M.buildClaimSupportContext(b, [{ ...ps[0], opinion: op(['[doc:doc-9]']) }]);
+  assert.equal(short.slots[0].citations[0].ref, 'doc:doc-9');
+});
+
+await check('worst case with known text: control/quote/backslash/multibyte/emoji sources, long IDs, many omissions — bounded, exact, honest', () => {
+  const nasty = (i) => `L${i} \u0001"\\\t 본문 😀 ${'\u0002가"'.repeat(30)}\n`.repeat(200);
+  const longId = (i) => `doc-${i}-${'가'.repeat(40)}`; // 124 UTF-8 bytes as doc:ID, above refBytes
+  const docs = Array.from({ length: 40 }, (_, i) => ({ id: i < 6 ? `doc-${i + 1}` : longId(i), name: 'n.md', content: nasty(i) }));
+  const cite = (ids) => ids.map((x) => `[doc:${x}]`).join(' ');
+  const ps = peers3.map((e, pi) => ({ expertId: e.id, name: e.name,
+    opinion: op(Array.from({ length: 12 }, (_, i) => cite([0, 1, 2, 3, 4, 5].map((k) => docs[(pi * 12 + i * 4 + k) % 40].id)).slice(0, 600))) }));
+  const b = brief({ documents: docs });
+  const ctx = M.buildClaimSupportContext(b, ps);
+  assertBounded(ctx, b, ps);
+  assert.equal(ctx.slots.length, 6); assert.equal(ctx.omitted.slots.length, 30);
+  // 16 kept candidates either carry text or are disclosed as byte-budget cuts; the rest are passage-limit cuts.
+  assert.equal(ctx.passages.length + ctx.omitted.passages.filter((x) => x.reason === 'byte-budget').length, LIM.passages, JSON.stringify(ctx.omitted.passages));
+  assert.ok(ctx.passages.length >= 8 && ctx.omitted.passages.filter((x) => x.reason === 'passage-limit').length >= 1);
+  assert.ok(ctx.slots.some((s) => s.omittedCitations > 0));
+  const byId = new Map(docs.map((d) => [d.id, d]));
+  for (const p of ctx.passages) {
+    const d = [...byId.values()].find((x) => p.location.sourceSha256 === sha(x.content) && x.content.startsWith(p.text));
+    assert.ok(d, 'passage text is an exact leading excerpt of a held document');
+    assert.equal(p.sha256, sha(p.text)); assert.equal(p.location.endOffset, p.text.length); assert.equal(p.truncated, p.text.length < d.content.length);
+    assert.ok(!/[\uD800-\uDBFF]$/.test(p.text), 'no split surrogate');
+  }
+  // Known sources whose excerpt was not shown are never reported as available.
+  for (const s of ctx.slots) for (const c of s.citations) {
+    if (c.text === 'omitted') assert.deepEqual(c.passageIds, []);
+    if (c.passageIds.length) assert.ok(['included', 'truncated'].includes(c.text));
+    if (!c.passageIds.length) assert.notEqual(s.citedText, 'available');
+  }
+  // Long known IDs are markers in the packet; the passage still binds by sha of the full source.
+  assert.ok(ctx.slots.flatMap((s) => s.citations).some((c) => /^doc:#sha256:[0-9a-f]{64}$/.test(c.ref)));
+});
+
+await check('many slots beyond any listing: omitted slots collapse into an exact count and the bound holds', () => {
+  const ps = Array.from({ length: 80 }, (_, i) => ({ expertId: `peer-${String(i).padStart(3, '0')}-${'\u0001'.repeat(20)}`, name: 'P', opinion: op(Array.from({ length: 12 }, (_, k) => `Uncited claim ${k}`)) }));
+  const b = brief();
+  const ctx = M.buildClaimSupportContext(b, ps);
+  assertBounded(ctx, b, ps);
+  assert.equal(ctx.slots.length, 6);
+  assert.ok(ctx.omitted.unlistedSlots > 0);
+  assert.equal(ctx.omitted.slots.length + ctx.omitted.unlistedSlots, 80 * 12 - 6);
+  // Absurd peer IDs: slots that cannot fit move to omitted as byte-budget, never silently.
+  const huge = peers3.map((e, i) => ({ expertId: `${i}${'\u0001'.repeat(1500)}`, name: 'H', opinion: op(['[doc:doc-1] budget', 'x']) }));
+  const h = M.buildClaimSupportContext(b, huge);
+  assertBounded(h, b, huge);
+  assert.ok(h.slots.length < 6 && h.slots.length + h.omitted.slots.length + h.omitted.unlistedSlots === 6);
+  assert.ok([...h.omitted.slots].some((s) => s.reason === 'byte-budget') || h.omitted.unlistedSlots > 0);
+});
+
+await check('line bounds: an excerpt or quote ending with a newline ends on its last covered line; offsets stay exact UTF-16', () => {
+  const src = 'first line of the document\nsecond line of the document\n' + 'x'.repeat(9000);
+  const b = brief({ documents: [{ id: 'doc-1', name: 'a.md', content: src }] });
+  const a = { ...peerA, opinion: op(['Lines [doc:doc-1]']) };
+  const ctx = M.buildClaimSupportContext(b, [a]);
+  const p = ctx.passages[0];
+  assert.equal(p.text, 'first line of the document\nsecond line of the document\n'); assert.ok(p.truncated);
+  assert.deepEqual([p.location.startLine, p.location.endLine, p.location.endOffset, p.location.totalLines], [1, 2, p.text.length, 3]);
+  const pr = (q) => M.parseReviewReply(reply([finding(A.id, 0, { status: 'partial', quotes: [{ passageId: p.passageId, quote: q }], rationale: 'r' })]), reviewer, [a], { claimSupportContext: ctx });
+  for (const [q, lines] of [['second line of the document\n', [2, 2]], ['first line of the document\nsecond line of the document\n', [1, 2]], ['document\nsecond', [1, 2]], ['first line of', [1, 1]]]) {
+    const out = pr(q);
+    assert.ok(!('invalid' in out), out.invalid);
+    const s = out.findings[0].claimSupport.quotes[0];
+    assert.deepEqual([s.startLine, s.endLine], lines, q);
+    assert.equal(src.slice(s.startOffset, s.endOffset), q); assert.equal(s.endOffset - s.startOffset, q.length);
+  }
+});
+
+await check('prompt states the packet bounds with the actual limit values', () => {
+  const m = M.reviewMessages(reviewer, [peerA, peerB], B0, undefined, PK);
+  assert.ok(m[0].content.includes(`at most ${LIM.slots} slots, ${LIM.citationsPerSlot} citations per slot (omittedCitations counts the rest), ${LIM.passages} passages of at most ${LIM.passageBytes} bytes, and ${LIM.totalBytes} bytes in all`));
+  assert.match(m[0].content, /unlistedSlots \/ unlistedPassages count cuts not listed/);
+  assert.match(m[0].content, new RegExp(`quotes: 0-${LIM.quotesPerFinding}, .*\\(${LIM.quoteMin}-${LIM.quoteMax} characters\\).*rationale at most ${LIM.rationale} characters`));
 });
 
 console.log(`claim-support: ${count} checks passed`);
