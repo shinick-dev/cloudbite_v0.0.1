@@ -361,8 +361,21 @@ export function memoMessages(brief: ProjectBrief, completed: readonly CompletedO
     return { id: d.id, name: d.name, kind: 'user-document-excerpt', truncated: c.truncated, excerpt: c.text, ...(d.origin ? { originMetadata: d.origin } : {}) };
   });
 
+  // source assessments: one reviewer model's reading of cited text per evidence finding, beside (never replacing) its verdict
+  const reports = opts.reviews ?? [];
+  const sourceAssessments = memoSourceAssessments(reports);
+  // core-claim findings: reviewer readings of a peer's summary/assumption/next action, checked only for an exact quote
+  const core = memoCoreClaims(reports, completed);
+  // These annotation sections live inside the same global prompt budget: their actual bytes (prompt rows, model-facing
+  // counts and system rules) are reserved out of the expert section, so a maximum-shaped team only gets a smaller
+  // fair share (disclosed per expert as truncation). Absent annotations reserve nothing: the legacy prompt is unchanged.
+  const annotationReserve = sourceAssessments || core ? utf8Bytes(JSON.stringify({
+    sourceAssessments: sourceAssessments ? [sourceAssessments.prompt, sourceAssessments.counts] : null,
+    coreClaimFindings: core ? [core.prompt, core.coverage] : null })) + (sourceAssessments ? utf8Bytes(SOURCE_ASSESSMENT_RULE) : 0)
+    + (core ? utf8Bytes(CORE_CLAIM_RULE) : 0) + 128 : 0;
+
   // experts: equal share each, so no leading subset dominates
-  const share = Math.min(B.expertMax, Math.floor(B.experts / completed.length));
+  const share = Math.min(B.expertMax, Math.floor((B.experts - annotationReserve) / completed.length));
   const expertCoverage: MemoExpertCoverage[] = [];
   const statedDirections: Record<OpinionDirection, number> = { support: 0, conditional: 0, concern: 0, abstain: 0 };
   // The share bounds the serialized entry (keys, ids and refs included): content gets what the JSON overhead leaves.
@@ -390,7 +403,6 @@ export function memoMessages(brief: ProjectBrief, completed: readonly CompletedO
   });
 
   // cross-review findings: reviewer readings, not verification
-  const reports = opts.reviews ?? [];
   const findingTotal = reports.reduce((n, r) => n + r.findings.length, 0);
   const perUnit = Math.floor(B.reviews / Math.max(1, findingTotal + reports.length));
   let revIncluded = 0, revTruncated = 0, revOmitted = 0;
@@ -407,11 +419,6 @@ export function memoMessages(brief: ProjectBrief, completed: readonly CompletedO
     });
     return { reviewerExpertId: r.reviewerExpertId, summary: s.text, findings };
   });
-
-  // source assessments: one reviewer model's reading of cited text per evidence finding, beside (never replacing) its verdict
-  const sourceAssessments = memoSourceAssessments(reports);
-  // core-claim findings: reviewer readings of a peer's summary/assumption/next action, checked only for an exact quote
-  const core = memoCoreClaims(reports, completed);
 
   // evidence packets: validated, capped, fair-shared; metadata packets carry no text
   const rawPackets = opts.packets ?? [];

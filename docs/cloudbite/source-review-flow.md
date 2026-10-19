@@ -69,6 +69,13 @@ not assessed, per-status counts, conflicts, gaps, and up to 16 KiB of whole item
 gap is never a contradiction, curated-card is a paraphrase. Core claims go in `coreClaimFindings` (6 KiB) without
 refs. Legacy reviews leave the prompt and coverage unchanged.
 
+Both sections live inside the unchanged 160 KiB global prompt bound (`CB_MEMO_PROMPT_MAX_BYTES`). When either is
+present, its actual prompt bytes (rows, model-facing counts, system rule, plus 128 B slack) are reserved out of the
+80 KiB expert section before the per-expert fair share is computed, so a maximum-shaped team (100 Korean roles at
+the field bounds, 6 documents, 3 full reports, packets, provenance) gets a smaller share, disclosed per expert as
+truncation, instead of overflowing. Ordinary 5-10 role projects keep the 3 KiB per-expert cap and an identical expert
+section; prompts without annotations are byte-identical to the pre-repair builder (`test/cloudbite-v5-memo-bound.mjs`).
+
 ## Known limits (integration owned elsewhere)
 
 - `client/cloudbite-console.ts` reads `AuthorResponseFinding.evidenceIndex/evidenceText` (lines 2350, 5281, 5283):
