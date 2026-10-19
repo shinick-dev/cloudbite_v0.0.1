@@ -6,6 +6,8 @@
 //   POST extend   {requestId}          -> ComputerState            (session ends at most SESSION_MS from now)
 //   POST snapshot {requestId,name}     -> ComputerState            (private cold filesystem capture; stops first, no RAM)
 //   POST launch   {}                   -> {url}                    (gateway URL with a single-use short ticket)
+//   GET  snapshots                     -> ComputerSnapshots        (own capture history; provider reads only, bounded re-checks)
+//   POST snapshots/select {requestId,account,name|null} -> ComputerSnapshots (template for a FUTURE new machine; no provider mutation)
 //   GET  performance                   -> ComputerPerformance      (cgroup sample cached >=10 s, estimated costs, hot-increase plans)
 //   POST resize   {requestId,cpu,memoryGiB,acknowledgeCost:true} -> ComputerState (running CPU/RAM increase; pending until observed)
 // requestId replays: same id + same arguments -> current state, or the original definite error; same id + other arguments
@@ -35,6 +37,9 @@ export const COMPUTER_ERRORS = {
   ticket_invalid: 'This desktop link is no longer valid. Open the computer again from CloudBite.',
   quota_exceeded: 'Daytona refused the increase: a resource quota or limit is reached. Nothing was changed.',
   resize_unavailable: 'Live resource increases are not available for this computer.',
+  snapshot_not_selectable: 'Only a finished snapshot captured by this computer can be chosen. Nothing was changed.',
+  snapshot_missing: 'That snapshot no longer exists in Daytona.',
+  template_unavailable: 'The chosen snapshot is not available as a finished capture of this computer. Choose another one or clear the choice; nothing was created.',
 } as const;
 export type ComputerErrorCode = keyof typeof COMPUTER_ERRORS;
 
@@ -55,6 +60,22 @@ export interface ComputerState {
   configuredAccounts: Array<{ id: ComputerAccount; label: string; available: boolean }>;
   ready: boolean;
   tools?: readonly { id: string; status: string; version: string | null }[];
+  /** Selected template for a future new machine (never applied to the current one). */
+  template?: { account: ComputerAccount; name: string } | null;
+}
+export const COMPUTER_SNAPSHOT_HISTORY_MAX = 20;
+export type ComputerSnapshotHistoryState = Exclude<ComputerSnapshotView['state'], 'waiting_stop'> | 'missing';
+/** One own capture: requested by this owner from its machine (collisions with foreign snapshots never appear here). */
+export interface ComputerSnapshotItem {
+  name: string; account: ComputerAccount; requestedAt: string; state: ComputerSnapshotHistoryState; error: ComputerErrorCode | null;
+  checkedAt: string | null; selected: boolean; selectable: boolean;
+}
+export interface ComputerSnapshots {
+  items: ComputerSnapshotItem[];
+  selected: { account: ComputerAccount; name: string } | null;
+  latest: ComputerSnapshotView | null;
+  machine: { status: ComputerStatus; account: ComputerAccount | null; id: string | null; template: string | null };
+  historyMax: number;
 }
 /** Internal identity for root RPC only (nested-compute setup); never contains provider URLs, tokens or keys. */
 export interface ComputerMachineRef { id: string; account: ComputerAccount; name: string; labels: Record<string, string>; status: ComputerStatus; region?: string | null }
