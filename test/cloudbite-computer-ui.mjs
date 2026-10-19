@@ -38,8 +38,11 @@ const state = (o = {}) => ({ ok: true, status: 'absent', error: null, machine: n
   configuredAccounts: [{ id: 'primary', label: 'Primary', available: true }, { id: 'secondary', label: 'Secondary', available: false }], ...o });
 const MACHINE = { id: 'sb-1', name: 'cloudbite-computer-owner', account: 'primary', region: 'us', cpu: 4, memoryGiB: 8, diskGiB: 10 };
 
+// The page's clock is a fake Date that advances only with e.advance(), so countdowns and deadlines are exact in tests.
+const T0 = Date.parse('2026-10-19T03:00:00Z');
 function env({ route, language = 'en-US', search = '', hash = '', webauthn = true, create = async () => attestation() } = {}) {
   const timers = new Map(); let seq = 0, now = 0;
+  class FakeDate extends Date { constructor(...a) { if (a.length) super(...a); else super(T0 + now); } static now() { return T0 + now; } }
   const doc = { activeElement: null, title: '', documentElement: { lang: 'en' }, visibilityState: 'visible', listeners: {},
     createElement: (t) => new El(doc, t), getElementById: (id) => (id === 'cb-computer' ? root : null),
     addEventListener(t, f) { (this.listeners[t] ||= []).push(f); } };
@@ -49,7 +52,7 @@ function env({ route, language = 'en-US', search = '', hash = '', webauthn = tru
   const location = { pathname: CLOUDBITE_COMPUTER_PATH, search, hash };
   const history = { state: null, replaceState(st, t, url) { replaced.push({ url, requests: requests.length, rendered: root.children.length, hashAtCall: location.hash }); location.hash = ''; } };
   const ctx = vm.createContext({
-    document: doc, location, history, URLSearchParams, URL, atob, btoa, Date, Uint8Array, ArrayBuffer,
+    document: doc, location, history, URLSearchParams, URL, atob, btoa, Date: FakeDate, Uint8Array, ArrayBuffer,
     crypto: webcrypto,
     navigator: { language, credentials: { get: async (o) => { gets.push(o); return assertion(); }, create: async (o) => { creates.push(o); return create(o); } } },
     ...(webauthn ? { PublicKeyCredential: function PublicKeyCredential() {} } : {}),
@@ -73,7 +76,7 @@ function env({ route, language = 'en-US', search = '', hash = '', webauthn = tru
   const btn = (text) => visible().find(e => e.tagName === 'BUTTON' && e.textContent === text);
   const links = () => visible().filter(e => e.tagName === 'A');
   const setVisibility = (v) => { doc.visibilityState = v; for (const f of doc.listeners.visibilitychange || []) f(); };
-  return { doc, root, requests, gets, creates, replaced, location, timers, flush, advance, all, visible, btn, links, setVisibility,
+  return { doc, root, requests, gets, creates, replaced, location, timers, flush, advance, all, visible, btn, links, setVisibility, now: () => T0 + now,
     text: () => visible().map(e => e._text + e.children.filter(c => typeof c === 'string').join('')).filter(Boolean).join(' | '),
     posts: (p) => requests.filter(r => r.method === 'POST' && r.url === p) };
 }
@@ -227,12 +230,12 @@ await test('polling: only while visible and pending, bounded, stops once running
 
 await test('running: open asks for a ticket and only accepts the separate desktop gateway URL', async () => {
   let url = `${GW}/p/_cloudbite/computer/desktop/?t=abc`;
-  const ends = new Date(Date.now() + 47 * 60000).toISOString();
+  const ends = new Date(T0 + 47 * 60000).toISOString();
   const { route } = owned(state({ status: 'running', machine: MACHINE, ready: true, sessionEndsAt: ends }), { launch: () => json(200, { ok: true, url }) });
   const e = env({ route });
   await e.flush();
   assert.match(e.text(), /4 vCPU · 8 GiB RAM · 10 GiB disk/);
-  assert.match(e.text(), /min left\). The machine then stops; data is kept\./);
+  assert.match(e.text(), /\(47 min left\)\. The machine then stops; files on disk are kept\./);
   assert.match(e.text(), /does not guarantee a price/);
   e.btn('Open desktop').click(); await e.flush();
   assert.deepEqual(e.posts('/api/cloudbite/computer/launch')[0].body, {});
@@ -809,6 +812,167 @@ await test('KO: performance and remote GPU cards speak Korean with plain button 
   assert.ok(e.btn('내 샌드박스 불러오기'));
   e.btn('EN').click();
   assert.ok(e.btn('Apply upgrade'), 'language switch keeps the open review');
+});
+
+// ── paid session: countdown, <=10 min warning, deadline (fake clock). Display only: it never extends, starts or stops by itself ──
+const MIN = 60000;
+const at = (ms) => new Date(T0 + ms).toISOString();
+const RUN_UNTIL = (ms, o = {}) => state({ status: 'running', machine: MACHINE, ready: true, sessionEndsAt: at(ms), ...o });
+const stateGets = (e) => e.requests.filter(r => r.url === `${API}/state`).length;
+const machinePosts = (e) => e.requests.filter(r => r.method === 'POST' && !r.url.startsWith(AUTH));
+const ticket = (e) => e.links().find(x => x.textContent === 'Open the desktop');
+
+await test('session countdown: minutes, then mm:ss with an inline RAM warning at <=10 min; Extend is one click, never automatic', async () => {
+  let e;
+  const { route } = owned(RUN_UNTIL(11 * MIN), { extend: (r, s) => { s.cur = RUN_UNTIL(e.now() - T0 + 120 * MIN); return json(200, s.cur); } });
+  e = env({ route });
+  await e.flush();
+  assert.match(e.text(), /\(11 min left\)/);
+  assert.ok(!/Less than 10 minutes left/.test(e.text()));
+  assert.equal(e.btn('Extend session').className, 'cc-btn');
+  assert.equal(e.timers.size, 1, 'one countdown tick, no polling');
+  await e.advance(MIN);
+  assert.match(e.text(), /\(10:00 left\)/);
+  assert.match(e.text(), /Less than 10 minutes left\. When time runs out the machine stops by itself: files on disk are kept, but open programs, terminals and anything only in memory \(RAM\) are closed and not saved\./);
+  await e.advance(1000); assert.match(e.text(), /\(9:59 left\)/);
+  await e.advance(1000); assert.match(e.text(), /\(9:58 left\)/);
+  assert.equal(e.btn('Extend session').className, 'cc-btn cc-primary', 'Extend is the obvious next step');
+  await e.advance(5 * MIN);
+  assert.equal(machinePosts(e).length, 0, 'the warning never extends, stops or starts anything');
+  assert.equal(stateGets(e), 1, 'the countdown itself does not poll');
+  e.btn('Extend session').click(); await e.flush();
+  const ext = e.posts(`${API}/extend`);
+  assert.equal(ext.length, 1);
+  assert.deepEqual(Object.keys(ext[0].body), ['requestId']); assert.match(ext[0].body.requestId, UUID);
+  assert.match(e.text(), /Session extended — it now ends /);
+  assert.ok(!/Less than 10 minutes left/.test(e.text()));
+  assert.match(e.text(), /\(2 h 0 min left\)/);
+  assert.ok(!/Notification|requestPermission|localStorage|sessionStorage/.test(CLOUDBITE_COMPUTER_JS), 'no notification permission or browser storage');
+});
+
+await test('deadline passes: ticket dropped and Open disabled at once, one state check, then only the server says stopped; nothing POSTed', async () => {
+  const { s, route } = owned(RUN_UNTIL(2 * MIN), { launch: () => json(200, { ok: true, url: `${GW}/p/_cloudbite/computer/desktop/?t=abc` }) });
+  const e = env({ route });
+  await e.flush();
+  e.btn('Open desktop').click(); await e.flush();
+  assert.ok(ticket(e));
+  const before = stateGets(e);
+  await e.advance(2 * MIN);
+  assert.equal(ticket(e), undefined, 'desktop ticket dropped at the deadline');
+  assert.equal(e.btn('Open desktop').disabled, true);
+  assert.match(e.text(), /Paid session: time is up\./);
+  assert.match(e.text(), /Time is up\. Checking with the server — the desktop cannot be opened until it answers\./);
+  assert.equal(stateGets(e), before + 1, 'one authoritative check at the deadline');
+  assert.ok(!/server reports the machine stopped/.test(e.text()), 'not claimed stopped before the server says so');
+  s.cur = state({ status: 'stopped', machine: MACHINE });
+  await e.advance(3000);
+  assert.match(e.text(), /The paid session ended and the server reports the machine stopped\. Files on disk are kept; programs that were open and anything only in memory \(RAM\) were closed and are not restored\./);
+  assert.ok(e.btn('Resume'));
+  assert.equal(e.btn('Open desktop'), undefined);
+  await e.advance(30 * MIN);
+  assert.deepEqual(e.requests.filter(r => r.method === 'POST').map(r => r.url), [`${API}/launch`], 'no automatic extend, stop or start');
+  assert.ok(!/Session extended/.test(e.text()));
+});
+
+await test('server still running after the deadline: Open stays closed with bounded rechecks; a later server deadline reopens it', async () => {
+  let e;
+  const { s, route } = owned(RUN_UNTIL(MIN));
+  e = env({ route });
+  await e.flush(); await e.advance(MIN + 30000);
+  assert.equal(e.btn('Open desktop').disabled, true);
+  assert.ok(stateGets(e) >= 5, `rechecks while past the deadline (${stateGets(e)})`);
+  s.cur = RUN_UNTIL(e.now() - T0 + 90 * MIN); // extended from another device
+  await e.advance(3000);
+  assert.equal(e.btn('Open desktop').disabled, false);
+  assert.match(e.text(), /\(1 h 29 min left\)/);
+  assert.ok(!/Time is up/.test(e.text()));
+  const n = stateGets(e);
+  await e.advance(5 * MIN);
+  assert.equal(stateGets(e), n, 'rechecks stop once the deadline is ahead again');
+  assert.equal(machinePosts(e).length, 0);
+  const { route: r2 } = owned(RUN_UNTIL(MIN));
+  const f = env({ route: r2 });
+  await f.flush(); await f.advance(2 * 60 * MIN);
+  const bounded = stateGets(f);
+  assert.ok(bounded <= 2 + 90, `bounded (${bounded})`);
+  await f.advance(60 * MIN); assert.equal(stateGets(f), bounded, 'stops at the bound');
+});
+
+await test('clock and polls stop while hidden and on sign-out; returning re-reads server state and explains an expiry seen there', async () => {
+  let e;
+  const { s, route } = owned(RUN_UNTIL(30 * MIN), { 'auth/logout': () => json(200, { authenticated: false }) });
+  e = env({ route });
+  await e.flush();
+  assert.equal(e.timers.size, 1);
+  e.setVisibility('hidden'); await e.flush();
+  assert.equal(e.timers.size, 0, 'no ticking while hidden');
+  const n = stateGets(e);
+  s.cur = state({ status: 'stopped', machine: MACHINE });
+  await e.advance(40 * MIN);
+  assert.equal(stateGets(e), n, 'nothing fetched while hidden');
+  e.setVisibility('visible'); await e.flush();
+  assert.equal(stateGets(e), n + 1, 'one state read on return');
+  assert.match(e.text(), /server reports the machine stopped/);
+  assert.equal(e.timers.size, 0, 'stopped: no ticking');
+  s.cur = RUN_UNTIL(e.now() - T0 + 60 * MIN);
+  e.btn('Refresh').click(); await e.flush();
+  assert.ok(!/server reports the machine stopped/.test(e.text()), 'a new session clears the ended note');
+  assert.equal(e.timers.size, 1);
+  e.btn('Sign out').click(); await e.flush();
+  assert.ok(e.btn('Sign in with passkey') || /Signed out/.test(e.text()));
+  assert.equal(e.timers.size, 0, 'no timers after sign-out');
+  await e.advance(3 * 60 * MIN);
+  assert.equal(machinePosts(e).length, 0);
+  assert.equal(stateGets(e), n + 2);
+});
+
+await test('Extend lost near the deadline: retry keeps the requestId; a late stop is never shown as extended or resumed', async () => {
+  let n = 0;
+  const { s, route } = owned(RUN_UNTIL(90 * 1000), { extend: () => { n++; return n === 1 ? Promise.reject(new Error('lost')) : json(409, { error: { code: 'not_running', message: 'x' } }); } });
+  const e = env({ route });
+  await e.flush();
+  e.btn('Extend session').click(); await e.flush();
+  assert.match(e.text(), /No definite answer/);
+  await e.advance(90 * 1000);
+  assert.match(e.text(), /Time is up\. Checking with the server/);
+  s.cur = state({ status: 'stopped', machine: MACHINE });
+  await e.advance(3000);
+  assert.match(e.text(), /server reports the machine stopped/);
+  assert.ok(!/Session extended/.test(e.text()));
+  e.btn('Retry same request').click(); await e.flush();
+  const ids = e.posts(`${API}/extend`).map(r => r.body.requestId);
+  assert.equal(ids.length, 2); assert.equal(new Set(ids).size, 1, 'same requestId');
+  assert.match(e.text(), /Rejected: not_running/);
+  assert.equal(e.posts(`${API}/start`).length, 0, 'never resumed by itself');
+  // a definite Extend answer that shows a stopped machine is not taken as an extension
+  const late = owned(RUN_UNTIL(5 * MIN), { extend: (r, s2) => { s2.cur = state({ status: 'stopped', machine: MACHINE }); return json(200, s2.cur); } });
+  const f = env({ route: late.route });
+  await f.flush();
+  f.btn('Extend session').click(); await f.flush();
+  assert.match(f.text(), /no longer running, so the session was not extended\. Resume starts it again; programs that were open are not restored\./);
+  assert.ok(!/Session extended/.test(f.text()));
+  assert.equal(f.posts(`${API}/start`).length, 0);
+});
+
+await test('KO countdown and warning; language switch keeps them; a wrong phone clock follows the server Date header', async () => {
+  const { route } = owned(RUN_UNTIL(5 * MIN));
+  const e = env({ route, language: 'ko-KR' });
+  await e.flush();
+  assert.match(e.text(), /\(5:00 남음\)/);
+  assert.match(e.text(), /10분도 남지 않았습니다\..*메모리\(RAM\)에만 있는 내용은 닫히며 저장되지 않습니다/);
+  e.btn('EN').click();
+  assert.match(e.text(), /\(5:00 left\)/);
+  assert.match(e.text(), /Less than 10 minutes left/);
+  let f;
+  const serverAt = (ms) => T0 - 3 * MIN + ms; // this phone's clock runs 3 minutes ahead of the server
+  const { route: base } = owned(state({ status: 'running', machine: MACHINE, ready: true, sessionEndsAt: new Date(serverAt(2 * MIN)).toISOString() }));
+  const skewed = (r, all) => (r.url === `${API}/state`
+    ? base(r, all).then(res => ({ ...res, headers: { get: (k) => (k === 'date' ? new Date(serverAt(f.now() - T0)).toUTCString() : null) } }))
+    : base(r, all));
+  f = env({ route: skewed });
+  await f.flush();
+  assert.match(f.text(), /\(2:00 left\)/, 'not shown as expired');
+  assert.equal(f.btn('Open desktop').disabled, false);
 });
 
 console.log(`cloudbite-computer-ui: ${pass} passed`);
