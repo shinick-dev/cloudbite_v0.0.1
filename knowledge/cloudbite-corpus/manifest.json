@@ -1,0 +1,230 @@
+{
+  "schema": "cloudbite.corpus-manifest/v1",
+  "note": "Openly licensed original documents only. No project documents, evaluation cases or answers. Each file is pinned by sha256; URLs are provenance, never fetched by the importer.",
+  "sources": [
+    {
+      "id": "orig-openroad-rsz-readme",
+      "title": "OpenROAD Gate Resizer (rsz) README",
+      "url": "https://github.com/The-OpenROAD-Project/OpenROAD/blob/1cf774db3ab22c72df2bc3605e1b4662d27523ed/src/rsz/README.md",
+      "format": "markdown",
+      "file": "sources/openroad/rsz-README.md",
+      "rights": "licensed",
+      "license": "BSD-3-Clause",
+      "licenseUrl": "https://github.com/The-OpenROAD-Project/OpenROAD/blob/1cf774db3ab22c72df2bc3605e1b4662d27523ed/LICENSE",
+      "attribution": "OpenROAD src/rsz/README.md at commit 1cf774db3ab22c72df2bc3605e1b4662d27523ed. Copyright (c) 2018-2025, The OpenROAD Authors. All rights reserved. Redistributed under the BSD 3-Clause License; the full license text is kept at knowledge/cloudbite-corpus/sources/openroad/LICENSE. Changes: Markdown tables longer than 2500 bytes are split into consecutive tables that repeat the header row.",
+      "version": "OpenROAD@1cf774db3ab22c72df2bc3605e1b4662d27523ed",
+      "retrievedAt": "2026-10-19",
+      "roles": [
+        "probably-primetime-sta",
+        "cb-role-072",
+        "cb-role-075",
+        "cb-role-076"
+      ],
+      "licenseEvidence": [
+        {
+          "file": "sources/openroad/LICENSE",
+          "quote": "Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.",
+          "sha256": "28cfc93cb2b552192bc316259d2c2a1aa5a980018cda1c5cd9b1143c9151aebb"
+        },
+        {
+          "file": "sources/openroad/rsz-README.md",
+          "quote": "BSD 3-Clause License. See [LICENSE](../../LICENSE) file.",
+          "sha256": "00c7f097191597a85ba2973fc9b16553cc8966ba172007318cde1756c8b8f310"
+        },
+        {
+          "url": "https://api.github.com/repos/The-OpenROAD-Project/OpenROAD/license",
+          "retrievedAt": "2026-10-19",
+          "quote": "\"spdx_id\": \"BSD-3-Clause\" (GitHub license detection for the repository LICENSE file)"
+        }
+      ],
+      "sha256": "00c7f097191597a85ba2973fc9b16553cc8966ba172007318cde1756c8b8f310",
+      "textSha256": "d91896b3b872e0242d31faa7df8c98e0ecc3b1a8d731340fcdd4d76365b7962e"
+    },
+    {
+      "id": "orig-openroad-gpl-readme",
+      "title": "OpenROAD Global Placement (gpl) README",
+      "url": "https://github.com/The-OpenROAD-Project/OpenROAD/blob/1cf774db3ab22c72df2bc3605e1b4662d27523ed/src/gpl/README.md",
+      "format": "markdown",
+      "file": "sources/openroad/gpl-README.md",
+      "rights": "licensed",
+      "license": "BSD-3-Clause",
+      "licenseUrl": "https://github.com/The-OpenROAD-Project/OpenROAD/blob/1cf774db3ab22c72df2bc3605e1b4662d27523ed/LICENSE",
+      "attribution": "OpenROAD src/gpl/README.md at commit 1cf774db3ab22c72df2bc3605e1b4662d27523ed. Copyright (c) 2018-2025, The OpenROAD Authors. All rights reserved. Redistributed under the BSD 3-Clause License; the full license text is kept at knowledge/cloudbite-corpus/sources/openroad/LICENSE. Changes: Markdown tables longer than 2500 bytes are split into consecutive tables that repeat the header row.",
+      "version": "OpenROAD@1cf774db3ab22c72df2bc3605e1b4662d27523ed",
+      "retrievedAt": "2026-10-19",
+      "roles": [
+        "probably-primetime-sta",
+        "cb-role-076"
+      ],
+      "licenseEvidence": [
+        {
+          "file": "sources/openroad/LICENSE",
+          "quote": "Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.",
+          "sha256": "28cfc93cb2b552192bc316259d2c2a1aa5a980018cda1c5cd9b1143c9151aebb"
+        },
+        {
+          "file": "sources/openroad/gpl-README.md",
+          "quote": "BSD 3-Clause License. See [LICENSE](../../LICENSE) file.",
+          "sha256": "3d08c974ea8c040d1377d15ae078ecf52ddf83e61467dccb47d9d4a211eea77c"
+        },
+        {
+          "url": "https://api.github.com/repos/The-OpenROAD-Project/OpenROAD/license",
+          "retrievedAt": "2026-10-19",
+          "quote": "\"spdx_id\": \"BSD-3-Clause\" (GitHub license detection for the repository LICENSE file)"
+        }
+      ],
+      "sha256": "3d08c974ea8c040d1377d15ae078ecf52ddf83e61467dccb47d9d4a211eea77c",
+      "textSha256": "29544ac86e95dbb0f91e3b0586c5c50f9449d7e4ada2da74a71d35f1b6ed6ff6"
+    },
+    {
+      "id": "orig-openroad-cts-readme",
+      "title": "OpenROAD Clock Tree Synthesis (cts) README",
+      "url": "https://github.com/The-OpenROAD-Project/OpenROAD/blob/1cf774db3ab22c72df2bc3605e1b4662d27523ed/src/cts/README.md",
+      "format": "markdown",
+      "file": "sources/openroad/cts-README.md",
+      "rights": "licensed",
+      "license": "BSD-3-Clause",
+      "licenseUrl": "https://github.com/The-OpenROAD-Project/OpenROAD/blob/1cf774db3ab22c72df2bc3605e1b4662d27523ed/LICENSE",
+      "attribution": "OpenROAD src/cts/README.md at commit 1cf774db3ab22c72df2bc3605e1b4662d27523ed. Copyright (c) 2018-2025, The OpenROAD Authors. All rights reserved. Redistributed under the BSD 3-Clause License; the full license text is kept at knowledge/cloudbite-corpus/sources/openroad/LICENSE. Changes: Markdown tables longer than 2500 bytes are split into consecutive tables that repeat the header row.",
+      "version": "OpenROAD@1cf774db3ab22c72df2bc3605e1b4662d27523ed",
+      "retrievedAt": "2026-10-19",
+      "roles": [
+        "probably-primetime-sta",
+        "cb-role-076"
+      ],
+      "licenseEvidence": [
+        {
+          "file": "sources/openroad/LICENSE",
+          "quote": "Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.",
+          "sha256": "28cfc93cb2b552192bc316259d2c2a1aa5a980018cda1c5cd9b1143c9151aebb"
+        },
+        {
+          "file": "sources/openroad/cts-README.md",
+          "quote": "BSD 3-Clause License. See [LICENSE](../../LICENSE) file.",
+          "sha256": "e99dd845861c3abcfb1558ffde278132ead446e5de41d26bac340ac038d458ca"
+        },
+        {
+          "url": "https://api.github.com/repos/The-OpenROAD-Project/OpenROAD/license",
+          "retrievedAt": "2026-10-19",
+          "quote": "\"spdx_id\": \"BSD-3-Clause\" (GitHub license detection for the repository LICENSE file)"
+        }
+      ],
+      "sha256": "e99dd845861c3abcfb1558ffde278132ead446e5de41d26bac340ac038d458ca",
+      "textSha256": "8be647f895330b52f0d80bd6b202b1d3bc48794a93f7b4c552df7aa299551acb"
+    },
+    {
+      "id": "orig-pmc1182327-ioannidis-2005",
+      "title": "Why Most Published Research Findings Are False",
+      "url": "https://doi.org/10.1371/journal.pmed.0020124",
+      "format": "jats-xml",
+      "file": "sources/pmc/PMC1182327.xml",
+      "rights": "licensed",
+      "license": "CC-BY-4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+      "attribution": "John P. A. Ioannidis (2005) Why Most Published Research Findings Are False. PLoS Medicine 2(8): e124. © 2005 John P. A. Ioannidis. https://doi.org/10.1371/journal.pmed.0020124. Open access under the Creative Commons Attribution License. Text retrieved as JATS XML from Europe PMC (PMC1182327, https://europepmc.org/article/PMC/PMC1182327). Changes: converted from JATS XML to Markdown; figure and table images, MathML-only rendering and journal front-matter metadata other than title, authors, copyright and license are not included.",
+      "version": "doi:10.1371/journal.pmed.0020124 (2005-08-30)",
+      "retrievedAt": "2026-10-19",
+      "roles": [
+        "cb-role-101",
+        "cb-role-105",
+        "cb-role-106",
+        "cb-role-118"
+      ],
+      "licenseNote": "The 2005 article names the Creative Commons Attribution License without a version; PLOS states it applies CC BY 4.0 to the articles it publishes and Europe PMC classifies the article as \"cc by\". Every CC BY version permits redistributing the complete text with attribution.",
+      "licenseEvidence": [
+        {
+          "file": "sources/pmc/PMC1182327.xml",
+          "quote": "This is an open-access article distributed under the terms of the Creative Commons Attribution License, which permits unrestricted use, distribution, and reproduction in any medium",
+          "sha256": "6095b3326a22274ea3ebbfb19e3fa287ddfcf36296f34397bf20ba5c3df85d65"
+        },
+        {
+          "file": "rights/europepmc-PMC1182327.json",
+          "quote": "\"license\":\"cc by\"",
+          "sha256": "5fd922905c818eecef9fe40e6106d3548179d6afc7feeae6802ca0ee0bf73cd9"
+        },
+        {
+          "url": "https://journals.plos.org/plosmedicine/s/licenses-and-copyright",
+          "retrievedAt": "2026-10-19",
+          "quote": "PLOS applies the Creative Commons Attribution 4.0 International (CC BY) license, or other comparable licenses that allow free and unrestricted use, to articles and other works we publish."
+        }
+      ],
+      "sha256": "6095b3326a22274ea3ebbfb19e3fa287ddfcf36296f34397bf20ba5c3df85d65",
+      "textSha256": "bef8044a61b390e6823c88574315c62155e3d3cd7aedf0f1fadb5598a5848b5f"
+    },
+    {
+      "id": "orig-pmc4359000-head-2015",
+      "title": "The Extent and Consequences of P-Hacking in Science",
+      "url": "https://doi.org/10.1371/journal.pbio.1002106",
+      "format": "jats-xml",
+      "file": "sources/pmc/PMC4359000.xml",
+      "rights": "licensed",
+      "license": "CC-BY-4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+      "attribution": "Megan L. Head, Luke Holman, Rob Lanfear, Andrew T. Kahn, Michael D. Jennions (2015) The Extent and Consequences of P-Hacking in Science. PLoS Biology 13(3): e1002106. © 2015 Head et al. https://doi.org/10.1371/journal.pbio.1002106. Open access under the Creative Commons Attribution License. Text retrieved as JATS XML from Europe PMC (PMC4359000, https://europepmc.org/article/PMC/PMC4359000). Changes: converted from JATS XML to Markdown; figure and table images, MathML-only rendering and journal front-matter metadata other than title, authors, copyright and license are not included.",
+      "version": "doi:10.1371/journal.pbio.1002106 (2015-03-13)",
+      "retrievedAt": "2026-10-19",
+      "roles": [
+        "cb-role-101",
+        "cb-role-105",
+        "cb-role-106",
+        "cb-role-118"
+      ],
+      "licenseEvidence": [
+        {
+          "file": "sources/pmc/PMC4359000.xml",
+          "quote": "This is an open-access article distributed under the terms of the Creative Commons Attribution License, which permits unrestricted use, distribution, and reproduction in any medium",
+          "sha256": "e39c00de8fe5c438f047979f1ce540df5228045cfeef291d6eeff3f8730119c7"
+        },
+        {
+          "file": "rights/europepmc-PMC4359000.json",
+          "quote": "\"license\":\"cc by\"",
+          "sha256": "fe7e36f08686cbf0c891c9d552d7b3ca05eea9f2ce02ffda423ee4ed8dccc8e3"
+        },
+        {
+          "url": "https://journals.plos.org/plosbiology/article?id=10.1371/journal.pbio.1002106",
+          "retrievedAt": "2026-10-19",
+          "quote": "© 2015 Head et al. This is an open access article distributed under the terms of the <a href=\"http://creativecommons.org/licenses/by/4.0/\">Creative Commons Attribution License</a>"
+        }
+      ],
+      "sha256": "e39c00de8fe5c438f047979f1ce540df5228045cfeef291d6eeff3f8730119c7",
+      "textSha256": "dd48dac639737ee4086c5bf4e3383157c0e935dc7d6d3849501de42a97d01891"
+    },
+    {
+      "id": "orig-pmc3812051-sandve-2013",
+      "title": "Ten Simple Rules for Reproducible Computational Research",
+      "url": "https://doi.org/10.1371/journal.pcbi.1003285",
+      "format": "jats-xml",
+      "file": "sources/pmc/PMC3812051.xml",
+      "rights": "licensed",
+      "license": "CC-BY-4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+      "attribution": "Geir Kjetil Sandve, Anton Nekrutenko, James Taylor, Eivind Hovig (2013) Ten Simple Rules for Reproducible Computational Research. PLoS Computational Biology 9(10): e1003285. © 2013 Sandve et al. https://doi.org/10.1371/journal.pcbi.1003285. Open access under the Creative Commons Attribution License. Text retrieved as JATS XML from Europe PMC (PMC3812051, https://europepmc.org/article/PMC/PMC3812051). Changes: converted from JATS XML to Markdown; figure and table images, MathML-only rendering and journal front-matter metadata other than title, authors, copyright and license are not included.",
+      "version": "doi:10.1371/journal.pcbi.1003285 (2013-10-24)",
+      "retrievedAt": "2026-10-19",
+      "roles": [
+        "cb-role-101",
+        "cb-role-106",
+        "cb-role-118"
+      ],
+      "licenseEvidence": [
+        {
+          "file": "sources/pmc/PMC3812051.xml",
+          "quote": "This is an open-access article distributed under the terms of the Creative Commons Attribution License, which permits unrestricted use, distribution, and reproduction in any medium",
+          "sha256": "6c72197e487de37923690bca0e31fd21cfb0f37d0a5eb313594df9661810fe71"
+        },
+        {
+          "file": "rights/europepmc-PMC3812051.json",
+          "quote": "\"license\":\"cc by\"",
+          "sha256": "e75199468f70e82f531dd0a90478f3e4e8a6cebdea01057cf46eb129b5f21e2e"
+        },
+        {
+          "file": "sources/pmc/PMC3812051.xml",
+          "quote": "content-type=\"ccbylicense\">https://creativecommons.org/licenses/by/4.0/</ali:license_ref><license-p>This is an open-access article distributed under the terms of the Creative Commons Attribution License",
+          "sha256": "6c72197e487de37923690bca0e31fd21cfb0f37d0a5eb313594df9661810fe71"
+        }
+      ],
+      "sha256": "6c72197e487de37923690bca0e31fd21cfb0f37d0a5eb313594df9661810fe71",
+      "textSha256": "8e0a9b9d654ae7ac694cd596836cbbebcdea1021ecc3a4062ac9e0f1525931c1"
+    }
+  ]
+}
