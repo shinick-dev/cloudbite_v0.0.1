@@ -178,6 +178,29 @@ await check('actual runner.py: system prompt carries the constructive rules on e
   }
 });
 
+await check('constructive wording fits the unchanged compact-final budget and invents no gate or stage', async () => {
+  const rules = M.CB_RUNNER_PY.match(/CONSTRUCTIVE_RULES = \(([\s\S]*?)\)\n/)[1].replace(/'\s*'|\\n/g, ' ').replace(/\s+/g, ' ');
+  // Prompt text only: these assert the instructions are mutually achievable, not that answers follow them.
+  assert.ok(M.CB_RUNNER_PY.includes('In final keep the report under 100 words') && M.CB_RUNNER_PY.includes('under 2500 characters'), 'budget rules unchanged');
+  assert.match(rules, /The final keeps the budget above: give the one most consequential concern/);
+  assert.match(rules, /up to two more only if they fit/);
+  assert.match(rules, /Optionally, .*out\/constructive-plan\.md before the final, within the same turns; the final must stand on its own without it/);
+  assert.match(rules, /Do not invent or impose a launch or sign-off gate merely because detail is absent, and do not assume a stage that was not stated; requirements the user stated still apply/);
+  assert.match(rules, /actual safety constraints and the citation and source rules still apply in full/);
+  assert.ok(!rules.includes('early-stage idea'), 'no blanket early-stage gate rule');
+  for (const lang of ['en', 'ko']) {
+    const t = M.WORKORDER_TEMPLATES[lang];
+    for (const s of [t.constructive, t.noQuota, t.proposed(true), t.proposed(false)]) assert.ok(s.length <= M.ASSIGNMENT_LIMITS.item, `${lang}: ${s.length} chars`);
+    assert.ok(t.noQuota.includes('out/constructive-plan.md'), `${lang}: optional supporting artifact`);
+  }
+  const en = M.WORKORDER_TEMPLATES.en, ko = M.WORKORDER_TEMPLATES.ko;
+  assert.match(en.constructive, /Lead with the one most consequential concern/); assert.match(en.constructive, /up to two more only if they fit; none is valid/);
+  assert.match(en.noQuota, /optional .*which must stand alone/);
+  assert.match(en.proposed(true), /merely because detail is absent; keep any requirement the user stated/);
+  assert.ok(!en.proposed(true).includes('early stage') && !ko.proposed(true).includes('초기 단계'), 'unspecified stage is not called early');
+  assert.match(ko.constructive, /가장 중요한 우려 하나를 먼저/); assert.match(ko.proposed(true), /세부가 없다는 이유만으로.*사용자가 진술한 요구사항은 유지/);
+});
+
 await check('runner budget constants and opinion limits are unchanged by v6', async () => {
   assert.equal(M.CB_RUNNER_ROUNDS, 6); assert.equal(M.CB_RUNNER_REPAIRS, 2); assert.equal(M.CB_INFERENCE_MAX_CALLS, 8);
   assert.deepEqual(M.ASSIGNMENT_LIMITS, { question: 800, items: 8, item: 400, perspectives: 14 });
