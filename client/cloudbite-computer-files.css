@@ -43,9 +43,11 @@ p{margin:0 0 12px}
 .cf-path-label{color:var(--muted);font-weight:400}
 .cf-toolbar-btns{display:flex;flex-wrap:wrap;gap:8px}
 
-.cf-facts{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;margin:8px 0 12px;font-size:14px}
-.cf-facts dt{color:var(--muted)}
-.cf-facts dd{margin:0;color:var(--navy);font-weight:600;overflow-wrap:anywhere;min-width:0;font-variant-numeric:tabular-nums}
+/* label | value: a long label wraps instead of squeezing the value; the value column never drops under 7rem (no one-letter
+   vertical stacks at 320–390px) and numbers/sizes stay on one line where they fit */
+.cf-facts{display:grid;grid-template-columns:minmax(0,max-content) minmax(7rem,1fr);gap:4px 12px;margin:8px 0 12px;font-size:14px}
+.cf-facts dt{color:var(--muted);min-width:0;overflow-wrap:anywhere}
+.cf-facts dd{margin:0;color:var(--navy);font-weight:600;overflow-wrap:break-word;min-width:0;font-variant-numeric:tabular-nums}
 
 .cf-field{display:grid;gap:6px;margin:12px 0;min-width:0}
 .cf-field-label{font-size:14px;font-weight:600;color:var(--navy);margin:0}

@@ -152,7 +152,9 @@ function server(o = {}) {
   return s;
 }
 
-function env({ srv = server(), language = 'en-US', search = '?lang=en' } = {}) {
+function env({ srv = server(), language = 'en-US', search = '?lang=en', withHistory = false } = {}) {
+  const urls = [];
+  const history = withHistory ? { state: null, replaceState(st, _t, url) { urls.push(url); } } : undefined;
   const doc = { title: '', documentElement: { lang: 'en' }, visibilityState: 'visible', listeners: {}, activated: [], focused: null,
     createElement: (t) => new El(doc, t), getElementById: (i) => (i === 'cb-computer-files' ? root : null),
     addEventListener(t, f) { (this.listeners[t] ||= []).push(f); } };
@@ -161,7 +163,7 @@ function env({ srv = server(), language = 'en-US', search = '?lang=en' } = {}) {
   const timers = new Map(); let tid = 0;
   const ctx = vm.createContext({
     document: doc, location: { pathname: CLOUDBITE_COMPUTER_FILES_PATH, search, hash: '' }, URLSearchParams, URL, Date, Uint8Array, Intl,
-    TextEncoder, AbortController, crypto: webcrypto, navigator: { language },
+    TextEncoder, AbortController, crypto: webcrypto, navigator: { language }, ...(history ? { history } : {}),
     setTimeout: (fn, ms) => { const i = ++tid; timers.set(i, { fn, ms }); return i; }, clearTimeout: (i) => { timers.delete(i); },
     fetch: (url, init = {}) => {
       const raw = typeof init.body === 'string' ? init.body : init.body === undefined ? undefined : Buffer.from(init.body);
@@ -186,7 +188,7 @@ function env({ srv = server(), language = 'en-US', search = '?lang=en' } = {}) {
   const rowBtn = (name) => row(name).children[0];
   const pick = (file) => { const c = byId('cf-upload-file'); c.files = file ? [file] : []; c.dispatch('change'); };
   const setVisibility = (v) => { doc.visibilityState = v; for (const f of doc.listeners.visibilitychange || []) f(); };
-  return { srv, doc, requests, timers, flush, all, visible, btn, btnLike, byId, text, posts, type, row, rowBtn, pick, setVisibility };
+  return { srv, doc, requests, timers, flush, all, visible, btn, btnLike, byId, text, posts, type, row, rowBtn, pick, setVisibility, urls };
 }
 const fakeFile = (name, bytes, o = {}) => ({ name, size: o.size ?? bytes.length, type: 'application/octet-stream', reads: 0,
   async arrayBuffer() { this.reads++; if (o.noRead) throw new Error('must not be read'); const c = Uint8Array.from(bytes); return c.buffer; } });
@@ -225,6 +227,8 @@ await test('page: same-origin script and style only, no inline code, storage, We
   assert.match(CLOUDBITE_COMPUTER_FILES_CSS, /\.cf-name\{[^}]*overflow-wrap:anywhere/);
   assert.match(CLOUDBITE_COMPUTER_FILES_CSS, /\.cf-grid\{display:grid;grid-template-columns:minmax\(0,1fr\)/);
   assert.match(CLOUDBITE_COMPUTER_FILES_CSS, /--navy:#142440/);
+  // storage/detail facts: a long label wraps, the value column keeps at least 7rem (no one-letter vertical stack at 320–390px)
+  assert.match(CLOUDBITE_COMPUTER_FILES_CSS, /\.cf-facts\{display:grid;grid-template-columns:minmax\(0,max-content\) minmax\(7rem,1fr\)/);
 });
 
 await test('browse: status then one metadata page; UTF-8, hostile and 255-byte names are plain text; folders navigate; never a body fetch', async () => {
@@ -521,6 +525,83 @@ await test('sign-out during an upload keeps it unconfirmed; after signing in aga
   assert.equal(begins.length, 2); assert.equal(begins[1].raw, begins[0].raw);
   assert.equal(e.posts('/create').length, 1);
   assert.match(e.text(), /Saved later\.bin/);
+});
+
+const netDown = { before: () => Promise.reject(new Error('offline')) };
+const badShape = { before: () => respond(200, { parentId: 'root', entries: 'nope', nextCursor: null }) };
+
+await test('first list read that fails (network or bad shape) ends loading: only the failure shows, the list is not called connected; Refresh recovers', async () => {
+  for (const [f, re] of [[netDown, /Could not refresh the list\. Network error — nothing was confirmed\./], [badShape, /Could not refresh the list\. The server answered in an unexpected way\./]]) {
+    const s = seeded();
+    s.faults[`GET ${API}`] = [f];
+    const e = env({ srv: s });
+    await e.flush();
+    assert.match(e.text(), re);
+    assert.ok(!/Loading…/.test(e.text()), 'no indefinite loading line after a definite failure');
+    assert.ok(!/This folder is empty/.test(e.text()), 'a failure is not an empty folder');
+    assert.match(e.text(), /File list \| Configured — list not read/);
+    assert.ok(!/File list \| Connected/.test(e.text()));
+    e.btn('Refresh').click(); await e.flush();
+    assert.ok(e.row('Documents'));
+    assert.ok(!/Could not refresh/.test(e.text()));
+    assert.match(e.text(), /File list \| Connected/);
+    assert.match(e.text(), /File contents \| Configured/);
+  }
+});
+
+await test('a refresh that fails keeps the rows already shown (list or status failure) and never shows loading or empty', async () => {
+  const s = seeded();
+  const e = env({ srv: s });
+  await e.flush();
+  e.rowBtn('보고서 2026 – 최종.pdf').click(); await e.flush();
+  s.faults[`GET ${API}`] = [netDown];
+  e.btn('Refresh').click(); await e.flush();
+  for (const n of ['Documents', '보고서 2026 – 최종.pdf', 'empty.txt']) assert.ok(e.row(n), `${n} kept`);
+  assert.equal(e.rowBtn('보고서 2026 – 최종.pdf').getAttribute('aria-expanded'), 'true', 'selection kept');
+  assert.match(e.text(), /Could not refresh the list\. Network error/);
+  assert.ok(!/Loading…|This folder is empty/.test(e.text()));
+  s.faults[`GET ${API}/status`] = [{ before: () => err(500, 'catalog_unavailable', true) }];
+  e.btn('Refresh').click(); await e.flush();
+  assert.ok(e.row('Documents') && e.row('empty.txt'));
+  assert.match(e.text(), /Could not refresh the list\. Rejected: catalog_unavailable/);
+  e.btn('Refresh').click(); await e.flush();
+  assert.ok(!/Could not refresh/.test(e.text())); assert.ok(e.row('Documents'));
+});
+
+await test('error details are worded in the language shown now, not the one active when the error happened', async () => {
+  const s = seeded();
+  s.faults[`GET ${API}`] = [netDown];
+  const e = env({ srv: s, search: '?lang=ko' });
+  await e.flush();
+  assert.match(e.text(), /목록을 새로 고치지 못했습니다\. 네트워크 오류 — 확인된 것이 없습니다\./);
+  e.btn('EN').click(); await e.flush();
+  assert.match(e.text(), /Could not refresh the list\. Network error — nothing was confirmed\./);
+  assert.ok(!/네트워크|목록을/.test(e.text()), 'no Korean detail left inside the English sentence');
+  e.btn('Refresh').click(); await e.flush();
+  // a known code in a download failure is explained, and re-explained after switching
+  s.faults[`POST ${API}/open`] = [{ before: () => err(409, 'not_verified') }];
+  e.rowBtn('보고서 2026 – 최종.pdf').click(); await e.flush();
+  e.btn('Download to this device').click(); await e.flush();
+  assert.match(e.text(), /Could not prepare the download\. The server could not verify this yet\./);
+  e.btn('KO').click(); await e.flush();
+  assert.match(e.text(), /내려받기를 준비하지 못했습니다\. 서버가 아직 확인하지 못했습니다\./);
+  assert.ok(!/could not verify/.test(e.text()));
+});
+
+await test('switching language rewrites ?lang= in place (kept on reload) and keeps other query and hash; no history API is harmless', async () => {
+  const e = env({ srv: seeded(), search: '?lang=ko&x=1', withHistory: true });
+  await e.flush();
+  assert.equal(e.urls.length, 0, 'loading does not touch the address');
+  e.btn('EN').click(); await e.flush();
+  assert.deepEqual(e.urls, ['/cloudbite/computer/files?lang=en&x=1']);
+  const n = e.requests.length;
+  e.btn('EN').click(); await e.flush();
+  assert.equal(e.urls.length, 1, 'pressing the current language changes nothing');
+  assert.equal(e.requests.length, n);
+  const plain = env({ srv: seeded(), search: '?lang=ko' });
+  await plain.flush();
+  plain.btn('EN').click(); await plain.flush();
+  assert.equal(plain.doc.documentElement.lang, 'en');
 });
 
 console.log(`${passed} cloudbite-computer-files-ui tests passed`);

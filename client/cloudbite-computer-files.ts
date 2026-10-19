@@ -11,7 +11,9 @@
 // request; an upload whose answer was lost first reads GET uploads/<id> and never mints a new write on its own.
 // No polling: a visible tab refreshes once when it becomes visible again. Nothing starts a machine or any paid provider action.
 // Everything is drawn with createElement/textContent (names isolated in <bdi>). Text comes from DICT (EN/KO); server error
-// codes are shown verbatim.
+// codes are shown verbatim. A message keeps what happened (code, HTTP status) and is worded when drawn, so switching language
+// never mixes an old-language detail into a new sentence; the switch also rewrites ?lang= (replaceState) so a reload keeps it.
+// A failed list read keeps the rows already shown and never leaves a loading line behind.
 
 const API = '/api/cloudbite/computer/files';
 const STATUS_API = `${API}/status`;
@@ -54,7 +56,7 @@ type Dir = { id: string; name: string };
 type Op = { kind: 'mkdir' | 'rename' | 'pin'; url: string; json: string; phase: 'sending' | 'uncertain'; key: string; label: () => string };
 type Step = 'create' | 'begin' | 'body' | 'commit';
 type Up = {
-  name: string; size: number; sha: string; bytes: ArrayBuffer; parentId: string; where: string; writerEpoch: number;
+  name: string; size: number; sha: string; bytes: ArrayBuffer; parentId: string; dirs: Dir[]; writerEpoch: number;
   createJson: string; beginId: string; beginJson: string | null; fileId: string | null; uploadId: string | null;
   step: Step; phase: 'sending' | 'uncertain' | 'failed'; code: string;
 };
@@ -74,7 +76,7 @@ const DICT = {
     checkAgain: 'Check again',
     notConfigured: 'File storage is not configured for this Cloudbite yet. Nothing is stored and no files can be listed.',
     blobsMissing: 'File contents storage is not configured. You can browse names, but downloads and uploads are off.',
-    storeTitle: 'Storage', sConnected: 'Connected', sNotConfigured: 'Not configured', sCatalog: 'File list', sBlobs: 'File contents',
+    storeTitle: 'Storage', sConnected: 'Connected', sConfigured: 'Configured', sUnread: 'Configured — list not read', sNotConfigured: 'Not configured', sCatalog: 'File list', sBlobs: 'File contents',
     sUsed: 'Used', sUsedOf: (u: string, q: string) => `${u} of ${q}`, sPending: 'Unfinished uploads', sDirty: 'Changed on cloud computer, not uploaded', sPinned: 'Kept on cloud computer',
     whereTitle: 'Three different places',
     where: [
@@ -145,7 +147,7 @@ const DICT = {
     checkAgain: '다시 확인',
     notConfigured: '이 Cloudbite 에는 아직 파일 저장소가 설정되지 않았습니다. 저장된 것이 없고 파일 목록도 볼 수 없습니다.',
     blobsMissing: '파일 내용 저장소가 설정되지 않았습니다. 이름은 볼 수 있지만 내려받기와 올리기는 꺼져 있습니다.',
-    storeTitle: '저장소', sConnected: '연결됨', sNotConfigured: '설정 안 됨', sCatalog: '파일 목록', sBlobs: '파일 내용',
+    storeTitle: '저장소', sConnected: '연결됨', sConfigured: '설정됨', sUnread: '설정됨 — 목록 못 읽음', sNotConfigured: '설정 안 됨', sCatalog: '파일 목록', sBlobs: '파일 내용',
     sUsed: '사용량', sUsedOf: (u: string, q: string) => `${q} 중 ${u}`, sPending: '끝나지 않은 올리기', sDirty: '클라우드 컴퓨터에서 바뀌었고 아직 올리지 않음', sPinned: '클라우드 컴퓨터에 항상 보관',
     whereTitle: '서로 다른 세 곳',
     where: [
@@ -346,7 +348,7 @@ function mount(root: HTMLElement): void {
   const S = {
     auth: 'loading' as 'loading' | 'in' | 'out' | 'failed', loading: false, loadMsg: null as Msg,
     status: null as Status | null, path: [] as Dir[], entries: [] as Entry[], cursor: null as string | null, listed: false,
-    listing: false, more: false, listMsg: null as Msg, gone: false, listVer: 0,
+    listing: false, more: false, listMsg: null as Msg, listFail: false, gone: false, listVer: 0,
     sel: null as string | null, renaming: null as string | null, drafts: new Map<string, string>(), rowMsg: null as Msg,
     op: null as Op | null, opMsg: null as Msg, mkMsg: null as Msg,
     dl: null as { fileId: string; phase: 'sending' | 'ready' } | null, dlLink: null as { fileId: string; href: string; name: string; size: number } | null, dlMsg: null as Msg,
@@ -359,13 +361,16 @@ function mount(root: HTMLElement): void {
   const sel = (): Entry | null => S.entries.find(e => e.fileId === S.sel) || null;
   const maxUpload = (): number => Math.min(UPLOAD_MAX, S.status && S.status.maxFileBytes > 0 ? S.status.maxFileBytes : UPLOAD_MAX);
   const codeText = (c: string): string => T().codes[c] || T().rejected(c);
+  /** The detail of a failed answer, worded in the language shown when it is drawn (known codes explained when asked) */
+  const failText = (r: Reply, explain = false) => (): string =>
+    (r.ok ? T().odd : r.status === 0 ? T().netErr : explain ? codeText(r.code || String(r.status)) : T().rejected(r.code || String(r.status)));
 
   // ── skeleton ──
   const brand = h('strong', 'cf-brand'), brandSub = h('span', 'cf-sub');
   const backLink = link('cf-nav-link', COMPUTER_PATH);
   const langNav = h('nav', 'cf-lang');
   const langBtns = (['en', 'ko'] as Lang[]).map(l => {
-    const b = button('cf-lang-btn', () => { if (lang !== l) { lang = l; render(); } });
+    const b = button('cf-lang-btn', () => { if (lang !== l) { lang = l; keepLang(); render(); } });
     b.textContent = l.toUpperCase(); b.setAttribute('lang', l);
     langNav.append(b);
     return b;
@@ -459,6 +464,15 @@ function mount(root: HTMLElement): void {
   const work = h('div', 'cf-grid', listCard, h('div', 'cf-stack', addCard, storeCard, whereCard));
   root.replaceChildren(header, h('main', 'cf-main', h1, lead, gate, work));
 
+  /** The language lives only in ?lang= (no storage, no new history entry); if the address cannot change, the page still switches */
+  function keepLang(): void {
+    const g = globalThis as { history?: History };
+    if (!g.history || typeof g.history.replaceState !== 'function') return;
+    const q = new URLSearchParams(location.search || '');
+    q.set('lang', lang);
+    try { g.history.replaceState(g.history.state, '', `${location.pathname || ''}?${q.toString()}${location.hash || ''}`); } catch { /* text still switches */ }
+  }
+
   // ── data ──
   async function refresh(): Promise<void> {
     const g = gen;
@@ -469,9 +483,10 @@ function mount(root: HTMLElement): void {
     if (!res.ok && authStatus(res.status)) { signedOut(); return; }
     const st = res.ok ? normalizeStatus(res.body) : null;
     if (!st) {
-      const m = res.ok ? 'odd' : res.status === 0 ? 'net' : res.code || String(res.status);
-      const msg: Msg = { text: () => `${S.auth === 'in' ? T().listFailed : T().loadFailed} ${m === 'odd' ? T().odd : m === 'net' ? T().netErr : T().rejected(m)}`, kind: 'warn' };
-      if (S.auth === 'in') S.listMsg = msg; else { S.loadMsg = msg; S.auth = 'failed'; }
+      const inside = S.auth === 'in', detail = failText(res);
+      const msg: Msg = { text: () => `${inside ? T().listFailed : T().loadFailed} ${detail()}`, kind: 'warn' };
+      // signed in already: the rows shown so far stay, only marked as not refreshed
+      if (inside) { S.listMsg = msg; S.listFail = true; } else { S.loadMsg = msg; S.auth = 'failed'; }
       render(); return;
     }
     S.status = st; S.auth = 'in'; S.loadMsg = null;
@@ -490,25 +505,26 @@ function mount(root: HTMLElement): void {
     S.listing = false; S.more = false;
     if (!res.ok && authStatus(res.status)) { signedOut(); return; }
     if (!res.ok && res.code === 'store_not_configured' && S.status) { S.status = { ...S.status, catalog: false }; S.entries = []; S.listVer++; render(); return; }
-    if (!res.ok && res.code === 'not_found') { S.gone = true; S.entries = []; S.cursor = null; S.listed = true; S.listMsg = null; S.listVer++; render(); return; }
+    if (!res.ok && res.code === 'not_found') { S.gone = true; S.entries = []; S.cursor = null; S.listed = true; S.listMsg = null; S.listFail = false; S.listVer++; render(); return; }
     const b = res.ok ? res.body : null;
     const next = b && (b.nextCursor === null || (typeof b.nextCursor === 'string' && b.nextCursor.length <= CURSOR_MAX)) ? b.nextCursor as string | null : undefined;
     if (!b || b.parentId !== parentId || !Array.isArray(b.entries) || next === undefined) {
-      const m = res.ok ? T().odd : res.status === 0 ? T().netErr : T().rejected(res.code || String(res.status));
-      S.listMsg = { text: () => `${T().listFailed} ${m}`, kind: 'warn' }; render(); return;
+      // a definite failure: rows already shown stay (not cleared, not marked loading); a first read shows only the failure
+      const detail = failText(res);
+      S.listMsg = { text: () => `${T().listFailed} ${detail()}`, kind: 'warn' }; S.listFail = true; render(); return;
     }
     const page = b.entries.slice(0, 200).map(normalizeEntry).filter((e): e is Entry => !!e && e.parentId === parentId);
     const base = append ? S.entries : [];
     const seen = new Set(base.map(e => e.fileId));
     S.entries = base.concat(page.filter(e => !seen.has(e.fileId))).slice(0, MAX_ENTRIES);
     S.cursor = S.entries.length >= MAX_ENTRIES ? null : next;
-    S.listed = true; S.gone = false; S.listMsg = null; S.listVer++;
+    S.listed = true; S.gone = false; S.listMsg = null; S.listFail = false; S.listVer++;
     if (S.sel && !S.entries.some(e => e.fileId === S.sel) && !append) { S.sel = null; S.renaming = null; }
     render();
   }
 
   function go(path: Dir[]): void {
-    S.path = path; S.entries = []; S.cursor = null; S.listed = false; S.gone = false; S.sel = null; S.renaming = null; S.rowMsg = null; S.listMsg = null;
+    S.path = path; S.entries = []; S.cursor = null; S.listed = false; S.listFail = false; S.gone = false; S.sel = null; S.renaming = null; S.rowMsg = null; S.listMsg = null;
     S.dlLink = null; S.dlMsg = null; S.listVer++;
     render();
     if (typeof listTitle.focus === 'function') listTitle.focus();
@@ -594,8 +610,8 @@ function mount(root: HTMLElement): void {
     const d = res.ok && isObj(res.body.descriptor) ? res.body.descriptor : null;
     const vid = d ? idOr(d.versionId, VERSION_ID) : null;
     if (!d || d.fileId !== fileId || vid !== versionId || typeof d.size !== 'number') {
-      const m = res.ok ? T().odd : res.status === 0 ? T().netErr : codeText(res.code || String(res.status));
-      S.dlMsg = { text: () => `${T().dlFailed} ${m}`, kind: 'warn' }; render(); return;
+      const detail = failText(res, true);
+      S.dlMsg = { text: () => `${T().dlFailed} ${detail()}`, kind: 'warn' }; render(); return;
     }
     const name = typeof d.name === 'string' && d.name ? d.name : e.name, size = d.size;
     S.dlLink = { fileId, href: `${API}/content/${encodeURIComponent(fileId)}?versionId=${encodeURIComponent(vid)}`, name, size };
@@ -624,7 +640,7 @@ function mount(root: HTMLElement): void {
     if (g !== gen || S.auth !== 'in' || !st || !canUpload()) { S.upMsg = null; render(); return; }
     const n = name.normalize('NFC'), parentId = cur().id;
     const up: Up = {
-      name: n, size: buf.byteLength, sha, bytes: buf, parentId, where: pathText(), writerEpoch: st.writerEpoch,
+      name: n, size: buf.byteLength, sha, bytes: buf, parentId, dirs: S.path.slice(), writerEpoch: st.writerEpoch,
       createJson: JSON.stringify({ requestId: uuid(), parentId, name: n, kind: 'file' }), beginId: uuid(), beginJson: null, fileId: null, uploadId: null,
       step: 'create', phase: 'sending', code: '',
     };
@@ -718,7 +734,7 @@ function mount(root: HTMLElement): void {
     gen++; ac.abort(); ac = new AbortController();
     if (S.op?.phase === 'sending') S.op.phase = 'uncertain';
     if (S.up?.phase === 'sending') S.up.phase = 'uncertain';
-    Object.assign(S, { auth: 'out', loading: false, loadMsg: null, status: null, entries: [], cursor: null, listed: false, listing: false, more: false, listMsg: null, dl: null, dlLink: null, dlMsg: null, upBusy: false });
+    Object.assign(S, { auth: 'out', loading: false, loadMsg: null, status: null, entries: [], cursor: null, listed: false, listing: false, more: false, listMsg: null, listFail: false, dl: null, dlLink: null, dlMsg: null, upBusy: false });
     S.listVer++;
     render();
   }
@@ -740,7 +756,7 @@ function mount(root: HTMLElement): void {
     return `${s} ${u[i]}`;
   }
   const when = (ms: number): string => (ms > 0 ? new Date(ms).toLocaleString(lang) : '');
-  function pathText(): string { return [T().home].concat(S.path.map(d => d.name)).join(' / '); }
+  function pathText(dirs: Dir[] = S.path): string { return [T().home].concat(dirs.map(d => d.name)).join(' / '); }
   function fact(dl: HTMLElement, k: string, v: string): void { dl.append(h('dt', '', k), h('dd', '', v)); }
 
   function render(): void {
@@ -765,8 +781,9 @@ function mount(root: HTMLElement): void {
     // storage
     storeTitle.textContent = d.storeTitle;
     storeFacts.replaceChildren();
-    fact(storeFacts, d.sCatalog, st.catalog ? d.sConnected : d.sNotConfigured);
-    fact(storeFacts, d.sBlobs, st.blobs ? d.sConnected : d.sNotConfigured);
+    // configured is not connected: the list counts as connected only after its last read succeeded; contents are never read here
+    fact(storeFacts, d.sCatalog, !st.catalog ? d.sNotConfigured : S.listed && !S.listFail ? d.sConnected : S.listFail ? d.sUnread : d.sConfigured);
+    fact(storeFacts, d.sBlobs, st.blobs ? d.sConfigured : d.sNotConfigured);
     if (st.catalog) {
       fact(storeFacts, d.sUsed, st.quotaBytes > 0 ? d.sUsedOf(bytes(st.usedBytes), bytes(st.quotaBytes)) : bytes(st.usedBytes));
       fact(storeFacts, d.sPending, nf().format(st.pendingUploads));
@@ -791,12 +808,13 @@ function mount(root: HTMLElement): void {
     moreBtn.hidden = !st.catalog || !S.cursor;
     moreBtn.textContent = S.more ? d.moreLoading : d.more; moreBtn.disabled = S.listing;
 
-    const key = `${lang}|${S.listVer}|${S.sel}|${st.catalog}|${S.listed}`;
+    const key = `${lang}|${S.listVer}|${S.sel}|${st.catalog}|${S.listed}|${S.listFail}`;
     if (key !== rowsKey) {
       rowsKey = key;
       const rows = S.entries.map(row);
-      if (!rows.length && S.listed && !S.gone) rows.push(h('li', 'cf-empty', d.listNone));
-      if (!rows.length && !S.listed && st.catalog) rows.push(h('li', 'cf-empty', d.loading));
+      // empty only after a successful read; loading only while no read has finished; a failed first read shows just its message
+      if (!rows.length && S.listed && !S.listFail && !S.gone) rows.push(h('li', 'cf-empty', d.listNone));
+      if (!rows.length && !S.listed && !S.listFail && st.catalog) rows.push(h('li', 'cf-empty', d.loading));
       if (S.entries.length >= MAX_ENTRIES) rows.push(h('li', 'cf-empty', d.capped(MAX_ENTRIES)));
       list.replaceChildren(...rows);
     }
@@ -823,7 +841,7 @@ function mount(root: HTMLElement): void {
     upForget.textContent = d.forget; upForget.hidden = !up || up.phase === 'sending';
     let um: Msg = S.upMsg;
     if (up) {
-      const target = d.uploadTo(up.name, up.where);
+      const target = d.uploadTo(up.name, pathText(up.dirs));
       if (up.phase === 'sending') um = { text: () => `${target} · ${T().steps[up.step]}`, kind: 'info' };
       else if (up.phase === 'uncertain') um = { text: () => `${target} · ${T().upUncertain}`, kind: 'warn' };
       else um = { text: () => `${target} · ${up.code === 'mismatch' ? T().upMismatch : up.code === 'aborted' ? T().upAborted : up.code === 'odd' ? T().odd : T().upFailed(codeText(up.code))}`, kind: 'warn' };
