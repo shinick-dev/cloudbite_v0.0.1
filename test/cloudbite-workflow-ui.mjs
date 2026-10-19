@@ -455,4 +455,287 @@ await test('PMC 합치기 한도: 6개·합계·중복은 거절하고 이유를
   assert.deepEqual(docNames(env), ['f2.txt', 'f3.txt', 'f4.txt', 'f5.txt', 'PMC7654321-abstract.md', 'PMC7654321-results.md'], 'a rejected pick stays picked for the retry; existing files are kept');
 });
 
+// ───────── 2단계: 결정 메모 · 관찰 신호 · 후속 라운드
+const PARENT = 'cb' + 'a'.repeat(32);
+const opinionOf = (dir, conf, ev) => ({ direction: dir, confidence: conf, summary: `Summary ${dir}`, evidence: ev, assumptions: ['A1'], nextActions: ['Pilot'] });
+const doneExperts = () => [
+  { id: 'run-0', expertId: 'x1', name: 'Expert 1', status: 'completed', activity: [], artifacts: [], updatedAt: 2, opinion: opinionOf('support', 70, ['Cites [doc:doc-1]']) },
+  { id: 'run-1', expertId: 'x2', name: 'Expert 2', status: 'completed', activity: [], artifacts: [], updatedAt: 2, opinion: opinionOf('concern', 55, ['No source']) },
+];
+const SIG = (expertId, over = {}) => ({ expertId, selfAssessedConfidence: 70, evidenceItems: 1, unreferencedEvidenceItems: 0,
+  references: { total: 1, document: 1, workspace: 0, knowledge: 0 }, suppliedText: { available: 1, missing: 0 },
+  knowledge: { curatedCardText: 0, curatedCardTextOmitted: 0, retrievalUnverified: 0, notRetrieved: 0 }, unknownReferences: 0,
+  observedRetrieval: null, assumptions: 1, crossReview: null, ...over });
+const SIGNALS = { schema: 'cloudbite.evidence-signals/v1', interpretation: 'Observed counts, not accuracy.',
+  experts: [SIG('x1'), SIG('x2', { selfAssessedConfidence: 55, observedRetrieval: { binding: 'bound', retrievals: 0, cards: 0, sources: 0 },
+    crossReview: { reviewers: 0, findings: 0, supported: 0, challenged: 0, insufficient: 0, evidenceItemsReviewed: 0 } })],
+  packetCoverage: { supplied: true, included: 1, total: 2, omittedExpertIds: ['x1'] },
+  review: { completedOpinions: 2, reviewedOpinions: 0, reviewers: 0, status: 'not-run', disclosure: 'No cross-review has run.' } };
+const claim = (text, expertIds, refs) => ({ text, expertIds, refs });
+const DMEMO = { summary: 'Prefer waiting one quarter.',
+  recommendation: { status: 'recommend', optionIds: ['option-2'], options: [{ id: 'option-2', text: 'Wait a quarter' }], rationale: 'Lower launch risk.', expertIds: ['x1'], refs: [{ kind: 'opinion-evidence', expertId: 'x1', index: 0 }] },
+  comparison: [
+    { optionId: 'option-1', optionText: 'Ship now', benefits: [claim('Faster revenue', ['x1'], [{ kind: 'document', id: 'doc-1' }])], risks: [claim('Support load', ['x2'], [])], conditions: [] },
+    { optionId: 'option-2', optionText: 'Wait a quarter', benefits: [], risks: [], conditions: [claim('Hiring closes', ['x1'], [{ kind: 'brief', field: 'decision.constraints' }])] }],
+  dissent: [claim('Expert 2 prefers shipping', ['x2'], [{ kind: 'review-finding', reviewerExpertId: 'x2', index: 0 }])],
+  criticalUnknowns: [claim('Churn rate', [], [{ kind: 'packet', id: 'pk-1' }])], changeTriggers: [], nextActions: [claim('Run a pilot', ['x1', 'x2'], [])],
+  basis: 'derived-interpretation', confidence: 'not-calibrated' };
+const COVERAGE = { teamSize: 2, completed: 2, statusCounts: { completed: 2 }, statedDirections: { support: 1, conditional: 0, concern: 1, abstain: 0 },
+  experts: [{ expertId: 'x1', summaryTruncated: true, evidenceIncluded: [0], evidenceTotal: 1, itemsTruncated: 0, assumptionsIncluded: 1, assumptionsTotal: 1, nextActionsIncluded: 1, nextActionsTotal: 1 }],
+  documents: [{ id: 'doc-1', includedBytes: 10, originalBytes: 20, truncated: true }],
+  brief: { objectiveTruncated: false, contextTruncated: false, decisionItemsTruncated: 0, decisionItemsOmitted: 2 },
+  reviews: { included: 0, total: 0, truncated: 0, omitted: 0, reports: 0 }, packets: { included: 1, total: 2, truncated: 0, omitted: 1, invalid: 0, metadataOnly: 1 },
+  fullReportsReviewed: false, sourcePagesReviewed: false, promptBytes: 4000 };
+const MEMO_DONE = { version: 'cloudbite-memo/v1', status: 'completed', attempts: 1, execution: 'server-nosana', startedAt: 5, completedAt: 6, language: 'en', coverage: COVERAGE, memo: DMEMO };
+const ROUND = { version: 'project-round/v1', parentId: PARENT, changeSummary: 'Budget halved', newRoles: ['x3'],
+  comparison: { stage: { previous: 'design', current: 'validation', changed: true }, responseLanguage: { previous: 'en', current: 'en', changed: false },
+    options: { previous: [{ id: 'option-1', text: 'Ship now' }], current: [{ id: 'option-1', text: 'Wait' }, { id: 'option-2', text: 'Ship now' }], exactTextMatches: [{ previous: 'option-1', current: 'option-2' }] },
+    constraints: { added: ['Half budget'], removed: [], unchanged: 1 }, successCriteria: { added: [], removed: [], unchanged: 0 }, unknowns: { added: [], removed: ['Churn?'], unchanged: 0 },
+    documents: { added: [], removed: [], changed: ['doc-1'], unchanged: [], current: [{ id: 'doc-1', name: 'n.txt', bytes: 4, sha256: 'f'.repeat(64) }] },
+    roles: { added: ['x3'], removed: ['x2'], kept: ['x1'] }, semanticImpact: 'not-analyzed' },
+  reference: { label: 'previous-round-reference', trust: 'untrusted-data', parentId: PARENT, parentStatus: 'completed',
+    opinions: [{ expertId: 'x1', name: 'Expert 1', selectedAgain: true, direction: 'support', confidence: 70, summary: 'Earlier view', evidence: ['Old evidence'] }],
+    excluded: [{ expertId: 'x2', status: 'failed' }], omissions: [{ path: 'opinions[0].summary', omittedBytes: 40 }], bytes: 900 } };
+const doneProject = (b, over = {}) => ({ ...runningProject(b), status: 'completed', updatedAt: 3, experts: doneExperts(), ...over });
+
+await test('2단계 사전: p2 의 EN·KO 열쇠가 같고, 메모·신호는 정확도·보정·투표가 아니라고 밝힌다', () => {
+  assert.deepEqual(Object.keys(KO.p2).sort(), Object.keys(EN.p2).sort());
+  for (const k of ['sigReviewStatus', 'revBasis']) assert.deepEqual(Object.keys(KO.p2[k]).sort(), Object.keys(EN.p2[k]).sort(), k);
+  assert.match(EN.p2.memoRecNote, /not a vote count, accuracy or calibrated confidence/);
+  assert.match(EN.p2.sigNote, /not the original source page/); assert.match(EN.p2.sigNote, /not accuracy/);
+  assert.match(EN.p2.revCap, /3 reviewers × 3 peers/); assert.match(EN.p2.roundNote, /reference only/);
+  assert.equal(EN.p2.unknown, 'UNKNOWN'); assert.match(KO.p2.unknown, /UNKNOWN/);
+});
+
+await test('normalizeMemo·normalizeSignals·normalizeRound: 계약 모양 그대로, 하나라도 틀리면 null (null 칸은 0 으로 바꾸지 않는다)', () => {
+  assert.deepEqual(plain(core.normalizeMemo(MEMO_DONE)), MEMO_DONE);
+  for (const bad of [{ ...MEMO_DONE, memo: { ...DMEMO, basis: 'votes' } }, { ...MEMO_DONE, memo: { ...DMEMO, confidence: 0.8 } }, { ...MEMO_DONE, memo: undefined },
+    { ...MEMO_DONE, memo: { ...DMEMO, dissent: [claim('x', [], [{ kind: 'web', id: 'u' }])] } }, { ...MEMO_DONE, coverage: { ...COVERAGE, sourcePagesReviewed: true } },
+    { ...MEMO_DONE, status: 'done' }, { ...MEMO_DONE, attempts: -1 }])
+    assert.equal(core.normalizeMemo(bad), null);
+  assert.deepEqual(plain(core.normalizeMemo({ version: 'cloudbite-memo/v1', status: 'idle', attempts: 0, execution: 'none' })), { version: 'cloudbite-memo/v1', status: 'idle', attempts: 0, execution: 'none' });
+  const sg = core.normalizeSignals(SIGNALS);
+  assert.deepEqual(plain(sg), SIGNALS);
+  assert.equal(sg.experts[0].observedRetrieval, null); assert.equal(sg.experts[0].crossReview, null);
+  for (const bad of [{ ...SIGNALS, schema: 'v2' }, { ...SIGNALS, experts: [SIG('x1', { crossReview: { findings: 1 } })] }, { ...SIGNALS, packetCoverage: { ...SIGNALS.packetCoverage, omittedExpertIds: null } }])
+    assert.equal(core.normalizeSignals(bad), null);
+  assert.deepEqual(plain(core.normalizeRound(ROUND)), ROUND);
+  for (const bad of [{ ...ROUND, reference: { ...ROUND.reference, trust: 'trusted' } }, { ...ROUND, parentId: 'proj-1' }, { ...ROUND, comparison: { ...ROUND.comparison, semanticImpact: 'similar' } }])
+    assert.equal(core.normalizeRound(bad), null);
+  const rows = core.signalRows(sg.experts[0], EN);
+  assert.deepEqual(plain(rows.filter(([, v]) => v === null).map(([k]) => k)),[EN.p2.sigRetrieval, EN.p2.sigCross], 'unobserved stays null (UNKNOWN), not 0');
+  assert.ok(core.signalRows(sg.experts[1], EN).every(([, v]) => v !== null));
+});
+
+/** 실제 실행 하나를 끝까지: 만들기 → 조회 한 번에 완료된 프로젝트. done 은 조회가 돌려줄 프로젝트를 만든다 */
+async function finishedRun(handlers = {}, done = (b) => doneProject(b)) {
+  let brief = null;
+  const env = fakeEnv(server({
+    '/api/cloudbite/projects': (init) => { brief = JSON.parse(init.body); return json(201, { project: runningProject(brief), accessToken: 'proj-tok' }); },
+    '/api/cloudbite/projects/proj-1': () => json(200, handlers.read ? handlers.read(brief) : done(brief)),
+    ...(handlers.memo ? { '/api/cloudbite/projects/proj-1/memo': (init) => handlers.memo(init, brief) } : {}),
+  }));
+  await goLive(env); await selectTwo(env);
+  await click(env, 'start'); await click(env, 'start');
+  await env.advance(5000);
+  return env;
+}
+const memoPosts = (env) => env.requests.filter(r => r.url === '/api/cloudbite/projects/proj-1/memo');
+const section = (env, cls) => env.all().find(n => n.tagName === 'SECTION' && n.className === cls);
+
+await test('결정 메모: 끝난 실제 실행에서만 한 번, 본문 {} + 프로젝트 Bearer, 진행 → 완료를 서버 그대로 그린다', async () => {
+  let reads = 0;
+  const env = await finishedRun({
+    memo: (_init, b) => json(202, doneProject(b, { memo: { version: 'cloudbite-memo/v1', status: 'running', attempts: 1, execution: 'server-nosana', startedAt: 5 } })),
+    read: (b) => { reads++; return doneProject(b, reads > 1 ? { memo: MEMO_DONE, evidenceSignals: SIGNALS } : {}); },
+  });
+  const btn = env.fk('memo-run');
+  assert.ok(btn && !btn.disabled, 'memo offered after a finished live run');
+  assert.ok(section(env, 'cb-memo').textContent.includes(EN.p2.memoOneAttempt));
+  await click(env, 'memo-run');
+  const [post] = memoPosts(env);
+  assert.equal(post.init.method, 'POST'); assert.equal(post.init.body, '{}');
+  assert.equal(post.init.headers.authorization, 'Bearer proj-tok'); assert.equal(post.init.headers['content-type'], 'application/json');
+  assert.ok(section(env, 'cb-memo').textContent.includes(EN.p2.memoRunning));
+  assert.equal(env.fk('memo-run'), undefined, 'no second paid button while running');
+  await env.advance(3100);
+  const text = section(env, 'cb-memo').textContent;
+  for (const t of [EN.p2.memoRecNote, 'Prefer waiting one quarter.', 'Wait a quarter', 'Ship now', 'Faster revenue', EN.p2.refDocument('doc-1', ''), EN.p2.refOpinion('Expert 1', 1),
+    EN.p2.refReview('Expert 2', 1), EN.p2.refBrief('decision.constraints'), EN.p2.refPacket('pk-1'), EN.p2.memoBy('Expert 1, Expert 2'), EN.p2.memoCovBrief(0, 2), EN.p2.memoCovLimits])
+    assert.ok(text.includes(t), t);
+  assert.equal(env.fk('memo-run'), undefined); assert.equal(memoPosts(env).length, 1);
+  const table = env.all().find(n => n.className === 'cb-memo-table');
+  assert.deepEqual(table.children[0].children[0].children.map(c => c.textContent), [EN.p2.memoOption, EN.p2.memoBenefits, EN.p2.memoRisks, EN.p2.memoConditions]);
+  assert.ok(!env.root.textContent.includes('votes:') && !/accuracy \d/.test(text));
+  // 원래 의견은 그대로, 요약 수는 유효한 의견만
+  assert.ok(env.root.textContent.includes('Summary support') && env.root.textContent.includes('Summary concern'));
+  langBtn(env, 'ko').click(); await env.flush();
+  assert.ok(section(env, 'cb-memo').textContent.includes(KO.p2.memoRecNote), 'memo labels follow the console language');
+  assert.ok(section(env, 'cb-memo').textContent.includes('Prefer waiting one quarter.'), 'stored memo text unchanged');
+});
+
+await test('결정 메모 네트워크 오류: 유료 요청을 다시 보내지 않고 GET 으로만 읽으며, 기록이 없으면 그렇다고 밝힌다', async () => {
+  let reads = 0, saved = false;
+  const env = await finishedRun({ memo: () => Promise.reject(new Error('timeout')), read: (b) => { reads++; return doneProject(b, saved ? { memo: MEMO_DONE } : {}); } });
+  const before = reads;
+  await click(env, 'memo-run');
+  assert.equal(memoPosts(env).length, 1);
+  assert.ok(reads > before, 'reads the project instead of resubmitting');
+  assert.ok(section(env, 'cb-memo').textContent.includes(EN.p2.memoNotFound));
+  assert.equal(env.fk('memo-run'), undefined, 'no paid retry button after an unknown outcome');
+  saved = true;
+  await click(env, 'memo-check');
+  assert.equal(memoPosts(env).length, 1, 'check status never re-POSTs');
+  assert.ok(section(env, 'cb-memo').textContent.includes('Prefer waiting one quarter.'));
+});
+
+await test('결정 메모 거부·잠김: 409 는 읽어서 그대로, 429·예산 0·실패 기록·취소된 실행은 유료 버튼이 없다', async () => {
+  const env = await finishedRun({ memo: () => json(429, { error: 'memo budget denied' }) });
+  await click(env, 'memo-run');
+  assert.ok(section(env, 'cb-memo').textContent.includes('memo budget denied'));
+  assert.equal(env.fk('memo-run'), undefined, 'a refused attempt is not retried from this screen');
+  const spent = await finishedRun({}, (b) => doneProject(b, { usage: { memo: { used: 1, max: 1, available: 0, exhausted: true } } }));
+  assert.equal(spent.fk('memo-run'), undefined); assert.ok(section(spent, 'cb-memo').textContent.includes(EN.p2.memoNoBudget));
+  const failed = await finishedRun({}, (b) => doneProject(b, { memo: { version: 'cloudbite-memo/v1', status: 'failed', attempts: 1, execution: 'server-nosana', error: 'provider timeout' } }));
+  assert.equal(failed.fk('memo-run'), undefined); assert.ok(section(failed, 'cb-memo').textContent.includes(EN.p2.memoFailed('provider timeout')));
+  const opts = await finishedRun({}, (b) => doneProject(b, { memo: { version: 'cloudbite-memo/v1', status: 'needs-options', attempts: 0, execution: 'none', reason: 'no options' } }));
+  assert.equal(opts.fk('memo-run'), undefined); assert.ok(section(opts, 'cb-memo').textContent.includes(EN.p2.memoNeedsOptions('no options')));
+  const cancelled = await finishedRun({}, (b) => doneProject(b, { status: 'cancelled' }));
+  assert.equal(cancelled.fk('memo-run'), undefined); assert.ok(section(cancelled, 'cb-memo').textContent.includes(EN.p2.memoNeedOpinion));
+  const conflict = await finishedRun({ memo: () => json(409, { error: 'project is no longer current' }) });
+  const reads = conflict.requests.filter(r => r.url === '/api/cloudbite/projects/proj-1' && !r.init.method).length;
+  await click(conflict, 'memo-run');
+  assert.ok(conflict.requests.filter(r => r.url === '/api/cloudbite/projects/proj-1' && !r.init.method).length > reads, '409 → read the saved state');
+  assert.ok(section(conflict, 'cb-memo').textContent.includes('project is no longer current'));
+  assert.equal(conflict.fk('memo-run'), undefined);
+});
+
+await test('관찰 신호: 자체 확신도 옆에 실제 수, 관찰 안 된 칸은 UNKNOWN (0 아님), 빠진 패킷 id 와 검토 범위를 보인다', async () => {
+  const cr = { status: 'completed', snapshotHash: 'h', startedAt: 4, completedAt: 5, execution: 'server-nosana',
+    reports: [{ reviewerExpertId: 'x2', summary: 'Read x1', findings: [{ targetExpertId: 'x1', evidenceIndex: 0, verdict: 'supported', rationale: 'ok' }] }],
+    coverage: { completedOpinions: 2, assignedOpinions: 1, unassigned: ['x2'], reviewers: 1, maxReviewers: 3, maxPeersPerReviewer: 3 },
+    disclosure: '1 of 2 completed opinions received a finding.',
+    textAvailability: [{ reviewerExpertId: 'x2', targetExpertId: 'x1', evidenceIndex: 0, verdict: 'supported', availability: ['supplied-project-text'], textBasis: 'available' }] };
+  const env = await finishedRun({}, (b) => doneProject(b, { evidenceSignals: SIGNALS, crossReview: cr }));
+  const sig = section(env, 'cb-signals');
+  assert.ok(sig, 'signals section shown');
+  for (const t of [EN.p2.sigNote, EN.p2.sigPackets(1, 2), EN.p2.sigOmitted(1, 'Expert 1'), EN.p2.sigReview(0, 2, 0, EN.p2.sigReviewStatus['not-run']), `${EN.p2.sigSelf} 70%`, `${EN.p2.sigSelf} 55%`])
+    assert.ok(sig.textContent.includes(t), t);
+  const dls = env.all().filter(n => n.className === 'cb-sig-dl');
+  const val = (dl, label) => { const i = dl.children.findIndex(c => c.textContent === label); return dl.children[i + 1].textContent; };
+  assert.equal(val(dls[0], EN.p2.sigRetrieval), 'UNKNOWN'); assert.equal(val(dls[0], EN.p2.sigCross), 'UNKNOWN');
+  assert.equal(val(dls[1], EN.p2.sigRetrieval), EN.p2.sigRetrievalVal('bound', 0, 0, 0), 'observed zero stays a zero');
+  assert.equal(dls[0].children.filter(c => c.className === 'cb-unknown' || c.children.some(k => k.className === 'cb-unknown')).length, 2);
+  const rv = section(env, 'cb-review').textContent;
+  for (const t of [EN.p2.revCoverage(1, 3, 3, 1, 2), EN.p2.revCap, EN.p2.revUnassigned('Expert 2'), EN.p2.revBasis.available, '1 of 2 completed opinions received a finding.'])
+    assert.ok(rv.includes(t), t);
+  const none = await finishedRun();
+  assert.ok(section(none, 'cb-signals').textContent.includes(EN.p2.sigMissing), 'no signals → UNKNOWN, not zero');
+  assert.ok(!/accuracy score|calibrated \d/i.test(sig.textContent));
+});
+
+await test('내보내기: Markdown 에 메모·신호(UNKNOWN)·이전 라운드·빠진 부분이 실제 저장값으로만 들어간다', () => {
+  const raw = doneProject({ title: 'T', objective: 'O', context: '', expertIds: ['x1', 'x2'], mode: 'live', requestId: 'r' }, { memo: MEMO_DONE, evidenceSignals: SIGNALS, previousRound: ROUND });
+  const md = core.markdownReport(core.normalizeProject(raw), false, EN);
+  for (const t of [`## ${EN.p2.roundTitle}`, EN.p2.roundOf(PARENT), 'Budget halved', EN.p2.roundNote, EN.p2.roundMatches('option-1 = option-2'), EN.p2.roundOmissions(1, 'opinions[0].summary'),
+    `## ${EN.p2.sigTitle}`, `- ${EN.p2.sigRetrieval}: UNKNOWN`, `- ${EN.p2.sigCross}: UNKNOWN`, EN.p2.sigOmitted(1, 'Expert 1'),
+    `## ${EN.p2.memoTitle}`, EN.p2.memoRecNote, '**option-2**: Wait a quarter', '#### option-1: Ship now', 'Faster revenue', EN.p2.memoCovLimits, EN.p2.memoCovBrief(0, 2)])
+    assert.ok(md.includes(t), t);
+  const bare = core.markdownReport(core.normalizeProject(doneProject({ title: 'T', objective: 'O', context: '', expertIds: ['x1'], mode: 'live', requestId: 'r' })), false, EN);
+  assert.ok(bare.includes(EN.p2.memoNone) && bare.includes(EN.p2.sigMissing), 'absent memo/signals are stated, not invented');
+  const ko = core.markdownReport(core.normalizeProject(raw), false, KO);
+  assert.ok(ko.includes(`## ${KO.p2.memoTitle}`) && ko.includes('Prefer waiting one quarter.'));
+});
+
+const HIST_LIST = { owner: false, rows: [{ id: PARENT, title: 'Parent run', status: 'completed', mode: 'live', createdAt: 1, expertCount: 2 }] };
+const parentProject = () => ({ ...doneProject({ title: 'Parent run', objective: 'Should we ship?', context: 'Ctx', expertIds: ['x1', 'x2'], mode: 'live', requestId: 'parent-req',
+  stage: 'design', responseLanguage: 'ko', budget: { maxExperts: 2, maxModelCalls: 20, maxReviewCalls: 3, maxMemoCalls: 1 },
+  decision: { options: ['Ship now', 'Wait a quarter'], constraints: ['Q4'], successCriteria: [], knownFacts: [], assumptions: [], unknowns: ['Churn?'] },
+  documents: [{ id: 'doc-1', name: 'n.txt', content: 'Note', origin: 'PMC OAI-PMH · PMC1' }] }), id: PARENT, memo: MEMO_DONE });
+function historyServer(over = {}) {
+  let deleted = false;
+  return server({
+    '/api/cloudbite/history?scope=mine': () => json(200, deleted ? { owner: false, rows: [] } : HIST_LIST),
+    [`/api/cloudbite/history/${PARENT}`]: (init) => {
+      if (init.method === 'DELETE') { deleted = true; return json(200, { ok: true }); }
+      return json(200, { project: parentProject(), model: 'm', roles: [], feedback: [], expiresAt: Date.now() + 1e6, canFeedback: false });
+    },
+    ...over,
+  });
+}
+const openParent = async (env) => { env.fk('nav:history').click(); await env.flush(); env.fk('hist-record:' + PARENT).click(); await env.flush(); };
+
+await test('사용 기록: 저장된 메모는 읽기 전용으로만 그리고 유료 버튼이 없다, 후속 라운드는 끝난 실제 실행에만', async () => {
+  const env = fakeEnv(historyServer());
+  await goLive(env); await openParent(env);
+  const detail = env.all().find(n => n.className === 'cb-panel cb-history-detail');
+  assert.ok(detail.textContent.includes(EN.p2.memoSaved) && detail.textContent.includes('Prefer waiting one quarter.'));
+  assert.equal(env.fk('memo-run'), undefined); assert.equal(env.requests.filter(r => r.url.endsWith('/memo')).length, 0);
+  assert.ok(env.fk('hist-followup'));
+  assert.equal(core.followUpEligible(core.normalizeProject({ ...parentProject(), brief: { ...parentProject().brief, title: '[deleted]' } })), false);
+  assert.equal(core.followUpEligible(core.normalizeProject({ ...parentProject(), status: 'running' })), false);
+  assert.equal(core.followUpEligible(core.normalizeProject({ ...parentProject(), brief: { ...parentProject().brief, mode: 'demo' } })), false);
+});
+
+await test('후속 라운드: 브리프·단계·응답 언어·자료 출처를 옮기고, 바뀐 점 요약 필수, 새 requestId + revision 을 보통 경로로 보낸다', async () => {
+  const env = fakeEnv(historyServer());
+  await goLive(env); await openParent(env);
+  await click(env, 'hist-followup');
+  assert.equal(env.byId('cb-fu-summary'), env.doc.activeElement, 'focus moves to the change summary');
+  assert.equal(env.byId('cb-objective').value, 'Should we ship?'); assert.equal(env.byId('cb-title').value, 'Parent run');
+  assert.equal(env.byId('cb-stage').value, 'design'); assert.equal(env.byId('cb-resp-lang').value, 'ko');
+  assert.equal(env.byId('cb-dec-options').value, 'Ship now\nWait a quarter');
+  assert.equal(env.byId('cb-budget-maxExperts').value, '', 'budget is not copied (normal quotas apply)');
+  const box = env.all().find(n => n.className === 'cb-followup');
+  assert.equal(box.hidden, false);
+  assert.ok(box.textContent.includes(EN.p2.fuParent('Parent run', PARENT)) && box.textContent.includes(EN.p2.roundRefs(2)) && box.textContent.includes(EN.p2.roundNote));
+  await click(env, 'start');
+  assert.ok(formMsg(env).includes(EN.p2.fuNeedSummary)); assert.equal(bodies(env, '/api/cloudbite/preview').length, 0, 'nothing sent without a change summary');
+  await setValue(env, 'cb-dec-options', 'Wait a quarter\nShip in Q1');
+  assert.ok(box.textContent.includes(EN.p2.roundMatches('option-2 = option-1')), 'only exact text matches, positional ids');
+  await setValue(env, 'cb-fu-summary', '  Budget halved  ');
+  await click(env, 'start');
+  const [pv] = bodies(env, '/api/cloudbite/preview'), p = JSON.parse(pv);
+  assert.deepEqual(p.revision, { parentId: PARENT, changeSummary: 'Budget halved' });
+  assert.notEqual(p.requestId, 'parent-req'); assert.match(p.requestId, /^[0-9a-f-]{36}$/);
+  assert.equal(p.stage, 'design'); assert.equal(p.responseLanguage, 'ko'); assert.ok(!('budget' in p));
+  assert.deepEqual(p.documents, [{ id: 'doc-1', name: 'n.txt', content: 'Note', origin: 'PMC OAI-PMH · PMC1' }]);
+  assert.deepEqual(p.expertIds, ['x1', 'x2'], 'previous team preselected for manual choice');
+  for (const k of ['previousRound', 'reference', 'opinions', 'historyToken', 'accessToken']) assert.ok(!(k in p), `${k} is not sent; the server builds the round`);
+  assert.equal(bodies(env, '/api/cloudbite/projects').length, 0, 'no silent auto-execution');
+  langBtn(env, 'ko').click(); await env.flush();
+  assert.equal(start(env).textContent, KO.runPlanLabel, 'UI language switch keeps the follow-up plan');
+  await click(env, 'start');
+  assert.deepEqual(bodies(env, '/api/cloudbite/projects'), [pv], 'executes the frozen follow-up body');
+  assert.equal(box.hidden, true, 'the draft is consumed by the new project');
+});
+
+await test('후속 라운드 오류·삭제: 부모가 없으면(404) 솔직히 알리고, 기록을 지우면 초안·계획·펼침 상태를 지운다', async () => {
+  const env = fakeEnv(historyServer({ '/api/cloudbite/preview': () => json(404, { error: 'parent project not found' }) }));
+  await goLive(env); await openParent(env); await click(env, 'hist-followup');
+  await setValue(env, 'cb-fu-summary', 'Changed');
+  await click(env, 'start');
+  assert.ok(formMsg(env).includes(EN.p2.fuParentMissing));
+  assert.equal(bodies(env, '/api/cloudbite/projects').length, 0);
+  await openParent(env);
+  env.byText('BUTTON', 'Delete record').click(); await env.flush();
+  env.byText('BUTTON', 'Delete permanently').click(); await env.flush();
+  assert.ok(env.root.textContent.includes(EN.p2.fuCleared));
+  assert.equal(env.all().find(n => n.className === 'cb-followup').hidden, true);
+  assert.equal(env.all().find(n => n.className === 'cb-panel cb-history-detail').textContent.includes('Should we ship?'), false, 'private detail cleared');
+  env.fk('nav:home').click(); await env.flush();
+  assert.equal(start(env).textContent, EN.prepareLabel, 'the plan tied to the deleted parent is gone');
+});
+
+await test('이전 라운드 그리기: 서버 비교·참고 의견을 "참고"로만 보이고 새 결과로 세지 않는다', async () => {
+  const env = await finishedRun({}, (b) => doneProject(b, { previousRound: ROUND }));
+  const r = section(env, 'cb-round').textContent;
+  for (const t of [EN.p2.roundOf(PARENT), EN.p2.roundNote, 'Budget halved', EN.p2.roundStage(EN.wfStageName.design, EN.wfStageName.validation, true),
+    EN.p2.roundMatches('option-1 = option-2'), EN.p2.roundPositional, EN.p2.roundRoles('Expert 3', 'Expert 2', 'Expert 1'), EN.p2.roundExcluded(`Expert 2 (${EN.status.failed})`), EN.p2.roundRefs(1)])
+    assert.ok(r.includes(t), t);
+  assert.ok(!env.all().find(n => n.className === 'cb-synth')?.textContent.includes('Earlier view'), 'reference opinions are not in the synthesis');
+  const bad = await finishedRun({}, (b) => doneProject(b, { previousRound: { ...ROUND, reference: { ...ROUND.reference, trust: 'trusted' } } }));
+  assert.ok(section(bad, 'cb-round').textContent.includes(EN.p2.roundInvalid));
+});
+
 console.log(`cloudbite-workflow-ui: ${pass} passed`);

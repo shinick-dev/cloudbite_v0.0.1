@@ -10,12 +10,12 @@ import type {
   ExpertDefinition, ExpertOpinion, ExpertRun, ExpertStatus, OpinionDirection, ProjectBrief, ProjectCrossReview, ProjectDocument, ProjectRun, ProjectStatus,
   ExpertAssignment, ProjectBudget, ProjectPreview, ProjectRevision, ProjectStage, ResponseLanguage,
 } from '../src/cloudbite-contract';
-// 아래 넷은 공개 계약(ProjectRun)에 아직 없는 서버 필드의 잎 모듈 타입이다 (타입만 — 실행 import 없음)
-import type { DecisionMemo, MemoClaim, MemoReference, ProjectMemo } from '../src/cloudbite-contract';
+// 결정 메모·예산·검토 범위는 공개 계약의 브라우저용 거울 타입, 신호·이전 라운드는 잎 모듈 타입이다 (타입만 — 실행 import 없음)
+import type { BudgetPhaseView, CrossReviewCoverage, CrossReviewTextAvailability, DecisionMemo, MemoClaim, MemoCoverage, MemoReference, ProjectMemo } from '../src/cloudbite-contract';
 type MemoStatus = ProjectMemo['status'];
 import type { EvidenceSignals, ExpertEvidenceSignals } from '../src/cloudbite-evidence';
 import type { PmcArticle, PmcImport, PmcImportErrorCode, PmcSection } from '../src/cloudbite-pmc';
-import type { ProjectPreviousRound } from '../src/cloudbite-revision';
+import type { ProjectPreviousRound, RoundOmission, RoundOption } from '../src/cloudbite-revision';
 import type { CloudbiteAccessRequest, CloudbiteAccessSession } from '../src/cloudbite-access-contract';
 import type { HistoryList, HistoryDetail, HistoryReport, HistoryIssue, HistoryFeedback } from '../src/cloudbite-history-contract';
 import type { CatalogueMaxRoles, ProjectMaxExperts } from '../src/cloudbite-catalogue-limits';
@@ -23,21 +23,14 @@ import type { CatalogueMaxRoles, ProjectMaxExperts } from '../src/cloudbite-cata
 type Mode = 'demo' | 'live';
 type View = 'home' | 'guide' | 'help' | 'settings' | 'history';
 type ConsoleExpert = ExpertRun & { invalidOpinion?: boolean };
-/** 서버가 저장한 결정 메모 (화면에 필요한 만큼만 정리). 원문 의견은 따로 그대로 남는다 */
-interface ConsoleMemo {
-  status: MemoStatus; attempts: number; execution: 'server-nosana' | 'none'; language?: ResponseLanguage;
-  startedAt?: number; completedAt?: number; reason?: string; error?: string; memo?: DecisionMemo; coverage?: MemoCoverageView;
-}
-interface MemoCoverageView {
-  teamSize: number; completed: number; statedDirections: Record<OpinionDirection, number>;
-  reviews: { included: number; total: number; truncated: number; omitted: number; reports: number };
-  packets: { included: number; total: number; truncated: number; omitted: number; invalid: number; metadataOnly: number };
-  documents: Array<{ id: string; truncated: boolean }>; expertsTruncated: number;
-}
-/** invalidCrossReview: 서버가 이 콘솔이 읽을 수 없는 교차 검토를 보냈다 (그리지 않고 그렇다고 밝힌다) */
+/** 서버가 저장한 결정 메모. 모양을 검사해 그대로 받으며, 원문 의견은 따로 그대로 남는다 */
+type ConsoleMemo = ProjectMemo;
+/** invalidCrossReview / invalidMemo / invalidSignals: 서버가 이 콘솔이 읽을 수 없는 값을 보냈다 (그리지 않고 그렇다고 밝힌다).
+ *  memoBudget: 서버 사용량 장부의 메모 칸 (없으면 모름 — 서버가 판단한다) */
 type ConsoleProject = Omit<ProjectRun, 'experts'> & {
   experts: ConsoleExpert[]; invalidCrossReview?: boolean;
-  memo?: ConsoleMemo; invalidMemo?: boolean; evidenceSignals?: EvidenceSignals; previousRound?: ProjectPreviousRound;
+  memo?: ConsoleMemo; invalidMemo?: boolean; evidenceSignals?: EvidenceSignals; invalidSignals?: boolean;
+  previousRound?: ProjectPreviousRound; invalidRound?: boolean; memoBudget?: BudgetPhaseView;
 };
 interface Limits { min: number; max: number }
 interface FormInput { title: string; objective: string; context: string; expertIds: string[] }
@@ -145,7 +138,212 @@ type Text = (m: Messages) => string;
 const CATALOGUE_MAX: CatalogueMaxRoles = 200;
 const PROJECT_MAX: ProjectMaxExperts = 100;
 
+// ── 워크플로 2단계 문구 (결정 메모 · 관찰 신호 · 후속 라운드). EN.p2 / KO.p2 로 붙고, KO 는 같은 모양이어야 타입 검사를 통과한다
+const P2_EN = {
+  memoTitle: 'Decision memo',
+  memoExplain: 'Optional final memo: one server-side Nosana call reads the completed, valid opinions of this live project, finished cross-review findings and evidence metadata. It is a derived interpretation, not a vote count, an accuracy score or calibrated confidence. The original opinions stay unchanged.',
+  memoBtn: 'Write decision memo (1 model call)',
+  memoOneAttempt: 'Each project gets one memo attempt and it is never retried. For another round, start a follow-up from History; it runs as a new project.',
+  memoNeedOpinion: 'The memo needs a finished, non-cancelled live run with at least one completed, valid opinion.',
+  memoNoBudget: 'This project has no memo call left (its memo cap is 0 or already used), so a memo cannot be requested.',
+  memoRunning: 'Writing the decision memo on the server…',
+  memoServerRunning: 'The server reports a decision memo in progress.',
+  memoNetwork: 'Could not confirm the server response. The memo may still be running or already saved. The paid request is not sent again; check its saved status.',
+  memoNotFound: 'The server has no memo record for this project yet. The earlier request is not sent again; check again later.',
+  memoCheck: 'Check memo status',
+  memoRequestFailed: (e: string) => `The memo request was refused: ${e}`,
+  memoInvalid: 'The server returned a decision memo this console cannot read, so it is not shown.',
+  memoPollStopped: 'Stopped checking the memo status. Reopen the project from History to see the saved result.',
+  memoFailed: (e: string) => `The decision memo failed${e ? `: ${e}` : '.'}`,
+  memoNeedsOptions: (r: string) => `No memo was written: the brief has no decision options to compare${r ? ` (${r})` : ''}. No model call was made. Add options in a follow-up round.`,
+  memoIdle: 'No memo has been written for this project.',
+  memoNone: 'No decision memo was written for this project.',
+  memoSaved: 'Saved memo (read-only). History shows what the server stored and never requests a memo.',
+  memoDone: (t: string, l: string) => `Completed at ${t}${l ? ` · written in ${l}` : ''}.`,
+  memoSummary: 'Summary',
+  memoRecommendation: 'Recommendation',
+  memoRecNote: 'A derived interpretation of the opinions — not a vote count, accuracy or calibrated confidence.',
+  memoNoRec: 'No recommendation',
+  memoComparison: 'Option comparison',
+  memoOption: 'Option', memoBenefits: 'Benefits', memoRisks: 'Risks', memoConditions: 'Conditions',
+  memoDissent: 'Dissent', memoUnknowns: 'Critical unknowns', memoTriggers: 'What would change this', memoActions: 'Next actions',
+  memoEmpty: 'None stated.',
+  memoBy: (names: string) => `Attributed to: ${names}`,
+  memoCoverage: 'Input coverage and omissions',
+  memoCovTeam: (c: number, t: number) => `${c} of ${t} selected roles had a completed opinion behind this memo.`,
+  memoCovDirections: (s: string) => `Stated directions (counts, not a vote): ${s}`,
+  memoCovReviews: (i: number, t: number, tr: number, o: number, r: number) => `Cross-review findings: ${i} of ${t} included (${tr} shortened, ${o} omitted) from ${plural(r, 'report')}.`,
+  memoCovPackets: (i: number, t: number, tr: number, o: number, inv: number, meta: number) => `Evidence metadata: ${i} of ${t} items included (${tr} shortened, ${o} omitted, ${inv} invalid, ${meta} metadata only).`,
+  memoCovDocs: (t: number, n: number) => `Documents: ${t} supplied, ${n} shortened for the memo input.`,
+  memoCovExperts: (n: number) => `${plural(n, 'opinion')} shortened for the memo input.`,
+  memoCovBrief: (n: number, o: number) => `Brief: ${n} decision items shortened, ${o} omitted.`,
+  memoCovLimits: 'The memo did not read full reports or original source pages.',
+  refOpinion: (name: string, n: number) => `${name} · evidence ${n}`,
+  refDocument: (id: string, name: string) => `Document ${id}${name ? ` · ${name}` : ''}`,
+  refPacket: (id: string) => `Evidence metadata ${id}`,
+  refReview: (name: string, n: number) => `Cross-review by ${name} · finding ${n}`,
+  refBrief: (f: string) => `Brief · ${f}`,
+  unknown: 'UNKNOWN',
+  sigTitle: 'Observed evidence signals',
+  sigNote: 'Counts of what each opinion cited and what was observed, shown beside its self-assessed confidence. A curated card is a short summary card, not the original source page. A source ID being present is not accuracy, and these counts do not calibrate confidence.',
+  sigMissing: 'Evidence signals: UNKNOWN — the server sent none for this project (not observed, which is not zero).',
+  sigInvalid: 'The server sent evidence signals this console cannot read, so they are not shown.',
+  sigPackets: (i: number, t: number) => `Evidence packets: ${i} of ${t} completed opinions have one.`,
+  sigPacketsUnknown: 'Evidence packets: UNKNOWN — none were recorded for this project.',
+  sigOmitted: (n: number, names: string) => `${n} omitted by the packet size bound: ${names}. An omitted packet does not mean nothing was retrieved.`,
+  sigReview: (r: number, c: number, n: number, s: string) => `Cross-review: ${r} of ${c} completed opinions received at least one finding · ${plural(n, 'reviewer report')} · ${s}.`,
+  sigReviewStatus: { running: 'running', completed: 'completed', failed: 'failed', 'not-run': 'not run' } as Record<ProjectCrossReview['status'] | 'not-run', string>,
+  sigSelf: 'Self-assessed confidence',
+  sigEvidence: 'Evidence items', sigEvidenceVal: (n: number, u: number) => `${n} (${u} without a source ID)`,
+  sigRefs: 'Cited IDs', sigRefsVal: (t: number, d: number, w: number, k: number) => `${t}: ${d} document · ${w} workspace · ${k} knowledge`,
+  sigSupplied: 'Supplied project text', sigSuppliedVal: (a: number, x: number) => `${a} present · ${x} missing`,
+  sigKnowledge: 'Knowledge citations', sigKnowledgeVal: (c: number, o: number, u: number, n: number) => `${c} with curated card text · ${o} card text omitted · ${u} retrieval unverified · ${n} not retrieved`,
+  sigUnknownIds: 'Unknown IDs', sigAssumptions: 'Assumptions',
+  sigRetrieval: 'Observed retrieval', sigRetrievalVal: (b: string, r: number, c: number, s: number) => `${r} retrievals · ${c} cards · ${s} sources (binding: ${b})`,
+  sigCross: 'Cross-review findings', sigCrossVal: (f: number, r: number, s: number, c: number, i: number, e: number) => `${f} from ${plural(r, 'reviewer')}: ${s} supported · ${c} challenged · ${i} insufficient · ${e} evidence items read`,
+  revCoverage: (r: number, maxR: number, peers: number, assigned: number, completed: number) => `Planned coverage: ${plural(r, 'reviewer')} (cap ${maxR}), each reading up to ${peers} other opinions; ${assigned} of ${completed} completed opinions were assigned to a reviewer.`,
+  revCap: 'The cap is at most 3 reviewers × 3 peers each, so not every role is reviewed.',
+  revUnassigned: (names: string) => `Not assigned to any reviewer: ${names}`,
+  revBasis: { available: 'cited text was in the reviewer input', partial: 'cited text partly in the reviewer input', unavailable: 'cited text not in the reviewer input', uncited: 'no source cited' } as Record<'available' | 'partial' | 'unavailable' | 'uncited', string>,
+  roundTitle: 'Follow-up round',
+  roundOf: (id: string) => `Follows project ${id}`,
+  roundChange: 'What changed (user summary)',
+  roundNote: 'This is a new project. Earlier opinions are previous-round reference only: they are not new results and are not counted in this round.',
+  roundStage: (a: string, b: string, changed: boolean) => `Stage: ${a} → ${b}${changed ? '' : ' (unchanged)'}`,
+  roundLang: (a: string, b: string, changed: boolean) => `Response language: ${a} → ${b}${changed ? '' : ' (unchanged)'}`,
+  roundPrev: 'Previous options', roundCur: 'Current options',
+  roundMatches: (s: string) => `Exact text matches: ${s}`, roundNoMatches: 'No option text matches exactly.',
+  roundPositional: 'Option IDs are positional within each round, so option-1 before and after may be different options. Only identical text is matched; meaning is not analyzed.',
+  roundList: (label: string, a: number, r: number, u: number) => `${label}: ${a} added · ${r} removed · ${u} unchanged`,
+  roundDocs: (a: string, r: string, c: string, u: string) => `Documents: added ${a} · removed ${r} · changed ${c} · unchanged ${u}`,
+  roundRoles: (a: string, r: string, k: string) => `Roles: added ${a} · removed ${r} · kept ${k}`,
+  roundRefs: (n: number) => `Previous-round opinions (${n}, reference only)`,
+  roundAgain: 'selected again',
+  roundExcluded: (s: string) => `No completed opinion, not used as reference: ${s}`,
+  roundOmissions: (n: number, s: string) => `${plural(n, 'part')} shortened or omitted from the reference: ${s}`,
+  roundOpinion: (dir: string, conf: number) => `${dir} · self-assessed confidence ${conf}% (previous round)`,
+  fuStart: 'Start follow-up round',
+  fuStartHelp: 'Copies this brief into the editor for a new project. You edit it, prepare a plan and run it yourself; nothing runs automatically and earlier opinions are shown as reference only.',
+  fuTitle: 'Follow-up round (new project)',
+  fuParent: (title: string, id: string) => `Follows “${title}” · ${id}`,
+  fuNote: 'The server checks that you can read the earlier project and builds the previous-round reference itself. Your usual project limits apply.',
+  fuSummary: 'What changed since the previous round (required)',
+  fuSummaryHelp: (n: number) => `Up to ${group(n)} characters.`,
+  fuRoles: 'Roles: the previous team is preselected for manual choice. Change it, or let Jev select within the limit.',
+  fuCancel: 'Cancel follow-up',
+  fuDiff: 'Changes so far (exact text only)',
+  fuNeedSummary: 'Follow-up: describe what changed since the previous round.',
+  fuSummaryLong: (n: number) => `Follow-up: the change summary is longer than ${group(n)} characters.`,
+  fuNeedLive: 'Follow-up rounds run as live projects only. Choose Live run in Settings.',
+  fuParentMissing: 'The earlier project was not found or you cannot read it (it may have been deleted or expired). Cancel the follow-up or edit the brief as a new project.',
+  fuCleared: 'The project was deleted, so the follow-up draft that referenced it was cleared.',
+  roundInvalid: 'The server sent a previous-round record this console cannot read, so it is not shown.',
+  memoReading: 'Reading the saved memo status (no new memo request is sent)…',
+};
+const P2_KO: typeof P2_EN = {
+  memoTitle: '결정 메모',
+  memoExplain: '선택 기능인 최종 메모입니다. 서버의 Nosana 호출 한 번이 이 실제 실행의 완료된 유효 의견, 끝난 교차 검토 판정, 근거 메타데이터를 읽습니다. 투표 집계·정확도 점수·보정된 확신도가 아니라 해석입니다. 원래 의견은 바뀌지 않습니다.',
+  memoBtn: '결정 메모 쓰기 (모델 호출 1회)',
+  memoOneAttempt: '프로젝트마다 메모는 한 번만 시도하며 다시 시도하지 않습니다. 다음 라운드는 사용 기록에서 후속 라운드를 시작해 새 프로젝트로 실행합니다.',
+  memoNeedOpinion: '메모는 취소되지 않고 끝난 실제 실행에 완료된 유효 의견이 하나 이상 있어야 합니다.',
+  memoNoBudget: '이 프로젝트에는 남은 메모 호출이 없어(메모 상한 0 또는 이미 사용) 메모를 요청할 수 없습니다.',
+  memoRunning: '서버에서 결정 메모를 쓰는 중…',
+  memoServerRunning: '서버가 결정 메모를 진행 중이라고 알렸습니다.',
+  memoNetwork: '서버 응답을 확인하지 못했습니다. 메모가 아직 진행 중이거나 이미 저장되었을 수 있습니다. 유료 요청은 다시 보내지 않으니 저장된 상태를 확인하세요.',
+  memoNotFound: '서버에 아직 이 프로젝트의 메모 기록이 없습니다. 앞선 요청은 다시 보내지 않습니다. 나중에 다시 확인하세요.',
+  memoCheck: '메모 상태 확인',
+  memoRequestFailed: (e) => `메모 요청이 거절되었습니다: ${e}`,
+  memoInvalid: '서버가 이 콘솔이 읽을 수 없는 결정 메모를 보내 표시하지 않습니다.',
+  memoPollStopped: '메모 상태 확인을 멈췄습니다. 사용 기록에서 프로젝트를 다시 열어 저장된 결과를 보세요.',
+  memoFailed: (e) => `결정 메모가 실패했습니다${e ? `: ${e}` : '.'}`,
+  memoNeedsOptions: (r) => `메모를 쓰지 않았습니다: 브리프에 비교할 결정 선택지가 없습니다${r ? ` (${r})` : ''}. 모델 호출은 없었습니다. 후속 라운드에서 선택지를 더하세요.`,
+  memoIdle: '이 프로젝트에는 아직 메모가 없습니다.',
+  memoNone: '이 프로젝트에는 결정 메모가 작성되지 않았습니다.',
+  memoSaved: '저장된 메모(읽기 전용). 사용 기록은 서버가 저장한 것만 보이며 메모를 요청하지 않습니다.',
+  memoDone: (t, l) => `${t}에 완료${l ? ` · ${l}로 작성` : ''}.`,
+  memoSummary: '요약',
+  memoRecommendation: '권고',
+  memoRecNote: '의견에서 끌어낸 해석입니다 — 투표 집계·정확도·보정된 확신도가 아닙니다.',
+  memoNoRec: '권고 없음',
+  memoComparison: '선택지 비교',
+  memoOption: '선택지', memoBenefits: '이점', memoRisks: '위험', memoConditions: '조건',
+  memoDissent: '이견', memoUnknowns: '핵심 미지수', memoTriggers: '판단을 바꿀 조건', memoActions: '다음 행동',
+  memoEmpty: '밝힌 내용 없음.',
+  memoBy: (names) => `출처 역할: ${names}`,
+  memoCoverage: '입력 범위와 빠진 부분',
+  memoCovTeam: (c, t) => `선택한 역할 ${t}개 중 ${c}개의 완료 의견이 이 메모의 바탕입니다.`,
+  memoCovDirections: (s) => `밝힌 방향(개수일 뿐 투표가 아님): ${s}`,
+  memoCovReviews: (i, t, tr, o, r) => `교차 검토 판정: 보고서 ${r}개의 ${t}개 중 ${i}개 포함 (${tr}개 줄임, ${o}개 뺌).`,
+  memoCovPackets: (i, t, tr, o, inv, meta) => `근거 메타데이터: ${t}개 중 ${i}개 포함 (${tr}개 줄임, ${o}개 뺌, ${inv}개 형식 오류, ${meta}개 메타데이터만).`,
+  memoCovDocs: (t, n) => `문서: ${t}개 제공, 메모 입력에서 ${n}개 줄임.`,
+  memoCovExperts: (n) => `메모 입력에서 의견 ${n}개를 줄였습니다.`,
+  memoCovBrief: (n, o) => `브리프: 결정 항목 ${n}개 줄임, ${o}개 뺌.`,
+  memoCovLimits: '메모는 전체 보고서나 원문 출처 페이지를 읽지 않았습니다.',
+  refOpinion: (name, n) => `${name} · 근거 ${n}`,
+  refDocument: (id, name) => `문서 ${id}${name ? ` · ${name}` : ''}`,
+  refPacket: (id) => `근거 메타데이터 ${id}`,
+  refReview: (name, n) => `${name}의 교차 검토 · 판정 ${n}`,
+  refBrief: (f) => `브리프 · ${f}`,
+  unknown: '알 수 없음(UNKNOWN)',
+  sigTitle: '관찰된 근거 신호',
+  sigNote: '각 의견이 인용한 것과 관찰된 것을 센 값이며, 자체 평가 확신도 옆에 보입니다. 정리 카드는 짧은 요약 카드이지 원문 출처 페이지가 아닙니다. 출처 ID가 있다는 것은 정확도가 아니며, 이 숫자는 확신도를 보정하지 않습니다.',
+  sigMissing: '근거 신호: 알 수 없음(UNKNOWN) — 서버가 이 프로젝트에 보내지 않았습니다 (관찰되지 않음이며 0이 아님).',
+  sigInvalid: '서버가 이 콘솔이 읽을 수 없는 근거 신호를 보내 표시하지 않습니다.',
+  sigPackets: (i, t) => `근거 묶음: 완료 의견 ${t}개 중 ${i}개에 있음.`,
+  sigPacketsUnknown: '근거 묶음: 알 수 없음(UNKNOWN) — 이 프로젝트에는 기록되지 않았습니다.',
+  sigOmitted: (n, names) => `묶음 크기 한도로 ${n}개 빠짐: ${names}. 묶음이 빠졌다고 아무것도 찾지 않았다는 뜻은 아닙니다.`,
+  sigReview: (r, c, n, s) => `교차 검토: 완료 의견 ${c}개 중 ${r}개가 판정을 하나 이상 받음 · 검토 보고서 ${n}개 · ${s}.`,
+  sigReviewStatus: { running: '진행 중', completed: '완료', failed: '실패', 'not-run': '실행 안 함' },
+  sigSelf: '자체 평가 확신도',
+  sigEvidence: '근거 항목', sigEvidenceVal: (n, u) => `${n}개 (출처 ID 없는 것 ${u}개)`,
+  sigRefs: '인용한 ID', sigRefsVal: (t, d, w, k) => `${t}개: 문서 ${d} · 작업공간 ${w} · 지식 ${k}`,
+  sigSupplied: '제공한 프로젝트 글', sigSuppliedVal: (a, x) => `있음 ${a} · 없음 ${x}`,
+  sigKnowledge: '지식 인용', sigKnowledgeVal: (c, o, u, n) => `정리 카드 글 있음 ${c} · 카드 글 빠짐 ${o} · 검색 확인 안 됨 ${u} · 검색 안 됨 ${n}`,
+  sigUnknownIds: '알 수 없는 ID', sigAssumptions: '가정',
+  sigRetrieval: '관찰된 검색', sigRetrievalVal: (b, r, c, s) => `검색 ${r}회 · 카드 ${c}개 · 출처 ${s}개 (연결: ${b})`,
+  sigCross: '교차 검토 판정', sigCrossVal: (f, r, s, c, i, e) => `검토자 ${r}명의 ${f}개: 뒷받침 ${s} · 반박 ${c} · 근거 부족 ${i} · 읽은 근거 항목 ${e}`,
+  revCoverage: (r, maxR, peers, assigned, completed) => `계획된 범위: 검토자 ${r}명(상한 ${maxR}), 각자 다른 의견을 최대 ${peers}개 읽음; 완료 의견 ${completed}개 중 ${assigned}개가 검토자에게 배정됨.`,
+  revCap: '상한은 검토자 최대 3명 × 각 3개 의견이라 모든 역할이 검토되지는 않습니다.',
+  revUnassigned: (names) => `어느 검토자에게도 배정되지 않음: ${names}`,
+  revBasis: { available: '인용한 글이 검토자 입력에 있었음', partial: '인용한 글 일부만 검토자 입력에 있었음', unavailable: '인용한 글이 검토자 입력에 없었음', uncited: '인용한 출처 없음' },
+  roundTitle: '후속 라운드',
+  roundOf: (id) => `프로젝트 ${id}의 후속`,
+  roundChange: '바뀐 점 (사용자 요약)',
+  roundNote: '새 프로젝트입니다. 이전 의견은 이전 라운드 참고 자료일 뿐 새 결과가 아니며 이번 라운드 집계에 들어가지 않습니다.',
+  roundStage: (a, b, changed) => `단계: ${a} → ${b}${changed ? '' : ' (같음)'}`,
+  roundLang: (a, b, changed) => `응답 언어: ${a} → ${b}${changed ? '' : ' (같음)'}`,
+  roundPrev: '이전 선택지', roundCur: '지금 선택지',
+  roundMatches: (s) => `글이 똑같은 선택지: ${s}`, roundNoMatches: '글이 똑같은 선택지가 없습니다.',
+  roundPositional: '선택지 ID는 라운드마다 순서로 매겨져, 앞뒤의 option-1이 다른 선택지일 수 있습니다. 글이 똑같은 것만 짝짓고 의미는 분석하지 않습니다.',
+  roundList: (label, a, r, u) => `${label}: 추가 ${a} · 삭제 ${r} · 같음 ${u}`,
+  roundDocs: (a, r, c, u) => `문서: 추가 ${a} · 삭제 ${r} · 바뀜 ${c} · 같음 ${u}`,
+  roundRoles: (a, r, k) => `역할: 추가 ${a} · 제외 ${r} · 유지 ${k}`,
+  roundRefs: (n) => `이전 라운드 의견 (${n}개, 참고용)`,
+  roundAgain: '다시 선택됨',
+  roundExcluded: (s) => `완료 의견이 없어 참고에 쓰지 않음: ${s}`,
+  roundOmissions: (n, s) => `참고 자료에서 ${n}개 부분을 줄이거나 뺌: ${s}`,
+  roundOpinion: (dir, conf) => `${dir} · 자체 평가 확신도 ${conf}% (이전 라운드)`,
+  fuStart: '후속 라운드 시작',
+  fuStartHelp: '이 브리프를 편집 영역에 새 프로젝트로 복사합니다. 직접 고치고 계획을 준비해 실행합니다. 자동으로 실행되는 것은 없으며 이전 의견은 참고로만 보입니다.',
+  fuTitle: '후속 라운드 (새 프로젝트)',
+  fuParent: (title, id) => `“${title}”의 후속 · ${id}`,
+  fuNote: '서버가 이전 프로젝트를 읽을 수 있는지 확인하고 이전 라운드 참고 자료를 직접 만듭니다. 평소의 프로젝트 한도가 적용됩니다.',
+  fuSummary: '이전 라운드 뒤 바뀐 점 (필수)',
+  fuSummaryHelp: (n) => `최대 ${group(n)}자.`,
+  fuRoles: '역할: 직접 고르기에는 이전 팀이 미리 선택되어 있습니다. 바꾸거나 한도 안에서 Jev가 고르게 하세요.',
+  fuCancel: '후속 라운드 취소',
+  fuDiff: '지금까지 바뀐 점 (글이 같은지만 봄)',
+  fuNeedSummary: '후속 라운드: 이전 라운드 뒤 바뀐 점을 적어 주세요.',
+  fuSummaryLong: (n) => `후속 라운드: 바뀐 점 요약이 ${group(n)}자를 넘습니다.`,
+  fuNeedLive: '후속 라운드는 실제 실행으로만 돕니다. 설정에서 실제 실행을 고르세요.',
+  fuParentMissing: '이전 프로젝트를 찾지 못했거나 읽을 수 없습니다 (삭제되었거나 만료되었을 수 있습니다). 후속 라운드를 취소하거나 새 프로젝트로 브리프를 고치세요.',
+  fuCleared: '프로젝트가 삭제되어 그 프로젝트를 가리키던 후속 라운드 초안을 지웠습니다.',
+  roundInvalid: '서버가 보낸 이전 라운드 기록을 이 화면이 읽을 수 없어 표시하지 않습니다.',
+  memoReading: '저장된 메모 상태를 읽는 중입니다 (새 메모 요청은 보내지 않습니다)…',
+};
+
 const EN = {
+  p2: P2_EN,
   docTitle: 'Cloudbite — Expert sandbox workspace',
   langGroup: 'Language',
   langChanged: 'Language: English',
@@ -608,6 +806,7 @@ const EN = {
 type Messages = typeof EN;
 
 const KO: Messages = {
+  p2: P2_KO,
   docTitle: 'Cloudbite — 전문가 샌드박스 작업공간',
   langGroup: '언어',
   langChanged: '언어: 한국어',
@@ -1451,15 +1650,30 @@ function normalizeProject(raw: unknown): ConsoleProject | null {
   const status = PROJECT_STATUSES.includes(raw.status as ProjectStatus) ? raw.status as ProjectStatus : statusFromExperts(experts);
   const decision = normalizeDecision(b.decision), documents = normalizeDocuments(b.documents), evidenceClaims = normalizeClaims(raw.evidenceClaims);
   const review = raw.crossReview === undefined || raw.crossReview === null ? undefined : normalizeCrossReview(raw.crossReview);
+  // 선택 필드: 없으면 없음(undefined), 있는데 읽을 수 없으면 invalid* 로 밝힌다 (꾸며 채우지 않는다)
+  const opt = <T>(v: unknown, f: (v: unknown) => T | null): T | null | undefined => v === undefined || v === null ? undefined : f(v);
+  const memo = opt(raw.memo, normalizeMemo), signals = opt(raw.evidenceSignals, normalizeSignals), round = opt(raw.previousRound, normalizeRound);
+  const memoBudget = isObj(raw.usage) ? phaseView(raw.usage.memo) : null;
+  const budget = isObj(b.budget) && BUDGET_FIELDS.every(f => isInt((b.budget as Record<string, unknown>)[f], BUDGET_LIMITS[f][0], BUDGET_LIMITS[f][1]))
+    ? Object.fromEntries(BUDGET_FIELDS.map(f => [f, (b.budget as Record<string, number>)[f]])) as unknown as ProjectBudget : null;
+  const revision = isObj(b.revision) && typeof b.revision.parentId === 'string' && REVISION.parentId.test(b.revision.parentId) && typeof b.revision.changeSummary === 'string'
+    ? { parentId: b.revision.parentId, changeSummary: clip(b.revision.changeSummary, REVISION.changeSummary) } : null;
   return {
     id, status, experts, createdAt: num(raw.createdAt) ?? 0, updatedAt: num(raw.updatedAt) ?? 0,
     brief: {
       title: str(b.title, LIMIT.title), objective: str(b.objective, LIMIT.objective), context: str(b.context, LIMIT.context),
       expertIds: strList(b.expertIds, 80, PROJECT_MAX), mode: b.mode === 'live' ? 'live' : 'demo', requestId: str(b.requestId, 120),
       ...(decision ? { decision } : {}), ...(documents ? { documents } : {}),
+      ...(STAGES.includes(b.stage as ProjectStage) ? { stage: b.stage as ProjectStage } : {}),
+      ...(RESPONSE_LANGS.includes(b.responseLanguage as ResponseLanguage) ? { responseLanguage: b.responseLanguage as ResponseLanguage } : {}),
+      ...(budget ? { budget } : {}), ...(revision ? { revision } : {}),
     },
     ...(evidenceClaims ? { evidenceClaims } : {}),
     ...(review ? { crossReview: review } : review === null ? { invalidCrossReview: true } : {}),
+    ...(memo ? { memo } : memo === null ? { invalidMemo: true } : {}),
+    ...(signals ? { evidenceSignals: signals } : signals === null ? { invalidSignals: true } : {}),
+    ...(round ? { previousRound: round } : round === null ? { invalidRound: true } : {}),
+    ...(memoBudget ? { memoBudget } : {}),
   };
 }
 
@@ -1665,11 +1879,287 @@ function normalizeCrossReview(raw: unknown): ProjectCrossReview | null {
     }
     reports.push({ reviewerExpertId, findings, summary: str(r.summary, 1000) });
   }
-  const completedAt = num(raw.completedAt), error = str(raw.error, 400);
+  const completedAt = num(raw.completedAt), error = str(raw.error, 400), disclosure = str(raw.disclosure, 1000);
+  // 범위·글 확인은 선택 필드다: 모양이 틀리면 그 필드만 그리지 않는다 (판정은 그대로)
+  const c = raw.coverage, ua = isObj(c) ? strArr(c.unassigned, PROJECT_MAX, 80) : null;
+  const coverage: CrossReviewCoverage | null = isObj(c) && ua && (['completedOpinions', 'assignedOpinions', 'reviewers', 'maxReviewers', 'maxPeersPerReviewer'] as const).every(k => isInt(c[k]))
+    ? { completedOpinions: c.completedOpinions as number, assignedOpinions: c.assignedOpinions as number, unassigned: ua, reviewers: c.reviewers as number,
+      maxReviewers: c.maxReviewers as number, maxPeersPerReviewer: c.maxPeersPerReviewer as number } : null;
+  const avail: CrossReviewTextAvailability[] = [];
+  if (Array.isArray(raw.textAvailability)) for (const t of raw.textAvailability.slice(0, 320)) {
+    if (!isObj(t) || typeof t.reviewerExpertId !== 'string' || typeof t.targetExpertId !== 'string' || !isInt(t.evidenceIndex)
+      || !VERDICTS.includes(t.verdict as CrossReviewFinding['verdict']) || !TEXT_BASIS.includes(t.textBasis as CrossReviewTextAvailability['textBasis'])) continue;
+    const a = strArr(t.availability, 40, 40);
+    avail.push({ reviewerExpertId: clip(t.reviewerExpertId, 80), targetExpertId: clip(t.targetExpertId, 80), evidenceIndex: t.evidenceIndex,
+      verdict: t.verdict as CrossReviewFinding['verdict'], availability: (a ?? []) as CrossReviewTextAvailability['availability'], textBasis: t.textBasis as CrossReviewTextAvailability['textBasis'] });
+  }
   return {
     status: raw.status as ProjectCrossReview['status'], snapshotHash: str(raw.snapshotHash, 128), startedAt: num(raw.startedAt) ?? 0,
     ...(completedAt !== null ? { completedAt } : {}), reports, ...(error ? { error } : {}), execution: 'server-nosana',
+    ...(coverage ? { coverage } : {}), ...(disclosure ? { disclosure } : {}), ...(avail.length ? { textAvailability: avail } : {}),
   };
+}
+const TEXT_BASIS: CrossReviewTextAvailability['textBasis'][] = ['available', 'partial', 'unavailable', 'uncited'];
+
+// ───────── 결정 메모 · 관찰 신호 · 이전 라운드 (서버가 저장한 모양 그대로만 받는다. 하나라도 틀리면 null → "읽을 수 없음")
+const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
+const every = <T>(v: unknown, max: number, f: (x: unknown) => T | null): T[] | null => {
+  if (!Array.isArray(v) || v.length > max) return null;
+  const out: T[] = [];
+  for (const x of v) { const y = f(x); if (y === null) return null; out.push(y); }
+  return out;
+};
+function phaseView(v: unknown): BudgetPhaseView | null {
+  return isObj(v) && isInt(v.used) && isInt(v.max) && isInt(v.available) && isBool(v.exhausted) ? { used: v.used, max: v.max, available: v.available, exhausted: v.exhausted } : null;
+}
+function memoRef(r: unknown): MemoReference | null {
+  if (!isObj(r)) return null;
+  if (r.kind === 'opinion-evidence') return typeof r.expertId === 'string' && isInt(r.index) ? { kind: 'opinion-evidence', expertId: clip(r.expertId, 80), index: r.index } : null;
+  if (r.kind === 'document') return typeof r.id === 'string' ? { kind: 'document', id: clip(r.id, 120) } : null;
+  if (r.kind === 'packet') return typeof r.id === 'string' ? { kind: 'packet', id: clip(r.id, 120) } : null;
+  if (r.kind === 'review-finding') return typeof r.reviewerExpertId === 'string' && isInt(r.index) ? { kind: 'review-finding', reviewerExpertId: clip(r.reviewerExpertId, 80), index: r.index } : null;
+  if (r.kind === 'brief') return typeof r.field === 'string' ? { kind: 'brief', field: clip(r.field, 80) } : null;
+  return null;
+}
+function memoClaim(c: unknown): MemoClaim | null {
+  if (!isObj(c) || typeof c.text !== 'string') return null;
+  const expertIds = strArr(c.expertIds, PROJECT_MAX, 80), refs = every(c.refs, 40, memoRef);
+  return expertIds && refs ? { text: clip(c.text, 1500), expertIds, refs } : null;
+}
+function decisionMemo(raw: unknown): DecisionMemo | null {
+  if (!isObj(raw) || typeof raw.summary !== 'string' || raw.basis !== 'derived-interpretation' || raw.confidence !== 'not-calibrated') return null;
+  const r = raw.recommendation;
+  if (!isObj(r) || (r.status !== 'recommend' && r.status !== 'no-recommendation') || typeof r.rationale !== 'string') return null;
+  const optionIds = strArr(r.optionIds, 8, 20), expertIds = strArr(r.expertIds, PROJECT_MAX, 80), refs = every(r.refs, 40, memoRef);
+  const options = every(r.options, 8, o => isObj(o) && typeof o.id === 'string' && OPTION_ID.test(o.id) && typeof o.text === 'string' ? { id: o.id, text: clip(o.text, 2000) } : null);
+  if (!optionIds || !optionIds.every(x => OPTION_ID.test(x)) || !expertIds || !refs || !options) return null;
+  const comparison = every(raw.comparison, 8, o => {
+    if (!isObj(o) || typeof o.optionId !== 'string' || !OPTION_ID.test(o.optionId) || typeof o.optionText !== 'string') return null;
+    const benefits = every(o.benefits, 20, memoClaim), risks = every(o.risks, 20, memoClaim), conditions = every(o.conditions, 20, memoClaim);
+    return benefits && risks && conditions ? { optionId: o.optionId, optionText: clip(o.optionText, 2000), benefits, risks, conditions } : null;
+  });
+  const lists = (['dissent', 'criticalUnknowns', 'changeTriggers', 'nextActions'] as const).map(k => every(raw[k], 20, memoClaim));
+  if (!comparison || lists.some(x => !x)) return null;
+  const [dissent, criticalUnknowns, changeTriggers, nextActions] = lists as MemoClaim[][];
+  return { summary: clip(raw.summary, 3000), recommendation: { status: r.status, optionIds, options, rationale: clip(r.rationale, 3000), expertIds, refs },
+    comparison, dissent, criticalUnknowns, changeTriggers, nextActions, basis: 'derived-interpretation', confidence: 'not-calibrated' };
+}
+function section(v: unknown): { included: number; total: number; truncated: number; omitted: number } | null {
+  return isObj(v) && isInt(v.included) && isInt(v.total) && isInt(v.truncated) && isInt(v.omitted) ? { included: v.included, total: v.total, truncated: v.truncated, omitted: v.omitted } : null;
+}
+function memoCoverage(raw: unknown): MemoCoverage | null {
+  if (!isObj(raw) || !isInt(raw.teamSize) || !isInt(raw.completed) || !isInt(raw.promptBytes) || raw.fullReportsReviewed !== false || raw.sourcePagesReviewed !== false) return null;
+  const sd = raw.statedDirections, sc = raw.statusCounts, br = raw.brief;
+  if (!isObj(sd) || !DIRECTIONS.every(d => isInt(sd[d])) || !isObj(sc) || !Object.entries(sc).every(([k, n]) => EXPERT_STATUSES.includes(k as ExpertStatus) && isInt(n))) return null;
+  if (!isObj(br) || !isBool(br.objectiveTruncated) || !isBool(br.contextTruncated) || !isInt(br.decisionItemsTruncated) || !isInt(br.decisionItemsOmitted)) return null;
+  const reviews = section(raw.reviews), packets = section(raw.packets);
+  if (!reviews || !packets || !isObj(raw.reviews) || !isInt(raw.reviews.reports) || !isObj(raw.packets) || !isInt(raw.packets.invalid) || !isInt(raw.packets.metadataOnly)) return null;
+  const experts = every(raw.experts, PROJECT_MAX, e => isObj(e) && typeof e.expertId === 'string' && isBool(e.summaryTruncated) && Array.isArray(e.evidenceIncluded) && e.evidenceIncluded.every(x => isInt(x))
+    && (['evidenceTotal', 'itemsTruncated', 'assumptionsIncluded', 'assumptionsTotal', 'nextActionsIncluded', 'nextActionsTotal'] as const).every(k => isInt(e[k]))
+    ? { expertId: clip(e.expertId, 80), summaryTruncated: e.summaryTruncated, evidenceIncluded: e.evidenceIncluded as number[], evidenceTotal: e.evidenceTotal as number, itemsTruncated: e.itemsTruncated as number,
+      assumptionsIncluded: e.assumptionsIncluded as number, assumptionsTotal: e.assumptionsTotal as number, nextActionsIncluded: e.nextActionsIncluded as number, nextActionsTotal: e.nextActionsTotal as number } : null);
+  const documents = every(raw.documents, DOCS.files * 2, d => isObj(d) && typeof d.id === 'string' && isInt(d.includedBytes) && isInt(d.originalBytes) && isBool(d.truncated)
+    ? { id: clip(d.id, 40), includedBytes: d.includedBytes, originalBytes: d.originalBytes, truncated: d.truncated } : null);
+  if (!experts || !documents) return null;
+  return { teamSize: raw.teamSize, completed: raw.completed, statusCounts: sc as MemoCoverage['statusCounts'], statedDirections: sd as Record<OpinionDirection, number>, experts, documents,
+    brief: { objectiveTruncated: br.objectiveTruncated, contextTruncated: br.contextTruncated, decisionItemsTruncated: br.decisionItemsTruncated, decisionItemsOmitted: br.decisionItemsOmitted },
+    reviews: { ...reviews, reports: raw.reviews.reports }, packets: { ...packets, invalid: raw.packets.invalid, metadataOnly: raw.packets.metadataOnly },
+    fullReportsReviewed: false, sourcePagesReviewed: false, promptBytes: raw.promptBytes };
+}
+/** 서버의 ProjectMemo. 완료인데 메모가 없거나 읽을 수 없으면 전체를 null 로 돌려 "읽을 수 없음"으로 밝힌다 */
+function normalizeMemo(raw: unknown): ConsoleMemo | null {
+  if (!isObj(raw) || raw.version !== 'cloudbite-memo/v1' || !MEMO_STATUSES.includes(raw.status as MemoStatus) || !isInt(raw.attempts)
+    || (raw.execution !== 'server-nosana' && raw.execution !== 'none')) return null;
+  const memo = raw.memo === undefined ? undefined : decisionMemo(raw.memo);
+  const coverage = raw.coverage === undefined ? undefined : memoCoverage(raw.coverage);
+  if (memo === null || coverage === null || (raw.status === 'completed' && !memo)) return null;
+  const at = (v: unknown) => num(v) ?? undefined;
+  const startedAt = at(raw.startedAt), completedAt = at(raw.completedAt), reason = str(raw.reason, 600), error = str(raw.error, 600), snapshotHash = str(raw.snapshotHash, 128);
+  return { version: 'cloudbite-memo/v1', status: raw.status as MemoStatus, attempts: raw.attempts, execution: raw.execution,
+    ...(snapshotHash ? { snapshotHash } : {}), ...(startedAt !== undefined ? { startedAt } : {}), ...(completedAt !== undefined ? { completedAt } : {}),
+    ...(RESPONSE_LANGS.includes(raw.language as ResponseLanguage) ? { language: raw.language as ResponseLanguage } : {}),
+    ...(coverage ? { coverage } : {}), ...(memo ? { memo } : {}), ...(reason ? { reason } : {}), ...(error ? { error } : {}) };
+}
+const SIGNAL_BINDINGS = ['bound', 'legacy-unbound', 'stale', 'foreign', 'invalid', 'absent', 'no-pack'];
+const intsOf = (o: unknown, keys: readonly string[]): Record<string, number> | null =>
+  isObj(o) && keys.every(k => isInt(o[k])) ? Object.fromEntries(keys.map(k => [k, o[k] as number])) : null;
+/** 서버의 관찰 장부. null 인 칸(검색·교차 검토)은 "관찰 안 됨"이라 그대로 null 로 둔다 — 0 으로 바꾸지 않는다 */
+function normalizeSignals(raw: unknown): EvidenceSignals | null {
+  if (!isObj(raw) || raw.schema !== 'cloudbite.evidence-signals/v1' || typeof raw.interpretation !== 'string') return null;
+  const experts = every(raw.experts, PROJECT_MAX, (e): ExpertEvidenceSignals | null => {
+    if (!isObj(e) || typeof e.expertId !== 'string' || !isInt(e.selfAssessedConfidence, 0, 100) || !isInt(e.evidenceItems) || !isInt(e.unreferencedEvidenceItems)
+      || !isInt(e.unknownReferences) || !isInt(e.assumptions)) return null;
+    const references = intsOf(e.references, ['total', 'document', 'workspace', 'knowledge']), suppliedText = intsOf(e.suppliedText, ['available', 'missing']);
+    const knowledge = intsOf(e.knowledge, ['curatedCardText', 'curatedCardTextOmitted', 'retrievalUnverified', 'notRetrieved']);
+    const or = e.observedRetrieval, cr = e.crossReview;
+    const observed = or === null ? null : isObj(or) && SIGNAL_BINDINGS.includes(or.binding as string) ? intsOf(or, ['retrievals', 'cards', 'sources']) : undefined;
+    const cross = cr === null ? null : intsOf(cr, ['reviewers', 'findings', 'supported', 'challenged', 'insufficient', 'evidenceItemsReviewed']) ?? undefined;
+    if (!references || !suppliedText || !knowledge || observed === undefined || cross === undefined) return null;
+    return { expertId: clip(e.expertId, 80), selfAssessedConfidence: e.selfAssessedConfidence, evidenceItems: e.evidenceItems, unreferencedEvidenceItems: e.unreferencedEvidenceItems,
+      references: references as ExpertEvidenceSignals['references'], suppliedText: suppliedText as ExpertEvidenceSignals['suppliedText'], knowledge: knowledge as ExpertEvidenceSignals['knowledge'],
+      unknownReferences: e.unknownReferences, observedRetrieval: observed && isObj(or) ? { binding: or.binding as NonNullable<ExpertEvidenceSignals['observedRetrieval']>['binding'], ...observed } as ExpertEvidenceSignals['observedRetrieval'] : null,
+      assumptions: e.assumptions, crossReview: cross as ExpertEvidenceSignals['crossReview'] };
+  });
+  const pc = raw.packetCoverage, rv = raw.review;
+  const omitted = isObj(pc) ? strArr(pc.omittedExpertIds, PROJECT_MAX, 80) : null;
+  if (!experts || !isObj(pc) || !isBool(pc.supplied) || !isInt(pc.included) || !isInt(pc.total) || !omitted) return null;
+  if (!isObj(rv) || !isInt(rv.completedOpinions) || !isInt(rv.reviewedOpinions) || !isInt(rv.reviewers) || typeof rv.disclosure !== 'string'
+    || !(rv.status === 'not-run' || REVIEW_STATUSES.includes(rv.status as ProjectCrossReview['status']))) return null;
+  return { schema: 'cloudbite.evidence-signals/v1', interpretation: clip(raw.interpretation, 1000), experts,
+    packetCoverage: { supplied: pc.supplied, included: pc.included, total: pc.total, omittedExpertIds: omitted },
+    review: { completedOpinions: rv.completedOpinions, reviewedOpinions: rv.reviewedOpinions, reviewers: rv.reviewers, status: rv.status as EvidenceSignals['review']['status'], disclosure: clip(rv.disclosure, 1000) } };
+}
+const roundOption = (o: unknown): RoundOption | null => isObj(o) && typeof o.id === 'string' && OPTION_ID.test(o.id) && typeof o.text === 'string' ? { id: o.id, text: clip(o.text, 2000) } : null;
+const roundIds = (v: unknown) => strArr(v, PROJECT_MAX, 120);
+function listDiff(v: unknown): { added: string[]; removed: string[]; unchanged: number } | null {
+  if (!isObj(v) || !isInt(v.unchanged)) return null;
+  const added = strArr(v.added, 50, 400), removed = strArr(v.removed, 50, 400);
+  return added && removed ? { added, removed, unchanged: v.unchanged } : null;
+}
+/** 서버가 만든 이전 라운드 (src/cloudbite-revision.ts ProjectPreviousRound). 이전 의견은 참고 자료일 뿐 새 실행에 섞지 않는다 */
+function normalizeRound(raw: unknown): ProjectPreviousRound | null {
+  if (!isObj(raw) || raw.version !== 'project-round/v1' || typeof raw.parentId !== 'string' || !REVISION.parentId.test(raw.parentId) || typeof raw.changeSummary !== 'string') return null;
+  const newRoles = roundIds(raw.newRoles), c = raw.comparison, r = raw.reference;
+  if (!newRoles || !isObj(c) || !isObj(r) || c.semanticImpact !== 'not-analyzed') return null;
+  const st = c.stage, rl = c.responseLanguage, op = c.options, docs = c.documents, roles = c.roles;
+  if (!isObj(st) || !STAGES.includes(st.previous as ProjectStage) || !STAGES.includes(st.current as ProjectStage) || !isBool(st.changed)) return null;
+  if (!isObj(rl) || !RESPONSE_LANGS.includes(rl.previous as ResponseLanguage) || !RESPONSE_LANGS.includes(rl.current as ResponseLanguage) || !isBool(rl.changed)) return null;
+  if (!isObj(op) || !isObj(docs) || !isObj(roles)) return null;
+  const previous = every(op.previous, 8, roundOption), current = every(op.current, 8, roundOption);
+  const matches = every(op.exactTextMatches, 64, x => isObj(x) && typeof x.previous === 'string' && typeof x.current === 'string' ? { previous: clip(x.previous, 20), current: clip(x.current, 20) } : null);
+  const constraints = listDiff(c.constraints), successCriteria = listDiff(c.successCriteria), unknowns = listDiff(c.unknowns);
+  const docLists = (['added', 'removed', 'changed', 'unchanged'] as const).map(k => strArr(docs[k], DOCS.files * 2, 40));
+  const docCurrent = every(docs.current, DOCS.files, d => isObj(d) && typeof d.id === 'string' && typeof d.name === 'string' && isInt(d.bytes) && typeof d.sha256 === 'string'
+    ? { id: clip(d.id, 40), name: clip(d.name, 120), bytes: d.bytes, sha256: clip(d.sha256, 64) } : null);
+  const roleLists = (['added', 'removed', 'kept'] as const).map(k => roundIds(roles[k]));
+  if (!previous || !current || !matches || !constraints || !successCriteria || !unknowns || docLists.some(x => !x) || !docCurrent || roleLists.some(x => !x)) return null;
+  const omission = (o: unknown): RoundOmission | null => isObj(o) && typeof o.path === 'string' && (o.omittedBytes === undefined || isInt(o.omittedBytes)) && (o.omittedItems === undefined || isInt(o.omittedItems))
+    ? { path: clip(o.path, 120), ...(o.omittedBytes !== undefined ? { omittedBytes: o.omittedBytes as number } : {}), ...(o.omittedItems !== undefined ? { omittedItems: o.omittedItems as number } : {}) } : null;
+  const opinions = every(r.opinions, PROJECT_MAX, o => {
+    if (!isObj(o) || typeof o.expertId !== 'string' || typeof o.name !== 'string' || !isBool(o.selectedAgain) || !DIRECTIONS.includes(o.direction as OpinionDirection)
+      || !isInt(o.confidence, 0, 100) || typeof o.summary !== 'string') return null;
+    const evidence = strArr(o.evidence, 8, 500);
+    return evidence ? { expertId: clip(o.expertId, 80), name: clip(o.name, 120), selectedAgain: o.selectedAgain, direction: o.direction as OpinionDirection, confidence: o.confidence, summary: clip(o.summary, 1500), evidence } : null;
+  });
+  const excluded = every(r.excluded, PROJECT_MAX, x => isObj(x) && typeof x.expertId === 'string' && EXPERT_STATUSES.includes(x.status as ExpertStatus) ? { expertId: clip(x.expertId, 80), status: x.status as ExpertStatus } : null);
+  const omissions = every(r.omissions, 400, omission);
+  if (r.label !== 'previous-round-reference' || r.trust !== 'untrusted-data' || r.parentId !== raw.parentId || !PROJECT_STATUSES.includes(r.parentStatus as ProjectStatus)
+    || !opinions || !excluded || !omissions || !isInt(r.bytes)) return null;
+  const [dAdded, dRemoved, dChanged, dUnchanged] = docLists as string[][], [rAdded, rRemoved, rKept] = roleLists as string[][];
+  return { version: 'project-round/v1', parentId: raw.parentId, changeSummary: clip(raw.changeSummary, 4000), newRoles,
+    comparison: { stage: { previous: st.previous as ProjectStage, current: st.current as ProjectStage, changed: st.changed },
+      responseLanguage: { previous: rl.previous as ResponseLanguage, current: rl.current as ResponseLanguage, changed: rl.changed },
+      options: { previous, current, exactTextMatches: matches }, constraints, successCriteria, unknowns,
+      documents: { added: dAdded, removed: dRemoved, changed: dChanged, unchanged: dUnchanged, current: docCurrent },
+      roles: { added: rAdded, removed: rRemoved, kept: rKept }, semanticImpact: 'not-analyzed' },
+    reference: { label: 'previous-round-reference', trust: 'untrusted-data', parentId: raw.parentId, parentStatus: r.parentStatus as ProjectStatus, opinions, excluded, omissions, bytes: r.bytes } };
+}
+
+/** 후속 라운드 초안과 이전 프로젝트의 차이. 글자가 정확히 같은 것만 같다고 보고, 의미는 따지지 않는다 (서버의 previousRound 가 최종 비교다) */
+interface DraftRound {
+  stage: [ProjectStage, ProjectStage]; language: [ResponseLanguage | '', ResponseLanguage | ''];
+  previous: string[]; current: string[]; decision: Partial<DecisionFrame>;
+  docs: Array<{ name: string; content: string }>; roles: string[] | null;
+}
+function draftRoundLines(parent: ConsoleProject, d: DraftRound, m: Messages, name: NameOf): string[] {
+  const t = m.p2, list = (x: string[]) => x.length ? x.join(', ') : m.none;
+  const stage = (x: ProjectStage) => x === 'unspecified' ? m.wfStageNone : m.wfStageName[x];
+  const lang = (x: ResponseLanguage | '') => x ? m.wfLangName[x] : m.wfLangNone;
+  const opt = (i: number) => `option-${i + 1}`;
+  const matches = d.current.flatMap((c, j) => d.previous.flatMap((p, i) => p === c ? [`${opt(i)} = ${opt(j)}`] : []));
+  const diff = (f: 'constraints' | 'successCriteria' | 'unknowns') => {
+    const a = parent.brief.decision?.[f] ?? [], b = d.decision[f] ?? [];
+    return t.roundList(m.decisionField[f], b.filter(x => !a.includes(x)).length, a.filter(x => !b.includes(x)).length, b.filter(x => a.includes(x)).length);
+  };
+  const before = parent.brief.documents ?? [];
+  const docName = (x: { name: string }) => x.name;
+  const added = d.docs.filter(x => !before.some(y => y.name === x.name)).map(docName), removed = before.filter(y => !d.docs.some(x => x.name === y.name)).map(docName);
+  const changed = d.docs.filter(x => before.some(y => y.name === x.name && y.content !== x.content)).map(docName);
+  const same = d.docs.filter(x => before.some(y => y.name === x.name && y.content === x.content)).map(docName);
+  const lines = [
+    t.roundStage(stage(d.stage[0]), stage(d.stage[1]), d.stage[0] !== d.stage[1]),
+    t.roundLang(lang(d.language[0]), lang(d.language[1]), d.language[0] !== d.language[1]),
+    `${t.roundPrev}: ${d.previous.length ? d.previous.map((x, i) => `${opt(i)}: ${x}`).join(' | ') : m.none}`,
+    `${t.roundCur}: ${d.current.length ? d.current.map((x, i) => `${opt(i)}: ${x}`).join(' | ') : m.none}`,
+    matches.length ? t.roundMatches(matches.join(', ')) : t.roundNoMatches, t.roundPositional,
+    diff('constraints'), diff('successCriteria'), diff('unknowns'),
+    t.roundDocs(list(added), list(removed), list(changed), list(same)),
+  ];
+  if (d.roles) {
+    const was = parent.brief.expertIds;
+    lines.push(t.roundRoles(list(d.roles.filter(x => !was.includes(x)).map(name)), list(was.filter(x => !d.roles!.includes(x)).map(name)), list(d.roles.filter(x => was.includes(x)).map(name))));
+  }
+  return lines;
+}
+/** 사용 기록 상세에서 후속 라운드를 시작할 수 있는 프로젝트: 끝난 실제 실행이고 삭제 표시가 없다 */
+function followUpEligible(p: ConsoleProject): boolean {
+  return p.brief.mode === 'live' && TERMINAL_PROJECT.includes(p.status) && REVISION.parentId.test(p.id) && p.brief.title !== '[deleted]' && p.brief.objective !== '[deleted]';
+}
+
+// ───────── 화면·보고서가 같이 쓰는 줄 (사전 글자만 쓴다. 숫자가 없는 칸은 UNKNOWN 이지 0 이 아니다)
+type NameOf = (id: string) => string;
+function signalRows(s: ExpertEvidenceSignals, m: Messages): Array<[string, string | null]> {
+  const t = m.p2, o = s.observedRetrieval, c = s.crossReview;
+  return [
+    [t.sigSelf, `${s.selfAssessedConfidence}%`],
+    [t.sigEvidence, t.sigEvidenceVal(s.evidenceItems, s.unreferencedEvidenceItems)],
+    [t.sigRefs, t.sigRefsVal(s.references.total, s.references.document, s.references.workspace, s.references.knowledge)],
+    [t.sigSupplied, t.sigSuppliedVal(s.suppliedText.available, s.suppliedText.missing)],
+    [t.sigKnowledge, t.sigKnowledgeVal(s.knowledge.curatedCardText, s.knowledge.curatedCardTextOmitted, s.knowledge.retrievalUnverified, s.knowledge.notRetrieved)],
+    [t.sigUnknownIds, String(s.unknownReferences)],
+    [t.sigAssumptions, String(s.assumptions)],
+    [t.sigRetrieval, o ? t.sigRetrievalVal(o.binding, o.retrievals, o.cards, o.sources) : null],
+    [t.sigCross, c ? t.sigCrossVal(c.findings, c.reviewers, c.supported, c.challenged, c.insufficient, c.evidenceItemsReviewed) : null],
+  ];
+}
+function signalSummary(sg: EvidenceSignals, m: Messages, name: NameOf): string[] {
+  const t = m.p2, pc = sg.packetCoverage, rv = sg.review;
+  return [
+    pc.supplied ? t.sigPackets(pc.included, pc.total) : t.sigPacketsUnknown,
+    ...(pc.supplied && pc.omittedExpertIds.length ? [t.sigOmitted(pc.omittedExpertIds.length, pc.omittedExpertIds.map(name).join(', '))] : []),
+    t.sigReview(rv.reviewedOpinions, rv.completedOpinions, rv.reviewers, t.sigReviewStatus[rv.status]), rv.disclosure,
+  ];
+}
+function memoCoverageLines(c: MemoCoverage, m: Messages): string[] {
+  const t = m.p2, shortened = c.experts.filter(e => e.summaryTruncated || e.itemsTruncated > 0 || e.evidenceIncluded.length < e.evidenceTotal).length;
+  return [
+    t.memoCovTeam(c.completed, c.teamSize),
+    t.memoCovDirections(DIRECTIONS.map(d => `${m.direction[d]} ${c.statedDirections[d]}`).join(' · ')),
+    t.memoCovReviews(c.reviews.included, c.reviews.total, c.reviews.truncated, c.reviews.omitted, c.reviews.reports),
+    t.memoCovPackets(c.packets.included, c.packets.total, c.packets.truncated, c.packets.omitted, c.packets.invalid, c.packets.metadataOnly),
+    t.memoCovDocs(c.documents.length, c.documents.filter(d => d.truncated).length),
+    t.memoCovExperts(shortened),
+    t.memoCovBrief(c.brief.decisionItemsTruncated + (c.brief.objectiveTruncated ? 1 : 0) + (c.brief.contextTruncated ? 1 : 0), c.brief.decisionItemsOmitted),
+    t.memoCovLimits,
+  ];
+}
+function memoRefText(p: ConsoleProject, r: MemoReference, m: Messages, name: NameOf): string {
+  const t = m.p2;
+  if (r.kind === 'opinion-evidence') return t.refOpinion(name(r.expertId), r.index + 1);
+  if (r.kind === 'document') return t.refDocument(r.id, p.brief.documents?.find(d => d.id === r.id)?.name ?? '');
+  if (r.kind === 'packet') return t.refPacket(r.id);
+  if (r.kind === 'review-finding') return t.refReview(name(r.reviewerExpertId), r.index + 1);
+  return t.refBrief(r.field);
+}
+function roundLines(r: ProjectPreviousRound, m: Messages, name: NameOf): string[] {
+  const t = m.p2, c = r.comparison, list = (x: string[]) => x.length ? x.join(', ') : m.none;
+  const stage = (s: ProjectStage) => s === 'unspecified' ? m.wfStageNone : m.wfStageName[s];
+  const matches = c.options.exactTextMatches.map(x => `${x.previous} = ${x.current}`).join(', ');
+  const omitted = r.reference.omissions;
+  return [
+    t.roundStage(stage(c.stage.previous), stage(c.stage.current), c.stage.changed),
+    t.roundLang(m.wfLangName[c.responseLanguage.previous], m.wfLangName[c.responseLanguage.current], c.responseLanguage.changed),
+    `${t.roundPrev}: ${c.options.previous.length ? c.options.previous.map(o => `${o.id}: ${o.text}`).join(' | ') : m.none}`,
+    `${t.roundCur}: ${c.options.current.length ? c.options.current.map(o => `${o.id}: ${o.text}`).join(' | ') : m.none}`,
+    matches ? t.roundMatches(matches) : t.roundNoMatches, t.roundPositional,
+    t.roundList(m.decisionField.constraints, c.constraints.added.length, c.constraints.removed.length, c.constraints.unchanged),
+    t.roundList(m.decisionField.successCriteria, c.successCriteria.added.length, c.successCriteria.removed.length, c.successCriteria.unchanged),
+    t.roundList(m.decisionField.unknowns, c.unknowns.added.length, c.unknowns.removed.length, c.unknowns.unchanged),
+    t.roundDocs(list(c.documents.added), list(c.documents.removed), list(c.documents.changed), list(c.documents.unchanged)),
+    t.roundRoles(list(c.roles.added.map(name)), list(c.roles.removed.map(name)), list(c.roles.kept.map(name))),
+    ...(r.reference.excluded.length ? [t.roundExcluded(r.reference.excluded.map(x => `${name(x.expertId)} (${m.status[x.status]})`).join(', '))] : []),
+    ...(omitted.length ? [t.roundOmissions(omitted.length, omitted.slice(0, 12).map(o => o.path).join(', ') + (omitted.length > 12 ? ', …' : ''))] : []),
+  ];
 }
 /** 교차 검토를 걸 수 있는 프로젝트: 취소되지 않고 끝났으며 의견을 낸 완료 전문가가 2명 이상 (서버와 같은 조건) */
 function reviewEligible(p: ConsoleProject): boolean {
@@ -1677,7 +2167,7 @@ function reviewEligible(p: ConsoleProject): boolean {
 }
 
 /** 폼 오류. field 로 접힌 Project details 를 펼칠지 정하고, text 는 그릴 때의 언어로 바꾼다 */
-interface FormIssue { field: 'title' | 'objective' | 'context' | 'decision' | 'docs' | 'experts' | 'budget' | 'run'; text: Text }
+interface FormIssue { field: 'title' | 'objective' | 'context' | 'decision' | 'docs' | 'experts' | 'budget' | 'revision' | 'run'; text: Text }
 function validateForm(f: FormInput, limits: Limits): FormIssue[] {
   const errors: FormIssue[] = [];
   if (!f.title.trim()) errors.push({ field: 'title', text: m => m.vTitle });
@@ -2021,7 +2511,71 @@ function markdownReport(p: ConsoleProject, demo: boolean, m: Messages = EN): str
     else if (e.error) lines.push(m.mdError(e.error));
     else if (e.invalidOpinion) lines.push(m.mdInvalid);
   }
+  if (!demo) lines.push(...phaseTwoMarkdown(p, m));
   return lines.join('\n') + '\n';
+}
+
+/** 이전 라운드·관찰 신호·교차 검토 범위·결정 메모. 서버가 저장한 것만 쓰고, 없거나 읽을 수 없으면 그렇다고 적는다 */
+function phaseTwoMarkdown(p: ConsoleProject, m: Messages): string[] {
+  const t = m.p2, name: NameOf = id => p.experts.find(e => e.expertId === id)?.name ?? p.previousRound?.reference.opinions.find(o => o.expertId === id)?.name ?? id;
+  const out: string[] = [];
+  const r = p.previousRound;
+  if (r || p.invalidRound) {
+    out.push('', `## ${t.roundTitle}`);
+    if (!r) out.push(t.roundInvalid);
+    else {
+      out.push(t.roundOf(r.parentId), '', `> ${t.roundNote}`, '', `### ${t.roundChange}`, r.changeSummary, '', ...roundLines(r, m, name).map(x => `- ${x}`));
+      if (r.reference.opinions.length) {
+        out.push('', `### ${t.roundRefs(r.reference.opinions.length)}`);
+        for (const o of r.reference.opinions) out.push(`- **${o.name}**${o.selectedAgain ? ` (${t.roundAgain})` : ''}: ${t.roundOpinion(m.direction[o.direction], o.confidence)} — ${o.summary}`);
+      }
+    }
+  }
+  out.push('', `## ${t.sigTitle}`);
+  const sg = p.evidenceSignals;
+  if (p.invalidSignals) out.push(t.sigInvalid);
+  else if (!sg) out.push(t.sigMissing);
+  else {
+    out.push(`> ${t.sigNote}`, '', sg.interpretation, '', ...signalSummary(sg, m, name).map(x => `- ${x}`));
+    for (const e of sg.experts) out.push('', `### ${name(e.expertId)}`, ...signalRows(e, m).map(([k, v]) => `- ${k}: ${v ?? t.unknown}`));
+  }
+  const cr = p.crossReview;
+  if (cr) {
+    out.push('', `## ${m.reviewTitle}`, `- ${m.projectStatus[cr.status === 'running' ? 'running' : cr.status === 'failed' ? 'failed' : 'completed']}`);
+    if (cr.coverage) {
+      const c = cr.coverage;
+      out.push(`- ${t.revCoverage(c.reviewers, c.maxReviewers, c.maxPeersPerReviewer, c.assignedOpinions, c.completedOpinions)}`);
+      if (c.unassigned.length) out.push(`- ${t.revUnassigned(c.unassigned.map(name).join(', '))}`);
+    }
+    out.push(`- ${t.revCap}`, ...(cr.disclosure ? [`- ${cr.disclosure}`] : []));
+    for (const rep of cr.reports) for (const f of rep.findings) {
+      const basis = cr.textAvailability?.find(x => x.reviewerExpertId === rep.reviewerExpertId && x.targetExpertId === f.targetExpertId && x.evidenceIndex === f.evidenceIndex);
+      out.push(`- ${m.reviewBy(name(rep.reviewerExpertId))} · ${m.verdict[f.verdict]} · ${m.reviewFinding(name(f.targetExpertId), f.evidenceIndex + 1)}${basis ? ` (${t.revBasis[basis.textBasis]})` : ''}${f.rationale ? ` — ${f.rationale}` : ''}`);
+    }
+  }
+  out.push('', `## ${t.memoTitle}`);
+  const pm = p.memo;
+  if (p.invalidMemo) out.push(t.memoInvalid);
+  else if (!pm || (pm.status === 'idle' && pm.attempts === 0)) out.push(t.memoNone);
+  else if (pm.status === 'running') out.push(t.memoServerRunning);
+  else if (pm.status === 'failed') out.push(t.memoFailed(pm.error ?? ''));
+  else if (pm.status === 'needs-options') out.push(t.memoNeedsOptions(pm.reason ?? ''));
+  else if (pm.memo) {
+    const d = pm.memo, rec = d.recommendation;
+    const refs = (c: { expertIds: string[]; refs: MemoReference[] }) => {
+      const bits = [...(c.expertIds.length ? [t.memoBy(c.expertIds.map(name).join(', '))] : []), ...c.refs.map(x => memoRefText(p, x, m, name))];
+      return bits.length ? ` _(${bits.join('; ')})_` : '';
+    };
+    const claims = (list: MemoClaim[]) => list.length ? list.map(c => `- ${c.text}${refs(c)}`) : [`- ${t.memoEmpty}`];
+    out.push(`> ${t.memoExplain}`, '', `### ${t.memoSummary}`, d.summary, '', `### ${t.memoRecommendation}`, `> ${t.memoRecNote}`, '',
+      ...(rec.status === 'recommend' && rec.options.length ? rec.options.map(o => `- **${o.id}**: ${o.text}`) : [`- ${t.memoNoRec}`]),
+      ...(rec.rationale ? ['', rec.rationale + refs(rec)] : []), '', `### ${t.memoComparison}`);
+    for (const o of d.comparison) out.push('', `#### ${o.optionId}: ${o.optionText}`, `${t.memoBenefits}:`, ...claims(o.benefits), `${t.memoRisks}:`, ...claims(o.risks), `${t.memoConditions}:`, ...claims(o.conditions));
+    for (const [label, list] of [[t.memoDissent, d.dissent], [t.memoUnknowns, d.criticalUnknowns], [t.memoTriggers, d.changeTriggers], [t.memoActions, d.nextActions]] as Array<[string, MemoClaim[]]>)
+      out.push('', `### ${label}`, ...claims(list));
+    if (pm.coverage) out.push('', `### ${t.memoCoverage}`, ...memoCoverageLines(pm.coverage, m).map(x => `- ${x}`));
+  }
+  return out;
 }
 
 // ───────────────────────── DOM ─────────────────────────
@@ -2197,6 +2751,11 @@ function boot(): void {
     evOpen: new Set<string>(),
     /** 이 화면에서 건 교차 검토 요청의 상태. 서버가 보낸 project.crossReview 와 따로 둔다 (실패를 완료로 꾸미지 않는다) */
     review: null as null | { projectId: string; phase: 'running' | 'failed'; error: Text | null; polls: number },
+    /** 이 화면에서 건 결정 메모 요청. 한 프로젝트에 한 번만 보내며, 이 값이 있으면 그 프로젝트에 유료 버튼을 다시 내지 않는다.
+     *  unknown = 응답을 확인하지 못함(다시 보내지 않고 읽기만 한다), reading = 저장 상태를 읽는 중, settled = 서버 상태를 받았다 */
+    memo: null as null | { projectId: string; phase: 'running' | 'reading' | 'unknown' | 'failed' | 'settled'; error: Text | null; polls: number },
+    /** 사용 기록에서 시작한 후속 라운드 초안: 부모 id 와 서버가 읽어 준 부모 프로젝트(참고·비교용), 사용자가 쓰는 바뀐 점 요약 */
+    followUp: null as null | { parentId: string; parent: ConsoleProject; changeSummary: string },
     /** 실제 실행 전 준비한 계획. body 는 미리보기에 보낸 바로 그 JSON 문자열이며, 실행은 이 문자열을 그대로 보낸다 (기본값을 덧붙이지 않는다).
      *  sig 는 준비한 순간의 의미 있는 입력 전체. 하나라도 바뀌면 계획을 버린다 */
     plan: null as null | { sig: string; phase: 'preparing' | 'ready' | 'error'; routed: boolean; body: string; preview: ProjectPreview | null; error: Text | null },
@@ -2209,6 +2768,7 @@ function boot(): void {
   let timers: number[] = [];
   let pollTimer = 0;
   let reviewTimer = 0;
+  let memoTimer = 0;
   let docKey = 0, docRev = 0, docSig = '';
   let planGen = 0, pmcSeq = 0, pmcRev = 0, pmcSig = '', planDrawn: unknown = undefined, planDrawnKey = '';
   /** 파일은 하나씩 차례로 읽는다: 늦게 끝난 읽기가 한도 계산을 앞지르지 않는다 */
@@ -2455,10 +3015,23 @@ function boot(): void {
   for (const n of [titleIn, objectiveIn, contextIn, stageSel, respSel, ...DECISION_FIELDS.map(f => decisionIns[f]), ...BUDGET_FIELDS.map(f => budgetIns[f])]) {
     n.addEventListener('input', () => semanticEdit()); n.addEventListener('change', () => semanticEdit());
   }
+  // 후속 라운드 초안 (사용 기록에서 시작했을 때만 보인다): 바뀐 점 요약은 필수, 비교는 정확한 글자만
+  const fuSummaryIn = h('textarea', { id: 'cb-fu-summary', rows: 3, maxlength: REVISION.changeSummary + 200, 'aria-describedby': 'cb-fu-help', 'data-fk': 'fu-summary' });
+  fuSummaryIn.addEventListener('input', () => { if (S.followUp) S.followUp.changeSummary = fuSummaryIn.value; semanticEdit(); });
+  const fuParentLine = h('p', { class: 'cb-help' });
+  const fuDiffList = h('ul', { class: 'cb-fu-diff' });
+  const fuRefs = h('div', { class: 'cb-fu-refs' });
+  const fuCancelBtn = tx('button', { type: 'button', class: 'cb-ghost', 'data-fk': 'fu-cancel', onclick: () => cancelFollowUp() }, m => m.p2.fuCancel);
+  const fuBox = h('section', { class: 'cb-followup', 'aria-labelledby': 'cb-fu-h', hidden: true },
+    tx('h3', { id: 'cb-fu-h', class: 'cb-label' }, m => m.p2.fuTitle), fuParentLine, tx('p', { class: 'cb-help' }, m => m.p2.fuNote),
+    h('div', { class: 'cb-field' }, tx('label', { for: 'cb-fu-summary', class: 'cb-label' }, m => m.p2.fuSummary), fuSummaryIn,
+      bind(h('p', { id: 'cb-fu-help', class: 'cb-help' }), (n, m) => { n.textContent = m.p2.fuSummaryHelp(REVISION.changeSummary); })),
+    tx('p', { class: 'cb-help' }, m => m.p2.fuRoles),
+    tx('h4', { class: 'cb-label' }, m => m.p2.fuDiff), fuDiffList, fuRefs, fuCancelBtn);
   const modeLine = h('span');
   const startNote = h('div', { class: 'cb-startnote' });
   const historyNotice = tx('p', { class: 'cb-help cb-history-notice' }, () => HT().notice);
-  const form = attr(h('form', { class: 'cb-form', novalidate: true },
+  const form = attr(h('form', { class: 'cb-form', novalidate: true }, fuBox,
     h('div', { class: 'cb-field cb-objective' }, tx('label', { for: 'cb-objective', class: 'cb-label' }, m => m.objectiveLabel), objectiveIn, counter(objectiveIn, LIMIT.objective)),
     staExampleBtn, projDetails, decisionDetails, docsDetails, wfFields, budgetDetails,
     h('div', { class: 'cb-team' }, jevBox, manualBox, poolDetails, catalogueNote),
@@ -2674,10 +3247,10 @@ function boot(): void {
     if (S.plan && !preparing() && S.plan.sig !== semanticSig()) { S.plan = null; S.planStale = true; }
     staExampleBtn.hidden = !catalogue().some(e => e.id === 'probably-primetime-sta');
     staExampleBtn.disabled = busy;
-    for (const n of [titleIn, objectiveIn, contextIn, failIn, tokenIn, filterIn, stageSel, respSel, budgetFill, budgetClear,
+    for (const n of [titleIn, objectiveIn, contextIn, failIn, tokenIn, filterIn, stageSel, respSel, budgetFill, budgetClear, fuSummaryIn, fuCancelBtn,
       ...DECISION_FIELDS.map(f => decisionIns[f]), ...BUDGET_FIELDS.map(f => budgetIns[f])]) n.disabled = busy;
     budgetHint.textContent = m.budgetHint(BUDGET_FIELDS.some(f => budgetIns[f].value.trim() !== ''));
-    renderDecisionHint(); renderDocs(busy); renderPmc(busy); renderPlan();
+    renderDecisionHint(); renderDocs(busy); renderPmc(busy); renderFollowUp(); renderPlan();
     const liveReady = S.boot.status === 'ready' && !!cfg?.liveReady && liveCredential();
     const auto = autoRoute(), rt = routing();
     const none = !auto && S.selected.size === 0;
@@ -3245,6 +3818,8 @@ function boot(): void {
     if (r.status === 200) {
       H.detailGen++; H.detail = null; H.deleteId = ''; H.message = '';
       for (const key of H.drafts.keys()) if (key.startsWith(id + ':')) H.drafts.delete(key);
+      for (const key of [...H.opened]) if (key.startsWith(id + ':')) H.opened.delete(key);
+      if (S.followUp?.parentId === id) { dropFollowUp(); H.message = 'fu-cleared'; keepFocus(renderControls); }
       await loadHistory();
     } else { historyDenied(r.status); paintHistory(); }
   }
@@ -3321,9 +3896,10 @@ function boot(): void {
   const locked = () => active() || preparing();
   /** 계획에 들어가는 입력 전체. 화면 언어는 넣지 않는다 (응답 언어는 넣는다) */
   const semanticSig = () => JSON.stringify([S.mode, autoRoute(), autoRoute() ? [] : [...S.selected], limits().max, titleIn.value, objectiveIn.value, contextIn.value,
-    decisionTexts(), docsPayload(S.docs), stageSel.value, respSel.value, budgetTexts()]);
+    decisionTexts(), docsPayload(S.docs), stageSel.value, respSel.value, budgetTexts(), S.followUp ? [S.followUp.parentId, fuSummaryIn.value] : null]);
   function semanticEdit(): void {
     budgetHint.textContent = M.budgetHint(BUDGET_FIELDS.some(f => budgetIns[f].value.trim() !== ''));
+    if (S.followUp) renderFollowUp();
     if (S.plan && !preparing() && S.plan.sig !== semanticSig()) keepFocus(renderControls);
   }
   /** 실제 실행과 같은 자격: 넣은 토큰이 있으면 그 헤더만, 없으면 same-origin 쿠키 (소유자 → 방문자) */
@@ -3358,7 +3934,7 @@ function boot(): void {
 
   /** 계획 준비: Jev 가 고르면 먼저 /route, 그다음 만들기와 똑같은 본문으로 /preview. 직접 고르면 Jev 를 부르지 않는다.
    *  실패하면 잠금을 풀고 아무것도 만들지 않는다. 같은 입력으로 다시 준비하면 같은 requestId 를 쓴다 */
-  async function preparePlan(f: FormInput, decision: DecisionFrame | undefined, wf: ReturnType<typeof parseWorkflow>['extras'], auto: boolean): Promise<void> {
+  async function preparePlan(f: FormInput, decision: DecisionFrame | undefined, wf: ReturnType<typeof parseWorkflow>['extras'] & { revision?: ProjectRevision }, auto: boolean): Promise<void> {
     const sig = semanticSig();
     const requestId = S.planReq?.sig === sig ? S.planReq.requestId : crypto.randomUUID();
     S.planReq = { sig, requestId };
@@ -3378,7 +3954,7 @@ function boot(): void {
       const res = await post('/api/cloudbite/route', JSON.stringify({ title: f.title, objective: f.objective, context: f.context, requestId, ...extras }));
       if (gen !== planGen) return;
       if (!res) return fail(m => m.routeNetwork);
-      if (!res.ok) { const msg = await refusal(res, c, true); return fail(msg); }
+      if (!res.ok) { const msg = wf.revision && res.status === 404 ? ((m: Messages) => m.p2.fuParentMissing) : await refusal(res, c, true); return fail(msg); }
       let body: unknown = null;
       try { body = await res.json(); } catch { /* 아래에서 형식 오류 */ }
       if (gen !== planGen) return;
@@ -3395,7 +3971,7 @@ function boot(): void {
     const res = await post('/api/cloudbite/preview', frozen);
     if (gen !== planGen) return;
     if (!res) return fail(m => m.planNetwork);
-    if (!res.ok) { const msg = await refusal(res, c); return fail(msg); }
+    if (!res.ok) { const msg = wf.revision && res.status === 404 ? ((m: Messages) => m.p2.fuParentMissing) : await refusal(res, c); return fail(msg); }
     let body: unknown = null;
     try { body = await res.json(); } catch { /* 아래에서 형식 오류 */ }
     if (gen !== planGen) return;
@@ -3414,7 +3990,7 @@ function boot(): void {
     if (!plan || plan.phase !== 'ready' || !plan.body || plan.sig !== semanticSig() || locked()) return;
     clearTimers();
     const gen = ++S.gen;
-    S.review = null;
+    S.review = null; S.memo = null;
     S.artifactCache.clear(); S.hiddenRows.clear(); S.focusExpert = ''; S.artifactPath = ''; S.artifactPicked = false; lastAnnounce = '';
     S.run = { mode: 'live', phase: 'starting', project: null, accessToken: '', error: null, startedAt: Date.now(), pollErrors: 0,
       routed: plan.routed, viaVisitor: viaVisitor(), viaOwner: viaOwner() };
@@ -3591,9 +4167,15 @@ function boot(): void {
           })) : null)))
           : h('p', { class: 'cb-help' }, m.ledgerEmpty)));
     }
+    const round = roundKids(p, prefix, opened);
+    if (round.length) kids.unshift(h('section', { class: 'cb-round', 'aria-labelledby': `${prefix}round-h` }, h('h3', { id: `${prefix}round-h` }, m.p2.roundTitle), ...round));
+    const signals = signalsKids(p, prefix, opened);
+    if (signals.length) kids.push(h('section', { class: 'cb-signals', 'aria-labelledby': `${prefix}sig-h` }, h('h3', { id: `${prefix}sig-h` }, m.p2.sigTitle), ...signals));
     const review = reviewKids(p, interactive);
     if (review.length) kids.push(h('section', { class: 'cb-review', 'aria-labelledby': `${prefix}review-h` },
       h('h3', { id: `${prefix}review-h` }, m.reviewTitle), ...review));
+    const memo = memoKids(p, interactive, prefix, opened);
+    if (memo.length) kids.push(h('section', { class: 'cb-memo', 'aria-labelledby': `${prefix}memo-h` }, h('h3', { id: `${prefix}memo-h` }, m.p2.memoTitle), ...memo));
     return kids;
   }
 
@@ -3611,6 +4193,12 @@ function boot(): void {
     else if (local?.phase === 'failed' && local.error) kids.push(h('p', { class: 'cb-warn', role: 'alert' }, local.error(m)));
     if (cr?.status === 'failed') kids.push(h('p', { class: 'cb-warn' }, m.reviewFailed(cr.error ?? '')));
     if (cr?.status === 'completed') kids.push(h('p', { class: 'cb-ok' }, m.reviewDone(hhmm(cr.completedAt ?? cr.startedAt))));
+    if (cr?.coverage) {
+      const c = cr.coverage;
+      kids.push(h('p', { class: 'cb-help' }, m.p2.revCoverage(c.reviewers, c.maxReviewers, c.maxPeersPerReviewer, c.assignedOpinions, c.completedOpinions)),
+        h('p', { class: 'cb-help' }, m.p2.revCap), c.unassigned.length ? h('p', { class: 'cb-help' }, m.p2.revUnassigned(c.unassigned.map(id => expertName(p, id)).join(', '))) : null);
+    } else if (cr) kids.push(h('p', { class: 'cb-help' }, m.p2.revCap));
+    if (cr?.disclosure) kids.push(h('p', { class: 'cb-help' }, cr.disclosure));
     // 버튼은 실제로 걸 수 있을 때만 (서버는 프로젝트마다 한 번만 시도한다): 이미 결과가 있거나 진행 중이면 없다
     if (interactive && !cr && !p.invalidCrossReview && !running) {
       if (canAsk) kids.push(h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'review-run', onclick: () => { void runCrossReview(); } },
@@ -3624,9 +4212,11 @@ function boot(): void {
         r.findings.length ? h('ol', { class: 'cb-findings' }, ...r.findings.map(f => {
           const target = p.experts.find(e => e.expertId === f.targetExpertId);
           const quoted = target?.opinion?.evidence[f.evidenceIndex];
+          const basis = cr?.textAvailability?.find(x => x.reviewerExpertId === r.reviewerExpertId && x.targetExpertId === f.targetExpertId && x.evidenceIndex === f.evidenceIndex);
           return h('li', { class: 'cb-finding' },
             h('div', { class: 'cb-finding-head' }, h('span', { class: `cb-chip ${VERDICT_CHIP[f.verdict]}` }, m.verdict[f.verdict]),
-              h('strong', null, m.reviewFinding(expertName(p, f.targetExpertId), f.evidenceIndex + 1))),
+              h('strong', null, m.reviewFinding(expertName(p, f.targetExpertId), f.evidenceIndex + 1)),
+              basis ? h('span', { class: 'cb-tag' }, m.p2.revBasis[basis.textBasis]) : null),
             quoted ? h('blockquote', { class: 'cb-finding-evidence' }, quoted) : null,
             f.rationale ? h('p', null, f.rationale) : null);
         })) : h('p', { class: 'cb-help' }, m.reviewNoFindings)));
@@ -3702,6 +4292,176 @@ function boot(): void {
     adoptReview(gen, id, body, () => failed(m => m.reviewInvalid));
   }
 
+  // ── 결정 메모: 사용자가 누를 때만 한 번 (서버도 프로젝트마다 한 번만 시도한다). 응답을 확인하지 못하면 다시 보내지 않고 읽기만 한다
+  /** 메모를 부를 수 없는 이유. null 이면 부를 수 있다 */
+  function memoBlocked(p: ConsoleProject): Text | null {
+    if (p.brief.mode !== 'live' || !TERMINAL_PROJECT.includes(p.status) || p.status === 'cancelled'
+      || !p.experts.some(e => e.status === 'completed' && e.opinion && !e.invalidOpinion)) return m => m.p2.memoNeedOpinion;
+    if (p.memoBudget ? p.memoBudget.available <= 0 : p.brief.budget?.maxMemoCalls === 0) return m => m.p2.memoNoBudget;
+    return null;
+  }
+  const memoNames = (p: ConsoleProject, ids: string[]) => ids.map(id => expertName(p, id)).join(', ');
+  function claimMeta(p: ConsoleProject, expertIds: string[], refs: MemoReference[]): Kid {
+    const m = M, name = (id: string) => expertName(p, id);
+    if (!expertIds.length && !refs.length) return null;
+    return h('span', { class: 'cb-memo-meta' }, expertIds.length ? h('span', null, m.p2.memoBy(memoNames(p, expertIds))) : null,
+      refs.length ? h('span', { class: 'cb-memo-refs' }, ...refs.map(r => h('span', { class: 'cb-tag' }, memoRefText(p, r, m, name)))) : null);
+  }
+  function claimItems(p: ConsoleProject, list: MemoClaim[]): Kid {
+    if (!list.length) return h('p', { class: 'cb-help' }, M.p2.memoEmpty);
+    return h('ul', { class: 'cb-memo-claims' }, ...list.map(c => h('li', null, h('span', null, c.text), claimMeta(p, c.expertIds, c.refs))));
+  }
+  function memoView(p: ConsoleProject, d: DecisionMemo, prefix: string, opened: Set<string>): Kid[] {
+    const m = M, t = m.p2, r = d.recommendation;
+    const lists: Array<[string, MemoClaim[]]> = [[t.memoDissent, d.dissent], [t.memoUnknowns, d.criticalUnknowns], [t.memoTriggers, d.changeTriggers], [t.memoActions, d.nextActions]];
+    return [
+      h('h4', null, t.memoSummary), h('p', null, d.summary),
+      h('div', { class: 'cb-memo-rec' }, h('h4', null, t.memoRecommendation), h('p', { class: 'cb-help' }, t.memoRecNote),
+        r.status === 'recommend' && r.options.length
+          ? h('ul', { class: 'cb-memo-picks' }, ...r.options.map(o => h('li', null, h('span', { class: 'cb-tag' }, o.id), ' ', o.text)))
+          : h('p', null, h('strong', null, t.memoNoRec)),
+        r.rationale ? h('p', null, r.rationale) : null, claimMeta(p, r.expertIds, r.refs)),
+      h('h4', null, t.memoComparison),
+      d.comparison.length ? h('div', { class: 'cb-memo-scroll' }, h('table', { class: 'cb-memo-table' },
+        h('thead', null, h('tr', null, ...[t.memoOption, t.memoBenefits, t.memoRisks, t.memoConditions].map(x => h('th', { scope: 'col' }, x)))),
+        h('tbody', null, ...d.comparison.map(o => h('tr', null,
+          h('th', { scope: 'row' }, h('span', { class: 'cb-tag' }, o.optionId), ' ', o.optionText),
+          h('td', { 'data-label': t.memoBenefits }, claimItems(p, o.benefits)), h('td', { 'data-label': t.memoRisks }, claimItems(p, o.risks)),
+          h('td', { 'data-label': t.memoConditions }, claimItems(p, o.conditions))))))) : h('p', { class: 'cb-help' }, t.memoEmpty),
+      ...lists.flatMap(([label, list]) => [h('h4', null, label), claimItems(p, list)]),
+      p.memo?.coverage ? evDisclosure(opened, `${prefix}memo-cov`, 'cb-quiet', [h('span', null, t.memoCoverage)],
+        h('ul', { class: 'cb-memo-cov' }, ...memoCoverageLines(p.memo.coverage, m).map(x => h('li', null, x)))) : null,
+    ];
+  }
+  const memoUntried = (p: ConsoleProject) => !p.memo || (p.memo.status === 'idle' && p.memo.attempts === 0);
+  function memoKids(p: ConsoleProject, interactive: boolean, prefix: string, opened: Set<string>): Kid[] {
+    const m = M, t = m.p2, pm = p.memo;
+    const local = interactive && S.memo?.projectId === p.id ? S.memo : null;
+    const run = interactive ? S.run : null;
+    const mine = !!run && run.mode === 'live' && !!run.accessToken && run.project?.id === p.id;
+    if (!pm && !p.invalidMemo && !local && !(mine && TERMINAL_PROJECT.includes(p.status))) return [];
+    const kids: Kid[] = [h('p', { class: 'cb-help' }, t.memoExplain)];
+    if (!interactive) kids.push(h('p', { class: 'cb-help' }, t.memoSaved));
+    if (p.invalidMemo) kids.push(h('p', { class: 'cb-warn' }, t.memoInvalid));
+    const running = local?.phase === 'running' || pm?.status === 'running';
+    if (running) kids.push(h('p', { class: 'cb-help', role: 'status' }, local?.phase === 'running' ? t.memoRunning : t.memoServerRunning));
+    else if (local?.phase === 'reading') kids.push(h('p', { class: 'cb-help', role: 'status' }, t.memoReading));
+    else if (local?.phase === 'unknown') kids.push(h('p', { class: 'cb-warn', role: 'alert' }, (local.error ?? (mm => mm.p2.memoNetwork))(m)),
+      h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'memo-check', disabled: !mine, onclick: () => { void memoRead(S.gen, p.id, null); } }, t.memoCheck));
+    else if (local?.phase === 'failed' && local.error) kids.push(h('p', { class: 'cb-warn', role: 'alert' }, local.error(m)));
+    if (pm?.status === 'failed') kids.push(h('p', { class: 'cb-warn' }, t.memoFailed(pm.error ?? '')));
+    if (pm?.status === 'needs-options') kids.push(h('p', { class: 'cb-warn' }, t.memoNeedsOptions(pm.reason ?? '')));
+    if (pm?.status === 'completed' && pm.memo)
+      kids.push(h('p', { class: 'cb-ok' }, t.memoDone(hhmm(pm.completedAt ?? pm.startedAt ?? 0), pm.language ? m.wfLangName[pm.language] : '')), ...memoView(p, pm.memo, prefix, opened));
+    // 유료 버튼: 지금 실행에서, 서버가 아직 한 번도 시도하지 않았고, 이 화면도 보낸 적이 없을 때만 (사용 기록은 그리기만 한다)
+    if (interactive && mine && memoUntried(p) && !p.invalidMemo && !local && !running) {
+      const why = memoBlocked(p);
+      if (why || active()) kids.push(h('p', { class: 'cb-help' }, why ? why(m) : t.memoIdle));
+      else kids.push(h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'memo-run', onclick: () => { void runMemo(); } }, t.memoBtn),
+        h('p', { class: 'cb-help' }, t.memoOneAttempt));
+    } else if (!interactive && memoUntried(p) && !p.invalidMemo) kids.push(h('p', { class: 'cb-help' }, t.memoNone));
+    else if (interactive && !running && local?.phase !== 'reading') kids.push(h('p', { class: 'cb-help' }, t.memoOneAttempt));
+    return kids;
+  }
+  async function runMemo(): Promise<void> {
+    const run = S.run, p = run?.project;
+    if (!run || !p || run.mode !== 'live' || !run.accessToken || active() || memoBlocked(p) || S.memo?.projectId === p.id || !memoUntried(p)) return;
+    const gen = S.gen, id = p.id;
+    S.memo = { projectId: id, phase: 'running', error: null, polls: 0 };
+    renderEvidence();
+    const here = () => gen === S.gen && S.run?.project?.id === id;
+    const failed = (msg: Text) => { if (!here()) return; S.memo = { projectId: id, phase: 'failed', error: msg, polls: 0 }; keepFocus(renderEvidence); };
+    let res: Response;
+    try {
+      res = await fetch(`/api/cloudbite/projects/${encodeURIComponent(id)}/memo`, { method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        headers: { authorization: `Bearer ${run.accessToken}`, 'content-type': 'application/json' }, body: '{}' });
+    } catch {
+      // 요청이 서버에 닿았는지 모른다: 다시 보내지 않고 저장된 상태를 읽는다
+      if (!here()) return;
+      S.memo = { projectId: id, phase: 'unknown', error: m => m.p2.memoNetwork, polls: 0 };
+      return memoRead(gen, id, null);
+    }
+    if (!here()) return;
+    if (res.status === 409) { const msg = await errorText(res); return memoRead(gen, id, msg); }
+    if (!res.ok) { const msg = await errorText(res); return failed(m => m.p2.memoRequestFailed(msg(m))); }
+    let body: unknown = null;
+    try { body = await res.json(); } catch { /* 아래에서 형식 오류 */ }
+    if (!here()) return;
+    adoptMemo(gen, id, body, () => failed(m => m.p2.memoInvalid));
+  }
+  /** 서버 ProjectRun 을 받아 메모 상태를 그대로 보인다. 진행 중이면 읽기 조회만 이어 간다 */
+  function adoptMemo(gen: number, id: string, body: unknown, invalid: () => void): void {
+    const next = normalizeProject(isObj(body) && isObj(body.project) ? body.project : body);
+    if (!next || next.id !== id || !S.run?.project) return invalid();
+    S.run.project = next;
+    if (next.memo?.status === 'running') {
+      const polls = (S.memo?.projectId === id ? S.memo.polls : 0) + 1;
+      if (polls > 40) { S.memo = { projectId: id, phase: 'failed', error: m => m.p2.memoPollStopped, polls }; renderAll(); return; }
+      S.memo = { projectId: id, phase: 'running', error: null, polls };
+      clearTimeout(memoTimer);
+      memoTimer = setTimeout(() => { void memoRead(gen, id, null); }, 3000) as unknown as number;
+    } else if (!memoUntried(next) || next.invalidMemo) S.memo = { projectId: id, phase: 'settled', error: null, polls: 0 };
+    else S.memo = { projectId: id, phase: 'unknown', error: m => m.p2.memoNotFound, polls: 0 };
+    renderAll();
+  }
+  /** GET 으로만 다시 읽는다 (유료 POST 를 다시 보내지 않는다). why 는 409 의 서버 설명 */
+  async function memoRead(gen: number, id: string, why: Text | null): Promise<void> {
+    const run = S.run;
+    if (gen !== S.gen || run?.project?.id !== id || !run.accessToken) return;
+    const here = () => gen === S.gen && S.run?.project?.id === id;
+    const unknown = (msg: Text) => { if (!here()) return; S.memo = { projectId: id, phase: 'unknown', error: msg, polls: 0 }; keepFocus(renderAll); };
+    const prev = S.memo?.projectId === id ? S.memo : null;
+    if (prev?.phase !== 'running') { S.memo = { projectId: id, phase: 'reading', error: prev?.error ?? null, polls: prev?.polls ?? 0 }; renderEvidence(); }
+    let res: Response;
+    try {
+      res = await fetch(`/api/cloudbite/projects/${encodeURIComponent(id)}`, { credentials: 'same-origin', cache: 'no-store', headers: { authorization: `Bearer ${run.accessToken}` } });
+    } catch { return unknown(m => m.p2.memoNetwork); }
+    if (!here()) return;
+    if (!res.ok) { const msg = await errorText(res); return unknown(m => m.p2.memoRequestFailed((why ?? msg)(m))); }
+    let body: unknown = null;
+    try { body = await res.json(); } catch { /* 아래에서 형식 오류 */ }
+    if (!here()) return;
+    const next = normalizeProject(body);
+    if (why && next && next.id === id && memoUntried(next) && !next.invalidMemo) {
+      S.run!.project = next; S.memo = { projectId: id, phase: 'failed', error: m => m.p2.memoRequestFailed(why(m)), polls: 0 }; renderAll(); return;
+    }
+    adoptMemo(gen, id, body, () => unknown(m => m.p2.memoInvalid));
+  }
+
+  // ── 관찰 신호: 서버 장부를 그대로. null 칸은 UNKNOWN (0 이 아니다)
+  function signalsKids(p: ConsoleProject, prefix: string, opened: Set<string>): Kid[] {
+    const m = M, t = m.p2, sg = p.evidenceSignals;
+    if (p.invalidSignals) return [h('p', { class: 'cb-warn' }, t.sigInvalid)];
+    if (!sg) return TERMINAL_PROJECT.includes(p.status) && p.experts.some(e => e.opinion) ? [h('p', { class: 'cb-help' }, t.sigMissing)] : [];
+    const name = (id: string) => expertName(p, id);
+    return [
+      h('p', { class: 'cb-help' }, t.sigNote), h('p', { class: 'cb-help' }, sg.interpretation),
+      h('ul', { class: 'cb-sig-summary' }, ...signalSummary(sg, m, name).map(x => h('li', null, x))),
+      ...sg.experts.map(e => evDisclosure(opened, `${prefix}sig:${e.expertId}`, 'cb-quiet', [h('span', null, name(e.expertId)), ' ', h('span', { class: 'cb-tag' }, `${t.sigSelf} ${e.selfAssessedConfidence}%`)],
+        h('dl', { class: 'cb-sig-dl' }, ...signalRows(e, m).flatMap(([k, v]) => [h('dt', null, k), h('dd', null, v === null ? h('span', { class: 'cb-unknown' }, t.unknown) : v)])))),
+    ];
+  }
+
+  // ── 이전 라운드: 서버가 만든 비교·참고. 이전 의견은 새 결과가 아니다
+  function roundKids(p: ConsoleProject, prefix: string, opened: Set<string>): Kid[] {
+    const m = M, t = m.p2, r = p.previousRound;
+    if (p.invalidRound) return [h('p', { class: 'cb-warn' }, t.roundInvalid)];
+    if (!r) return [];
+    const ops = r.reference.opinions;
+    const name = (id: string) => ops.find(o => o.expertId === id)?.name ?? expertName(p, id);
+    return [
+      h('p', null, h('span', { class: 'cb-tag' }, t.roundOf(r.parentId))),
+      h('p', { class: 'cb-help' }, t.roundNote),
+      h('h4', null, t.roundChange), h('p', { class: 'cb-round-change' }, r.changeSummary),
+      h('ul', { class: 'cb-round-diff' }, ...roundLines(r, m, name).map(x => h('li', null, x))),
+      ops.length ? evDisclosure(opened, `${prefix}round-refs`, 'cb-quiet', [h('span', null, t.roundRefs(ops.length))],
+        h('ol', { class: 'cb-round-refs' }, ...ops.map(o => h('li', null,
+          h('div', { class: 'cb-claim-head' }, h('strong', null, o.name), o.selectedAgain ? h('span', { class: 'cb-tag' }, t.roundAgain) : null),
+          h('p', { class: 'cb-help' }, t.roundOpinion(m.direction[o.direction], o.confidence)), h('p', null, o.summary),
+          o.evidence.length ? h('ul', null, ...o.evidence.map(x => h('li', null, x))) : null)))) : null,
+    ];
+  }
+
   function historyDisclosure(key: string, title: string, ...content: Kid[]): HTMLDetailsElement {
     const box = h('details', { class: 'cb-disclosure cb-history-disclosure', open: H.opened.has(key) }, h('summary', null, icon('chevron'), title), ...content);
     box.addEventListener('toggle', () => { if (box.open) H.opened.add(key); else H.opened.delete(key); });
@@ -3722,6 +4482,7 @@ function boot(): void {
     const notices: Kid[] = [tabs];
     if (H.error || H.unauthorized) notices.push(h('p', { class: 'cb-warn', role: 'alert' }, H.unauthorized ? t.auth : t.error(H.error), ' ', pageLink(OWNER_INBOX_PATH, m => m.ownerInbox)));
     if (H.busy) notices.push(h('p', { role: 'status', class: 'cb-help' }, t.loading));
+    if (H.message === 'fu-cleared') notices.push(h('p', { role: 'status', class: 'cb-help' }, M.p2.fuCleared));
     if (H.tab === 'report' && H.report && H.owner) {
       const r = H.report;
       fill(historyBody, ...notices, h('section', { class: 'cb-panel cb-history-report' }, h('h3', null, t.report), h('p', null, t.reportIntro),
@@ -3779,6 +4540,9 @@ function boot(): void {
       }
       const saved = normalizeProject(p);
       if (saved) detail.append(...evidenceKids(saved, H.opened, `${p.id}:ev:`, false).filter((k): k is Node | string => !!k));
+      if (saved && followUpEligible(saved)) detail.append(h('div', { class: 'cb-history-followup' },
+        h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'hist-followup', disabled: locked(), onclick: () => startFollowUp(saved) }, M.p2.fuStart),
+        h('p', { class: 'cb-help' }, M.p2.fuStartHelp)));
       detail.append(h('p', { class: 'cb-help' }, t.qualityNote));
       if (H.deleteId === p.id) detail.append(h('div', { class: 'cb-history-delete', role: 'group', 'aria-label': t.confirm }, h('p', null, t.confirm),
         h('button', { type: 'button', class: 'cb-secondary', disabled: H.mutation, onclick: () => { void deleteHistory(p.id); } }, t.deleteYes),
@@ -3786,6 +4550,70 @@ function boot(): void {
       else detail.append(h('button', { type: 'button', class: 'cb-ghost', onclick: () => { H.deleteId = p.id; paintHistory(); } }, t.remove));
     }
     fill(historyBody, ...notices, h('div', { class: 'cb-history-grid' }, list, detail), h('p', { class: 'cb-help' }, t.ownerNote));
+  }
+
+  // ── 후속 라운드
+  /** 지금 화면의 초안과 부모의 차이 (화면 표시용). 서버가 만든 previousRound 가 실행 뒤의 최종 비교다 */
+  function draftRound(parent: ConsoleProject): DraftRound {
+    const frame = parseDecision(decisionTexts()).frame;
+    return {
+      stage: [parent.brief.stage ?? 'unspecified', (STAGES.includes(stageSel.value as ProjectStage) ? stageSel.value : 'unspecified') as ProjectStage],
+      language: [parent.brief.responseLanguage ?? '', (RESPONSE_LANGS.includes(respSel.value as ResponseLanguage) ? respSel.value : '') as ResponseLanguage | ''],
+      previous: parent.brief.decision?.options ?? [], current: frame?.options ?? [], decision: frame ?? {},
+      docs: S.docs.map(d => ({ name: d.name, content: d.content })), roles: autoRoute() ? null : [...S.selected],
+    };
+  }
+  function renderFollowUp(): void {
+    const fu = S.followUp, m = M;
+    fuBox.hidden = !fu;
+    if (!fu) return;
+    const p = fu.parent, name = (id: string) => expertName(p, id);
+    fuParentLine.textContent = m.p2.fuParent(p.brief.title, fu.parentId);
+    fill(fuDiffList, ...draftRoundLines(p, draftRound(p), m, name).map(x => h('li', null, x)));
+    const ops = p.experts.filter(e => e.status === 'completed' && e.opinion && !e.invalidOpinion);
+    fill(fuRefs, ops.length ? evDisclosure(S.evOpen, `fu:${fu.parentId}:refs`, 'cb-quiet', [h('span', null, m.p2.roundRefs(ops.length))],
+      h('p', { class: 'cb-help' }, m.p2.roundNote),
+      h('ul', { class: 'cb-round-refs' }, ...ops.map(e => h('li', null, h('strong', null, e.name), ' ',
+        h('span', { class: 'cb-help' }, m.p2.roundOpinion(m.direction[e.opinion!.direction], e.opinion!.confidence)))))) : null);
+  }
+  /** 사용 기록의 끝난 실제 실행을 새 프로젝트 초안으로 옮긴다. 아무것도 실행하지 않고, 이전 의견은 참고로만 보인다 */
+  function startFollowUp(parent: ConsoleProject): void {
+    if (locked() || !followUpEligible(parent)) return;
+    if (S.mode !== 'live') setMode('live');
+    const b = parent.brief;
+    titleIn.value = b.title; objectiveIn.value = b.objective; contextIn.value = b.context;
+    for (const f of DECISION_FIELDS) decisionIns[f].value = (b.decision?.[f] ?? []).join('\n');
+    S.docs = (b.documents ?? []).map(d => ({ key: ++docKey, name: d.name, content: d.content, ...(d.origin ? { origin: d.origin } : {}) }));
+    S.docErrors = []; S.docOpen.clear(); docRev++;
+    stageSel.value = b.stage && b.stage !== 'unspecified' ? b.stage : '';
+    respSel.value = b.responseLanguage ?? '';
+    for (const f of BUDGET_FIELDS) budgetIns[f].value = '';
+    // 역할: 이전 팀을 직접 고르기로 미리 채운다 (사용자가 바꾸거나 Jev 로 새로 고르게 할 수 있다). 숨은 선택은 없다
+    S.selected.clear();
+    const allowed = new Set(catalogue().map(e => e.id));
+    for (const id of b.expertIds) if (allowed.has(id) && S.selected.size < limits().max) S.selected.add(id);
+    if (routing()) S.routeMode = 'manual';
+    S.followUp = { parentId: parent.id, parent, changeSummary: '' };
+    fuSummaryIn.value = '';
+    planGen++; S.plan = null; S.planReq = null; S.planStale = false; S.formErrors = []; S.route = null;
+    S.setupOpen = true;
+    if (b.decision) decisionDetails.open = true;
+    if (b.documents?.length) docsDetails.open = true;
+    setView('home');
+    renderAll();
+    fuSummaryIn.focus();
+  }
+  function dropFollowUp(): void {
+    S.followUp = null; fuSummaryIn.value = '';
+    planGen++; S.plan = null; S.planReq = null; S.planStale = false;
+    S.formErrors = S.formErrors.filter(e => e.field !== 'revision');
+  }
+  /** 초안만 놓는다. 옮겨 온 브리프 글은 사용자의 입력으로 남는다 */
+  function cancelFollowUp(): void {
+    if (locked()) return;
+    dropFollowUp();
+    renderAll();
+    objectiveIn.focus();
   }
 
   // ── 동작
@@ -3888,6 +4716,7 @@ function boot(): void {
   function clearTimers(): void {
     for (const t of timers) clearTimeout(t); timers = []; clearTimeout(pollTimer); pollTimer = 0; clearTimeout(accessTimer); accessTimer = 0;
     clearTimeout(reviewTimer); reviewTimer = 0;
+    clearTimeout(memoTimer); memoTimer = 0;
   }
 
   /** 방문자 실행이 끝나면 서버가 아는 접근 상태(canCreate)를 다시 읽는다. 실패한 실행의 정리 확인을 기다리는 동안만
@@ -3915,6 +4744,14 @@ function boot(): void {
     if (S.docReading) S.formErrors.push({ field: 'docs', text: m => m.vDocsBusy });
     const wf = parseWorkflow(stageSel.value, respSel.value, budgetTexts());
     S.formErrors.push(...wf.issues);
+    // 후속 라운드: 실제 실행만, 바뀐 점 요약 필수. 부모 권한은 서버가 지금 자격으로 다시 확인한다 (화면이 따로 주장하지 않는다)
+    const fu = S.followUp, change = fuSummaryIn.value.trim();
+    if (fu) {
+      if (S.mode !== 'live') S.formErrors.push({ field: 'revision', text: m => m.p2.fuNeedLive });
+      if (!change) S.formErrors.push({ field: 'revision', text: m => m.p2.fuNeedSummary });
+      else if (change.length > REVISION.changeSummary) S.formErrors.push({ field: 'revision', text: m => m.p2.fuSummaryLong(REVISION.changeSummary) });
+    }
+    const extras = fu ? { ...wf.extras, revision: { parentId: fu.parentId, changeSummary: change } } : wf.extras;
     if (auto) {
       if (!routing()!.ready) S.formErrors.push({ field: 'run', text: m => m.jevUnavailable });
       else if (!routeCredential()) S.formErrors.push({ field: 'run', text: m => m.jevNeedAccess });
@@ -3936,13 +4773,13 @@ function boot(): void {
     // 실제 실행: 준비한 계획이 지금 입력과 같으면 그 계획을 실행하고, 아니면 새 계획을 준비한다 (바로 실행하지 않는다)
     if (S.mode === 'live') {
       if (S.plan?.phase === 'ready' && S.plan.sig === semanticSig()) executePlan();
-      else void preparePlan(f, dec.frame, wf.extras, auto);
+      else void preparePlan(f, dec.frame, extras, auto);
       return;
     }
     clearTimers();
     const gen = ++S.gen;
     const brief: ProjectBrief = { ...f, mode: S.mode, requestId: crypto.randomUUID(), ...briefExtras({ decision: dec.frame, documents: S.docs.length ? docsPayload(S.docs) : undefined }), ...wf.extras };
-    S.review = null;
+    S.review = null; S.memo = null;
     S.artifactCache.clear(); S.hiddenRows.clear(); S.focusExpert = ''; S.artifactPath = ''; S.artifactPicked = false; lastAnnounce = '';
     S.run = { mode: S.mode, phase: auto ? 'routing' : 'starting', project: null, accessToken: '', error: null, startedAt: Date.now(), pollErrors: 0,
       routed: auto, viaVisitor: viaVisitor(), viaOwner: viaOwner() };
@@ -4073,7 +4910,7 @@ function boot(): void {
     const token = isObj(body) ? str(body.accessToken, 2000) : '';
     if (!project || !token) { S.run!.phase = 'error'; S.run!.error = m => m.invalidResponse; renderAll(); return; }
     S.run!.project = project; S.run!.accessToken = token; S.setupOpen = false; // 실제로 시작됐으니 편집 영역을 접는다
-    if (frozen) { S.plan = null; S.planReq = null; S.planStale = false; } // 계획을 썼다: 다음 실행은 새 계획·새 requestId
+    if (frozen) { S.plan = null; S.planReq = null; S.planStale = false; if (S.followUp) { S.followUp = null; fuSummaryIn.value = ''; } } // 계획을 썼다: 다음 실행은 새 계획·새 requestId
     if (v) v.usedProjects = Math.min(v.maxProjects, v.usedProjects + 1); // 서버가 센 사용량을 화면에도 반영한다
     S.run!.phase = TERMINAL_PROJECT.includes(project.status) ? 'done' : 'running';
     if (S.run!.phase === 'running') schedulePoll(gen, 1200);
@@ -4303,7 +5140,7 @@ function boot(): void {
   void first.then(() => { if (!S.run && recheckable() && !accessTimer) accessTimer = setTimeout(() => refreshAccess(true), ACCESS_RECHECK_MS) as unknown as number; });
 }
 
-const CloudbiteCore = { parseDecision, docProblem, docAccept, docsPayload, docsBytes, parseWorkflow, normalizePreview, normalizePmc, normalizeCrossReview, reviewEligible, projectMarkdown, normalizeBootstrap, normalizePool, normalizeRouting, normalizeRoute, suggestTeam, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, artifactContent, domainLabel, DEMO_EXPERTS,
+const CloudbiteCore = { normalizeMemo, normalizeSignals, normalizeRound, phaseView, signalRows, signalSummary, memoCoverageLines, roundLines, draftRoundLines, followUpEligible, phaseTwoMarkdown, parseDecision, docProblem, docAccept, docsPayload, docsBytes, parseWorkflow, normalizePreview, normalizePmc, normalizeCrossReview, reviewEligible, projectMarkdown, normalizeBootstrap, normalizePool, normalizeRouting, normalizeRoute, suggestTeam, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, artifactContent, domainLabel, DEMO_EXPERTS,
   pickLang, withLang, normalizeOwnerSession, DICT, ROLE_KO };
 const hook = (globalThis as { __cloudbiteTestHook?: (core: typeof CloudbiteCore) => void }).__cloudbiteTestHook;
 if (typeof hook === 'function') hook(CloudbiteCore);
