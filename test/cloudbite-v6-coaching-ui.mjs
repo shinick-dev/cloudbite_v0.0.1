@@ -275,7 +275,8 @@ await test('수정 제안 → 다음 라운드 초안: 목표·범위·이정표
   assert.equal(box.hidden, false, 'existing follow-up draft opened');
   assert.ok(box.textContent.includes(EN.p2.fuParent('AI advisory room', PARENT)) && box.textContent.includes(EN.p6.draftNote), 'parent provenance kept and labelled');
   assert.equal(env.byId('cb-objective').value, COACHING.revisedProject.objective.text);
-  assert.equal(env.byId('cb-context').value, `Startup teams.\n\n${EN.p6.draftBlockHead}\n- ${EN.p6.scope}: One pilot team, 10 roles, no data upload.\n- ${EN.p6.milestone}: Five pre-pay conversations completed.`);
+  // v7: 범위·이정표 다음에 우선 보완책·열린 질문도 "제안" 이름표 아래 옮긴다 (test/cloudbite-v7-continuity.mjs 가 상한·생략을 고정한다)
+  assert.ok(env.byId('cb-context').value.startsWith(`Startup teams.\n\n${EN.p6.draftBlockHead}\n- ${EN.p6.scope}: One pilot team, 10 roles, no data upload.\n- ${EN.p6.milestone}: Five pre-pay conversations completed.\n${EN.p7.draftRepairsHead}`));
   assert.equal(env.byId('cb-fu-summary').value, EN.p6.draftSummary);
   assert.equal(env.byId('cb-dec-knownFacts').value, 'We have 3 design partners', 'known facts stay the parent\'s; no suggestion becomes a fact');
   assert.equal(env.byId('cb-dec-constraints').value, '4 weeks');

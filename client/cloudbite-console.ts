@@ -16,6 +16,8 @@ type MemoStatus = ProjectMemo['status'];
 import type { EvidenceSignals, ExpertEvidenceSignals } from '../src/cloudbite-evidence';
 import type { PmcArticle, PmcImport, PmcImportErrorCode, PmcSection } from '../src/cloudbite-pmc';
 import type { ProjectPreviousRound, RoundOmission, RoundOption } from '../src/cloudbite-revision';
+// v7 연속성: 잎 모듈의 타입만 가져온다 (콘솔은 묶지 않는 단일 변환이라 실행 코드는 가져올 수 없다. 상한은 아래 CONTINUITY 에 같게 둔다)
+import type { ContinuityChange, ContinuitySubject, CoachingHandoff, HandoffClaim, HandoffRepair, HandoffState, RoundContinuity } from '../src/cloudbite-project-context';
 import type { CloudbiteAccessRequest, CloudbiteAccessSession } from '../src/cloudbite-access-contract';
 import type { HistoryList, HistoryDetail, HistoryReport, HistoryIssue, HistoryFeedback } from '../src/cloudbite-history-contract';
 import type { CatalogueMaxRoles, ProjectMaxExperts } from '../src/cloudbite-catalogue-limits';
@@ -57,6 +59,8 @@ type ConsoleProject = Omit<ProjectRun, 'experts' | 'crossReview'> & {
   memo?: ConsoleMemo; invalidMemo?: boolean; evidenceSignals?: EvidenceSignals; invalidSignals?: boolean;
   previousRound?: ProjectPreviousRound; invalidRound?: boolean; invalidAuthorPlan?: boolean; memoBudget?: BudgetPhaseView;
   invalidProvenance?: boolean; invalidQuantitative?: boolean;
+  /** v7: previousRound.continuity 가 있는데 이 콘솔이 읽을 수 없다 (이전 라운드의 나머지는 그대로 보인다) */
+  invalidContinuity?: boolean;
 };
 interface Limits { min: number; max: number }
 interface FormInput { title: string; objective: string; context: string; expertIds: string[] }
@@ -582,14 +586,20 @@ const P4_KO: typeof P4_EN = {
 };
 
 // ── v6 코칭 문구: 브리프 도우미(브라우저 안 규칙 기반, 모델 호출 없음) · 메모의 제안 수정안 · 다음 라운드 초안. EN.p6 / KO.p6
-type CoachQ = 'who' | 'decision' | 'constraint';
+type CoachQ = 'who' | 'decision' | 'constraint' | 'success' | 'evidence' | 'unknown';
 const P6_EN = {
   helperTitle: 'Sharpen a rough idea (optional)',
-  helperHint: (n: number) => n ? `${n} of 3 answered` : 'Three questions',
-  helperNote: 'Local drafting aid: three fixed questions in this browser. No model call, nothing is sent until you run. Skip it if your brief is already concrete.',
-  q: { who: 'Who is this for, and who decides?', decision: 'What decision should this project help you make?', constraint: 'What constraint binds right now?' } as Record<CoachQ, string>,
-  qHint: { who: 'e.g. 5–20 person startup teams; the founder decides.', decision: 'e.g. whether to launch in 4 weeks or run a 2-week pilot first.', constraint: 'e.g. one engineer, no customer data upload, 4-week deadline.' } as Record<CoachQ, string>,
-  qLabel: { who: 'Who it is for / who decides', decision: 'Decision to make', constraint: 'Current constraint' } as Record<CoachQ, string>,
+  helperHint: (n: number, total: number) => n ? `${n} of ${total} answered` : `${total} questions for this brief`,
+  helperNote: 'Local drafting aid in this browser: fixed rules pick only the questions your stage and empty decision fields leave open, and say what each answer influences. No model call, nothing is sent until you run. Skip it if your brief is already concrete.',
+  q: { who: 'Who is this for, and who decides?', decision: 'What decision should this project help you make?', constraint: 'What constraint binds right now?',
+    success: 'What result would show this worked?', evidence: 'What have you already tested or observed?', unknown: 'What is the biggest thing you do not know yet?' } as Record<CoachQ, string>,
+  qHint: { who: 'e.g. 5–20 person startup teams; the founder decides.', decision: 'e.g. whether to launch in 4 weeks or run a 2-week pilot first.', constraint: 'e.g. one engineer, no customer data upload, 4-week deadline.',
+    success: 'e.g. 3 of 5 pilot teams use it weekly by week 4.', evidence: 'e.g. 3 interviews; 2 teams asked for a trial.', unknown: 'e.g. whether teams will pay before a trial.' } as Record<CoachQ, string>,
+  qLabel: { who: 'Who it is for / who decides', decision: 'Decision to make', constraint: 'Current constraint', success: 'Success signal', evidence: 'Already observed', unknown: 'Biggest unknown' } as Record<CoachQ, string>,
+  /** 답이 무엇에 영향을 주는지 (규칙이 이 질문을 고른 이유) */
+  qWhy: { who: 'Influences whose trade-offs the roles weigh.', decision: 'No options entered: influences whether the memo compares options or reviews the whole project.',
+    constraint: 'No constraints entered: influences which repairs are feasible now.', success: 'No success criteria at this stage: influences what the next milestone must show.',
+    evidence: 'No known facts at this stage: influences whether advice starts from evidence or from assumptions.', unknown: 'No unknowns at an early stage: influences which check comes first.' } as Record<CoachQ, string>,
   preview: 'Preview addition to Context',
   previewTitle: 'Proposed addition (not applied yet)',
   previewNote: 'Your answers are added as a labelled block at the end of Context. Existing text stays as you wrote it. Nothing is added to known facts.',
@@ -619,9 +629,9 @@ const P6_EN = {
   noOptions: 'The brief has no decision options, so there is nothing to compare. The memo reviews the project as a whole.',
   thinOk: 'A memo can also be written for a brief without decision options; it then proposes how to sharpen the project.',
   useDraft: 'Use revised project as next-round draft',
-  useDraftHelp: 'Copies the proposed objective, scope and next milestone into a follow-up draft. Nothing runs and nothing is adopted; edit before you run. Previous round and roles are kept.',
+  useDraftHelp: 'Copies the proposed objective, scope, next milestone and, as space allows, the priority repairs and open questions into a follow-up draft. Nothing runs and nothing is adopted or marked done; edit before you run. Previous round and roles are kept.',
   draftBlockHead: 'Proposed revision from the parent memo (edit or remove; not adopted or validated):',
-  draftSummary: 'Objective, scope and next milestone drafted from the parent memo\'s proposed revision. Review before running.',
+  draftSummary: 'Objective, scope, next milestone and proposed repairs/questions drafted from the parent memo\'s proposed revision. Review before running, and say here what you actually did or learned since the parent.',
   draftNote: 'This draft started from the parent memo\'s proposed revision. Nothing was adopted or run.',
   draftNoRoom: 'Scope and next milestone were not added to Context because it would exceed the length limit; see the parent memo.',
   // 종합: 방향 분포만 설명한다 (개수는 결정의 질·합의가 아니다)
@@ -629,11 +639,16 @@ const P6_EN = {
 };
 const P6_KO: typeof P6_EN = {
   helperTitle: '대략적인 아이디어 다듬기 (선택)',
-  helperHint: (n) => n ? `3개 중 ${n}개 답함` : '질문 세 개',
-  helperNote: '브라우저 안의 작성 도우미입니다: 정해진 질문 세 개이며 모델 호출이 없고, 실행하기 전에는 아무것도 보내지 않습니다. 브리프가 이미 구체적이면 건너뛰세요.',
-  q: { who: '누구를 위한 것이고, 누가 결정하나요?', decision: '이 프로젝트로 어떤 결정을 내리려 하나요?', constraint: '지금 가장 묶여 있는 제약은 무엇인가요?' },
-  qHint: { who: '예: 5–20명 스타트업 팀, 대표가 결정.', decision: '예: 4주 안에 출시할지, 2주 시범을 먼저 할지.', constraint: '예: 개발자 1명, 고객 데이터 업로드 없음, 4주 마감.' },
-  qLabel: { who: '대상 / 결정권자', decision: '내릴 결정', constraint: '현재 제약' },
+  helperHint: (n, total) => n ? `${total}개 중 ${n}개 답함` : `이 브리프에 맞는 질문 ${total}개`,
+  helperNote: '브라우저 안의 작성 도우미입니다: 정해진 규칙이 단계와 비어 있는 결정 칸에 맞는 질문만 고르고, 답이 무엇에 영향을 주는지 밝힙니다. 모델 호출이 없고, 실행하기 전에는 아무것도 보내지 않습니다. 브리프가 이미 구체적이면 건너뛰세요.',
+  q: { who: '누구를 위한 것이고, 누가 결정하나요?', decision: '이 프로젝트로 어떤 결정을 내리려 하나요?', constraint: '지금 가장 묶여 있는 제약은 무엇인가요?',
+    success: '어떤 결과가 나오면 잘 됐다고 볼 수 있나요?', evidence: '이미 시험해 보거나 관찰한 것은 무엇인가요?', unknown: '아직 모르는 것 중 가장 큰 것은 무엇인가요?' },
+  qHint: { who: '예: 5–20명 스타트업 팀, 대표가 결정.', decision: '예: 4주 안에 출시할지, 2주 시범을 먼저 할지.', constraint: '예: 개발자 1명, 고객 데이터 업로드 없음, 4주 마감.',
+    success: '예: 4주차까지 시범 팀 5곳 중 3곳이 매주 사용.', evidence: '예: 인터뷰 3건, 2개 팀이 시범을 요청.', unknown: '예: 시범 전에 팀이 돈을 낼지.' },
+  qLabel: { who: '대상 / 결정권자', decision: '내릴 결정', constraint: '현재 제약', success: '성공 신호', evidence: '이미 관찰한 것', unknown: '가장 큰 미지수' },
+  qWhy: { who: '역할들이 누구의 맞바꿈을 따질지에 영향을 줍니다.', decision: '선택지가 비어 있음: 메모가 선택지를 비교할지, 프로젝트 전체를 검토할지에 영향을 줍니다.',
+    constraint: '제약이 비어 있음: 지금 할 수 있는 보완책이 무엇인지에 영향을 줍니다.', success: '이 단계에 성공 기준이 비어 있음: 다음 이정표가 무엇을 보여야 하는지에 영향을 줍니다.',
+    evidence: '이 단계에 알려진 사실이 비어 있음: 조언이 근거에서 시작할지 가정에서 시작할지에 영향을 줍니다.', unknown: '초기 단계에 미지수가 비어 있음: 무엇을 먼저 확인할지에 영향을 줍니다.' },
   preview: '맥락에 더할 내용 미리 보기',
   previewTitle: '더할 내용 (아직 적용 전)',
   previewNote: '답은 맥락 끝에 이름표를 단 묶음으로 더해집니다. 이미 쓴 글은 그대로입니다. 알려진 사실에는 아무것도 더하지 않습니다.',
@@ -662,15 +677,54 @@ const P6_KO: typeof P6_EN = {
   noOptions: '브리프에 결정 선택지가 없어 비교할 것이 없습니다. 메모는 프로젝트 전체를 검토합니다.',
   thinOk: '결정 선택지가 없는 브리프에도 메모를 쓸 수 있습니다. 그때 메모는 프로젝트를 다듬는 방법을 제안합니다.',
   useDraft: '수정 제안을 다음 라운드 초안으로 쓰기',
-  useDraftHelp: '제안된 목표·범위·다음 이정표를 후속 라운드 초안에 옮깁니다. 실행하거나 채택하지 않으며, 실행 전에 고칠 수 있습니다. 이전 라운드와 역할 선택은 그대로입니다.',
+  useDraftHelp: '제안된 목표·범위·다음 이정표와, 자리가 있는 만큼 우선 보완책·열린 질문을 후속 라운드 초안에 옮깁니다. 실행하거나 채택하지 않고 한 일로 표시하지도 않으며, 실행 전에 고칠 수 있습니다. 이전 라운드와 역할 선택은 그대로입니다.',
   draftBlockHead: '부모 메모의 수정 제안 (고치거나 지우세요. 채택·검증되지 않음):',
-  draftSummary: '부모 메모의 수정 제안으로 목표·범위·다음 이정표를 초안했습니다. 실행 전에 검토하세요.',
+  draftSummary: '부모 메모의 수정 제안으로 목표·범위·다음 이정표와 제안된 보완책·질문을 초안했습니다. 실행 전에 검토하고, 부모 이후 실제로 한 일이나 알게 된 것을 여기에 적으세요.',
   draftNote: '이 초안은 부모 메모의 수정 제안에서 시작했습니다. 채택하거나 실행한 것은 없습니다.',
   draftNoRoom: '맥락 길이 한도를 넘게 되어 범위와 다음 이정표는 맥락에 더하지 않았습니다. 부모 메모를 참고하세요.',
   distTitle: '밝힌 방향',
 };
+// ── v7 연속성 문구: 부모 메모의 제안을 다음 라운드로 옮길 때 "제안·안 함·검증 안 됨"을 한 일·확인과 구별한다. EN.p7 / KO.p7
+const P7_EN = {
+  priorTitle: 'Open points from the parent memo',
+  priorNote: 'The parent memo model proposed these. None was done, checked or adopted by carrying it here. In “What changed”, say which you actually did or checked and what you found.',
+  proposed: 'Proposed · not done', checkPending: 'Check (not verified)', openQ: 'Open question',
+  draftRepairsHead: 'Proposed repairs (not done or verified yet):',
+  draftQuestionsHead: 'Open questions that could change the decision:',
+  draftOmitted: (n: number) => `${n} proposed item(s) did not fit in Context and were not copied; see the parent memo.`,
+  contTitle: 'Continuity with the parent round',
+  contCarried: (r: number, q: number) => `Carried from the parent memo as reference: ${r} proposed repair(s), ${q} open question(s). Not done or verified.`,
+  contNone: 'The parent memo had no coaching proposals to carry.',
+  contUnreadable: 'The parent memo\'s coaching could not be read, so nothing was carried.',
+  contChanged: (s: string) => `Changed since the parent (exact text): ${s}`,
+  contSame: 'No exact-text change in stage, decision fields or documents since the parent.',
+  contMissing: (ids: string) => `Parent documents no longer present: ${ids}`,
+  contReeval: 'Experts were asked to re-evaluate earlier proposals and conclusions that depended on these changes, stating the new basis next to the old one.',
+  contStanding: 'The change summary is your statement; carried items stay proposals until the current material shows otherwise.',
+  contInvalid: 'This round includes continuity data this console cannot read, so it is not shown. The rest of the round is unaffected.',
+  subject: { stage: 'stage', options: 'options', constraints: 'constraints', successCriteria: 'success criteria', knownFacts: 'known facts', assumptions: 'assumptions', unknowns: 'unknowns', documents: 'documents' } as Record<ContinuitySubject, string>,
+};
+const P7_KO: typeof P7_EN = {
+  priorTitle: '부모 메모의 열린 항목',
+  priorNote: '부모 메모 모델이 제안한 것입니다. 여기로 옮겨도 한 일·확인한 일·채택한 일이 되지 않습니다. "바뀐 점"에 실제로 한 일이나 확인한 것과 그 결과를 적으세요.',
+  proposed: '제안 · 하지 않음', checkPending: '확인 (검증 안 됨)', openQ: '열린 질문',
+  draftRepairsHead: '제안된 보완책 (아직 하거나 검증하지 않음):',
+  draftQuestionsHead: '판단을 바꿀 수 있는 열린 질문:',
+  draftOmitted: (n) => `제안 ${n}개는 맥락에 들어가지 않아 옮기지 않았습니다. 부모 메모를 참고하세요.`,
+  contTitle: '부모 라운드와의 연속성',
+  contCarried: (r, q) => `부모 메모에서 참고로 옮김: 제안된 보완책 ${r}개, 열린 질문 ${q}개. 하거나 검증한 것이 아닙니다.`,
+  contNone: '부모 메모에 옮길 코칭 제안이 없었습니다.',
+  contUnreadable: '부모 메모의 코칭을 읽을 수 없어 아무것도 옮기지 않았습니다.',
+  contChanged: (s) => `부모 이후 바뀐 것 (정확한 글자 기준): ${s}`,
+  contSame: '부모 이후 단계·결정 칸·문서에 글자가 바뀐 것이 없습니다.',
+  contMissing: (ids) => `더는 없는 부모 문서: ${ids}`,
+  contReeval: '전문가들에게 이 변화에 기대던 이전 제안·결론을 다시 평가하고, 새 근거를 이전 근거 옆에 밝히도록 요청했습니다.',
+  contStanding: '바뀐 점 요약은 사용자의 진술입니다. 옮겨 온 항목은 지금 자료가 달리 보여 주기 전까지 제안으로 남습니다.',
+  contInvalid: '이 라운드의 연속성 자료를 이 콘솔이 읽을 수 없어 표시하지 않습니다. 라운드의 나머지는 그대로입니다.',
+  subject: { stage: '단계', options: '선택지', constraints: '제약', successCriteria: '성공 기준', knownFacts: '알려진 사실', assumptions: '가정', unknowns: '미지수', documents: '문서' },
+};
 const EN = {
-  p2: P2_EN, p3: P3_EN, p4: P4_EN, p6: P6_EN,
+  p2: P2_EN, p3: P3_EN, p4: P4_EN, p6: P6_EN, p7: P7_EN,
   docTitle: 'Cloudbite — Expert sandbox workspace',
   langGroup: 'Language',
   langChanged: 'Language: English',
@@ -1134,7 +1188,7 @@ const EN = {
 type Messages = typeof EN;
 
 const KO: Messages = {
-  p2: P2_KO, p3: P3_KO, p4: P4_KO, p6: P6_KO,
+  p2: P2_KO, p3: P3_KO, p4: P4_KO, p6: P6_KO, p7: P7_KO,
   docTitle: 'Cloudbite — 전문가 샌드박스 작업공간',
   langGroup: '언어',
   langChanged: '언어: 한국어',
@@ -1999,6 +2053,12 @@ function normalizeProject(raw: unknown): ConsoleProject | null {
     authorPlan = normalizeAuthorPlan(raw.previousRound.authorResponse, round.parentId);
     if (authorPlan) round.authorResponse = authorPlan;
   }
+  // v7 연속성도 이전 라운드 안의 선택 필드다: 옛 라운드에는 없고, 읽을 수 없으면 그 칸만 빼고 밝힌다
+  let continuity: RoundContinuity | null | undefined;
+  if (round && isObj(raw.previousRound) && raw.previousRound.continuity !== undefined) {
+    continuity = normalizeContinuity(raw.previousRound.continuity);
+    if (continuity) round.continuity = continuity;
+  }
   return {
     id, status, experts, createdAt: num(raw.createdAt) ?? 0, updatedAt: num(raw.updatedAt) ?? 0,
     brief: {
@@ -2015,6 +2075,7 @@ function normalizeProject(raw: unknown): ConsoleProject | null {
     ...(signals ? { evidenceSignals: signals } : signals === null ? { invalidSignals: true } : {}),
     ...(round ? { previousRound: round } : round === null ? { invalidRound: true } : {}),
     ...(authorPlan === null ? { invalidAuthorPlan: true } : {}),
+    ...(continuity === null ? { invalidContinuity: true } : {}),
     ...(memoBudget ? { memoBudget } : {}),
     ...(prov ? { provenance: prov } : prov === null ? { invalidProvenance: true } : {}),
     ...(quantitative ? { quantitativeChecks: quantitative } : quantitative === null ? { invalidQuantitative: true } : {}),
@@ -2869,6 +2930,100 @@ function memoRefText(p: ConsoleProject, r: MemoReference, m: Messages, name: Nam
   if (r.kind === 'review-finding') return t.refReview(name(r.reviewerExpertId), r.index + 1);
   return t.refBrief(r.field);
 }
+// ── v7 연속성 (src/cloudbite-project-context.ts RoundContinuity). 고정 값·상한만 받고, 틀리면 이 칸만 읽을 수 없다고 밝힌다.
+// 상한은 서버 HANDOFF_LIMITS 와 같다 (제안·질문 3개, 주장 600바이트 ≤ 600자, 전문가 8명, 바뀐 id 12개)
+const CONTINUITY = { repairs: 3, questions: 3, claim: 600, expertIds: 8, changeIds: 12 };
+const CONT_SUBJECTS: ContinuitySubject[] = ['stage', 'options', 'constraints', 'successCriteria', 'knownFacts', 'assumptions', 'unknowns', 'documents'];
+const HANDOFF_STATES: HandoffState[] = ['present', 'none', 'unreadable'];
+function handoffClaim(v: unknown): HandoffClaim | null {
+  if (!isObj(v) || typeof v.text !== 'string' || !v.text.trim() || v.text.length > CONTINUITY.claim) return null;
+  const expertIds = strArr(v.expertIds, CONTINUITY.expertIds, 80);
+  return expertIds ? { text: v.text, expertIds } : null;
+}
+function roundOmission(o: unknown): RoundOmission | null {
+  return isObj(o) && typeof o.path === 'string' && (o.omittedBytes === undefined || isInt(o.omittedBytes)) && (o.omittedItems === undefined || isInt(o.omittedItems))
+    ? { path: clip(o.path, 120), ...(o.omittedBytes !== undefined ? { omittedBytes: o.omittedBytes as number } : {}), ...(o.omittedItems !== undefined ? { omittedItems: o.omittedItems as number } : {}) } : null;
+}
+function normalizeHandoff(v: unknown): CoachingHandoff | null {
+  if (!isObj(v) || v.version !== 'cloudbite-project-context/v1' || v.source !== 'parent-memo-coaching' || v.standing !== 'generated-proposal-not-adopted'
+    || !COACH_STANCES.includes(v.stance as ProjectCoaching['stance']) || !isObj(v.revisedProject)) return null;
+  const rp = v.revisedProject, objective = handoffClaim(rp.objective), scope = handoffClaim(rp.scope), nextMilestone = handoffClaim(rp.nextMilestone);
+  const repairs = every(v.repairs, CONTINUITY.repairs, x => {
+    if (!isObj(x) || typeof x.id !== 'string' || x.status !== 'proposed-not-executed' || x.verification !== 'not-verified'
+      || !COACH_KINDS.includes(x.kind as CoachingRepair['kind']) || !COACH_PRIORITIES.includes(x.priority as CoachingRepair['priority'])) return null;
+    const issue = handoffClaim(x.issue), change = handoffClaim(x.change), check = handoffClaim(x.check), decisionTrigger = handoffClaim(x.decisionTrigger);
+    return issue && change && check && decisionTrigger ? { id: clip(x.id, 40), priority: x.priority as HandoffRepair['priority'], kind: x.kind as HandoffRepair['kind'],
+      issue, change, check, decisionTrigger, status: 'proposed-not-executed' as const, verification: 'not-verified' as const } : null;
+  });
+  const questions = every(v.questions, CONTINUITY.questions, x => {
+    if (!isObj(x) || typeof x.id !== 'string' || x.status !== 'open-not-answered') return null;
+    const text = handoffClaim(x.text);
+    return text ? { id: clip(x.id, 40), text, status: 'open-not-answered' as const } : null;
+  });
+  const omissions = every(v.omissions, 64, roundOmission);
+  if (!objective || !scope || !nextMilestone || !repairs || !questions || !omissions) return null;
+  return { version: 'cloudbite-project-context/v1', source: 'parent-memo-coaching', standing: 'generated-proposal-not-adopted', stance: v.stance as CoachingHandoff['stance'],
+    revisedProject: { objective, scope, nextMilestone }, repairs, questions, omissions };
+}
+/** 서버가 만든 연속성. 옛 라운드에는 없다 (undefined). 있는데 모양이 다르면 null */
+function normalizeContinuity(v: unknown): RoundContinuity | null {
+  if (!isObj(v) || v.version !== 'cloudbite-project-context/v1' || v.label !== 'previous-round-continuity' || v.trust !== 'untrusted-data'
+    || !HANDOFF_STATES.includes(v.parentCoaching as HandoffState) || v.changeSummaryStanding !== 'user-statement-not-verified' || !isBool(v.reevaluate)) return null;
+  const prior = v.priorProposals === undefined ? undefined : normalizeHandoff(v.priorProposals);
+  if (prior === null || (v.parentCoaching === 'present') !== !!prior) return null;
+  const changed = every(v.changed, CONT_SUBJECTS.length, x => {
+    if (!isObj(x) || !CONT_SUBJECTS.includes(x.subject as ContinuitySubject) || !isInt(x.added) || !isInt(x.removed) || !isInt(x.changed)) return null;
+    const ids = x.ids === undefined ? undefined : strArr(x.ids, CONTINUITY.changeIds, 64);
+    if (ids === null) return null;
+    const out: ContinuityChange = { subject: x.subject as ContinuitySubject, added: x.added, removed: x.removed, changed: x.changed, ...(ids ? { ids } : {}) };
+    return out;
+  });
+  const missingEvidence = strArr(v.missingEvidence, CONTINUITY.changeIds, 64), instructions = strArr(v.instructions, 8, 600), omissions = every(v.omissions, 64, roundOmission);
+  if (!changed || !missingEvidence || !instructions || !omissions) return null;
+  return { version: 'cloudbite-project-context/v1', label: 'previous-round-continuity', trust: 'untrusted-data', parentCoaching: v.parentCoaching as HandoffState,
+    ...(prior ? { priorProposals: prior } : {}), changeSummaryStanding: 'user-statement-not-verified', changed, missingEvidence, reevaluate: v.reevaluate, instructions, omissions };
+}
+/** 화면·보고서가 같이 쓰는 연속성 줄. 옮긴 제안은 "제안·검증 안 됨" 이름표를 달고, 모델이 쓴 글은 번역하지 않는다 */
+function continuityLines(k: RoundContinuity, m: Messages): string[] {
+  const t = m.p7, t6 = m.p6, pp = k.priorProposals;
+  return [
+    k.parentCoaching === 'present' && pp ? t.contCarried(pp.repairs.length, pp.questions.length) : k.parentCoaching === 'unreadable' ? t.contUnreadable : t.contNone,
+    ...(pp ? pp.repairs.map(r => `[${t6.priority[r.priority]} · ${t.proposed}] ${r.change.text} — ${t.checkPending}: ${r.check.text}`) : []),
+    ...(pp ? pp.questions.map(q => `[${t.openQ}] ${q.text.text}`) : []),
+    k.changed.length ? t.contChanged(k.changed.map(c => t.subject[c.subject] + (c.ids?.length ? ` (${c.ids.join(', ')})` : '')).join(', ')) : t.contSame,
+    ...(k.missingEvidence.length ? [t.contMissing(k.missingEvidence.join(', '))] : []),
+    ...(k.reevaluate ? [t.contReeval] : []),
+    t.contStanding,
+  ];
+}
+const PRIORITY_RANK: Record<CoachingRepair['priority'], number> = { now: 0, next: 1, later: 2 };
+const byPriority = <T extends { priority: CoachingRepair['priority'] }>(list: readonly T[]): T[] => [...list].sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
+/** v7 수정 제안 초안 묶음. 범위·이정표(핵심)가 room 에 들어가지 않으면 null (아무것도 더하지 않는다). 그다음 보완책(지금→다음→나중)·질문 순서로
+ *  들어가는 만큼만 넣고, 처음 못 들어간 것부터는 모두 빼서 센다 (순서를 건너뛰어 낮은 순위를 끼워 넣지 않는다) */
+function coachDraftBlock(c: ProjectCoaching, m: Messages, room: number): { text: string; added: number; omitted: number } | null {
+  const t = m.p6, t7 = m.p7;
+  let text = `${t.draftBlockHead}\n- ${t.scope}: ${c.revisedProject.scope.text}\n- ${t.milestone}: ${c.revisedProject.nextMilestone.text}`;
+  if (text.length > room) return null;
+  const items: Array<[string, string]> = [
+    ...byPriority(c.repairs).map((r): [string, string] => [t7.draftRepairsHead, `- [${t.priority[r.priority]}] ${r.change.text} (${t.check}: ${r.check.text})`]),
+    ...c.questions.map((q): [string, string] => [t7.draftQuestionsHead, `- ${q.text}`]),
+  ];
+  let added = 0, head = '';
+  for (const [hd, line] of items) {
+    const add = (hd === head ? '' : `\n${hd}`) + `\n${line}`;
+    if (text.length + add.length > room) break;
+    text += add; head = hd; added++;
+  }
+  return { text, added, omitted: items.length - added };
+}
+const COACH_QS: CoachQ[] = ['who', 'decision', 'constraint', 'success', 'evidence', 'unknown'];
+/** 브리프 도우미가 보일 질문: 단계와 비어 있는 결정 칸으로만 정하는 고정 규칙 (모델·학습 없음). 이미 답한 질문은 규칙이 바뀌어도 보인다 */
+function coachQuestions(stage: string, filled: (f: DecisionField) => boolean, answered: (q: CoachQ) => boolean): CoachQ[] {
+  const late = stage === 'validation' || stage === 'launch' || stage === 'operation';
+  const need: Record<CoachQ, boolean> = { who: true, decision: !filled('options'), constraint: !filled('constraints'),
+    success: late && !filled('successCriteria'), evidence: late && !filled('knownFacts'), unknown: !late && !filled('unknowns') };
+  return COACH_QS.filter(q => need[q] || answered(q));
+}
 function roundLines(r: ProjectPreviousRound, m: Messages, name: NameOf): string[] {
   const t = m.p2, c = r.comparison, list = (x: string[]) => x.length ? x.join(', ') : m.none;
   const stage = (s: ProjectStage) => s === 'unspecified' ? m.wfStageNone : m.wfStageName[s];
@@ -3253,6 +3408,8 @@ function phaseTwoMarkdown(p: ConsoleProject, m: Messages): string[] {
     if (!r) out.push(t.roundInvalid);
     else {
       out.push(t.roundOf(r.parentId), '', `> ${t.roundNote}`, '', `### ${t.roundChange}`, r.changeSummary, '', ...roundLines(r, m, name).map(x => `- ${x}`));
+      if (r.continuity) out.push('', `### ${m.p7.contTitle}`, ...continuityLines(r.continuity, m).map(x => `- ${x}`));
+      else if (p.invalidContinuity) out.push('', m.p7.contInvalid);
       if (r.reference.opinions.length) {
         out.push('', `### ${t.roundRefs(r.reference.opinions.length)}`);
         for (const o of r.reference.opinions) out.push(`- **${o.name}**${o.selectedAgain ? ` (${t.roundAgain})` : ''}: ${t.roundOpinion(m.direction[o.direction], o.confidence)} — ${o.summary}`);
@@ -3616,7 +3773,7 @@ function boot(): void {
     memo: null as null | { projectId: string; phase: 'running' | 'reading' | 'unknown' | 'failed' | 'blocked' | 'settled'; error: Text | null; polls: number },
     /** 사용 기록에서 시작한 후속 라운드 초안: 부모 id 와 서버가 읽어 준 부모 프로젝트(참고·비교용), 사용자가 쓰는 바뀐 점 요약 */
     /** authorResponse: 작성자 응답 라운드 (부모의 완료된 교차 검토 해시와 고를 수 있는 해당 작성자). 없으면 보통 후속 라운드 */
-    followUp: null as null | { parentId: string; parent: ConsoleProject; changeSummary: string; authorResponse?: { reviewSnapshotHash: string; affected: string[] }; coached?: boolean },
+    followUp: null as null | { parentId: string; parent: ConsoleProject; changeSummary: string; authorResponse?: { reviewSnapshotHash: string; affected: string[] }; coached?: boolean; carryOmitted?: number },
     /** 실제 실행 전 준비한 계획. body 는 미리보기에 보낸 바로 그 JSON 문자열이며, 실행은 이 문자열을 그대로 보낸다 (기본값을 덧붙이지 않는다).
      *  sig 는 준비한 순간의 의미 있는 입력 전체. 하나라도 바뀌면 계획을 버린다 */
     plan: null as null | { sig: string; phase: 'preparing' | 'ready' | 'error'; routed: boolean; body: string; preview: ProjectPreview | null; error: Text | null },
@@ -3892,17 +4049,17 @@ function boot(): void {
   const fuRefs = h('div', { class: 'cb-fu-refs' });
   const fuAuthorLine = h('p', { class: 'cb-help cb-fu-author', hidden: true });
   const fuCoachLine = h('p', { class: 'cb-help cb-fu-coach', hidden: true });
+  const fuPrior = h('div', { class: 'cb-fu-prior-box' });
   const fuRolesNote = tx('p', { class: 'cb-help' }, m => m.p2.fuRoles);
   const fuCancelBtn = tx('button', { type: 'button', class: 'cb-ghost', 'data-fk': 'fu-cancel', onclick: () => cancelFollowUp() }, m => m.p2.fuCancel);
   const fuBox = h('section', { class: 'cb-followup', 'aria-labelledby': 'cb-fu-h', hidden: true },
     tx('h3', { id: 'cb-fu-h', class: 'cb-label' }, m => m.p2.fuTitle), fuParentLine, tx('p', { class: 'cb-help' }, m => m.p2.fuNote),
     h('div', { class: 'cb-field' }, tx('label', { for: 'cb-fu-summary', class: 'cb-label' }, m => m.p2.fuSummary), fuSummaryIn,
       bind(h('p', { id: 'cb-fu-help', class: 'cb-help' }), (n, m) => { n.textContent = m.p2.fuSummaryHelp(REVISION.changeSummary); })),
-    fuAuthorLine, fuCoachLine, fuRolesNote,
+    fuAuthorLine, fuCoachLine, fuPrior, fuRolesNote,
     tx('h4', { class: 'cb-label' }, m => m.p2.fuDiff), fuDiffList, fuRefs, fuCancelBtn);
   // 브리프 도우미 (선택, v6): 브라우저 안의 정해진 질문 세 개. 모델 호출 없음. 답은 고정 입력란이라 언어 전환·다시 그리기에도 남는다.
   // 미리 보기는 그 순간의 목표·맥락·답에 묶이고, 사용자가 Apply 를 눌러야 맥락 끝에 이름표 묶음으로 더해진다 (덮어쓰지 않는다)
-  const COACH_QS: CoachQ[] = ['who', 'decision', 'constraint'];
   const COACH_ANSWER_MAX = 280; // 브리프 도우미 답의 입력 상한 (메모 코칭 주장 상한 COACH.claim 과는 따로다)
   const coachIns = {} as Record<CoachQ, HTMLTextAreaElement>;
   for (const q of COACH_QS) {
@@ -3910,14 +4067,18 @@ function boot(): void {
     ta.addEventListener('input', () => renderCoach());
     coachIns[q] = ta;
   }
+  const coachFields = Object.fromEntries(COACH_QS.map(q => [q, h('div', { class: 'cb-field', 'data-coach-q': q },
+    tx('label', { for: `cb-coach-${q}`, class: 'cb-label' }, m => m.p6.q[q]), coachIns[q], tx('p', { class: 'cb-help cb-coach-why' }, m => m.p6.qWhy[q]))])) as unknown as Record<CoachQ, HTMLElement>;
   const coachHint = h('span', { class: 'cb-summary-hint' });
   const coachMsg = h('div', { class: 'cb-coach-out', 'aria-live': 'polite' });
   const coachPreviewBtn = tx('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'coach-preview', onclick: () => coachPreview() }, m => m.p6.preview);
   const coachDetails = h('details', { class: 'cb-disclosure cb-coach-helper' },
     h('summary', null, icon('chevron'), tx('span', null, m => m.p6.helperTitle), coachHint),
     h('div', { class: 'cb-disclosure-body' }, tx('p', { class: 'cb-help' }, m => m.p6.helperNote),
-      h('div', { class: 'cb-fields' }, ...COACH_QS.map(q => h('div', { class: 'cb-field' }, tx('label', { for: `cb-coach-${q}`, class: 'cb-label' }, m => m.p6.q[q]), coachIns[q]))),
+      h('div', { class: 'cb-fields' }, ...COACH_QS.map(q => coachFields[q])),
       h('div', { class: 'cb-docs-row' }, coachPreviewBtn), coachMsg));
+  // 단계·결정 칸이 바뀌면 보일 질문을 다시 고른다 (답과 미리 보기는 그대로)
+  for (const n of [stageSel, ...DECISION_FIELDS.map(f => decisionIns[f])]) { n.addEventListener('input', () => renderCoach()); n.addEventListener('change', () => renderCoach()); }
   const modeLine = h('span');
   const startNote = h('div', { class: 'cb-startnote' });
   const historyNotice = tx('p', { class: 'cb-help cb-history-notice' }, () => HT().notice);
@@ -4839,7 +5000,9 @@ function boot(): void {
   const coachDraftFresh = () => !!S.coach.draft && S.coach.draft.basis === coachBasis();
   function renderCoach(): void {
     const m = M, t = m.p6, busy = locked(), d = S.coach.draft;
-    coachHint.textContent = t.helperHint(COACH_QS.filter(q => coachIns[q].value.trim()).length);
+    const shown = coachQuestions(stageSel.value, f => decisionIns[f].value.trim() !== '', q => coachIns[q].value.trim() !== '');
+    for (const q of COACH_QS) coachFields[q].hidden = !shown.includes(q);
+    coachHint.textContent = t.helperHint(shown.filter(q => coachIns[q].value.trim()).length, shown.length);
     for (const q of COACH_QS) coachIns[q].disabled = busy;
     coachPreviewBtn.disabled = busy;
     if (!d) { fill(coachMsg, S.coach.need ? h('p', { class: 'cb-warn' }, t.needAnswer) : S.coach.applied ? h('p', { class: 'cb-ok' }, t.applied) : null); return; }
@@ -5883,6 +6046,9 @@ function boot(): void {
           h('div', { class: 'cb-claim-head' }, h('strong', null, o.name), o.selectedAgain ? h('span', { class: 'cb-tag' }, t.roundAgain) : null),
           h('p', { class: 'cb-help' }, t.roundOpinion(m.direction[o.direction], o.confidence)), h('p', null, o.summary),
           o.evidence.length ? h('ul', null, ...o.evidence.map(x => h('li', null, x))) : null)))) : null,
+      r.continuity ? h('section', { class: 'cb-continuity', 'aria-labelledby': `${prefix}cont-h` }, h('h4', { id: `${prefix}cont-h` }, m.p7.contTitle),
+        h('ul', { class: 'cb-round-diff' }, ...continuityLines(r.continuity, m).map(x => h('li', null, x))))
+        : p.invalidContinuity ? h('p', { class: 'cb-warn' }, m.p7.contInvalid) : null,
     ];
   }
 
@@ -5998,7 +6164,15 @@ function boot(): void {
     const ar = fu.authorResponse;
     fuAuthorLine.hidden = !ar; fuRolesNote.hidden = !!ar;
     fuAuthorLine.textContent = ar ? m.p3.fuAuthor(ar.affected.map(name).join(', ')) : '';
-    fuCoachLine.hidden = !fu.coached; fuCoachLine.textContent = fu.coached ? m.p6.draftNote : '';
+    fuCoachLine.hidden = !fu.coached; fuCoachLine.textContent = fu.coached ? m.p6.draftNote + (fu.carryOmitted ? ` ${m.p7.draftOmitted(fu.carryOmitted)}` : '') : '';
+    // 부모 메모의 열린 항목: 제안일 뿐 한 일·확인이 아니다. 무엇을 했는지는 사용자가 바뀐 점에 적는다
+    const pc = p.memo?.memo?.coaching, t7 = m.p7;
+    fill(fuPrior, pc && (pc.repairs.length || pc.questions.length) ? h('div', { class: 'cb-fu-prior', role: 'group', 'aria-labelledby': 'cb-fu-prior-h' },
+      h('h4', { id: 'cb-fu-prior-h', class: 'cb-label' }, t7.priorTitle), h('p', { class: 'cb-help' }, t7.priorNote),
+      h('ul', { class: 'cb-fu-diff' },
+        ...byPriority(pc.repairs).map(r => h('li', { 'data-priority': r.priority }, h('span', { class: `cb-tag is-${r.priority}` }, m.p6.priority[r.priority]), ' ',
+          h('span', { class: 'cb-tag is-unval' }, t7.proposed), ' ', h('span', null, r.change.text), ' ', h('span', { class: 'cb-help' }, `— ${t7.checkPending}: ${r.check.text}`))),
+        ...pc.questions.map(q => h('li', null, h('span', { class: 'cb-tag' }, t7.openQ), ' ', h('span', null, q.text))))) : null);
     fill(fuDiffList, ...draftRoundLines(p, draftRound(p), m, name).map(x => h('li', null, x)));
     const ops = p.experts.filter(e => e.status === 'completed' && e.opinion && !e.invalidOpinion);
     fill(fuRefs, ops.length ? evDisclosure(S.evOpen, `fu:${fu.parentId}:refs`, 'cb-quiet', [h('span', null, m.p2.roundRefs(ops.length))],
@@ -6044,14 +6218,14 @@ function boot(): void {
     const t = M.p6, rp = c.revisedProject;
     fu.coached = true;
     objectiveIn.value = clip(rp.objective.text, LIMIT.objective);
-    const block = `${t.draftBlockHead}\n- ${t.scope}: ${rp.scope.text}\n- ${t.milestone}: ${rp.nextMilestone.text}`;
+    // 범위·이정표 다음에 우선 보완책·열린 질문을 맥락 한도 안에서만 더한다. 못 넣은 수는 바뀐 점 요약과 초안 안내에 밝힌다
     const base = contextIn.value.replace(/\s+$/, '');
-    const next = base ? `${base}\n\n${block}` : block;
-    const room = next.length <= LIMIT.context;
-    if (room) contextIn.value = next;
-    fu.changeSummary = room ? t.draftSummary : `${t.draftSummary} ${t.draftNoRoom}`;
+    const block = coachDraftBlock(c, M, LIMIT.context - (base ? base.length + 2 : 0));
+    if (block) contextIn.value = base ? `${base}\n\n${block.text}` : block.text;
+    fu.carryOmitted = block?.omitted ?? 0;
+    fu.changeSummary = !block ? `${t.draftSummary} ${t.draftNoRoom}` : block.omitted ? `${t.draftSummary} ${M.p7.draftOmitted(block.omitted)}` : t.draftSummary;
     fuSummaryIn.value = fu.changeSummary;
-    if (room) projDetails.open = true;
+    if (block) projDetails.open = true;
     for (const update of recount) update();
     renderAll();
     objectiveIn.focus();
@@ -6616,7 +6790,7 @@ function boot(): void {
   void first.then(() => { if (!S.run && recheckable() && !accessTimer) accessTimer = setTimeout(() => refreshAccess(true), ACCESS_RECHECK_MS) as unknown as number; });
 }
 
-const CloudbiteCore = { normalizeProvenance, provenanceView, provenanceGroups, provenanceLines, normalizeAuthorPlan, normalizeAuthorResponse, normalizeArtifactCoverage, authorResponseAffected, authorResponseEligible, authorResponseLines, artifactLines, normalizeMemo, normalizeSignals, normalizeRound, phaseView, signalRows, signalSummary, memoCoverageLines, roundLines, draftRoundLines, followUpEligible, phaseTwoMarkdown, parseDecision, docProblem, docAccept, docsPayload, docsBytes, parseWorkflow, normalizePreview, normalizePmc, normalizeCrossReview, reviewEligible, projectMarkdown, normalizeBootstrap, normalizePool, normalizeRouting, normalizeRoute, suggestTeam, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, artifactContent, domainLabel, DEMO_EXPERTS,
+const CloudbiteCore = { normalizeContinuity, continuityLines, coachDraftBlock, coachQuestions, CONTINUITY, normalizeProvenance, provenanceView, provenanceGroups, provenanceLines, normalizeAuthorPlan, normalizeAuthorResponse, normalizeArtifactCoverage, authorResponseAffected, authorResponseEligible, authorResponseLines, artifactLines, normalizeMemo, normalizeSignals, normalizeRound, phaseView, signalRows, signalSummary, memoCoverageLines, roundLines, draftRoundLines, followUpEligible, phaseTwoMarkdown, parseDecision, docProblem, docAccept, docsPayload, docsBytes, parseWorkflow, normalizePreview, normalizePmc, normalizeCrossReview, reviewEligible, projectMarkdown, normalizeBootstrap, normalizePool, normalizeRouting, normalizeRoute, suggestTeam, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, artifactContent, domainLabel, DEMO_EXPERTS,
   pickLang, withLang, normalizeOwnerSession, DICT, ROLE_KO, normalizeHumanReview, normalizeClaimFindings, HR_TEXT, HR_DIMENSIONS, HR_ISSUES };
 const hook = (globalThis as { __cloudbiteTestHook?: (core: typeof CloudbiteCore) => void }).__cloudbiteTestHook;
 if (typeof hook === 'function') hook(CloudbiteCore);
