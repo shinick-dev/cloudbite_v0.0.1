@@ -132,7 +132,7 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
     try{const result=await latencyBackend(env,computer,tag);return json(result.body,result.status);}catch{return error('latency_unavailable',503);}
   }
   if(req.method==='GET' && op==='costs'){
-    try{return json(await computerCosts(env));}catch{return error('costs_unavailable',503);}
+    try{const result=await computerCosts(env,{refresh:url.searchParams.get('refresh')==='1',ownerTag:tag});return json(result.body,result.status);}catch{return error('costs_unavailable',503);}
   }
   if(req.method==='GET' && op==='state'){const result=await computer.computerState(tag);return json(result,'status' in result&&typeof result.status==='number'?result.status:200);}
   if(req.method==='GET' && op==='performance'){const result=await computer.computerPerformance(tag);return json(result,'status' in result&&typeof result.status==='number'?result.status:200);}
