@@ -36,6 +36,7 @@
     "CLOUDBITE_DAYTONA_API_URL": "https://app.daytona.io/api",
     "CLOUDBITE_DAYTONA_SNAPSHOT": "",
     "CLOUDBITE_COMPUTER_SNAPSHOT": "cloudbite-computer-3d400ff85b2e",
+    "CLOUDBITE_COMPUTER_HOT_RESIZE_ENABLED": "0",
     "CLOUDBITE_COMPUTER_GATEWAY_ORIGIN": "https://cloudbite-desktop.ai-gongbu.workers.dev",
     "CLOUDBITE_COMPUTER_PROXY_SUFFIXES": ".daytonaproxy01.net,.proxy.daytona.works"
   },
