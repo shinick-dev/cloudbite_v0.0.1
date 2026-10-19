@@ -455,6 +455,38 @@ await test('memo: a delete during the call or a superseded claim discards the la
   assert.equal(v.data.memo.status, 'failed'); assert.equal(N.calls.length, 2);
 });
 
+await test('v7 memo: collected generated artifacts reach the real DO prompt, and an altered tail discards the paid result', async () => {
+  const w = world(), x = await finished(w);
+  N.memoIds = x.created.brief.expertIds;
+  const store = w.store(x.id), run = store.m.get('project').runs[0], record = store.m.get('expert:' + run);
+  const content = 'Generated proposed ECO check, not execution proof. '.repeat(150);
+  record.run.artifacts = [{ path: 'out/report.md', label: 'Expert report', bytes: Buffer.byteLength(content) },
+    { path: 'out/analysis.csv', label: 'Missing file', bytes: 30 }];
+  store.m.set('expert:' + run, record); store.m.set(`artifact:${run}:out/report.md`, content);
+  N.hold = gate(); const pending = memo(w, x);
+  await new Promise(r => setTimeout(r, 20));
+  assert.equal(N.calls.length, 1);
+  const data = JSON.parse(N.calls[0].req.messages[1].content.replace(/^[^\n]*\n/, ''));
+  const artifact = data.packets.find(p => p.kind === 'expert-artifact-excerpt');
+  assert.ok(artifact); assert.equal(artifact.expertId, record.run.expertId);
+  assert.match(artifact.excerpt, /proposed ECO/); assert.match(artifact.originMetadata, /sha256=/);
+  assert.equal(data.coverage.fullReportsReviewed, false);
+  assert.ok(data.packets.some(p => /selected but unavailable: 1/.test(p.label)));
+  assert.match(N.calls[0].req.messages[0].content, /not independent sources or proof that a tool ran/);
+  store.m.set(`artifact:${run}:out/report.md`, content + ' changed outside the excerpt');
+  N.hold.resolve(); const result = await pending;
+  assert.equal(result.status, 200, result.text); assert.equal(result.data.memo.status, 'failed');
+  assert.match(result.data.memo.error, /inputs changed/);
+  assert.equal(N.calls.length, 1); assert.equal(store.m.get('budget').memo, 1);
+  assert.equal((await memo(w, x)).data.memo.status, 'failed'); assert.equal(N.calls.length, 1);
+  const y = await finished(w); N.memoIds = y.created.brief.expertIds; N.hold = null;
+  const sy = w.store(y.id), ry = sy.m.get('project').runs[0], ey = sy.m.get('expert:' + ry);
+  ey.run.artifacts = [{ path: 'out/report.md', label: 'Expert report', bytes: 40 }]; sy.m.set('expert:' + ry, ey);
+  sy.m.set(`artifact:${ry}:out/report.md`, 'Generated proposed runtime measurement.');
+  const accepted = await memo(w, y);
+  assert.equal(accepted.status, 200, accepted.text); assert.equal(accepted.data.memo.status, 'completed');
+});
+
 // ── follow-up rounds ──
 await test('revision: a new project bound to the reading actor\'s parent; replay keeps the original snapshot; deleted or foreign parents fail before create', async () => {
   const w = world(), parent = await finished(w);

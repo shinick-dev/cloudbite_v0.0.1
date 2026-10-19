@@ -43,7 +43,7 @@ export const CB_MEMO_BUDGET = Object.freeze({
 /** UTF-8 cap of the optional provenance context (cloudbite-provenance). Absent context leaves the prompt byte-identical. */
 export const CB_MEMO_PROVENANCE_MAX_BYTES = 8 * 1024;
 export const CB_MEMO_PACKET_LIMITS = Object.freeze({ packets: 24, label: 200, text: 4000, origin: 500 });
-export const CB_MEMO_PACKET_KINDS = ['document-excerpt', 'source-excerpt', 'source-metadata'] as const;
+export const CB_MEMO_PACKET_KINDS = ['document-excerpt', 'source-excerpt', 'source-metadata', 'expert-artifact-excerpt'] as const;
 /** Accepted reply bounds (characters). reply bounds the whole raw reply so it fits CB_MEMO_MAX_TOKENS. */
 export const CB_MEMO_LIMITS = Object.freeze({
   reply: 8000, summary: 1000, rationale: 1000, claim: 280, recommended: 3,
@@ -534,7 +534,7 @@ export function memoMessages(brief: ProjectBrief, completed: readonly CompletedO
     ...(core ? { coreClaimFindings: core.prompt } : {}),
   };
   const messages: ChatMessage[] = [
-    { role: 'system', content: system + (prov ? '\n' + PROVENANCE_RULE : '') + (sourceAssessments ? '\n' + SOURCE_ASSESSMENT_RULE : '')
+    { role: 'system', content: system + (usedPackets.some(p => p.kind === 'expert-artifact-excerpt') ? '\nExpert-artifact-excerpt packets are bounded excerpts of collected AI-generated reports or analysis files, not independent sources or proof that a tool ran. Use them to make proposed changes and checks more concrete; distinguish proposed calculations/experiments from observed results. A hash binds the stored artifact, not its truth. State omissions and never claim full reports or original source pages were read.' : '') + (prov ? '\n' + PROVENANCE_RULE : '') + (sourceAssessments ? '\n' + SOURCE_ASSESSMENT_RULE : '')
       + (core ? '\n' + CORE_CLAIM_RULE : '') + '\n' + MEMO_LANGUAGE_INSTRUCTIONS[plan.language] },
     { role: 'user', content: 'Untrusted memo data (JSON):\n' + JSON.stringify(data) },
   ];

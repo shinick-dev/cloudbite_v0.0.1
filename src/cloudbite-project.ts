@@ -52,6 +52,7 @@ import {
   type DecisionMemo, type MemoCoverage, type MemoEvidencePacket, type MemoInputOptions, type ProjectMemo,
 } from './cloudbite-memo';
 import { buildExpertAssignments } from './cloudbite-workorders';
+import { selectMemoArtifacts, memoArtifactPackets } from './cloudbite-memo-artifacts';
 import { defaultResponseLanguage } from './cloudbite-workflow';
 import { previousRoundWorkOrderRules, previousRoundWorkspaceFiles, ROUND_VERSION, type ProjectPreviousRound } from './cloudbite-revision';
 import { artifactPacketsFor, buildArtifactPacket, type StoredArtifact } from './cloudbite-artifact-review';
@@ -844,7 +845,7 @@ export class CloudbiteProject extends DurableObject<Env> {
     if (s.memo) return this.existingMemo(s.memo, tokenHash);
     const completed = this.completed(s);
     if (!completed.length) return fail(409, 'the decision memo needs at least one completed expert opinion');
-    const opts = this.memoOptions(s);
+    const opts = await this.memoOptions(s);
     let prompt: ReturnType<typeof memoMessages>;
     try { prompt = memoMessages(s.p.brief, completed, opts); } catch { return fail(409, 'the decision memo needs at least one completed expert opinion'); }
     const snapshotHash = await memoSnapshotHash(prompt.snapshot);
@@ -912,7 +913,7 @@ export class CloudbiteProject extends DurableObject<Env> {
     const m = await tx.get<unknown>([...p.runs.map((r) => `expert:${r}`), 'packets', 'round', 'provenance']);
     const fresh: Loaded = { p, experts: p.runs.map((r) => m.get(`expert:${r}`) as ExpertRecord).filter(Boolean), cr,
       packets: m.get('packets') as EvidencePacket[] | undefined, round: m.get('round') as ProjectPreviousRound | undefined, provenance: m.get('provenance') };
-    return isMemoSnapshotCurrent(snapshot, p.brief, this.completed(fresh), this.memoOptions(fresh));
+    return isMemoSnapshotCurrent(snapshot, p.brief, this.completed(fresh), await this.memoOptions(fresh, tx));
   }
 
   private async afterMemo(): Promise<ProjectRun | CbFail> {
@@ -1000,7 +1001,7 @@ export class CloudbiteProject extends DurableObject<Env> {
    * packet ID of its own, so IDs that slug alike never merge. Sources a sealed packet itself left out (unnamed, counted
    * only) are disclosed first as one metadata record per packet, naming the packet hash.
    */
-  private memoOptions(s: Loaded): MemoInputOptions {
+  private async memoOptions(s: Loaded, store: Pick<DurableObjectStorage, 'get'> = this.ctx.storage): Promise<MemoInputOptions> {
     const disclosures: MemoEvidencePacket[] = [], sources: MemoEvidencePacket[] = [], taken = new Set<string>(), seen = new Set<string>();
     const fnv = (t: string) => { let h = 0x811c9dc5; for (let i = 0; i < t.length; i++) h = Math.imul(h ^ t.charCodeAt(i), 0x01000193); return (h >>> 0).toString(16).padStart(8, '0'); };
     const unique = (prefix: string, raw: string) => {
@@ -1027,7 +1028,9 @@ export class CloudbiteProject extends DurableObject<Env> {
           origin: src.url.slice(0, Math.max(0, CB_MEMO_PACKET_LIMITS.origin - tail.length)) + tail });
       }
     }
-    const packets = [...disclosures, ...sources];
+    const selection = selectMemoArtifacts(s.experts);
+    const artifactContents = selection.entries.length ? await store.get<unknown>(selection.entries.map(a => a.key)) : new Map<string, unknown>();
+    const packets = [...memoArtifactPackets(selection, artifactContents), ...disclosures, ...sources];
     const reviews = s.cr && s.cr.review.status !== 'running' ? s.cr.review.reports : [];
     return { coaching: true, team: s.experts.map((e) => ({ expertId: e.run.expertId, name: e.run.name, status: e.run.status })),
       ...(reviews.length ? { reviews } : {}), ...(packets.length ? { packets } : {}),
