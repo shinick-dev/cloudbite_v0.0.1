@@ -398,10 +398,20 @@ const CLAUSES = /[.;!?。\n]|,\s*(?:but|however|although)\b|그러나|하지만|
 // uncertain", "... if the budget allows", "동의했지만 비용은 불확실하다") is split off so its words cannot waive the main
 // assertion, while a leading hypothetical ("If all experts agree, proceed") keeps its "if" with the predicate.
 const SUBCLAUSES = /(?=\b(?:even (?:if|though)|if|though|although|unless|whether or not)\b)|(?<=지만|는데|더라도)/i;
+/** Uncertainty must govern the agreement, not an unrelated cost/schedule in the same clause. Still a heuristic. */
+function uncertaintyAboutAgreement(c: string): boolean {
+  if (!UNCERTAIN.test(c)) return false;
+  return /^\s*(?:if\b|suppose\b|assuming\b|hypothetically\b|만약)/i.test(c)
+    || /\bwhether\s+(?:(?:all|most|any|the|a)\s+)*(?:consensus|agreement|unanimity|votes?|experts?|panel|team)\b/i.test(c)
+    || /\b(?:consensus|agreement|unanimity|votes?)\s+(?:is|was|remains|has been|seems)\s+(?:unclear|unknown|uncertain|unverified|unconfirmed|unestablished|undetermined|undecided|unsure)\b/i.test(c)
+    || /(?:합의|동의|만장일치|투표)\s*(?:의\s*)?여부/.test(c)
+    || /(?:합의|동의|만장일치|투표)(?:가|에|를|로)?\s*(?:(?:형성|도달|이루|진행|되|했|하였|됐|였)[가-힣 ]{0,8})?(?:는|은)지(?![만도])/.test(c)
+    || /(?:합의|동의|만장일치|투표)(?:은|는|가|이)?\s*(?:불분명|불확실|불명확|미확인|미정|알 수 없|근거가 부족)/.test(c);
+}
 /** `prospective`: the text is a proposed action/trigger (changeTriggers, nextActions), where a non-past vote is a proposal. */
 export function claimsUnsupportedAgreement(t: string, opts: { prospective?: boolean } = {}): boolean {
   return t.replace(QUOTED, ' ').split(CLAUSES).flatMap((c) => c.split(SUBCLAUSES)).some((c) => {
-    if (!POSITIVE_AGREEMENT.test(c) || NEGATED.test(c) || UNCERTAIN.test(c)) return false;
+    if (!POSITIVE_AGREEMENT.test(c) || NEGATED.test(c) || uncertaintyAboutAgreement(c)) return false;
     return !opts.prospective || POSITIVE_NON_VOTE.test(c) || PAST_VOTE.test(c);
   });
 }

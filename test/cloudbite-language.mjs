@@ -330,7 +330,9 @@ await check('memo: uncertainty, quoted expert words and proposed future votes ar
   badKo({ dissent: '전문가들이 합의에 도달했다.' }, '합의 도달 단정');
   // R1: uncertainty about something other than the agreement (cost, budget) no longer waives the assertion.
   for (const d of ['All experts recommend option-1 if the budget allows.', 'Majority of experts supported option-2 even though cost is uncertain.',
-    'The team reached consensus, though cost is unknown.', 'All experts agreed, even if costs rise.']) {
+    'The team reached consensus, though cost is unknown.', 'All experts agreed, even if costs rise.',
+    'All experts agreed on option-1 with unknown cost.', 'The majority of experts supported option-2 because delivery is uncertain.',
+    'Budget is unknown and all experts agreed on option-1.']) {
     badEn({ dissent: d }, d); badEn({ summary: d }, d); badEn({ c4: d }, d); assert.equal(MM.claimsUnsupportedAgreement(d), true, d);
   }
   badKo({ dissent: '전원이 동의했지만 비용은 불확실하다.' }, '전원 동의 + 무관한 불확실성');
