@@ -119,9 +119,9 @@
       "format": "jats-xml",
       "file": "sources/pmc/PMC1182327.xml",
       "rights": "licensed",
-      "license": "CC-BY-4.0",
-      "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
-      "attribution": "John P. A. Ioannidis (2005) Why Most Published Research Findings Are False. PLoS Medicine 2(8): e124. © 2005 John P. A. Ioannidis. https://doi.org/10.1371/journal.pmed.0020124. Open access under the Creative Commons Attribution License. Text retrieved as JATS XML from Europe PMC (PMC1182327, https://europepmc.org/article/PMC/PMC1182327). Changes: converted from JATS XML to Markdown; figure and table images, MathML-only rendering and journal front-matter metadata other than title, authors, copyright and license are not included.",
+      "license": "CC-BY (version unspecified)",
+      "licenseUrl": "https://journals.plos.org/plosmedicine/article?id=10.1371/journal.pmed.0020124",
+      "attribution": "John P. A. Ioannidis (2005) Why Most Published Research Findings Are False. PLoS Med 2(8): e124. © 2005 John P. A. Ioannidis. https://doi.org/10.1371/journal.pmed.0020124. Creative Commons Attribution License (version unspecified in the article). Via Europe PMC PMC1182327. Changes: JATS XML converted to Markdown; figure/table images, MathML-only rendering and front matter beyond title, authors, copyright and license omitted.",
       "version": "doi:10.1371/journal.pmed.0020124 (2005-08-30)",
       "retrievedAt": "2026-10-19",
       "roles": [
@@ -130,7 +130,7 @@
         "cb-role-106",
         "cb-role-118"
       ],
-      "licenseNote": "The 2005 article names the Creative Commons Attribution License without a version; PLOS states it applies CC BY 4.0 to the articles it publishes and Europe PMC classifies the article as \"cc by\". Every CC BY version permits redistributing the complete text with attribution.",
+      "licenseNote": "The 2005 article (pinned XML) grants distribution under the Creative Commons Attribution License without naming a version, and Europe PMC (pinned record) classifies it as \"cc by\". No exact version is inferred: licenseUrl is the article and its own license statement, and the complete copyright and license text stays in the pinned XML and rights files.",
       "licenseEvidence": [
         {
           "file": "sources/pmc/PMC1182327.xml",
@@ -141,11 +141,6 @@
           "file": "rights/europepmc-PMC1182327.json",
           "quote": "\"license\":\"cc by\"",
           "sha256": "5fd922905c818eecef9fe40e6106d3548179d6afc7feeae6802ca0ee0bf73cd9"
-        },
-        {
-          "url": "https://journals.plos.org/plosmedicine/s/licenses-and-copyright",
-          "retrievedAt": "2026-10-19",
-          "quote": "PLOS applies the Creative Commons Attribution 4.0 International (CC BY) license, or other comparable licenses that allow free and unrestricted use, to articles and other works we publish."
         }
       ],
       "sha256": "6095b3326a22274ea3ebbfb19e3fa287ddfcf36296f34397bf20ba5c3df85d65",
@@ -160,7 +155,7 @@
       "rights": "licensed",
       "license": "CC-BY-4.0",
       "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
-      "attribution": "Megan L. Head, Luke Holman, Rob Lanfear, Andrew T. Kahn, Michael D. Jennions (2015) The Extent and Consequences of P-Hacking in Science. PLoS Biology 13(3): e1002106. © 2015 Head et al. https://doi.org/10.1371/journal.pbio.1002106. Open access under the Creative Commons Attribution License. Text retrieved as JATS XML from Europe PMC (PMC4359000, https://europepmc.org/article/PMC/PMC4359000). Changes: converted from JATS XML to Markdown; figure and table images, MathML-only rendering and journal front-matter metadata other than title, authors, copyright and license are not included.",
+      "attribution": "Megan L. Head, Luke Holman, Rob Lanfear, Andrew T. Kahn, Michael D. Jennions (2015) The Extent and Consequences of P-Hacking in Science. PLoS Biol 13(3): e1002106. © 2015 Head et al. https://doi.org/10.1371/journal.pbio.1002106. CC BY 4.0. Via Europe PMC PMC4359000. Changes: JATS XML converted to Markdown; figure/table images, MathML-only rendering and front matter beyond title, authors, copyright and license omitted.",
       "version": "doi:10.1371/journal.pbio.1002106 (2015-03-13)",
       "retrievedAt": "2026-10-19",
       "roles": [
@@ -198,7 +193,7 @@
       "rights": "licensed",
       "license": "CC-BY-4.0",
       "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
-      "attribution": "Geir Kjetil Sandve, Anton Nekrutenko, James Taylor, Eivind Hovig (2013) Ten Simple Rules for Reproducible Computational Research. PLoS Computational Biology 9(10): e1003285. © 2013 Sandve et al. https://doi.org/10.1371/journal.pcbi.1003285. Open access under the Creative Commons Attribution License. Text retrieved as JATS XML from Europe PMC (PMC3812051, https://europepmc.org/article/PMC/PMC3812051). Changes: converted from JATS XML to Markdown; figure and table images, MathML-only rendering and journal front-matter metadata other than title, authors, copyright and license are not included.",
+      "attribution": "Geir Kjetil Sandve, Anton Nekrutenko, James Taylor, Eivind Hovig (2013) Ten Simple Rules for Reproducible Computational Research. PLoS Comput Biol 9(10): e1003285. © 2013 Sandve et al. https://doi.org/10.1371/journal.pcbi.1003285. CC BY 4.0. Via Europe PMC PMC3812051. Changes: JATS XML converted to Markdown; figure/table images, MathML-only rendering and front matter beyond title, authors, copyright and license omitted.",
       "version": "doi:10.1371/journal.pcbi.1003285 (2013-10-24)",
       "retrievedAt": "2026-10-19",
       "roles": [

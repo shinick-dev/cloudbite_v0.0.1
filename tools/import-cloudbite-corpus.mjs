@@ -25,7 +25,12 @@ export const ROLES = Object.freeze(['probably-primetime-sta', 'cb-role-072', 'cb
 export const LICENSES = Object.freeze({
   'BSD-3-Clause': 'Redistributions of source code must retain the above copyright notice',
   'CC-BY-4.0': 'Creative Commons Attribution License',
+  'CC-BY (version unspecified)': 'Creative Commons Attribution License',
 });
+/** A license recorded without a version is accepted only on pinned-file evidence, none of which names a version. */
+export const UNVERSIONED = 'CC-BY (version unspecified)';
+/** Display metadata limit shared with the runtime index validator (src/cloudbite-corpus-search.ts CORPUS_LIMITS.metaChars). */
+export const META_CHARS = 500;
 const SOURCE_ID = /^orig-[a-z0-9][a-z0-9_-]{0,64}$/;
 const SHA = /^[0-9a-f]{64}$/;
 const FORMATS = new Set(['markdown', 'jats-xml']);
@@ -62,6 +67,17 @@ function containedFile(baseDir, rel, what) {
   return fs.readFileSync(abs);
 }
 const squash = (s) => s.replace(/\s+/g, ' ').trim();
+/** The exact contiguous span of `text` that `chunk` stands for. A chunk that is not a substring is accepted only when it
+ *  differs from exactly one source span in its runs of newlines (blank-line separators); that span is returned so the
+ *  chunk carries the original text. Anything else (joined, reordered or rewritten lines) fails. */
+export function exactSpan(text, chunk, what, maxBytes = LIMITS.chunkBytes) {
+  if (text.includes(chunk)) return chunk;
+  const pattern = chunk.split(/\n+/).map(p => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\n+');
+  const spans = [...text.matchAll(new RegExp(pattern, 'g'))].map(m => m[0]);
+  if (spans.length !== 1) fail(`${what} is not an exact contiguous span of its source (${spans.length} newline-normalized matches); fix the source or chunker rather than storing non-original text`);
+  if (bytes(spans[0]) > maxBytes) fail(`${what}: its original span is ${bytes(spans[0])} bytes > ${maxBytes}`);
+  return spans[0];
+}
 
 // ── manifest ──
 const STR = (o, k, max, what) => { const v = o[k]; if (typeof v !== 'string' || !v.trim() || v.length > max) fail(`${what}.${k} must be a non-empty string of at most ${max} characters`); return v; };
@@ -82,7 +98,7 @@ export function loadManifest(manifestPath) {
     if (ids.has(s.id)) fail(`${what}.id ${s.id} is duplicated`);
     ids.add(s.id);
     const w = `source ${s.id}`;
-    for (const [k, max] of [['title', 200], ['url', 300], ['licenseUrl', 300], ['attribution', 1200], ['version', 80], ['retrievedAt', 10]]) STR(s, k, max, w);
+    for (const [k, max] of [['title', 200], ['url', 300], ['licenseUrl', 300], ['attribution', META_CHARS], ['version', 80], ['retrievedAt', 10]]) STR(s, k, max, w);
     for (const k of ['url', 'licenseUrl']) if (!/^https:\/\/[^\s]+$/.test(s[k])) fail(`${w}: ${k} must be an https URL`);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(s.retrievedAt)) fail(`${w}: retrievedAt must be YYYY-MM-DD`);
     if (s.rights !== 'licensed') fail(`${w}: rights must be "licensed" (original text needs a redistribution license; project-authored or proprietary text is not corpus material)`);
@@ -108,6 +124,8 @@ export function loadManifest(manifestPath) {
       } else if (typeof e.url !== 'string' || !/^https:\/\//.test(e.url) || !/^\d{4}-\d{2}-\d{2}$/.test(e.retrievedAt ?? '')) fail(`${ew} needs a pinned file or an https url with retrievedAt`);
       if (squash(e.quote).includes(LICENSES[s.license])) clause = true;
     }
+    if (s.license === UNVERSIONED && s.licenseEvidence.some(e => typeof e.file !== 'string' || /\b\d\.\d\b|licenses\/by\/\d/.test(e.quote)))
+      fail(`${w}: ${UNVERSIONED} needs pinned-file license evidence only, and no quote may name a license version`);
     if (!clause) fail(`${w}: no license evidence quotes the ${s.license} clause "${LICENSES[s.license]}"`);
     if (!inDocument) fail(`${w}: license evidence must include the license statement inside the original document ${s.file}`);
     if (s.license === 'BSD-3-Clause' && !/Copyright \(c\)/.test(s.attribution)) fail(`${w}: BSD-3-Clause redistribution must retain the copyright notice in attribution`);
@@ -407,8 +425,8 @@ export async function buildCorpus(manifestPath) {
       const id = c.chunkId.replace('#', '-').replace('.', '-'), parentId = c.parentId.replace('#', '-');
       if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id)) fail(`chunk id ${id} is not a 1-80 character identifier`);
       if (c.bytes > LIMITS.chunkBytes || c.contentSha256 !== sha256(c.text) || c.originalText !== true) fail(`chunk ${id} violates the chunk contract`);
-      if (!text.includes(c.text) && !c.text.split('\n').every(l => text.includes(l))) fail(`chunk ${id} text is not taken from source ${s.id}`);
-      chunks.push({ id, sourceId: s.id, parentId, headingPath: [...c.headingPath], text: c.text, sha256: c.contentSha256 });
+      const exact = exactSpan(text, c.text, `chunk ${id} of source ${s.id}`);
+      chunks.push({ id, sourceId: s.id, parentId, headingPath: [...c.headingPath], text: exact, sha256: sha256(exact) });
     }
   }
   if (chunks.length > LIMITS.chunks) fail(`${chunks.length} chunks > ${LIMITS.chunks}`);
@@ -444,7 +462,8 @@ function cachedVectors(prev, chunks) {
   const out = new Map();
   if (!prev || prev.embeddings.model !== MODEL || prev.embeddings.dimensions !== DIMENSIONS) return out;
   for (const c of prev.index.chunks ?? []) {
-    if (validVector(c.vector) && c.sha256 === sha256(c.text) && prev.embeddings.bindings?.[c.id] === vectorBinding(c.sha256, c.vector)) out.set(c.sha256, c.vector);
+    const src = prev.index.sources?.find(s => s.id === c.sourceId);
+    if (typeof src?.text === 'string' && src.text.includes(c.text) && validVector(c.vector) && c.sha256 === sha256(c.text) && prev.embeddings.bindings?.[c.id] === vectorBinding(c.sha256, c.vector)) out.set(c.sha256, c.vector);
   }
   return out;
 }
@@ -488,9 +507,10 @@ export function verifyGenerated(gen, sources, chunks) {
     if (!validVector(vector)) fail(`chunk ${c.id} vector is not ${DIMENSIONS} finite numbers`);
     if (embeddings.bindings?.[c.id] !== vectorBinding(c.sha256, vector)) fail(`chunk ${c.id} vector binding does not match its text/model/dimensions`);
     const src = index.sources.find(s => s.id === c.sourceId);
-    if (!src || !src.text.includes(c.text.split('\n')[0])) fail(`chunk ${c.id} does not resolve to its source text`);
+    if (!src || !src.text.includes(c.text)) fail(`chunk ${c.id} is not an exact excerpt of its source text`);
   });
   if (Object.keys(embeddings.bindings ?? {}).length !== index.chunks.length) fail('embedding bindings do not cover exactly the chunks');
+  for (const s of index.sources) for (const k of ['title', 'attribution']) if (typeof s[k] !== 'string' || s[k].length > META_CHARS) fail(`source ${s.id}.${k} exceeds ${META_CHARS} characters`);
   return index;
 }
 

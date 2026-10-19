@@ -15,7 +15,7 @@ const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const CORPUS_DIR = path.join(ROOT, 'knowledge/cloudbite-corpus');
 const GENERATED = path.join(ROOT, 'src/cloudbite-corpus.generated.ts');
 const imp = await import(pathToFileURL(path.join(ROOT, 'tools/import-cloudbite-corpus.mjs')).href);
-const b = await build({ stdin: { contents: "export * from './src/cloudbite-corpus.generated.ts'; export * from './src/cloudbite-corpus-contract.ts';", resolveDir: ROOT, loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'esm' });
+const b = await build({ stdin: { contents: "export * from './src/cloudbite-corpus.generated.ts'; export * from './src/cloudbite-corpus-contract.ts'; export { validateCorpusIndex } from './src/cloudbite-corpus-search.ts';", resolveDir: ROOT, loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'esm' });
 const g = await import('data:text/javascript;base64,' + Buffer.from(b.outputFiles[0].text).toString('base64'));
 let checks = 0;
 const ok = (cond, message) => { assert.ok(cond, message); checks++; };
@@ -59,7 +59,7 @@ try {
     const src = C.sources.find(s => s.id === c.sourceId);
     ok(src && /^[a-zA-Z0-9_-]{1,80}$/.test(c.id) && /^[a-zA-Z0-9_-]{1,80}$/.test(c.parentId) && !ids.has(c.id), `${c.id}: unique identifier resolving to its source`);
     ids.add(c.id);
-    ok(c.sha256 === sha(c.text) && Buffer.byteLength(c.text) <= 2500 && c.text.split('\n').every(l => src.text.includes(l)), `${c.id}: bounded, hashed, taken from the source text`);
+    ok(c.sha256 === sha(c.text) && Buffer.byteLength(c.text) <= 2500 && src.text.includes(c.text), `${c.id}: bounded, hashed, an exact contiguous excerpt of the source text`);
     ok(c.vector.length === 256 && c.vector.every(Number.isFinite) && g.CORPUS_EMBEDDINGS.bindings[c.id] === imp.vectorBinding(c.sha256, c.vector), `${c.id}: 256 finite dimensions bound to its text/model/dimensions`);
     ok(((c.text.match(/^ {0,3}```/gm) ?? []).length) % 2 === 0, `${c.id}: code fences are never cut`);
   }
@@ -77,6 +77,18 @@ try {
   const tables = C.chunks.filter(c => c.sourceId.startsWith('orig-openroad') && /^\| Switch Name \| Description \|$/m.test(c.text));
   ok(tables.length > 3 && tables.every(c => c.text.split('\n').filter(l => l.startsWith('|')).length >= 3), 'split option tables each repeat their header row');
   ok(C.chunks.some(c => c.sourceId === 'orig-pmc4359000-head-2015' && /^\| Discipline \|/m.test(c.text)), 'JATS tables become Markdown tables');
+  const io = C.sources.find(s => s.id === 'orig-pmc1182327-ioannidis-2005');
+  ok(io.license === 'CC-BY (version unspecified)' && !/creativecommons/.test(io.licenseUrl) && C.sources.filter(s => s.id !== io.id && s.url.includes('10.1371')).every(s => s.license === 'CC-BY-4.0'), 'Ioannidis 2005 records CC BY without an inferred version; Head/Sandve keep their explicit 4.0');
+  ok(C.sources.every(s => s.attribution.length <= imp.META_CHARS && s.title.length <= imp.META_CHARS), 'display metadata fits the runtime 500-character limit');
+  {
+    const v = await g.validateCorpusIndex(C);
+    ok(v.sha256 === C.sha256 && v.sources === C.sources.length && v.chunks === C.chunks.length, 'runtime validateCorpusIndex accepts the actual generated index with the same canonical sha256');
+    const long = structuredClone(C); long.sources[0].attribution = 'x'.repeat(501); long.sha256 = imp.indexSha256(long);
+    await rejects(() => g.validateCorpusIndex(long), /attribution/, 'runtime rejects a 501-character attribution');
+    const glued = structuredClone(C), gc = glued.chunks.find(c => /\n\n/.test(c.text));
+    gc.text = gc.text.replace('\n\n', '\n\n\n'); gc.sha256 = sha(gc.text); glued.sha256 = imp.indexSha256(glued);
+    await rejects(() => g.validateCorpusIndex(glued), /not an excerpt of its source/, 'runtime rejects a chunk whose separators differ from its source');
+  }
   ok(C.sources.find(s => s.id === 'orig-pmc1182327-ioannidis-2005').text.includes('It can be proven that most claimed research findings are false'), 'Ioannidis original sentence present verbatim');
 
   // ── 2. offline --check with no key, and deterministic regeneration with no network ──
@@ -96,10 +108,13 @@ try {
     [m => { first(m).license = 'LicenseRef-Synopsys-PrimeTime-Manual'; }, /not an accepted redistribution license/, 'proprietary manual license'],
     [m => { pmcSrc(m).license = 'CC-BY-NC-4.0'; }, /not an accepted redistribution license/, 'non-commercial CC license'],
     [m => { first(m).rights = 'project-authored'; }, /rights must be "licensed"/, 'project-authored text'],
-    [m => { pmcSrc(m).licenseEvidence = pmcSrc(m).licenseEvidence.filter(e => e.file !== pmcSrc(m).file); }, /license statement inside the original document|quotes the CC-BY-4.0 clause/, 'missing in-document license statement'],
+    [m => { pmcSrc(m).licenseEvidence = pmcSrc(m).licenseEvidence.filter(e => e.file !== pmcSrc(m).file); }, /license statement inside the original document|quotes the .* clause/, 'missing in-document license statement'],
     [m => { first(m).licenseEvidence[1].quote = 'Licensed under the Apache License, Version 2.0.'; }, /quote not found/, 'license quote absent from the document'],
     [m => { first(m).attribution = 'The OpenROAD Authors.'; }, /retain the copyright notice/, 'BSD attribution without copyright notice'],
     [m => { pmcSrc(m).attribution = 'Ioannidis 2005.'; }, /state the changes/, 'CC BY attribution without changes'],
+    [m => { first(m).attribution = `Copyright (c) ${'x'.repeat(490)}`; }, /attribution must be a non-empty string of at most 500/, 'attribution over the runtime 500-character limit'],
+    [m => { pmcSrc(m).license = 'CC-BY (version unspecified)'; pmcSrc(m).licenseEvidence.push({ url: 'https://example.org/policy', retrievedAt: '2026-10-19', quote: 'Creative Commons Attribution License' }); }, /pinned-file license evidence only/, 'unversioned CC BY on unpinned evidence'],
+    [m => { pmcSrc(m).license = 'CC-BY (version unspecified)'; pmcSrc(m).licenseEvidence.push(m.sources.find(s => s.id === 'orig-pmc3812051-sandve-2013').licenseEvidence[2]); }, /no quote may name a license version/, 'unversioned CC BY quoting a version'],
     [m => { first(m).roles = ['cb-role-999']; }, /roles must be/, 'unknown role'],
     [m => { first(m).id = 'rsz'; }, /orig- prefix/, 'source id without orig- prefix'],
     [m => { m.sources[1].id = m.sources[0].id; }, /duplicated/, 'duplicate source id'],
@@ -122,6 +137,27 @@ try {
     assert.throws(() => imp.verifyGenerated(txt, sources, chunks), /differs from the derived chunk/); checks++;
     const ix = structuredClone(gen); ix.index.sources[0].title += ' (edited)';
     assert.throws(() => imp.verifyGenerated(ix, sources, chunks), /index sha256/); checks++;
+    const far = structuredClone(gen), fc = far.index.chunks.find(c => /\n\n/.test(c.text));
+    fc.text = fc.text.replace('\n\n', '\n'); fc.sha256 = sha(fc.text); far.embeddings.bindings[fc.id] = imp.vectorBinding(fc.sha256, fc.vector); far.index.sha256 = imp.indexSha256(far.index);
+    assert.throws(() => imp.verifyGenerated(far, sources, chunks), /differs from the derived chunk|not an exact excerpt/); checks++;
+    const meta = structuredClone(gen); meta.index.sources[0].attribution = 'x'.repeat(501); meta.index.sha256 = imp.indexSha256(meta.index);
+    assert.throws(() => imp.verifyGenerated(meta, sources.map((s, k) => k ? s : { ...s, attribution: 'x'.repeat(501) }), chunks), /exceeds 500 characters/); checks++;
+    // --check on a generated file whose chunk is rebound to non-contiguous text
+    const h = copy(); fs.writeFileSync(h.out, imp.render(far.index, far.embeddings));
+    await rejects(() => imp.run({ manifest: h.manifest, out: h.out, check: true }), /differs from the derived chunk|not an exact excerpt/, '--check rejects a rebound non-contiguous chunk');
+    // the vector cache never reuses a vector whose cached chunk is not an exact excerpt of its cached source
+    const k = copy(), cached = structuredClone(gen), kc = cached.index.chunks[0], ks = cached.index.sources.find(s => s.id === kc.sourceId);
+    ks.text = ks.text.replace(kc.text, ''); ks.sha256 = sha(ks.text); cached.index.sha256 = imp.indexSha256(cached.index);
+    fs.writeFileSync(k.out, imp.render(cached.index, cached.embeddings));
+    const sent = [], stub = async (url, init) => { const body = JSON.parse(init.body); sent.push(...body.input); return { ok: true, status: 200, json: async () => ({ data: body.input.map((_, i) => ({ index: i, embedding: kc.vector })), usage: { prompt_tokens: 1, total_tokens: 1 } }) }; };
+    const kr = await imp.run({ manifest: k.manifest, out: k.out, check: false, fetchImpl: stub, key: 'k', log: () => {} });
+    ok(kr.embedded === 1 && sent.length === 1 && sent[0] === kc.text, 'cache rejects a vector whose chunk is not an excerpt of its cached source');
+    // exact-span recovery: only blank-line separators may differ, from exactly one bounded contiguous source span
+    ok(imp.exactSpan('a\nb\n```\nc\n', 'b\n```\n\nc', 'x') === 'b\n```\nc', 'separator-normalized chunk resolves to the exact original span');
+    assert.throws(() => imp.exactSpan('one\ntwo\nthree\n', 'one\nthree', 'x'), /not an exact contiguous span/); checks++;
+    assert.throws(() => imp.exactSpan('a b\nc\n', 'a\nb', 'x'), /not an exact contiguous span/); checks++;
+    assert.throws(() => imp.exactSpan('p\nq\n\np\n\nq', 'p\n\n\nq', 'x'), /2 newline-normalized matches/); checks++;
+    assert.throws(() => imp.exactSpan(`a\n${'\n'.repeat(30)}b`, 'a\nb', 'x', 20), /bytes > 20/); checks++;
     const f = copy(); fs.writeFileSync(f.out, fs.readFileSync(f.out, 'utf8').replace('"dimensions": 256', '"dimensions": 512'));
     await rejects(() => imp.run({ manifest: f.manifest, out: f.out, check: true }), /model\/dimensions|provenance mismatch/, '--check rejects changed dimensions');
   }
