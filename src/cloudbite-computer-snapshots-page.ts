@@ -1,6 +1,6 @@
 // Generated file — do not edit. Sources: client/cloudbite-computer-snapshots.ts · client/cloudbite-computer-snapshots.css
 // Rebuild: node tools/build-cloudbite-computer-snapshots.mjs (--check verifies it is current)
-// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 9b129d1e2acb0510620d5d622d5a0693f459858685b46ca3319ee3527fa11c47 · css sha256 9b2bf252a01f36ecfa0be0825c244668b6e39e97e19bb95f7aab17d9d5938bbf
+// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 50a8600600e9251c6677a37f3a908980052d1fe5ea1b80b38f889733fbcda4fc · css sha256 2221afe38d0dff48682d414d01b1d0384f7a18a47e72eadd7db752bef35c7c26
 // Routing (runtime): GET CLOUDBITE_COMPUTER_SNAPSHOTS_PATH → CLOUDBITE_COMPUTER_SNAPSHOTS_HTML, CLOUDBITE_COMPUTER_SNAPSHOTS_JS_PATH → CLOUDBITE_COMPUTER_SNAPSHOTS_JS (text/javascript),
 // CLOUDBITE_COMPUTER_SNAPSHOTS_CSS_PATH → CLOUDBITE_COMPUTER_SNAPSHOTS_CSS (text/css). CSP script-src 'self'; style-src 'self' suffices (no inline).
 // The script calls GET /api/cloudbite/computer/snapshots, POST /api/cloudbite/computer/snapshot and POST /api/cloudbite/computer/snapshots/select same-origin with the existing cookie and links only to /cloudbite/computer.
@@ -87,7 +87,7 @@ export const CLOUDBITE_COMPUTER_SNAPSHOTS_CSS = [
   ".cs-ok{background:var(--ok-soft);color:var(--ok)}",
   ".cs-warn{background:var(--warn-soft);color:var(--warn)}",
   ".cs-info{background:var(--pale);color:var(--navy)}",
-  ".cs-callout{font-size:14px;border-left:4px solid var(--wait);background:var(--wait-soft);color:#5c3b04;padding:10px 12px;border-radius:0 10px 10px 0}",
+  ".cs-callout{font-size:14px;border:1px solid var(--wait);background:var(--wait-soft);color:#5c3b04;padding:10px 12px;border-radius:12px}",
   "",
   "",
   ".cs-pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:4px 12px;font-size:13px;font-weight:700;background:var(--pale);color:var(--navy);max-width:100%}",
@@ -128,7 +128,7 @@ export const CLOUDBITE_COMPUTER_SNAPSHOTS_JS = [
   "const API = \"/api/cloudbite/computer\";",
   "const SNAPSHOTS_API = `${API}/snapshots`;",
   "const SELECT_API = `${API}/snapshots/select`;",
-  "const CAPTURE_API = `${API}/snapshot`;",
+  "const CAPTURE_API = `${API}/snapshots/capture`;",
   "const COMPUTER_PATH = \"/cloudbite/computer\";",
   "const NAME = /^[a-z0-9][a-z0-9-]{2,62}$/;",
   "const SAFE_CODE = /^[a-z0-9_.-]{1,64}$/i;",

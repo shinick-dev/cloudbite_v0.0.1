@@ -8,7 +8,7 @@ All routes live under `/api/cloudbite/computer`, behind the existing owner cooki
 
 | Route | DO method | Effect |
 |---|---|---|
-| `POST snapshot {requestId,name}` | `computerSnapshot` | Unchanged capture flow (stop first, one request, reconcile by exact name). The standalone page also sends `acknowledgeStop:true`; the service ignores extra keys, so the root router enforces it for that page. |
+| `POST snapshots/capture {requestId,name,acknowledgeStop:true}` | `computerSnapshot` | Stops first, sends one capture request and reconciles by exact name. The root requires the explicit stop acknowledgement and removes it before the RPC. The existing main-page `POST snapshot` remains available. |
 | `GET snapshots` | `computerSnapshots` | Own capture history. Provider reads only: the machine refresh plus a re-check of at most 3 `active` captures per request, each at most once a minute. A re-check can mark a capture `missing`, or drop it when Daytona names another sandbox as its source. |
 | `POST snapshots/select {requestId,account,name}` | `computerSelectSnapshot` | Chooses the template of a future new machine, or clears the choice with `name:null`. Keys are exactly these three. No provider mutation of any kind. |
 

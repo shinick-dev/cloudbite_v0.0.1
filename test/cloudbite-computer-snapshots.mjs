@@ -292,7 +292,7 @@ await test('the history is bounded to 20 and the bound never drops the selected 
 
 globalThis.fetch = realFetch;
 const API = '/api/cloudbite/computer';
-const LIST = `${API}/snapshots`, SELECT = `${API}/snapshots/select`, CAPTURE = `${API}/snapshot`;
+const LIST = `${API}/snapshots`, SELECT = `${API}/snapshots/select`, CAPTURE = `${API}/snapshots/capture`;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 class El {

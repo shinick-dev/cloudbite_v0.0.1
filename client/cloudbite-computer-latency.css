@@ -50,7 +50,7 @@ p{margin:0 0 12px}
 .cl-ok{background:var(--ok-soft);color:var(--ok)}
 .cl-warn{background:var(--warn-soft);color:var(--warn)}
 .cl-info{background:var(--pale);color:var(--navy)}
-.cl-callout{font-size:14px;border-left:4px solid var(--wait);background:var(--wait-soft);color:#5c3b04;padding:10px 12px;border-radius:0 10px 10px 0;margin:12px 0 0}
+.cl-callout{font-size:14px;border:1px solid var(--wait);background:var(--wait-soft);color:#5c3b04;padding:10px 12px;border-radius:12px;margin:12px 0 0}
 
 @media (min-width:600px){
   h1{font-size:32px}

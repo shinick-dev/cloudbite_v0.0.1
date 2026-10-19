@@ -58,7 +58,7 @@ p{margin:0 0 12px}
 .cs-ok{background:var(--ok-soft);color:var(--ok)}
 .cs-warn{background:var(--warn-soft);color:var(--warn)}
 .cs-info{background:var(--pale);color:var(--navy)}
-.cs-callout{font-size:14px;border-left:4px solid var(--wait);background:var(--wait-soft);color:#5c3b04;padding:10px 12px;border-radius:0 10px 10px 0}
+.cs-callout{font-size:14px;border:1px solid var(--wait);background:var(--wait-soft);color:#5c3b04;padding:10px 12px;border-radius:12px}
 
 
 .cs-pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:4px 12px;font-size:13px;font-weight:700;background:var(--pale);color:var(--navy);max-width:100%}

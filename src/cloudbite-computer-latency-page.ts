@@ -1,6 +1,6 @@
 // Generated file — do not edit. Sources: client/cloudbite-computer-latency.ts · client/cloudbite-computer-latency.css
 // Rebuild: node tools/build-cloudbite-computer-latency.mjs (--check verifies it is current)
-// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 a4ea02521b47c3a15522f2c5abaacc8c637e6f724ff0c5668ec2ef0fc459e808 · css sha256 bc678aaf507e48bcaee7d0dd1921478239d5bbfdf87b2f24f5f601644c5bf8d1
+// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 a4ea02521b47c3a15522f2c5abaacc8c637e6f724ff0c5668ec2ef0fc459e808 · css sha256 479dd57a460fd738848b47c2aa745d68f73a2dd27705a22bbc04b80164b708a9
 // Routing (runtime): GET CLOUDBITE_COMPUTER_LATENCY_PATH → CLOUDBITE_COMPUTER_LATENCY_HTML, CLOUDBITE_COMPUTER_LATENCY_JS_PATH → CLOUDBITE_COMPUTER_LATENCY_JS (text/javascript),
 // CLOUDBITE_COMPUTER_LATENCY_CSS_PATH → CLOUDBITE_COMPUTER_LATENCY_CSS (text/css). CSP script-src 'self'; style-src 'self' suffices (no inline).
 // The script calls only GET /api/cloudbite/computer/latency/ping and /latency/backend same-origin with the existing cookie, from explicit buttons, and links only to /cloudbite/computer.
@@ -79,7 +79,7 @@ export const CLOUDBITE_COMPUTER_LATENCY_CSS = [
   ".cl-ok{background:var(--ok-soft);color:var(--ok)}",
   ".cl-warn{background:var(--warn-soft);color:var(--warn)}",
   ".cl-info{background:var(--pale);color:var(--navy)}",
-  ".cl-callout{font-size:14px;border-left:4px solid var(--wait);background:var(--wait-soft);color:#5c3b04;padding:10px 12px;border-radius:0 10px 10px 0;margin:12px 0 0}",
+  ".cl-callout{font-size:14px;border:1px solid var(--wait);background:var(--wait-soft);color:#5c3b04;padding:10px 12px;border-radius:12px;margin:12px 0 0}",
   "",
   "@media (min-width:600px){",
   "  h1{font-size:32px}",
