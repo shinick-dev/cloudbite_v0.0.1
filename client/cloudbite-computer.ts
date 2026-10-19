@@ -1263,6 +1263,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
   function resetCapacity(): void {
     perfSeq++; sbSeq++; candSeq++; gpuSeq++;
     Object.assign(S, {
+      jobs: null, jobsLoading: false, jobsMsg: null,
       perf: null, perfLoading: false, perfMsg: null, plan: '', review: null, reviewMsg: null, resizeCheck: false, sent: null,
       sandboxes: null, sbPartial: false, sbLoading: false, sbMsg: null, sandbox: '', cands: null, candLoading: false, candMsg: null,
       gpuOp: null, gpuMsg: null, choice: null, copyMsg: null,

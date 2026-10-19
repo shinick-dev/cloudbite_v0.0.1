@@ -1020,6 +1020,17 @@ await test('late state and launch replies after logout cannot restore private UI
   assert.ok(!e.links().some(a=>(a.getAttribute('href')||'').includes('ticket=late')));
 });
 
+await test('logout clears a pending nested-job list so its late answer cannot leak or leave the list locked', async () => {
+  let reply;
+  const {route}=owned(state({status:'running',machine:MACHINE,ready:true}),{'nested/jobs':()=>new Promise(r=>{reply=r;}),'auth/logout':()=>json(200,{authenticated:false})});
+  const e=env({route}); await e.flush(); e.btn('Show nested jobs').click(); await e.flush();
+  e.btn('Sign out').click(); await e.flush();
+  reply(await json(200,{jobs:[{id:'private-old-job',provider:'nosana',status:'running'}]})); await e.flush();
+  e.btn('Check connection again').click(); await e.flush();
+  assert.doesNotMatch(e.text(),/private-old-job/);
+  assert.equal(e.btn('Show nested jobs').disabled,false);
+});
+
 await test('a desktop ticket from before an offline interval is discarded even after network recovery', async () => {
   let reply;
   const {route}=owned(state({status:'running',machine:MACHINE,ready:true}),{launch:()=>new Promise(r=>{reply=r;})});

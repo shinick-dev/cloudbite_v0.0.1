@@ -1,6 +1,6 @@
 // Generated file — do not edit. Sources: client/cloudbite-computer.ts · client/cloudbite-computer.css
 // Rebuild: node tools/build-cloudbite-computer.mjs (--check verifies it is current)
-// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 e6724281556e4809b9c5f807839803b00bdfc202ef2d1f422706d1d882860fd2 · css sha256 62187bac5bf4cc9c48f060e1c0aa99a72891eee6153e696c9713bee516e90e0c
+// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 ed701c7a3e5e035ca9894dfac24216d4cb5d5ef5f277c1670406e49c7536224b · css sha256 62187bac5bf4cc9c48f060e1c0aa99a72891eee6153e696c9713bee516e90e0c
 // Routing (runtime): GET CLOUDBITE_COMPUTER_PATH → CLOUDBITE_COMPUTER_HTML, CLOUDBITE_COMPUTER_JS_PATH → CLOUDBITE_COMPUTER_JS (text/javascript),
 // CLOUDBITE_COMPUTER_CSS_PATH → CLOUDBITE_COMPUTER_CSS (text/css). CSP script-src 'self'; style-src 'self' suffices (no inline).
 // The script calls /api/cloudbite/computer/* (sign-in under /api/cloudbite/computer/auth/*) same-origin and links out only to the gateway and k.shinick.dev.
@@ -1889,6 +1889,9 @@ export const CLOUDBITE_COMPUTER_JS = [
   "    candSeq++;",
   "    gpuSeq++;",
   "    Object.assign(S, {",
+  "      jobs: null,",
+  "      jobsLoading: false,",
+  "      jobsMsg: null,",
   "      perf: null,",
   "      perfLoading: false,",
   "      perfMsg: null,",
