@@ -213,10 +213,14 @@ def matrix_write(root, big_mib=32):
                      ("append", append), ("truncate", truncate), ("delete", delete), ("chmod", chmod), ("utime", utime),
                      ("symlink", symlink), ("hardlink", hardlink), ("flock", lock), ("dirFsync", dir_fsync)):
         _check(r, name, fn)
+    def list_root():
+        return sorted((n, os.stat(os.path.join(root, n)).st_size) for n in os.listdir(root))
+
+    _check(r, "listRootMetadata", list_root)
     for p in (small, big, uni):
         if os.path.exists(p):
             files[os.path.relpath(p, root).replace(os.sep, "/")] = {"size": os.path.getsize(p), "sha256": _sha(p)}
-    manifest = {"files": files, "dirs": ["empty", "한글 폴더", "dir-b/child"], "expectedBigSha256": hashlib.sha256(big_bytes).hexdigest()}
+    manifest = {"files": files, "dirs": [d for d, c in (("empty", "emptyDir"), ("한글 폴더", "unicodePath"), ("dir-b/child", "renameDir")) if r[c]["ok"]], "expectedBigSha256": hashlib.sha256(big_bytes).hexdigest()}
     with open(os.path.join(root, ".cbfs-manifest.json"), "w", encoding="utf8") as f:
         json.dump(manifest, f, ensure_ascii=False)
         f.flush()

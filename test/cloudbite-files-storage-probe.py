@@ -280,6 +280,31 @@ fp.sandboxes["other"] = {"id": "other", "name": "x", "labels": {}, "mount": "v8"
 led.data["proof"] = {"verified": True}
 ok(probe.cleanup(led, fp)["volume"] == "delete-uncertain", "409 reported as cleanup uncertainty")
 
+# Mountpoint-S3-like semantics (seen live: rename ENOSYS, delete EPERM): unsupported ops are
+# recorded as failures and the restart verify only expects what was actually created.
+import errno
+real_replace, real_remove = os.replace, os.remove
+
+
+def no_rename(a, b):
+    raise OSError(errno.ENOSYS, "Function not implemented")
+
+
+def no_delete(p):
+    raise PermissionError(errno.EPERM, "Operation not permitted")
+
+
+os.replace, os.remove = no_rename, no_delete
+try:
+    sroot = os.path.join(tempfile.mkdtemp(), "s3like")
+    w = probe.matrix_write(sroot, 1)
+finally:
+    os.replace, os.remove = real_replace, real_remove
+ok(not w["checks"]["renameDir"]["ok"] and not w["checks"]["delete"]["ok"], "unsupported ops recorded as failures")
+ok("dir-b/child" not in w["manifest"]["dirs"] and "empty" in w["manifest"]["dirs"], "manifest expects only created dirs")
+ok(w["checks"]["listRootMetadata"]["ok"], "metadata listing recorded")
+ok(probe.matrix_verify(sroot)["ok"], "verify passes on S3-like semantics when bytes match")
+
 # --matrix CLI on a local root prints one JSON line.
 root = os.path.join(tempfile.mkdtemp(), "m")
 r = subprocess.run([sys.executable, "-B", TOOL, "--matrix", "write", "--root", root, "--big-mib", "1"], capture_output=True, text=True, encoding="utf8")
