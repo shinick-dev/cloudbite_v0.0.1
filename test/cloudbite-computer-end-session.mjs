@@ -14,7 +14,7 @@ import { createHash, randomBytes, randomUUID, webcrypto } from 'node:crypto';
 import { build } from 'esbuild';
 
 const tmp = mkdtempSync(join(tmpdir(), 'cloudbite-end-'));
-const built = await build({ stdin: { contents: `export * from './src/cloudbite-computer-service.ts'; export * from './src/cloudbite-computer-contract.ts'; export { ComputerDaytonaError } from './src/cloudbite-computer-daytona.ts';`, resolveDir: process.cwd(), loader: 'ts' },
+const built = await build({ stdin: { contents: `export * from './src/cloudbite-computer-service.ts'; export * from './src/cloudbite-computer-contract.ts'; export { ComputerBackups } from './src/cloudbite-computer-backups.ts'; export { ComputerDaytonaError } from './src/cloudbite-computer-daytona.ts';`, resolveDir: process.cwd(), loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'esm', plugins: [{ name: 'cf', setup(b) {
     b.onResolve({ filter: /^cloudflare:workers$/ }, () => ({ path: 'cf', namespace: 'stub' }));
     b.onLoad({ filter: /^cf$/, namespace: 'stub' }, () => ({ contents: 'export class DurableObject { constructor(ctx,env){this.ctx=ctx;this.env=env;} }' }));
@@ -352,6 +352,123 @@ await test('computerBackupProtectedNames: storage only, prepared images + templa
   await assert.rejects(M.computerBackupProtectedNames(env, kv, 'BAD'));
   assert.deepEqual(await M.computerBackupProtectedNames(ENV, { async get() { return undefined; } }, OWNER), ['cloudbite-computer-v1']);
   assert.equal(w.fake.calls.length, n, 'no provider call');
+});
+
+await test('unanswered capture with the real manager: unconfirmed ends the flow as unknown within a few alarms; start works, no second create', async () => {
+  const w = world(), bkv = new Map();
+  const prov = { gets: 0, creates: 0, async getSnapshot() { this.gets++; return null; },
+    async createSnapshot() { this.creates++; throw Object.assign(new Error('timeout'), { status: 0 }); }, async removeSnapshot() { return 'absent'; } };
+  const backups = new M.ComputerBackups({ store: { get: async (k) => structuredClone(bkv.get(k)), put: async (k, v) => { bkv.set(k, structuredClone(v)); } },
+    provider: prov, now: () => w.clock.now, random: Math.random, protectedNames: () => [] });
+  const store = { async get(k) { return structuredClone(w.kv.get(k)); }, async put(k, v) { w.kv.set(k, structuredClone(v)); },
+    async setAlarm(at) { w.clock.alarm = at; }, async deleteAlarm() { w.clock.alarm = null; } };
+  w.svc = new M.ComputerService({ store, env: ENV, daytona: w.fake.api, now: () => w.clock.now, random: (n) => new Uint8Array(randomBytes(n)),
+    sha256: async (s) => createHash('sha256').update(s).digest('hex'), end: { backup: backups } });
+  await running(w);
+  await w.svc.end(OWNER, { requestId: randomUUID(), mode: 'disk_backup' });
+  let n = 0; while (rec(w).end.phase !== 'done' && n < 20) { await alarms(w, 1); n++; }
+  const e = rec(w).end;
+  assert.ok(n <= 10, `done after ${n} alarms`); assert.equal(e.phase, 'done'); assert.equal(e.backup, 'unknown', 'never claimed saved');
+  assert.equal(e.backupWork, false); assert.equal((await backups.summary(OWNER)).items[0].state, 'unconfirmed', 'still owned and blocking');
+  const st = await w.svc.start(OWNER, { requestId: randomUUID(), account: 'primary' });
+  assert.equal(st.ok, true); assert.equal(ops(w.fake, 'start').length, 1);
+  const gets = prov.gets; await alarms(w, 30);
+  assert.equal(prov.creates, 1, 'no second create'); assert.equal(prov.gets, gets, 'no further automatic reads');
+  // unknown with work still true (create unanswered, not yet unconfirmed) keeps backing_up as before
+  const p = world({ backup: [{ state: 'unknown', work: true }, { state: 'unknown', work: true }, 'active'] }); await running(p);
+  await p.svc.end(OWNER, { requestId: randomUUID(), mode: 'disk_backup' });
+  await alarms(p, 3); assert.equal(rec(p).end.phase, 'backing_up');
+  await alarms(p, 1); assert.equal(rec(p).end.phase, 'done'); assert.equal(rec(p).end.backup, 'active');
+});
+
+await test('drain leaves resume owed: after a successful end, the next start of the same machine resumes once (alarm, not GET)', async () => {
+  const w = world({ drain: [CLEAN], backup: ['active'] }); await running(w);
+  const id = randomUUID();
+  await w.svc.end(OWNER, { requestId: id, mode: 'files_verified' });
+  await alarms(w, 3);
+  assert.equal(rec(w).end.phase, 'done'); assert.equal(w.d.resumes, 0, 'never resumed while stopped');
+  assert.equal(rec(w).resume.machineId, rec(w).machine.id); assert.equal(rec(w).resume.requestId, id);
+  await alarms(w, 3); assert.equal(w.d.resumes, 0);
+  const st = await w.svc.start(OWNER, { requestId: randomUUID(), account: 'primary' });
+  assert.equal(st.ok, true); assert.equal(w.d.resumes, 0, 'start itself does not call the hook');
+  for (let k = 0; k < 3; k++) await w.svc.state(OWNER);
+  assert.equal(w.d.resumes, 0, 'GET state never dispatches it');
+  assert.ok(w.clock.alarm !== null);
+  await alarms(w, 1);
+  assert.equal(w.d.resumes, 1); assert.equal(rec(w).resume, null);
+  await alarms(w, 5); assert.equal(w.d.resumes, 1, 'once');
+  assert.equal(ops(w.fake, 'start').length, 1, 'no new provider start');
+});
+
+await test('owed resume survives a DO restart and a failing hook (bounded per run, retried on the next run of the same machine)', async () => {
+  const shared = { kv: new Map(), clock: { now: 1_800_000_000_000, alarm: null }, fake: fakeDaytona() };
+  const w = world({ shared, drain: [CLEAN], backup: ['active'] }); await running(w);
+  await w.svc.end(OWNER, { requestId: randomUUID(), mode: 'files_verified' });
+  await alarms(w, 3); assert.equal(rec(w).end.phase, 'done');
+  const w2 = world({ shared, drain: [CLEAN], backup: ['active'] }); // evicted DO, fresh instance
+  let calls = 0; w2.svc.d.end.resume = async () => { calls++; throw new Error('agent not reachable'); };
+  await w2.svc.start(OWNER, { requestId: randomUUID(), account: 'primary' });
+  await alarms(w2, 20);
+  assert.equal(calls, 6, 'bounded tries in this run'); assert.ok(rec(w2).resume, 'still owed');
+  await w2.svc.stop(OWNER, { requestId: randomUUID() }); await alarms(w2, 1);
+  const w3 = world({ shared, drain: [CLEAN], backup: ['active'] });
+  await w3.svc.start(OWNER, { requestId: randomUUID(), account: 'primary' });
+  await alarms(w3, 2);
+  assert.equal(w3.d.resumes, 1, 'the next run resumes'); assert.equal(rec(w3).resume, null);
+  assert.equal(ops(shared.fake, 'start').length, 2);
+  // a blocked end still resumes at once; a failure there is retried by the alarm
+  const b = world({ drain: [{ ok: false, code: 'agent_missing', retryable: false }] }); await running(b);
+  let fails = 1; const ok = b.d.resume; b.svc.d.end.resume = async (...a) => { if (fails-- > 0) throw new Error('x'); return ok(...a); };
+  await b.svc.end(OWNER, { requestId: randomUUID(), mode: 'files_verified' });
+  await alarms(b, 1); assert.equal(rec(b).end.phase, 'blocked'); assert.equal(b.d.resumes, 0);
+  await alarms(b, 1); assert.equal(b.d.resumes, 1); assert.equal(rec(b).resume, null);
+});
+
+await test('lost answer of the 12th drain after a restart: a user end turns blocked and resumes; a deadline end still stops at the deadline', async () => {
+  const w = world({ drain: [{ ...CLEAN, dirty: 1 }] }); await running(w);
+  await w.svc.end(OWNER, { requestId: randomUUID(), mode: 'files_verified' });
+  await alarms(w, 1);
+  const r = rec(w); r.end.drains = 12; w.kv.set('computer', r); // the 12th attempt was persisted, its answer lost
+  await alarms(w, 1);
+  assert.equal(rec(w).end.phase, 'blocked'); assert.equal(rec(w).end.files, 'blocked'); assert.equal(w.d.resumes, 1);
+  assert.equal(w.d.calls.length, 1, 'no drain beyond the budget'); assert.equal(ops(w.fake, 'stop').length, 0);
+  assert.equal((await w.svc.start(OWNER, { requestId: randomUUID(), account: 'primary' })).ok, true, 'not busy any more');
+
+  const d = world({ drain: [{ ...CLEAN, dirty: 1 }] }); await running(d);
+  await d.svc.endSettings(OWNER, { requestId: randomUUID(), autoEnd: 'files_verified' });
+  const deadline = rec(d).sessionEndsAt;
+  d.clock.now = deadline - 5 * 60_000; await d.svc.alarm();
+  const x = rec(d); x.end.drains = 12; d.kv.set('computer', x);
+  await alarms(d, 3);
+  assert.equal(rec(d).end.phase, 'draining', 'no early stop of the paid session'); assert.equal(ops(d.fake, 'stop').length, 0);
+  d.clock.now = deadline; await d.svc.alarm();
+  assert.equal(ops(d.fake, 'stop').length, 1); assert.equal(rec(d).end.files, 'pending');
+});
+
+await test('definite stop refusal keeps the hard deadline and retries a bounded number of times; an unanswered stop is never re-sent', async () => {
+  const w = world(); await running(w);
+  const deadline = rec(w).sessionEndsAt;
+  w.fake.fail.stop = [{ status: 409 }, { status: 409 }];
+  w.clock.now = deadline; await w.svc.alarm();
+  assert.equal(ops(w.fake, 'stop').length, 1); assert.ok(rec(w).sessionEndsAt >= deadline, 'deadline kept');
+  await alarms(w, 3);
+  assert.equal(ops(w.fake, 'stop').length, 3); assert.equal(rec(w).status, 'stopped'); assert.equal(rec(w).sessionEndsAt, null);
+  const z = world(); await running(z);
+  z.fake.fail.stop = [{ status: 409 }, { status: 409 }, { status: 409 }, { status: 409 }, { status: 409 }];
+  z.clock.now = rec(z).sessionEndsAt; await z.svc.alarm();
+  await alarms(z, 10);
+  assert.equal(ops(z.fake, 'stop').length, 4, '1 + 3 bounded retries'); assert.equal(rec(z).sessionEndsAt, null);
+  const u = world(); await running(u);
+  u.fake.fail.stop = [{ status: 0 }];
+  u.clock.now = rec(u).sessionEndsAt; await u.svc.alarm();
+  await alarms(u, 5);
+  assert.equal(ops(u.fake, 'stop').length, 1, 'uncertain stop reconciled by GET only'); assert.equal(rec(u).sessionEndsAt, null);
+  // a user end whose stop is refused fails, but the machine keeps its deadline
+  const e = world(); await running(e);
+  const dl = rec(e).sessionEndsAt; e.fake.fail.stop = [{ status: 409 }];
+  await e.svc.end(OWNER, { requestId: randomUUID(), mode: 'disk_backup' });
+  await alarms(e, 1);
+  assert.equal(rec(e).end.phase, 'failed'); assert.equal(rec(e).sessionEndsAt, dl);
 });
 
 // ───────────────────────── main page (generated CLOUDBITE_COMPUTER_JS in a tiny fake DOM; not browser evidence) ─────────────────────────

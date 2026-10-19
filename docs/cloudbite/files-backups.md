@@ -33,7 +33,8 @@ backups.reconcile(ownerTag) // explicit owner/root action only (never the alarm)
 - `work:true` means capture/cleanup still needs ticks even when the begin's state is terminal (e.g. the retention
   delete after the new backup became active). The root keeps a bounded alarm while `work` or `pending`/`unknown`.
 
-`pending`/`unknown` keep the lifecycle's `backing_up` phase ticking; `active`, `coalesced`, `failed`, `blocked` end it.
+`pending`/`unknown` keep the lifecycle's `backing_up` phase ticking; `active`, `coalesced`, `failed`, `blocked` end it,
+and so does `unknown` with `work: false` (only `create_unconfirmed` answers that: nothing more happens until `reconcile()`).
 Reasons: `not_stopped`, `busy` (another machine's capture in flight), `recent`, `unchanged`, `daily_limit`,
 `retention_blocked`, `cleanup_blocked`, `ownership_unproven`, `foreign`, `name_collision`, `provider_refused`,
 `provider_error`, `create_unconfirmed`, `timeout`, `bad_request`, `request_conflict`, `no_backup` (`not_applied` only
@@ -41,8 +42,8 @@ appears in ledgers written before this rule; it is no longer produced).
 
 **Unconfirmed create (lifecycle peer note).** A create whose answer was lost (no answer, 5xx, 408/429, or a restart
 while `requested`) and that then reads 404 by exact name 5 times answers `{ state: 'unknown', reason:
-'create_unconfirmed', work: false }`. The lifecycle keeps its own bounded `backing_up` poll and then ends as
-`unknown`; ticks in that state make no provider call. Every new `begin` answers `blocked/create_unconfirmed` until
+'create_unconfirmed', work: false }`. The lifecycle ends its `backing_up` phase as `unknown` on that answer (it never
+claims a saved backup and does not hold the stopped machine busy); ticks in that state make no provider call. Every new `begin` answers `blocked/create_unconfirmed` until
 `reconcile()` proves the resource ours (it then continues as a normal capture) or contrary evidence marks it
 `foreign`/`unproven`. The original `requestId` keeps replaying `unknown`, never `failed`.
 
@@ -64,6 +65,12 @@ while `requested`) and that then reads 404 by exact name 5 times answers `{ stat
   up unaccounted snapshots). Only an explicit `reconcile()` re-reads it; strict ownership proof (exact name, id,
   source machine, `general === false`) recovers it, a 404/error leaves it unconfirmed, contrary evidence marks it
   `foreign`.
+- **Proven capture gone.** An id is recorded only from a read that proved the capture ours. If a later read by that
+  exact id answers 404 before the capture became active (provider cleaned up a failed build, or the owner deleted it),
+  the item is released like a confirmed delete: the receipt is kept as `failed/provider_error` (frozen earlier as
+  `failed/timeout` for a stale one), a `gone` history entry is recorded, the slot is freed, no DELETE is sent and
+  reads stop; a later capture is allowed. Without a proven id a 404 proves nothing (see unconfirmed above). A missing
+  source/general field or a foreign DTO is still never adopted or deleted.
 - **Ownership proof.** `active` requires the provider DTO to show the exact name, an id (not used by another ledger
   item), `sourceSandboxId === recorded machine id` and `general === false`. Missing evidence → `ownership_unproven`;
   contrary evidence → `foreign`. Both preserve the resource, are never deleted, and block new captures.

@@ -43,7 +43,9 @@ export interface ComputerBackupHook {
 /**
  * Injected by root. They run inside this DO's serial queue, so they must never call back into ComputerService/DO methods.
  * drain: combined agent prepare-end --flush + watcher report on the running owned machine (no start/stop).
- * resume: best effort, leaves draining when an end is blocked or cancelled and the machine keeps running.
+ * resume: leaves draining. Called when an end is blocked or cancelled and the machine keeps running, and, because the agent
+ * and the watcher keep draining across restarts, once the SAME drained machine is next observed running after a later start
+ * (alarm only, bounded tries per run, retained across DO restarts until one call succeeds). It must be idempotent.
  */
 export interface ComputerEndHooks {
   drain?(machine: ComputerMachineRef, requestId: string): Promise<ComputerDrainResult>;
@@ -93,6 +95,8 @@ interface EndRec {
   /** The manager still has work (e.g. retention after a new backup turned active); ticked after `done`, at most workPolls. */
   backupWork?: boolean; workPolls?: number;
 }
+/** A drain left the agent/watcher of this machine draining: resume is owed until one resume call succeeds. Survives new ends. */
+interface ResumeRec { requestId: string; machineId: string; tries: number; epoch: number; at: number | null }
 interface Rec {
   ownerTag: string | null;
   machine: Machine | null;
@@ -109,6 +113,9 @@ interface Rec {
   resize?: ResizeRec | null;
   perf?: PerfRec | null;
   end?: EndRec | null;
+  resume?: ResumeRec | null;
+  /** Definite provider refusals of the stop since the last answered stop/start; the deadline is kept while this is bounded. */
+  stopRefusals?: number;
   /** Owner opt-in: start this kind of safe end shortly before the session deadline. Absent = the plain deadline stop. */
   autoEnd?: ComputerEndMode | null;
   ops: Op[];
@@ -131,6 +138,8 @@ const END_ACTIVE: ComputerEndPhase[] = ['draining', 'stopping', 'backing_up'];
 const BACKUP_DONE: ComputerEndBackup[] = ['active', 'coalesced', 'failed', 'blocked'];
 // User end: up to 12 drains 10 s apart (~2 min) before it is blocked. Stop: 2 sends at most, ~10 min to observe it.
 // Backup: ~1 h of alarms. Opted-in owners get the deadline end 5 min before the session ends; it stops at the deadline.
+// Owed resume: at most 6 calls per machine run, 10 s apart. A refused stop keeps the deadline for at most 3 refusals.
+const RESUME_TRIES = 6, STOP_REFUSALS_MAX = 3;
 const END_DRAIN_TRIES = 12, END_STOP_TRIES = 2, END_STOP_MAX_POLLS = 60, END_BACKUP_MAX_POLLS = 360, END_PREEXPIRY_MS = 5 * 60_000, END_FLUSH_TIMEOUT_S = 30;
 const DRAIN_COUNTS = ['dirty', 'uploading', 'conflict', 'unconfirmedOps', 'open', 'pendingDeletions', 'errors'] as const;
 const RECHECK_MS = 60_000, RECHECK_MAX = 3; // explicit GET: at most 3 active captures re-read, each at most once a minute
@@ -364,7 +373,7 @@ export class ComputerService {
     const now = this.d.now();
     const pending = r.status === 'starting' || r.status === 'stopping' || r.status === 'unknown' || r.status === 'snapshotting'
       || (r.status === 'running' && r.desktop === 'starting')
-      || (!!r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state)) || this.probeDue(r) || this.resizing(r) || this.ending(r) || !!r.end?.backupWork;
+      || (!!r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state)) || this.probeDue(r) || this.resizing(r) || this.ending(r) || !!r.end?.backupWork || this.resumeDue(r);
     const fast = r.status === 'starting' || (r.status === 'running' && r.desktop === 'starting');
     // The alarm defers the session stop while a resize is pending; the deadline must not become a 1 s poll meanwhile.
     const deadline = r.status === 'running' && r.sessionEndsAt ? (this.resizing(r) ? Math.max(r.sessionEndsAt, now + COMPUTER_POLL_MS) : r.sessionEndsAt) : null;
@@ -416,7 +425,7 @@ export class ComputerService {
         if (r.status === 'running') { this.extendSessions(r); return this.view(r); }
         if (r.status === 'starting') return this.view(r);
         if (r.status !== 'stopped') throw new ComputerError(r.status === 'unknown' ? 'unknown_outcome' : 'busy');
-        r.status = 'starting'; r.error = null; r.sessionEndsAt = this.d.now() + COMPUTER_SESSION_MS;
+        r.status = 'starting'; r.error = null; r.sessionEndsAt = this.d.now() + COMPUTER_SESSION_MS; r.stopRefusals = 0;
         await this.save(r); // ledger before mutation
         try { await this.d.daytona.start(this.dt(a), r.machine.id!); }
         catch (e) { this.unconfirmed(r, e); }
@@ -468,11 +477,18 @@ export class ComputerService {
 
   private async stopMachine(r: Rec) {
     const a = this.account(r.machine!.account); if (!a) throw new ComputerError('not_configured');
+    const deadline = r.sessionEndsAt;
     r.status = 'stopping'; r.sessionEndsAt = null; r.desktop = 'not_running'; this.down(r);
     await this.save(r); // ledger before mutation; also revokes gateway fast reads (sessions + epoch)
     await this.d.store.put(PREVIEW_KEY, null);
-    try { await this.d.daytona.stop(this.dt(a), r.machine!.id!); }
-    catch (e) { this.unconfirmed(r, e); }
+    try { await this.d.daytona.stop(this.dt(a), r.machine!.id!); r.stopRefusals = 0; }
+    catch (e) {
+      // A definite refusal leaves the machine running: keep its hard deadline so a later alarm stops it again (bounded, one
+      // alarm apart). An unanswered stop is reconciled by GET and never re-sent, so its deadline stays cleared.
+      if (e instanceof ComputerDaytonaError && !e.uncertain && deadline !== null && (r.stopRefusals = (r.stopRefusals ?? 0) + 1) <= STOP_REFUSALS_MAX)
+        r.sessionEndsAt = Math.max(deadline, this.d.now() + COMPUTER_POLL_MS);
+      this.unconfirmed(r, e);
+    }
   }
 
   stop(ownerTag: string, body: { requestId?: unknown }) {
@@ -522,7 +538,7 @@ export class ComputerService {
   /** Bounded (never more than one session from now); desktop cookies still valid now follow the new deadline. */
   private extendSessions(r: Rec) {
     const now = this.d.now(), end = now + COMPUTER_SESSION_MS;
-    r.sessionEndsAt = end;
+    r.sessionEndsAt = end; r.stopRefusals = 0;
     r.sessions = r.sessions.filter((s) => s.exp > now).map((s) => ({ ...s, exp: end }));
   }
 
@@ -657,6 +673,7 @@ export class ComputerService {
           try { await this.stopMachine(r); } catch { /* recorded on r */ }
         }
         if (!this.ending(r) && r.end?.backupWork) await this.tickBackupWork(r);
+        if (!this.ending(r)) await this.resumeOwed(r);
         if (r.status !== 'running') { r.desktopLaunches = 0; r.desktopLaunchAt = null; }
         if (r.machine?.created === 'owned' && r.snapshot) await this.pollSnapshot(r);
         if (r.machine?.created === 'owned' && r.status === 'running' && r.desktop === 'starting') await this.pollDesktop(r);
@@ -747,10 +764,32 @@ export class ComputerService {
     return { id: m.id!, account: m.account, name: m.name, labels: computerLabels(r.ownerTag!, m.account), status: r.status, region: m.region };
   }
 
+  /** Immediate resume (blocked/cancelled end). A failure keeps the owed resume for the bounded alarm retries. */
   private async resumeAgent(r: Rec) {
-    const h = this.d.end;
-    if (!h?.resume || r.status !== 'running' || !r.machine?.id || !r.end) return;
-    try { await h.resume(this.machineRef(r), r.end.requestId); } catch { /* best effort; the agent also leaves draining on restart */ }
+    const h = this.d.end, id = r.resume?.requestId ?? r.end?.requestId;
+    if (!h?.resume || r.status !== 'running' || !r.machine?.id || !id) return;
+    try { await h.resume(this.machineRef(r), id); r.resume = null; }
+    catch { if (r.resume) r.resume.at = this.d.now(); } // still draining across restarts: resumeOwed retries it, one alarm later
+  }
+
+  /** An owed resume can run: the same owned machine that was drained is running, no end is active, this run has tries left. */
+  private resumeDue(r: Rec) {
+    const o = r.resume, m = r.machine;
+    return !!o && !!this.d.end?.resume && m?.created === 'owned' && m.id === o.machineId && r.status === 'running' && !this.ending(r)
+      && (o.epoch !== (r.desktopEpoch ?? 0) || o.tries < RESUME_TRIES);
+  }
+
+  /** Alarm only (never a GET): one resume call per alarm, recorded before it is sent. Never a provider start or other mutation. */
+  private async resumeOwed(r: Rec) {
+    const o = r.resume, m = r.machine; if (!o) return;
+    if (!m || (m.id && m.id !== o.machineId)) { r.resume = null; return; } // that machine is gone; a new one was never drained
+    if (!this.resumeDue(r)) return;
+    const now = this.d.now(), epoch = r.desktopEpoch ?? 0;
+    if (o.epoch !== epoch) { o.epoch = epoch; o.tries = 0; o.at = null; } // each run of the same machine gets its own bounded tries
+    if (o.at !== null && now >= o.at && now - o.at < COMPUTER_POLL_MS) return;
+    o.tries++; o.at = now;
+    await this.save(r); // attempt persisted before the call
+    try { await this.d.end!.resume!(this.machineRef(r), o.requestId); r.resume = null; } catch { /* a later alarm of this run retries */ }
   }
 
   /** Best-effort `sync` before the stop. The provider stop is what keeps the disk; a failed flush is reported, never hidden. */
@@ -762,8 +801,10 @@ export class ComputerService {
 
   /** One drain request, recorded before it is sent. Only known numeric/boolean fields are kept; anything else fails verification. */
   private async drainOnce(r: Rec): Promise<ComputerDrainResult | null> {
-    const e = r.end!;
+    const e = r.end!, o = r.resume, id = r.machine!.id!;
     e.drains++; e.drainAt = this.d.now();
+    // From the first drain on, the agent/watcher may be draining: a resume is owed to this machine until one succeeds.
+    r.resume = o && o.machineId === id ? { ...o, requestId: e.requestId } : { requestId: e.requestId, machineId: id, tries: 0, epoch: r.desktopEpoch ?? 0, at: null };
     await this.save(r); // phase and attempt persisted before the outbound call
     let res: ComputerDrainResult;
     try { res = await this.d.end!.drain!(this.machineRef(r), e.requestId); } catch { return null; }
@@ -792,6 +833,12 @@ export class ComputerService {
         if (e.files === 'verifying') e.files = 'unverified'; // stopped meanwhile: nothing more can be proven
         e.phase = 'stopping';
       } else if (e.mode === 'files_verified' && h?.drain) {
+        if (!due && e.drains >= END_DRAIN_TRIES && e.trigger === 'user') {
+          // The last attempt was persisted but its answer was lost (DO restart): no drain is left, so block and resume.
+          e.phase = 'blocked'; e.files = 'blocked';
+          await this.resumeAgent(r);
+          return;
+        }
         if (!due && (e.drains >= END_DRAIN_TRIES || (e.drainAt !== null && now - e.drainAt < COMPUTER_POLL_MS))) return;
         const res = await this.drainOnce(r);
         const verified = !!res?.ok && computerDrainVerified(e.report);
@@ -829,7 +876,9 @@ export class ComputerService {
           : await b.tick(r.ownerTag!);
       } catch { st = null; } // begin is idempotent per requestId: the next alarm asks the same request again
       this.mirrorBackup(e, st);
-      if (BACKUP_DONE.includes(e.backup)) e.phase = 'done';
+      // An unknown outcome the manager no longer works on (create_unconfirmed: owned and blocking until an explicit reconcile)
+      // ends the flow as unknown now; holding the stopped machine busy for the alarm budget would prove nothing.
+      if (BACKUP_DONE.includes(e.backup) || (st?.state === 'unknown' && st.work === false)) e.phase = 'done';
       else if (++e.polls >= END_BACKUP_MAX_POLLS) { e.phase = 'done'; e.backup = 'unknown'; }
     }
   }

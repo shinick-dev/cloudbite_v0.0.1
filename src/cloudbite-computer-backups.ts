@@ -108,7 +108,8 @@ interface Item {
   polls: number; absent: number; deletes: number; deleteAt: number | null; why: ComputerBackupReason | null;
 }
 /** 'not_applied' is read from older ledgers only; an unknown create is never closed that way any more. */
-type DoneOutcome = 'removed' | 'not_applied' | 'refused' | 'collision' | 'skipped';
+/** 'gone': a proven-own capture that a read by its id later found absent before this ledger retired it (never claimed saved). */
+type DoneOutcome = 'removed' | 'not_applied' | 'refused' | 'collision' | 'skipped' | 'gone';
 interface Done { name: string; id: string | null; outcome: DoneOutcome; why: ComputerBackupReason | null; at: number }
 interface Receipt { requestId: string; key: string; at: number; item: string | null; result: ComputerBackupStatus; final: boolean }
 interface Ledger { v: 1; owner: string; items: Item[]; done: Done[]; begins: Receipt[]; creates: number[] }
@@ -261,7 +262,10 @@ export class ComputerBackups implements ComputerBackupHook {
     i.polls++;
     if (info === undefined) { if (i.polls >= BACKUP_LIMITS.createPolls && INFLIGHT.includes(i.state)) this.mark(i, 'stale', 'timeout'); return; }
     if (info === null) {
-      if (i.state === 'active' || i.id) { this.mark(i, 'unproven', 'ownership_unproven'); return; }
+      // i.id is recorded only from a read that proved the capture ours, so a 404 by that exact id confirms it is gone (the
+      // same rule as sendDelete): keep the receipt, free the slot, send nothing. Without a proven id a 404 proves nothing.
+      if (i.id) return this.drop(l, i, 'gone', 'provider_error');
+      if (i.state === 'active') { this.mark(i, 'unproven', 'ownership_unproven'); return; }
       // Absent so far is not proof an old create cannot still land: stop automatic reads, keep it owned and blocking.
       if (i.state !== 'unconfirmed' && ++i.absent >= BACKUP_LIMITS.reconcileAbsent) this.mark(i, 'unconfirmed', 'create_unconfirmed');
       return;

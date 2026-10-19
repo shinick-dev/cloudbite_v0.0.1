@@ -2,6 +2,7 @@
 // store. These are test doubles: nothing here is live persistence, a live Daytona snapshot or a quota/cost measurement.
 // Pins: stopped-only, storage-only begin/status, intent before mutation, unknown create applied / unconfirmed after 404s
 // (owned, blocking, late appearance recovered only by explicit reconcile, never resubmitted), restart without resubmit,
+// a proven-own capture later 404 by id is released as failed (no DELETE, no endless reads),
 // generated names inside the restore UI's 3-48 rule for every owner tag, ownership proof (missing/mismatch/duplicate id), latest + protected guards, delete 404 confirmation
 // and bounded re-sends, retention to 3 verified + 1 replacement, min interval / daily cap, unchanged vs unknown revision.
 //   node test/cloudbite-computer-backups.mjs
@@ -509,6 +510,39 @@ await test('stale capture stays owned, re-read, and blocks new captures (expiry 
   await r.b.tick(OWNER);
   assert.equal((await r.b.summary(OWNER)).blocked, null);
   assert.equal(r.provider.count('create'), 1);
+});
+
+await test('proven-own capture that later 404s by its id: receipt kept (failed, never saved), slot freed, no DELETE, reads stop, next capture allowed', async () => {
+  for (const reads of [99, 10_000]) { // still building (snapshotting), or past the poll budget (stale)
+    const { b, provider, clock } = rig();
+    provider.buildReads = reads;
+    const s = await begin(b);
+    await b.tick(OWNER); await b.tick(OWNER); // create, then a read proves it ours (id recorded)
+    if (reads === 10_000) for (let k = 0; k < L.createPolls; k++) await b.tick(OWNER);
+    assert.equal((await b.summary(OWNER)).items[0].state, reads === 99 ? 'snapshotting' : 'stale');
+    provider.snaps('primary').clear(); // the provider dropped the failed build, or the owner deleted it
+    const gets = provider.count('get');
+    const t = await b.tick(OWNER);
+    assert.equal(t.state, 'failed'); assert.equal(t.reason, reads === 99 ? 'provider_error' : 'timeout', 'the stale receipt was already final'); assert.equal(t.name, s.name); assert.equal(t.work, false);
+    for (let k = 0; k < 400; k++) await b.tick(OWNER);
+    assert.equal(provider.count('get'), gets + 1, 'one read by id, then no endless reads');
+    const sum = await b.summary(OWNER);
+    assert.deepEqual(sum.items, []); assert.equal(sum.owned, 0); assert.equal(sum.blocked, null);
+    assert.equal(provider.count('remove'), 0, 'nothing deleted');
+    clock.t += 7 * H;
+    const n = await begin(b);
+    assert.equal(n.state, 'pending'); assert.notEqual(n.name, s.name);
+  }
+  // without a proven id a 404 still proves nothing: the unanswered create keeps its slot through 400 ticks and reconcile
+  const { b, provider, clock } = rig();
+  provider.createFault = { status: 0, applied: false };
+  await begin(b);
+  for (let k = 0; k < 400; k++) await b.tick(OWNER);
+  await b.reconcile(OWNER);
+  clock.t += 3 * 86_400_000;
+  const n = await begin(b);
+  assert.equal(n.state, 'blocked'); assert.equal(n.reason, 'create_unconfirmed');
+  assert.equal((await b.summary(OWNER)).owned, 1); assert.equal(provider.count('create'), 1);
 });
 
 await test('ledger is owner bound and bounded', async () => {

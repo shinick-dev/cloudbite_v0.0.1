@@ -26,9 +26,14 @@
 3. `files_verified`: drain을 최대 12회(약 2분) 시도. `agentReady && managedScanComplete && !scanLimited`이고
    dirty/uploading/conflict/unconfirmedOps/open/pendingDeletions/errors가 모두 0일 때만 증명으로 본다.
    빈 journal의 bare agent ready는 증명이 아니다. 끝내 증명이 안 되면 `blocked` — 머신은 계속 실행되고 `resume` hook을 부른다.
+   12번째 시도가 저장된 뒤 그 응답이 DO 재기동으로 사라졌어도, 사용자 종료는 다음 alarm에서 `blocked`가 되고 `resume`을 부른다
+   (기한 종료는 그대로 기한까지 기다렸다가 정지한다 — 일찍 정지하지 않는다).
 4. stop은 최대 2회 전송, 상태는 GET으로 관찰(약 10분). 응답 없는 stop은 GET으로 조정하며 맹목 재전송하지 않는다.
 5. 정지 확인 뒤 `backup.begin`(같은 requestId, `environmentRevision: null`)을 부르고 이후 alarm마다 `tick`.
    `active/coalesced/failed/blocked`면 `done`, `pending/unknown`은 최대 360회(약 1시간) 후 `unknown`으로 끝낸다.
+   단 `unknown`이면서 `work: false`(관리자의 `create_unconfirmed`: 소유·차단 유지, 명시적 reconcile만)는 관리자가 더 할 일이
+   없으므로 그 alarm에서 바로 `done`/`unknown`으로 끝낸다. 저장됨·active로 표시하지 않으며, 이미 정지한 머신의 start를 1시간
+   `busy`로 막지 않는다. `unknown`+`work: true`는 기존처럼 계속 tick한다.
    begin이 응답하지 않으면 다음 alarm에 같은 requestId로 다시 묻는다(관리자는 requestId에 대해 멱등).
 6. 관리자 상태의 `work: true`(예: 새 백업 active 뒤 보관 정리)는 `done` 이후에도 alarm마다 `tick`을 부르게 한다.
    `work`가 거짓이 되거나 360회(약 1시간)에 닿으면 멈춘다. 이 service는 삭제·재시작을 하지 않으며 tick 안의 정리는 관리자 몫이다.
@@ -45,6 +50,21 @@
 - provider auto-stop 등 외부 정지가 관찰되면 opt-in 소유자에게만 `provider_stop` 종료 기록(파일 `unverified`)을 만들고
   환경 백업을 이어 간다. 자동 재시작은 하지 않는다.
 - 종료 진행 중에는 start·수동 snapshot·resize가 `busy`다. 기존 ‘중지’는 drain 단계만 가로챌 수 있다(파일 `unverified`).
+- provider가 stop을 명확히 거절(4xx, 408/429 제외)하면 머신은 계속 실행 중이므로 세션 기한을 지우지 않고 되살린다(이미
+  지났으면 다음 alarm). 거절은 최대 3번까지 다시 정지를 시도하고 그 뒤에는 기한을 비운다. 응답 없는 stop은 여전히 GET으로만
+  조정하고 재전송하지 않는다.
+
+## drain 뒤 resume
+
+agent(`files-agent.py init`)와 watcher는 재시작해도 `draining`을 유지하고 `resume`만 이를 해제한다. 그래서 drain을 한 번이라도
+보낸 종료는 그 머신(id)에 대한 `resume` 빚을 DO 기록(`resume`)에 남긴다(새 종료가 와도 유지, 같은 머신이면 requestId만 갱신).
+
+- `blocked`·`cancelled`는 기존처럼 즉시 `resume`을 부른다. 실패하면 빚이 남고 다음 alarm부터 다시 시도한다.
+- 성공한 종료(`done`/`failed`) 뒤에는 **같은 소유 머신이 실행 중으로 관찰된 alarm**에서만 `resume(machine, requestId)`를 부른다.
+  start가 alarm을 예약하고, GET state/endStatus는 hook을 부르지 않는다. 새 provider start나 다른 mutation은 없다.
+- 시도는 호출 전에 저장되고, 머신 실행(run)마다 최대 6회·10초 간격이다. 한 번 성공하면 빚을 지운다. 다 실패하면 빚은 남아 같은
+  머신의 다음 실행에서 다시 6회까지 시도한다. 머신이 사라지거나 다른 머신으로 바뀌면 빚을 버린다(새 머신은 drain된 적 없음).
+- 통합 쪽 `resume` hook은 멱등이어야 한다(같은 requestId로 여러 번 불릴 수 있음).
 
 ## 루트 연결 계약
 
