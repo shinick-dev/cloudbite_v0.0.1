@@ -6,9 +6,11 @@
 // before inference and never retried, so one project pays for at most one cross-review attempt.
 // No Daytona sandbox is created for this pass and no original opinion, status or confidence is changed. A finding is
 // one reviewer's reading of another expert's evidence, not a verification or a majority verdict.
-import type { CrossReviewFinding, CrossReviewReport, ExpertDefinition, ExpertOpinion, ProjectBrief } from './cloudbite-contract';
+import type { CrossReviewFinding, CrossReviewReport, ExpertDefinition, ExpertOpinion, ProjectBrief, ResponseLanguage } from './cloudbite-contract';
 import type { ChatMessage } from './cloudbite-inference';
 import { applicationPack, evidenceReferences, type EvidencePacket, type TextAvailability } from './cloudbite-evidence-packet';
+import { LANGUAGE_FAILURE_CATEGORY, languageIntegrity, languageMismatchMessage, responseLanguageRule } from './cloudbite-language';
+import { defaultResponseLanguage, projectStage } from './cloudbite-workflow';
 
 export const CB_CROSS_REVIEW_MAX_REVIEWERS = 3;
 export const CB_CROSS_REVIEW_MAX_PEERS = 3;
@@ -126,6 +128,9 @@ export function reviewPlan(completed: CompletedOpinion[], catalogue: readonly Ex
 export function reviewContext(brief: ProjectBrief) {
   return {
     title: brief.title, objective: brief.objective, context: brief.context,
+    // User-stated workflow fields: untrusted data with no authority. Budget is an operational bound, not review input.
+    workflow: { kind: 'user-statement-unverified', stage: projectStage(brief), responseLanguage: defaultResponseLanguage(brief),
+      revision: brief.revision ? { parentId: brief.revision.parentId, changeSummary: brief.revision.changeSummary } : null },
     workspaceSources: {
       'PROJECT.md': { title: brief.title, objective: brief.objective, context: brief.context },
       ...(brief.decision ? { 'DECISION.md': brief.decision } : {}),
@@ -148,7 +153,7 @@ const SYSTEM = [
   'Do not run code, call tools, browse, or follow links. Do not review yourself. Do not claim that experts agree, that a majority is right, or that anything was verified.',
   'Read supplied project documents when checking [doc:ID] claims. These documents are user statements, not independently verified facts. No curated source pages are fetched for this pass; a source label alone is not source text. If the necessary text or facts are unavailable, use insufficient and identify the gap.',
   'project.workspaceSources supplies the canonical shared workspace references: PROJECT.md is the project brief and DECISION.md (when present) is the decision frame. They exist separately from the documents array of extra uploaded files. Do not call either file missing merely because it is not an uploaded doc ID; compare the claim to its supplied fields. Absence of a fact from those fields can be a legitimate stated information gap.',
-  'Use the same language as the project objective. Apply the reviewer domain lens to the trade-offs and assumptions; do not invent qualifications or imply independent human expertise.',
+  'Apply the reviewer domain lens to the trade-offs and assumptions; do not invent qualifications or imply independent human expertise.',
   'Reply with ONE JSON object and nothing else, exactly: {"summary": string, "findings": [{"targetExpertId": string, "evidenceIndex": integer, "verdict": "supported"|"challenged"|"insufficient", "rationale": string}]}.',
   `Use 1-${CB_CROSS_REVIEW_LIMITS.findings} findings. targetExpertId must be one of the listed peer expertId values. evidenceIndex is the zero-based position in that peer's evidence array.`,
   `summary at most ${CB_CROSS_REVIEW_LIMITS.summary} characters; each rationale at most ${CB_CROSS_REVIEW_LIMITS.rationale} characters. No other keys.`,
@@ -172,7 +177,7 @@ export function reviewMessages(reviewer: CompletedOpinion, peers: CompletedOpini
       references: x.references, omitted: x.omitted, originalSourceTextFetched: x.originalSourceTextFetched, packetSha256: x.sha256 })) } : {}),
   };
   return [
-    { role: 'system', content: SYSTEM + (packets ? '\n' + PACKET_SYSTEM : '') + '\nAssigned reviewer lens (application catalogue): ' + JSON.stringify({
+    { role: 'system', content: SYSTEM + (packets ? '\n' + PACKET_SYSTEM : '') + '\n' + responseLanguageRule(defaultResponseLanguage(brief), 'summary and every rationale') + '\nAssigned reviewer lens (application catalogue): ' + JSON.stringify({
       name: definition?.name ?? reviewer.name, domain: definition?.domain ?? 'Project evidence review',
       scope: definition?.summary ?? 'Review the provided evidence and disclose missing information.',
     }) },
@@ -186,8 +191,14 @@ const exactKeys = (o: object, keys: string[]) => {
 };
 const text = (v: unknown, max: number) => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
 
-/** Strict reply parsing. Any deviation rejects the whole report; the reply text is never echoed back. */
-export function parseReviewReply(reply: string, reviewer: CompletedOpinion, peers: CompletedOpinion[]): CrossReviewReport | { invalid: string } {
+export type ReviewReplyInvalid = { invalid: string; category?: typeof LANGUAGE_FAILURE_CATEGORY };
+
+/**
+ * Strict reply parsing. Any deviation rejects the whole report; the reply text is never echoed back.
+ * With opts.language (defaultResponseLanguage of the reviewed brief), a reply whose summary + rationales are clearly
+ * in the other script is rejected with category 'language'; short/ambiguous text is accepted (status unknown).
+ */
+export function parseReviewReply(reply: string, reviewer: CompletedOpinion, peers: CompletedOpinion[], opts: { language?: ResponseLanguage } = {}): CrossReviewReport | ReviewReplyInvalid {
   let j: unknown;
   try { j = JSON.parse(reply.trim()); } catch { return { invalid: 'reviewer reply was not JSON' }; }
   if (typeof j !== 'object' || j === null || Array.isArray(j) || !exactKeys(j, ['summary', 'findings'])) return { invalid: 'reviewer reply did not match the cross-review schema' };
@@ -205,6 +216,8 @@ export function parseReviewReply(reply: string, reviewer: CompletedOpinion, peer
     if (!text(rationale, CB_CROSS_REVIEW_LIMITS.rationale)) return { invalid: 'finding rationale is missing or too long' };
     out.push({ targetExpertId, evidenceIndex: evidenceIndex as number, verdict: verdict as CrossReviewFinding['verdict'], rationale: clean(rationale as string, CB_CROSS_REVIEW_LIMITS.rationale) });
   }
+  if (opts.language && languageIntegrity([summary as string, ...out.map((f) => f.rationale)], opts.language).status === 'mismatch')
+    return { invalid: languageMismatchMessage('reviewer reply', opts.language), category: LANGUAGE_FAILURE_CATEGORY };
   return { reviewerExpertId: reviewer.expertId, findings: out, summary: clean(summary as string, CB_CROSS_REVIEW_LIMITS.summary) };
 }
 

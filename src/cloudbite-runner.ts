@@ -5,6 +5,7 @@
 import { CB_CAPABILITY_TTL, CB_INFERENCE_BODY_MAX, CB_INFERENCE_MAX_CALLS, CB_INFERENCE_MAX_TOKENS } from './cloudbite-config';
 import { CLOUDBITE_OPINION_LIMITS as OPINION } from './cloudbite-personas';
 import { KNOWLEDGE_LIMITS, KNOWLEDGE_SCHEMA, PEER_REVIEW_STATEMENT } from './cloudbite-knowledge';
+import { CB_LANGUAGE_PY, RESPONSE_LANGUAGE_NAMES, responseLanguageRule } from './cloudbite-language';
 
 export const CB_RUNNER_ROUNDS = 6;
 // After a final rejected on the last turn: at most this many final-only repair replies, still inside maxCalls.
@@ -25,6 +26,7 @@ const DIAGNOSTIC_CODES: Record<string, string> = {
   final_format: 'final did not match the result format (format)',
   final_citation: 'final cited a source not retrieved for this role (citation)',
   final_peer_review: 'final lacked the required no-peer-verification statement (peer review)',
+  final_language: 'final narrative was not in the selected response language (language)',
   final_turn_tool: 'a tool was requested when the final was required (turns)',
   budget: 'runner inference budget or deadline exhausted (budget)',
   inference: 'model inference failed (inference)',
@@ -60,6 +62,8 @@ export interface RunnerCapability {
 export function runnerCapability(gateway: string, project: string, run: string, expertId: string, token: string, now: number): RunnerCapability {
   return { gateway, project, run, expertId, token, expiresAt: now + CB_CAPABILITY_TTL, rounds: CB_RUNNER_ROUNDS, maxCalls: CB_INFERENCE_MAX_CALLS };
 }
+
+const RUNNER_LANGUAGE_FIELDS = 'the final opinion narrative (summary, evidence explanations, assumptions, nextActions) and the report prose and headings';
 
 export const CB_RUNNER_PY = String.raw`#!/usr/bin/env python3
 """Cloudbite expert runner: bounded model/tool loop inside this sandbox (stdlib only)."""
@@ -100,6 +104,10 @@ REPAIR_TURN = ('Final rejected: %s.\nFinal repair %d of %d: tools are no longer 
                'corrected compact final JSON object (action, opinion, report). Fix only what was rejected. Do not invent\n'
                'evidence, results or sources; if a claim or citation is not supported by work already done or a source\n'
                'already retrieved, drop it and state the gap. Choose direction and confidence from your own evidence.')
+# Selected response language (project.json responseLanguage, else Hangul in the objective). Absent project.json: no rule.
+LANGUAGE_RULES = ${JSON.stringify({ ko: responseLanguageRule('ko', RUNNER_LANGUAGE_FIELDS), en: responseLanguageRule('en', RUNNER_LANGUAGE_FIELDS) })}
+LANGUAGE_NAMES = ${JSON.stringify(RESPONSE_LANGUAGE_NAMES)}
+${CB_LANGUAGE_PY}
 # An honest, explicit User-Agent: Cloudflare refuses urllib's default one (403, error 1010) before the Worker runs.
 USER_AGENT = 'Cloudbite-Runner/0.0.1'
 # Inference failures are reported by local category only: never the upstream body, model output or credentials.
@@ -116,6 +124,7 @@ calls = 0
 failure = {'code': 'final_turn_tool', 'turn': 0, 'repairs': 0, 'http': 0}
 extras = []
 knowledge = None
+language = None
 knowledge_trace = []
 retrieved_sources = set()
 project_document_ids = set()
@@ -250,7 +259,24 @@ def final_problem(act):
     if not isinstance(report, str) or not report.strip(): return 'final_format', 'report must be non-empty markdown'
     problem = check_peer_statement(report)
     if problem: return 'final_peer_review', problem
+    if language and final_language(act['opinion'], report)[0] == 'mismatch':
+        return 'final_language', ('final narrative is not in the selected response language (%s, %s): write summary, evidence explanations, '
+                                  'assumptions, nextActions and report prose in %s; keep quotes, code, URLs, IDs and citation tokens unchanged'
+                                  % (language, LANGUAGE_NAMES[language], LANGUAGE_NAMES[language]))
     return None, None
+
+
+def final_language(o, report):
+    """Script check over the narrative fields; the required English peer statement is a fixed quote, not narrative."""
+    prose = re.sub(re.escape(PEER_STATEMENT), ' ', report if isinstance(report, str) else '', flags=re.I)
+    return language_integrity([o['summary']] + [x for k in OPINION_KEYS[3:] for x in o[k]] + [prose], language)
+
+
+def accepted_language(o, report, where):
+    if language:
+        status, h, l = final_language(o, report)
+        activity('status', '%s: response language %s check %s (script heuristic, not verified language identification; %d Hangul, %d Latin)'
+                 % (where, language, status, h, l))
 
 
 def flat_opinion(o):
@@ -339,6 +365,16 @@ def workspace_text():
     extra = decision_text()
     if extra: parts.append(extra)
     return '\n\n'.join(parts)
+
+
+def load_language():
+    global language
+    path = os.path.join(ROOT, 'project.json')
+    if not os.path.isfile(path): return
+    with open(path, encoding='utf-8') as f: brief = json.loads(f.read(512 * 1024))
+    if not isinstance(brief, dict): raise RuntimeError('invalid project brief')
+    stated, objective = brief.get('responseLanguage'), brief.get('objective')
+    language = stated if stated in ('ko', 'en') else 'ko' if isinstance(objective, str) and LANG_HANGUL.search(objective) else 'en'
 
 
 def load_knowledge():
@@ -495,6 +531,7 @@ def main():
     rounds = int(cap['rounds'])
     activity('status', 'runner started (python %s, %d turns)' % (sys.version.split()[0], rounds))
     load_knowledge()
+    load_language()
     document_path = os.path.join(ROOT, 'evidence', 'documents.json')
     if os.path.isfile(document_path):
         with open(document_path, encoding='utf-8') as f: document_data = json.loads(f.read(128 * 1024))
@@ -505,11 +542,11 @@ def main():
             if not isinstance(doc, dict) or not re.fullmatch(r'doc-[1-6]', doc.get('id', '')):
                 raise RuntimeError('invalid project document ID')
             project_document_ids.add(doc['id'])
-    messages = [{'role': 'system', 'content': SYSTEM % (TOOL_SECONDS, MAX_EXTRA, rounds)},
+    messages = [{'role': 'system', 'content': SYSTEM % (TOOL_SECONDS, MAX_EXTRA, rounds) + ('\n' + LANGUAGE_RULES[language] if language else '')},
                 {'role': 'user', 'content': workspace_text()}]
     for step in range(1, rounds + 1):
         if step == rounds:
-            messages.append({'role': 'user', 'content': FINAL_TURN})
+            messages.append({'role': 'user', 'content': FINAL_TURN + ('\nWrite the narrative in %s.' % LANGUAGE_NAMES[language] if language else '')})
         try:
             reply = infer(messages)
         except Exception as e:
@@ -553,6 +590,7 @@ def main():
                 messages.append({'role': 'user', 'content': 'Final rejected: ' + retry_hint(problem)})
                 continue
             activity('thought', 'turn %d: final opinion %s (self-assessed confidence %s)' % (step, act['opinion']['direction'], act['opinion']['confidence']))
+            accepted_language(act['opinion'], act['report'], 'turn %d' % step)
             finish('ok', act['opinion'], act['report'])
             return 0
     finish('error', error='no valid final opinion within %d turns' % rounds)
@@ -603,6 +641,7 @@ def repair(messages, rounds, problem):
             activity('error', 'final repair %d: final rejected: %s' % (attempt, problem))
             continue
         activity('thought', 'final repair %d: final opinion %s (self-assessed confidence %s)' % (attempt, act['opinion']['direction'], act['opinion']['confidence']))
+        accepted_language(act['opinion'], act['report'], 'final repair %d' % attempt)
         finish('ok', act['opinion'], act['report'])
         return 0
     used = failure['repairs']
