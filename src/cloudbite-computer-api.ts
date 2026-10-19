@@ -18,6 +18,7 @@ import {CLOUDBITE_COMPUTER_LATENCY_HTML,CLOUDBITE_COMPUTER_LATENCY_JS,CLOUDBITE_
 import {CLOUDBITE_COMPUTER_COSTS_HTML,CLOUDBITE_COMPUTER_COSTS_JS,CLOUDBITE_COMPUTER_COSTS_CSS} from './cloudbite-computer-costs-page';
 import {latencyPing,latencyBackend} from './cloudbite-computer-latency';
 import {computerCosts} from './cloudbite-computer-costs';
+import {CLOUDBITE_COMPUTER_FILES_HTML,CLOUDBITE_COMPUTER_FILES_JS,CLOUDBITE_COMPUTER_FILES_CSS} from './cloudbite-computer-files-page';
 import {filesAgentRoute,filesBrowserRoute,type FilesEnv} from './cloudbite-computer-files-runtime';
 
 const API = '/api/cloudbite/computer';
@@ -26,6 +27,7 @@ const EXTRA_PAGES:Record<string,readonly[string,string,string]>={
  snapshots:[CLOUDBITE_COMPUTER_SNAPSHOTS_HTML,CLOUDBITE_COMPUTER_SNAPSHOTS_JS,CLOUDBITE_COMPUTER_SNAPSHOTS_CSS],
  latency:[CLOUDBITE_COMPUTER_LATENCY_HTML,CLOUDBITE_COMPUTER_LATENCY_JS,CLOUDBITE_COMPUTER_LATENCY_CSS],
  costs:[CLOUDBITE_COMPUTER_COSTS_HTML,CLOUDBITE_COMPUTER_COSTS_JS,CLOUDBITE_COMPUTER_COSTS_CSS],
+ files:[CLOUDBITE_COMPUTER_FILES_HTML,CLOUDBITE_COMPUTER_FILES_JS,CLOUDBITE_COMPUTER_FILES_CSS],
 };
 const headers = { 'cache-control':'no-store', 'x-content-type-options':'nosniff', 'referrer-policy':'no-referrer' };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {status, headers:{...headers,'content-type':'application/json'}});
@@ -111,7 +113,7 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
       return new Response(response.status===101?null:response.body,{status:response.status,statusText:response.statusText,headers:h,...(response.webSocket?{webSocket:response.webSocket}:{})});
     } catch{return error('desktop_unavailable',502);}
   }
-  const extraPage=/^\/cloudbite\/computer\/(snapshots|latency|costs)(\.js|\.css)?$/.exec(p);
+  const extraPage=/^\/cloudbite\/computer\/(snapshots|latency|costs|files)(\.js|\.css)?$/.exec(p);
   if(extraPage || p===PAGE || p===PAGE+'.js' || p===PAGE+'.css' || p===PAGE+'/jobs' || p===PAGE+'/jobs.js' || p===PAGE+'/jobs.css') {
     if(req.method!=='GET')return error('method_not_allowed',405);
     const jobs=p.startsWith(PAGE+'/jobs');

@@ -55,7 +55,14 @@ try {
     async list({ prefix = '', startAfter, limit = Infinity } = {}) {
       return new Map([...this.m.keys()].filter(k => k.startsWith(prefix) && (startAfter === undefined || k > startAfter)).sort().slice(0, limit).map(k => [k, clone(this.m.get(k))]));
     }
-    async transaction(fn) { const t = new MemStorage(); t.m = new Map([...this.m].map(([k, v]) => [k, clone(v)])); const r = await fn(t); this.m = t.m; return r; }
+    // Serialized like DO storage transactions; `beforeTxn` lets a test interleave work right before a transaction runs.
+    async transaction(fn) {
+      if (this.beforeTxn) await this.beforeTxn();
+      const run = async () => {
+        const t = new MemStorage(); t.m = new Map([...this.m].map(([k, v]) => [k, clone(v)])); const r = await fn(t); this.m = t.m; return r;
+      };
+      const p = (this.txq ?? Promise.resolve()).then(run, run); this.txq = p.catch(() => {}); return p;
+    }
   }
   const hexOf = u8 => createHash('sha256').update(u8).digest('hex');
   class MemR2 {
@@ -236,6 +243,66 @@ try {
   await doR.svc.advanceWriter(tag, { requestId: 'w-x', expectedEpoch: 2, machineId: MID });
   r = await go(envR, gw, M.FILES_AGENT_PATH + '/status', { headers: { authorization: 'Bearer ' + g3.body.token } }); assert.equal((await j(r)).error.code, 'stale_writer');
   ok('capability expiry, revocation, machine replacement and stale epoch fences');
+
+  // ---- capability grant concurrency, revoke fencing, unknown persistence ----
+  const st = doR.ctx.storage, agentStatus = tok => go(envR, gw, M.FILES_AGENT_PATH + '/status', { headers: { authorization: 'Bearer ' + tok } }).then(j);
+  const caps = () => [...st.m.keys()].filter(k => k.startsWith('cap/') && k !== 'cap/fence');
+  let g4 = await M.filesAgentGrant(envR, tag, machine, 'g4'); assert.equal(g4.body.writerEpoch, 3);
+  { // two grants that both read the same fence: exactly one lands, the loser's token is dropped
+    let arrived = 0, open; const gate = new Promise(r => { open = r; });
+    st.beforeTxn = async () => { if (++arrived === 2) open(); await gate; };
+    const [x, y] = await Promise.all([M.filesAgentGrant(envR, tag, machine, 'c-a'), M.filesAgentGrant(envR, tag, machine, 'c-b')]);
+    st.beforeTxn = undefined;
+    const won = [x, y].filter(v => v.ok), lost = [x, y].filter(v => !v.ok);
+    assert.equal(won.length, 1, 'exactly one concurrent grant wins'); assert.equal(lost[0].error.code, 'grant_superseded'); assert.equal(lost[0].body, undefined);
+    assert.deepEqual(caps(), ['cap/active'], 'a single active capability record');
+    assert.equal((await agentStatus(won[0].body.token)).agent.writerEpoch, 3);
+    assert.equal((await agentStatus(g4.body.token)).error.code, 'capability_invalid');
+    g4 = won[0];
+  }
+  { // revoke landing between a grant's fence read and its write: the grant is superseded, nothing is resurrected
+    st.beforeTxn = async () => { st.beforeTxn = undefined; assert.deepEqual((await doR.filesRevokeAgents(tag)).body, { revoked: 1 }); };
+    const late = await M.filesAgentGrant(envR, tag, machine, 'late');
+    assert.equal(late.error.code, 'grant_superseded'); assert.equal(late.body, undefined);
+    assert.deepEqual(caps(), [], 'revoked and not re-granted');
+    assert.equal((await agentStatus(g4.body.token)).error.code, 'capability_invalid');
+  }
+  { // persistence outcome unknown: no token is returned, so none can be installed; the previous capability is untouched
+    const g5 = await M.filesAgentGrant(envR, tag, machine, 'g5'); assert.ok(g5.ok);
+    st.beforeTxn = async () => { st.beforeTxn = undefined; throw new Error('storage reset'); };
+    const u = await M.filesAgentGrant(envR, tag, machine, 'g6');
+    assert.equal(u.error.code, 'commit_unknown'); assert.equal(u.error.retryable, true); assert.ok(!JSON.stringify(u).includes('cbfa_'));
+    assert.equal((await agentStatus(g5.body.token)).agent.writerEpoch, 3);
+    g4 = g5;
+  }
+  ok('grants are a transactional singleton: concurrent grant, revoke race and unknown persistence never leave two live or unconfirmed secrets');
+
+  { // agent body/commit/abort are fenced on the upload's own epoch, not only on begin
+    const T = g4.body.token, AT = (p, init = {}) => go(envR, gw, M.FILES_AGENT_PATH + '/' + p, { ...init, headers: { authorization: 'Bearer ' + T, ...(init.headers ?? {}) } });
+    const cur = (await j(await post(envR, 'files/open', { fileId: f2.fileId }))).descriptor.versionId;
+    const nb = new TextEncoder().encode('epoch three');
+    const mk = async rid => (await j(await AT('uploads/begin', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: rid, fileId: f2.fileId, baseVersion: cur, writerEpoch: 3, size: nb.length, sha256: hexOf(nb) }) }))).upload;
+    const e3a = await mk('e3a'), e3b = await mk('e3b');
+    r = await AT(`uploads/${e3b.uploadId}/body`, { method: 'PUT', headers: { 'content-length': String(nb.length) }, body: nb }); assert.equal(r.status, 200);
+    await doR.svc.advanceWriter(tag, { requestId: 'w-4', expectedEpoch: 3, machineId: MID });
+    const g7 = await M.filesAgentGrant(envR, tag, machine, 'g7'); assert.equal(g7.body.writerEpoch, 4);
+    const B4 = (p, init = {}) => go(envR, gw, M.FILES_AGENT_PATH + '/' + p, { ...init, headers: { authorization: 'Bearer ' + g7.body.token, ...(init.headers ?? {}) } });
+    const puts = r2.calls.put;
+    r = await B4(`uploads/${e3a.uploadId}/body`, { method: 'PUT', headers: { 'content-length': String(nb.length) }, body: nb }); assert.equal((await j(r)).error.code, 'stale_writer');
+    assert.equal(r2.calls.put, puts, 'no blob written for a stale-epoch upload');
+    r = await B4(`uploads/${e3b.uploadId}/commit`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); assert.equal((await j(r)).error.code, 'stale_writer');
+    r = await B4(`uploads/${e3a.uploadId}/abort`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); assert.equal((await j(r)).error.code, 'stale_writer');
+    r = await B4(`uploads/${e3b.uploadId}`); assert.equal((await j(r)).upload.phase, 'body_written', 'reconcile read still allowed, nothing committed');
+    assert.equal((await j(await post(envR, 'files/open', { fileId: f2.fileId }))).descriptor.versionId, cur, 'canonical unchanged');
+  }
+  ok('agent body/commit/abort require upload.writerEpoch == capability epoch');
+
+  // standalone files page is served same-origin with the strict page CSP
+  for (const [p, type] of [['', 'text/html'], ['.js', 'text/javascript'], ['.css', 'text/css']]) {
+    r = await go(envR, base, '/cloudbite/computer/files' + p); assert.equal(r.status, 200); assert.ok(r.headers.get('content-type').startsWith(type));
+    assert.match(r.headers.get('content-security-policy'), /script-src 'self'/); assert.ok((await r.text()).length > 100);
+  }
+  ok('/cloudbite/computer/files page, js and css routes wired');
 
   // existing computer routes still served
   r = await get(envR, 'state'); assert.equal(r.status, 200);

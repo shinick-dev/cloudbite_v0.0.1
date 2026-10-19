@@ -32,8 +32,14 @@ export type FilesOk<T = unknown> = { ok: true; body: T };
 export type FilesResult<T = unknown> = FilesOk<T> | FilesFail;
 export type FilesRead = { ok: true; descriptor: VersionView; name: string; length: number; body: ReadableStream<Uint8Array> } | FilesFail;
 export interface FilesAgentGrant { token: string; machineId: string; writerEpoch: number; workspaceId: string; expiresAt: number; endpoint: string }
-type LiveMachine = { id: string; status: string } | null;
+// What the owner's computer DO has recorded (computerMachine): the machine it created and last saw running. This is the
+// recorded ownership/run state, not a live provider probe; a provider-side stop is caught later by the epoch fence.
+type RecordedMachine = { id: string; status: string } | null;
 type Cap = { ownerId: string; machineId: string; writerEpoch: number; expiresAt: number };
+// Exactly one capability may be active per owner: 'cap/active' holds it, 'cap/fence' is bumped by every grant and revoke.
+// A grant writes only if the fence it read before minting is still current (transactional CAS), so concurrent grants or
+// a revoke racing a grant can never leave two live capabilities or resurrect a revoked one.
+type ActiveCap = Cap & { hash: string };
 type ReadReq = { fileId: unknown; versionId: unknown; offset?: number; length?: number };
 
 const OPS = ['list', 'status', 'create', 'rename', 'pin', 'open', 'begin', 'getUpload', 'commit', 'abort', 'pending', 'localState'] as const;
@@ -51,6 +57,7 @@ function failFrom(e: unknown, mutating: boolean): FilesFail {
 const hex = (b: ArrayBuffer) => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
 const sha256 = async (s: string) => hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)));
 function b64u(bytes: Uint8Array) { let s = ''; for (const b of bytes) s += String.fromCharCode(b); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+function sameHex(a: string, b: string) { if (a.length !== b.length) return false; let d = 0; for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i); return d === 0; }
 const emptyStream = () => new ReadableStream<Uint8Array>({ start(c) { c.close(); } });
 
 export function filesService(storage: DurableObjectStorage | undefined, bucket: R2Bucket | undefined) {
@@ -97,9 +104,10 @@ export function filesObjectClass(Base: typeof DurableObjectBase) {
       return failOf('not_found', 404);
     }
 
-    private async body(ownerId: string, uploadId: unknown, declared: number, body: ReadableStream<Uint8Array> | null): Promise<FilesResult> {
+    private async body(ownerId: string, uploadId: unknown, declared: number, body: ReadableStream<Uint8Array> | null, writerEpoch?: number): Promise<FilesResult> {
       try {
         const { upload } = await this.svc.getUpload(ownerId, { uploadId: uploadId as string });
+        if (writerEpoch !== undefined && upload.writerEpoch !== writerEpoch) { await body?.cancel().catch(() => {}); return failOf('stale_writer', 409); }
         // Fail before any byte moves when the declared length cannot be this upload.
         if (declared !== upload.size) { await body?.cancel().catch(() => {}); return failOf('size_mismatch', 422); }
         return { ok: true, body: await this.svc.writeUploadBody(ownerId, upload.uploadId, body ?? emptyStream()) };
@@ -136,35 +144,45 @@ export function filesObjectClass(Base: typeof DurableObjectBase) {
       if (typeof machineId !== 'string' || !MACHINE_RE.test(machineId) || typeof requestId !== 'string' || !GRANT_REQ_RE.test(requestId))
         return failOf('invalid_request', 400);
       try {
+        const fence = (await this.ctx.storage.get<number>('cap/fence')) ?? 0;
         const { status } = await this.svc.storageStatus(ownerId);
         let writerEpoch = status.writerEpoch;
         if (status.writerMachine === null)
           writerEpoch = (await this.svc.advanceWriter(ownerId, { requestId: `grant:${requestId}`, expectedEpoch: writerEpoch, machineId })).writerEpoch;
         else if (status.writerMachine !== machineId) return failOf('writer_conflict', 409);
         const token = 'cbfa_' + b64u(crypto.getRandomValues(new Uint8Array(32)));
-        const expiresAt = Date.now() + FILES_AGENT_TTL_MS;
-        const old = await this.ctx.storage.list({ prefix: 'cap/' });
-        const cap: Cap = { ownerId, machineId, writerEpoch, expiresAt };
-        await this.ctx.storage.transaction(async txn => {
-          if (old.size) await txn.delete([...old.keys()]);
-          await txn.put(`cap/${await sha256(token)}`, cap);
+        const active: ActiveCap = { ownerId, machineId, writerEpoch, expiresAt: Date.now() + FILES_AGENT_TTL_MS, hash: await sha256(token) };
+        const won = await this.ctx.storage.transaction(async txn => {
+          if (((await txn.get<number>('cap/fence')) ?? 0) !== fence) return false;
+          await txn.put({ 'cap/fence': fence + 1, 'cap/active': active });
+          return true;
         });
-        return { ok: true, body: { token, machineId, writerEpoch, workspaceId: ownerId, expiresAt } };
+        // Lost the race to another grant/revoke: this token was never stored, so it is dropped here, never handed out.
+        if (!won) return failOf('grant_superseded', 409, true);
+        return { ok: true, body: { token, machineId, writerEpoch, workspaceId: ownerId, expiresAt: active.expiresAt } };
+      } catch (e) { return failFrom(e, true); } // unknown persistence: no token leaves, the caller installs nothing
+    }
+
+    /** Revokes the machine capability of this owner (e.g. the machine was replaced or stopped for good) and fences any
+     *  grant that is still in flight. */
+    async filesRevokeAgents(ownerId: string): Promise<FilesResult<{ revoked: number }>> {
+      const b = await this.bind(ownerId); if (b) return b;
+      try {
+        const revoked = await this.ctx.storage.transaction(async txn => {
+          const had = (await txn.get<ActiveCap>('cap/active')) !== undefined;
+          await txn.put('cap/fence', ((await txn.get<number>('cap/fence')) ?? 0) + 1);
+          if (had) await txn.delete('cap/active');
+          return had ? 1 : 0;
+        });
+        return { ok: true, body: { revoked } };
       } catch (e) { return failFrom(e, true); }
     }
 
-    /** Revokes every machine capability of this owner (e.g. the machine was replaced or stopped for good). */
-    async filesRevokeAgents(ownerId: string): Promise<FilesResult<{ revoked: number }>> {
-      const b = await this.bind(ownerId); if (b) return b;
-      const old = await this.ctx.storage.list({ prefix: 'cap/' });
-      if (old.size) await this.ctx.storage.delete([...old.keys()]);
-      return { ok: true, body: { revoked: old.size } };
-    }
-
-    private async agent(token: unknown, live: LiveMachine): Promise<{ cap: Cap } | FilesFail> {
+    private async agent(token: unknown, live: RecordedMachine): Promise<{ cap: Cap } | FilesFail> {
       if (typeof token !== 'string' || !TOKEN_RE.test(token)) return failOf('capability_invalid', 401);
-      const cap = await this.ctx.storage.get<Cap>(`cap/${await sha256(token)}`);
-      if (!cap || (await this.ctx.storage.get<string>('meta/owner')) !== cap.ownerId) return failOf('capability_invalid', 401);
+      const hash = await sha256(token);
+      const cap = await this.ctx.storage.get<ActiveCap>('cap/active');
+      if (!cap || !sameHex(cap.hash, hash) || (await this.ctx.storage.get<string>('meta/owner')) !== cap.ownerId) return failOf('capability_invalid', 401);
       if (Date.now() >= cap.expiresAt) return failOf('capability_expired', 401);
       if (!live || live.id !== cap.machineId || live.status !== 'running') return failOf('not_running', 409);
       try {
@@ -175,22 +193,27 @@ export function filesObjectClass(Base: typeof DurableObjectBase) {
     }
 
     // agent surface: identity comes only from the capability, never from the request
-    async filesAgentCall(token: string, live: LiveMachine, op: FilesOp, input: Record<string, unknown>): Promise<FilesResult> {
+    async filesAgentCall(token: string, live: RecordedMachine, op: FilesOp, input: Record<string, unknown>): Promise<FilesResult> {
       const a = await this.agent(token, live); if (!('cap' in a)) return a;
       if (!AGENT_OPS.has(op)) return failOf('not_found', 404);
       const { cap } = a;
       if (op === 'begin' && input.writerEpoch !== cap.writerEpoch) return failOf('stale_writer', 409);
       if (op === 'localState' && (input.writerEpoch !== cap.writerEpoch || input.machineId !== cap.machineId)) return failOf('stale_writer', 409);
+      // An upload begun under another epoch (an older grant, or the browser) is never finished by this capability.
+      if (op === 'commit' || op === 'abort') {
+        try { if ((await this.svc.getUpload(cap.ownerId, { uploadId: input.uploadId as string })).upload.writerEpoch !== cap.writerEpoch) return failOf('stale_writer', 409); }
+        catch (e) { return failFrom(e, false); }
+      }
       const r = await this.run(cap.ownerId, op, input);
       if (op === 'status' && 'ok' in r)
         return { ok: true, body: { ...(r.body as { status: StorageStatusView }), agent: { machineId: cap.machineId, writerEpoch: cap.writerEpoch, expiresAt: cap.expiresAt } } };
       return r;
     }
-    async filesAgentWriteBody(token: string, live: LiveMachine, uploadId: string, declared: number, body: ReadableStream<Uint8Array> | null): Promise<FilesResult> {
+    async filesAgentWriteBody(token: string, live: RecordedMachine, uploadId: string, declared: number, body: ReadableStream<Uint8Array> | null): Promise<FilesResult> {
       const a = await this.agent(token, live); if (!('cap' in a)) { await body?.cancel().catch(() => {}); return a; }
-      return this.body(a.cap.ownerId, uploadId, declared, body);
+      return this.body(a.cap.ownerId, uploadId, declared, body, a.cap.writerEpoch);
     }
-    async filesAgentRead(token: string, live: LiveMachine, req: ReadReq): Promise<FilesRead> {
+    async filesAgentRead(token: string, live: RecordedMachine, req: ReadReq): Promise<FilesRead> {
       const a = await this.agent(token, live); if (!('cap' in a)) return a;
       return this.read(a.cap.ownerId, req);
     }
@@ -205,9 +228,9 @@ interface FilesRpc {
   filesWriteBody(ownerId: string, uploadId: string, declared: number, body: ReadableStream<Uint8Array> | null): Promise<FilesResult>;
   filesRead(ownerId: string, req: ReadReq): Promise<FilesRead>;
   filesGrant(ownerId: string, machineId: string, requestId: string): Promise<FilesResult<Omit<FilesAgentGrant, 'endpoint'>>>;
-  filesAgentCall(token: string, live: LiveMachine, op: FilesOp, input: Record<string, unknown>): Promise<FilesResult>;
-  filesAgentWriteBody(token: string, live: LiveMachine, uploadId: string, declared: number, body: ReadableStream<Uint8Array> | null): Promise<FilesResult>;
-  filesAgentRead(token: string, live: LiveMachine, req: ReadReq): Promise<FilesRead>;
+  filesAgentCall(token: string, live: RecordedMachine, op: FilesOp, input: Record<string, unknown>): Promise<FilesResult>;
+  filesAgentWriteBody(token: string, live: RecordedMachine, uploadId: string, declared: number, body: ReadableStream<Uint8Array> | null): Promise<FilesResult>;
+  filesAgentRead(token: string, live: RecordedMachine, req: ReadReq): Promise<FilesRead>;
 }
 const stubOf = (env: FilesEnv, tag: string) => {
   const ns = env.CLOUDBITE_COMPUTER_FILES;
@@ -324,7 +347,7 @@ export async function filesAgentRoute(req: Request, env: FilesEnv, url: URL): Pr
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
   if (!TOKEN_RE.test(token)) return sendFail('capability_invalid', 401);
   const tag = await computerOwnerTag(), stub = stubOf(env, tag)!;
-  let live: LiveMachine = null;
+  let live: RecordedMachine = null; // recorded owned+running machine, not a live provider probe (see RecordedMachine)
   try {
     const cur = await (env.CLOUDBITE_COMPUTER.get(env.CLOUDBITE_COMPUTER.idFromName('owner')) as unknown as MachineRpc).computerMachine(tag);
     if ('ok' in cur) live = { id: cur.machine.id, status: cur.machine.status };
