@@ -41,9 +41,11 @@
     "test:security": "node tools/test-security.mjs",
     "test:security-runner": "node test/security-runner.mjs",
     "build:cloudbite-computer": "node tools/build-cloudbite-computer.mjs",
-    "test:cloudbite:workflow": "node test/cloudbite-evidence-packet.mjs && node test/cloudbite-budget.mjs && node test/cloudbite-memo.mjs && node test/cloudbite-pmc.mjs && node test/cloudbite-quality-eval.mjs && node test/cloudbite-revision.mjs && node test/cloudbite-language.mjs && node test/cloudbite-backend-v2.mjs && node test/cloudbite-workflow-ui.mjs && node test/cloudbite-access.mjs && node test/cloudbite-owner.mjs && node test/cloudbite-access-ui.mjs && npm run test:cloudbite:v3",
+    "test:cloudbite:workflow": "node test/cloudbite-evidence-packet.mjs && node test/cloudbite-budget.mjs && node test/cloudbite-memo.mjs && node test/cloudbite-pmc.mjs && node test/cloudbite-quality-eval.mjs && node test/cloudbite-revision.mjs && node test/cloudbite-language.mjs && node test/cloudbite-backend-v2.mjs && node test/cloudbite-workflow-ui.mjs && node test/cloudbite-access.mjs && node test/cloudbite-owner.mjs && node test/cloudbite-access-ui.mjs && npm run test:cloudbite:v3 && npm run test:cloudbite:v4",
     "evaluate:cloudbite": "node tools/evaluate-cloudbite-quality.mjs",
-    "test:cloudbite:v3": "node test/cloudbite-provenance.mjs && node test/cloudbite-artifact-review.mjs && node test/cloudbite-author-response.mjs && node test/cloudbite-runner-author-response.mjs && node test/cloudbite-backend-v3.mjs && node test/cloudbite-v3-ui.mjs"
+    "test:cloudbite:v3": "node test/cloudbite-provenance.mjs && node test/cloudbite-artifact-review.mjs && node test/cloudbite-author-response.mjs && node test/cloudbite-runner-author-response.mjs && node test/cloudbite-backend-v3.mjs && node test/cloudbite-v3-ui.mjs",
+    "test:cloudbite:v4": "node test/cloudbite-claim-support.mjs && node test/cloudbite-quantitative.mjs && node test/cloudbite-quality-batch.mjs && node test/cloudbite-backend-v4.mjs && node test/cloudbite-v4-ui.mjs",
+    "evaluate:cloudbite:batch": "node tools/cloudbite-quality-batch.mjs"
   },
   "dependencies": {
     "@simplewebauthn/server": "^14.0.3",

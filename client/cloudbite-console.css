@@ -602,3 +602,12 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .cb-chip.is-maintain { background: var(--support-soft); color: #0b5a3b; }
 .cb-ar-ask { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
 .cb-ar-ask > p { margin: 0; }
+.cb-quant > .cb-field { display: flex; flex-direction: column; gap: 5px; margin: 12px 0; }
+.cb-quant input, .cb-quant textarea, .cb-quant select { width: 100%; max-width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); color: var(--ink); background: var(--surface, #fff); font: inherit; }
+.cb-quant textarea { resize: vertical; }
+.cb-quant-records { padding-left: 22px; }
+.cb-quant-records > li { margin: 8px 0; min-width: 0; }
+.cb-support figure { margin: 12px 0; }
+.cb-support blockquote { margin: 0; padding: 8px 12px; border-left: 3px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; }
+.cb-support figcaption { color: var(--muted); font-size: 12px; margin-top: 5px; overflow-wrap: anywhere; }
+.cb-support > .cb-help { overflow-wrap: anywhere; }

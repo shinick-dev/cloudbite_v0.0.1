@@ -521,6 +521,8 @@ const P4_EN = {
   supportTitle: 'Claim-to-text assessment', supportNote: 'Model assessment of the supplied passage; not factual verification. Curated cards are summaries, not original source pages.',
   supportStatus: { supported: 'Supports', partial: 'Partly supports', contradicted: 'Contradicts', insufficient: 'Cannot determine' } as Record<string, string>,
   supportInvalid: 'The claim-to-text assessment could not be read.',
+  computed: 'Computed', calculationError: 'Calculation error', csvCounts: (a: number, b: number) => `${a} included rows · ${b} excluded rows`,
+  textOrigin: { 'user-document': 'Supplied document', 'imported-original-excerpt': 'Imported original excerpt', 'workspace-field': 'User project statement', 'curated-card': 'Curated summary card' } as Record<string, string>,
 };
 const P4_KO: typeof P4_EN = {
   title: '계산 재현', note: '입력값이나 저장된 CSV로 계산합니다. 모델 호출은 없습니다. 입력의 사실성이나 결정의 타당성을 검증하지는 않습니다. 프로젝트당 서로 다른 계산 20개까지 함께 보관합니다.',
@@ -535,6 +537,8 @@ const P4_KO: typeof P4_EN = {
   supportTitle: '주장과 인용문 대조', supportNote: '제공된 문장에 대한 모델의 판단이며 사실 검증이 아닙니다. 지식 카드는 요약문이며 출처 원문과 다릅니다.',
   supportStatus: { supported: '지지', partial: '부분 지지', contradicted: '불일치', insufficient: '판단 불가' },
   supportInvalid: '주장과 인용문 대조 결과를 읽을 수 없습니다.',
+  computed: '계산 결과', calculationError: '계산 오류', csvCounts: (a: number, b: number) => `포함 ${a}행 · 제외 ${b}행`,
+  textOrigin: { 'user-document': '제공된 문서', 'imported-original-excerpt': '가져온 원문 발췌', 'workspace-field': '사용자의 프로젝트 진술', 'curated-card': '요약 지식 카드' },
 };
 const EN = {
   p2: P2_EN, p3: P3_EN, p4: P4_EN,
@@ -1900,6 +1904,7 @@ function normalizeQuantitative(raw: unknown, projectId: string): QuantitativeChe
     if (r.result.status === 'completed' && (typeof r.result.inputSha256 !== 'string' || !SHA256.test(r.result.inputSha256))) return null;
     if (r.result.status === 'completed' && r.result.kind === 'arithmetic' && (!isObj(r.result.result) || num(r.result.result.value) === null || typeof r.result.result.unit !== 'string')) return null;
     if (r.result.status === 'completed' && r.result.kind === 'csv-summary' && (!isObj(r.result.rows) || !isInt(r.result.rows.included) || !isInt(r.result.rows.excluded))) return null;
+    if (r.result.status === 'error' && (!isObj(r.result.error) || typeof r.result.error.message !== 'string' || typeof r.result.error.code !== 'string')) return null;
     try { if (JSON.stringify(r.request).length > 12 * 1024 || JSON.stringify(r.result).length > 64 * 1024) return null; } catch { return null; }
     if (r.request.kind === 'arithmetic' && (typeof r.request.expression !== 'string' || !isObj(r.request.variables))) return null;
     if (r.request.kind === 'csv-summary' && typeof r.request.column !== 'string') return null;
@@ -4723,7 +4728,8 @@ function boot(): void {
     } else content.push(h('p', { class: 'cb-help' }, t.readonly));
     const saved = p.quantitativeChecks ?? [];
     content.push(h('h4', null, t.records), !saved.length ? h('p', { class: 'cb-help' }, t.none) : h('ol', { class: 'cb-quant-records' }, ...saved.map(r => h('li', null,
-      evDisclosure(opened, `${prefix}quant:${r.id}`, 'cb-quiet', [h('span', null, r.request.kind === 'arithmetic' ? r.request.expression : `${r.request.column} — ${r.source?.kind === 'artifact' ? r.source.path : r.source?.kind === 'document' ? r.source.id : ''}`)],
+      evDisclosure(opened, `${prefix}quant:${r.id}`, 'cb-quiet', [h('span', null, r.request.kind === 'arithmetic' ? r.request.expression : `${r.request.column} — ${r.source?.kind === 'artifact' ? r.source.path : r.source?.kind === 'document' ? r.source.id : ''}`),
+        h('span', { class: 'cb-summary-hint' }, r.result.status === 'error' ? `${t.calculationError}: ${r.result.error.message}` : r.result.kind === 'arithmetic' ? `${t.computed}: ${r.result.result.value} ${r.result.result.unit}` : t.csvCounts(r.result.rows.included, r.result.rows.excluded))],
         h('p', { class: 'cb-help' }, new Date(r.createdAt).toISOString()), h('pre', { class: 'cb-doc-text' }, JSON.stringify(r, null, 2)))))));
     return evDisclosure(opened, `${prefix}quant`, 'cb-quiet cb-quant', [h('span', null, t.title)], ...content);
   }
@@ -4820,7 +4826,7 @@ function boot(): void {
             f.claimSupport ? evDisclosure(opened, `${prefix}support:${r.reviewerExpertId}:${f.targetExpertId}:${f.evidenceIndex}`, 'cb-quiet cb-support',
               [h('span', null, `${m.p4.supportTitle} · ${m.p4.supportStatus[f.claimSupport.status]}`)],
               h('p', { class: 'cb-help' }, m.p4.supportNote), h('p', null, f.claimSupport.rationale),
-              ...f.claimSupport.quotes.map(q => h('figure', null, h('blockquote', null, q.quote), h('figcaption', null, `${q.ref} · ${q.textOrigin} · L${q.startLine}–${q.endLine}`))),
+              ...f.claimSupport.quotes.map(q => h('figure', null, h('blockquote', null, q.quote), h('figcaption', null, `${q.ref} · ${m.p4.textOrigin[q.textOrigin]} · L${q.startLine}–${q.endLine}`))),
               h('p', { class: 'cb-help' }, `${f.claimSupport.citedText} · ${f.claimSupport.packetSha256}`)) : null);
         })) : h('p', { class: 'cb-help' }, m.reviewNoFindings)));
     }
