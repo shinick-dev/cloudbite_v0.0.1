@@ -6,7 +6,7 @@
 // card→source resolution that matches the pack). The audit's own copies, and any claim such as sourcePagesFetched,
 // are ignored. Source metadata (title/URL/license) is not original page text; original external source text is
 // never fetched by role search, so every knowledge reference carries originalText: 'not-fetched'.
-import { corpusEvidence, type CorpusReceipt } from './cloudbite-corpus-evidence';
+import { corpusEvidenceAudit, type CorpusEvidenceIssues, type CorpusReceipt } from './cloudbite-corpus-evidence';
 import type { ExpertOpinion, ProjectBrief } from './cloudbite-contract';
 import { sha256Hex } from './cloudbite-knowledge';
 import { phaseOnePack } from './cloudbite-personas';
@@ -227,6 +227,15 @@ const sealed = (body: Omit<EvidencePacket, 'bytes' | 'sha256'>): EvidencePacket 
 };
 const sizeOf = (body: Omit<EvidencePacket, 'bytes' | 'sha256'>) => utf8(JSON.stringify(body)) + 100; // + bytes/sha256 fields
 
+/** One bounded audit note counting unresolvable corpus receipts/hits by category; never query text. Undefined when none. */
+function corpusIssueNote(i: CorpusEvidenceIssues | undefined): string | undefined {
+  if (!i) return undefined;
+  const parts = ([['stale-index receipt', i.staleReceipts], ['malformed receipt', i.malformedReceipts], ['receipt over the 7-search bound', i.excessReceipts],
+    ['hit outside this role', i.foreignHits], ['hit with a mismatched sha256', i.mismatchedHits], ['hit naming an unknown chunk', i.unknownHits]] as const)
+    .filter(([, n]) => n > 0).map(([label, n]) => `${Math.min(n, 9999)} ${label}(s)`);
+  return parts.length ? `original corpus receipts not resolved and ignored (counts only): ${parts.join(', ')}` : undefined;
+}
+
 /**
  * One role's bounded packet. budget caps its UTF-8 size (default roleBytes). Inputs are never mutated; the result is
  * deeply frozen. Card text appears only for a bound audit, in observed retrieval order, until the budget is spent.
@@ -237,7 +246,7 @@ export function buildEvidencePacket(input: EvidencePacketInput, budget: number =
   const b = bind(input.expertId, pack, input.audit);
   const h = pack && pack.expertId === input.expertId ? packHashes(pack) : null;
   const allRefs = evidenceReferences(input.brief, input.opinion, b.binding === 'foreign' ? undefined : pack, b.binding, b.observedSources);
-  const originalEntries = input.corpusReceipts?.length ? corpusEvidence(input.expertId, input.corpusReceipts) : [];
+  const { entries: originalEntries, issues: corpusIssues } = input.corpusReceipts?.length ? corpusEvidenceAudit(input.expertId, input.corpusReceipts) : { entries: [], issues: undefined };
   const originalCited = new Set(allRefs.filter(r => r.kind === 'knowledge').map(r => r.id));
   // Keep room for cited original evidence before filling the packet with uncited curated orientation cards.
   const reserveOriginal = Math.min(Math.floor(max / 2), originalEntries.filter(e => originalCited.has(e.source.id)).slice(0, 2).reduce((n, e) => n + utf8(e.chunk.text) + 650, 0));
@@ -250,6 +259,8 @@ export function buildEvidencePacket(input: EvidencePacketInput, budget: number =
     omitted: { cards: 0, sources: 0, references: 0, observedIds: 0, unidentifiedIds: b.unidentified, truncatedSummaries: 0 },
     originalSourceTextFetched: false, auditNotes: b.notes,
   };
+  const corpusNote = corpusIssueNote(corpusIssues);
+  if (corpusNote) body.auditNotes.push(corpusNote);
   // Observed ID lists are metadata; they yield to the budget before references and cards do.
   while (sizeOf(body) > max && (body.observed.cardIds.length || body.observed.sourceIds.length)) {
     (body.observed.sourceIds.length >= body.observed.cardIds.length ? body.observed.sourceIds : body.observed.cardIds).pop();
@@ -287,7 +298,7 @@ export function buildEvidencePacket(input: EvidencePacketInput, budget: number =
     const final = evidenceReferences(input.brief, input.opinion, pack, b.binding, b.observedSources, included).slice(0, body.references.length);
     body.references.splice(0, body.references.length, ...final);
   }
-  if (input.corpusReceipts?.length) {
+  if (originalEntries.length) {
     const entries = originalEntries;
     body.originals = [];
     body.omitted.originalChunks = 0;
