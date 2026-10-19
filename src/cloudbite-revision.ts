@@ -39,6 +39,8 @@ export interface ParentRoundSnapshot {
   adoptedClaims?: CarriedAdoption[];
   /** v7: the parent memo's coaching as a bounded proposal handoff (cloudbite-project-context). Absent on older snapshots. */
   coachingState?: HandoffState; coaching?: CoachingHandoff;
+  /** v7: SHA-256 of the parent's FULL objective / context, hashed before any cap. The full context itself is never kept. */
+  objectiveSha256?: string; contextSha256?: string;
 }
 /** Only `authorizeRoundParent` creates these; a structurally identical object built elsewhere is refused. */
 export interface RoundParentAuthorization {
@@ -148,6 +150,7 @@ export async function authorizeRoundParent(input: { parentId: unknown; actor: st
           evidence: capList(o.evidence, ROUND_LIMITS.evidenceItems, ROUND_LIMITS.evidenceItem, `roles[${i}].evidence`, omissions) } } : {}) };
     }),
     omissions,
+    objectiveSha256: await sha256(str(p.brief.objective)), contextSha256: await sha256(str(p.brief.context)),
     ...(p.provenance ? { adoptedClaims: nextRoundCarry(p.provenance.ledger, p.provenance.state) } : {}),
   };
   // Only this parent's own stored memo is read (never its previousRound), so ancestry does not recurse.
@@ -222,10 +225,11 @@ export async function buildProjectRound(auth: RoundParentAuthorization, brief: P
     adoptedClaims.push(structuredClone(a)); adoptionBytes += n;
   }
   if (adoptionsOmitted) reference.omissions.push({ path: 'adoptedClaims', omittedItems: adoptionsOmitted });
-  const frame = (stage: string, opts: readonly RoundOption[], d: Partial<DecisionFrame> | undefined, documents: readonly RoundDocumentMeta[]) => ({ stage, options: opts.map((o) => o.text),
+  const frame = (hashes: { objectiveSha256?: string; contextSha256?: string }, stage: string, opts: readonly RoundOption[], d: Partial<DecisionFrame> | undefined, documents: readonly RoundDocumentMeta[]) => ({ ...hashes, stage, options: opts.map((o) => o.text),
     lists: { constraints: d?.constraints, successCriteria: d?.successCriteria, knownFacts: d?.knownFacts, assumptions: d?.assumptions, unknowns: d?.unknowns }, documents });
   const continuity = buildRoundContinuity({ state: s.coachingState ?? 'none', handoff: s.coaching,
-    previous: frame(s.stage, s.options, s.decision, s.documents), current: frame(curStage, currentOptions, brief.decision, docs) });
+    previous: frame({ objectiveSha256: s.objectiveSha256, contextSha256: s.contextSha256 }, s.stage, s.options, s.decision, s.documents),
+    current: frame({ objectiveSha256: await sha256(str(brief.objective)), contextSha256: await sha256(str(brief.context)) }, curStage, currentOptions, brief.decision, docs) });
   return deepFreeze({ version: ROUND_VERSION, parentId: s.parentId, changeSummary, newRoles: [...roles], comparison, reference,
     ...(s.adoptedClaims ? { adoptedClaims } : {}), continuity });
 }

@@ -17,7 +17,7 @@ import type { EvidenceSignals, ExpertEvidenceSignals } from '../src/cloudbite-ev
 import type { PmcArticle, PmcImport, PmcImportErrorCode, PmcSection } from '../src/cloudbite-pmc';
 import type { ProjectPreviousRound, RoundOmission, RoundOption } from '../src/cloudbite-revision';
 // v7 연속성: 잎 모듈의 타입만 가져온다 (콘솔은 묶지 않는 단일 변환이라 실행 코드는 가져올 수 없다. 상한은 아래 CONTINUITY 에 같게 둔다)
-import type { ContinuityChange, ContinuitySubject, CoachingHandoff, HandoffClaim, HandoffRepair, HandoffState, RoundContinuity } from '../src/cloudbite-project-context';
+import type { ContinuityChange, ContinuitySubject, CoachingHandoff, HandoffClaim, HandoffRepair, HandoffState, RoundContinuity, TextSubject } from '../src/cloudbite-project-context';
 import type { CloudbiteAccessRequest, CloudbiteAccessSession } from '../src/cloudbite-access-contract';
 import type { HistoryList, HistoryDetail, HistoryReport, HistoryIssue, HistoryFeedback } from '../src/cloudbite-history-contract';
 import type { CatalogueMaxRoles, ProjectMaxExperts } from '../src/cloudbite-catalogue-limits';
@@ -245,6 +245,7 @@ const P2_EN = {
   roundChange: 'What changed (user summary)',
   roundNote: 'This is a new project. Earlier opinions are previous-round reference only: they are not new results and are not counted in this round.',
   roundStage: (a: string, b: string, changed: boolean) => `Stage: ${a} → ${b}${changed ? '' : ' (unchanged)'}`,
+  roundText: (label: string, changed: boolean) => `${label}: ${changed ? 'changed (exact text; meaning not analyzed)' : 'unchanged'}`,
   roundLang: (a: string, b: string, changed: boolean) => `Response language: ${a} → ${b}${changed ? '' : ' (unchanged)'}`,
   roundPrev: 'Previous options', roundCur: 'Current options',
   roundMatches: (s: string) => `Exact text matches: ${s}`, roundNoMatches: 'No option text matches exactly.',
@@ -351,6 +352,7 @@ const P2_KO: typeof P2_EN = {
   roundChange: '바뀐 점 (사용자 요약)',
   roundNote: '새 프로젝트입니다. 이전 의견은 이전 라운드 참고 자료일 뿐 새 결과가 아니며 이번 라운드 집계에 들어가지 않습니다.',
   roundStage: (a, b, changed) => `단계: ${a} → ${b}${changed ? '' : ' (같음)'}`,
+  roundText: (label, changed) => `${label}: ${changed ? '바뀜 (정확한 글자 기준, 의미는 분석하지 않음)' : '같음'}`,
   roundLang: (a, b, changed) => `응답 언어: ${a} → ${b}${changed ? '' : ' (같음)'}`,
   roundPrev: '이전 선택지', roundCur: '지금 선택지',
   roundMatches: (s) => `글이 똑같은 선택지: ${s}`, roundNoMatches: '글이 똑같은 선택지가 없습니다.',
@@ -646,7 +648,7 @@ const P6_KO: typeof P6_EN = {
   qHint: { who: '예: 5–20명 스타트업 팀, 대표가 결정.', decision: '예: 4주 안에 출시할지, 2주 시범을 먼저 할지.', constraint: '예: 개발자 1명, 고객 데이터 업로드 없음, 4주 마감.',
     success: '예: 4주차까지 시범 팀 5곳 중 3곳이 매주 사용.', evidence: '예: 인터뷰 3건, 2개 팀이 시범을 요청.', unknown: '예: 시범 전에 팀이 돈을 낼지.' },
   qLabel: { who: '대상 / 결정권자', decision: '내릴 결정', constraint: '현재 제약', success: '성공 신호', evidence: '이미 관찰한 것', unknown: '가장 큰 미지수' },
-  qWhy: { who: '역할들이 누구의 맞바꿈을 따질지에 영향을 줍니다.', decision: '선택지가 비어 있음: 메모가 선택지를 비교할지, 프로젝트 전체를 검토할지에 영향을 줍니다.',
+  qWhy: { who: '누구의 우선순위와 제약을 고려할지에 영향을 줍니다.', decision: '선택지가 비어 있음: 메모가 선택지를 비교할지, 프로젝트 전체를 검토할지에 영향을 줍니다.',
     constraint: '제약이 비어 있음: 지금 할 수 있는 보완책이 무엇인지에 영향을 줍니다.', success: '이 단계에 성공 기준이 비어 있음: 다음 이정표가 무엇을 보여야 하는지에 영향을 줍니다.',
     evidence: '이 단계에 알려진 사실이 비어 있음: 조언이 근거에서 시작할지 가정에서 시작할지에 영향을 줍니다.', unknown: '초기 단계에 미지수가 비어 있음: 무엇을 먼저 확인할지에 영향을 줍니다.' },
   preview: '맥락에 더할 내용 미리 보기',
@@ -697,12 +699,14 @@ const P7_EN = {
   contNone: 'The parent memo had no coaching proposals to carry.',
   contUnreadable: 'The parent memo\'s coaching could not be read, so nothing was carried.',
   contChanged: (s: string) => `Changed since the parent (exact text): ${s}`,
-  contSame: 'No exact-text change in stage, decision fields or documents since the parent.',
+  contSame: 'No exact-text change in objective, context, stage, decision fields or documents since the parent.',
+  contSameCompared: 'No exact-text change since the parent in the fields that were compared.',
+  contNotCompared: (s: string) => `Not compared for this round, so not shown as unchanged: ${s}`,
   contMissing: (ids: string) => `Parent documents no longer present: ${ids}`,
   contReeval: 'Experts were asked to re-evaluate earlier proposals and conclusions that depended on these changes, stating the new basis next to the old one.',
   contStanding: 'The change summary is your statement; carried items stay proposals until the current material shows otherwise.',
   contInvalid: 'This round includes continuity data this console cannot read, so it is not shown. The rest of the round is unaffected.',
-  subject: { stage: 'stage', options: 'options', constraints: 'constraints', successCriteria: 'success criteria', knownFacts: 'known facts', assumptions: 'assumptions', unknowns: 'unknowns', documents: 'documents' } as Record<ContinuitySubject, string>,
+  subject: { objective: 'objective', context: 'context', stage: 'stage', options: 'options', constraints: 'constraints', successCriteria: 'success criteria', knownFacts: 'known facts', assumptions: 'assumptions', unknowns: 'unknowns', documents: 'documents' } as Record<ContinuitySubject, string>,
 };
 const P7_KO: typeof P7_EN = {
   priorTitle: '부모 메모의 열린 항목',
@@ -716,12 +720,14 @@ const P7_KO: typeof P7_EN = {
   contNone: '부모 메모에 옮길 코칭 제안이 없었습니다.',
   contUnreadable: '부모 메모의 코칭을 읽을 수 없어 아무것도 옮기지 않았습니다.',
   contChanged: (s) => `부모 이후 바뀐 것 (정확한 글자 기준): ${s}`,
-  contSame: '부모 이후 단계·결정 칸·문서에 글자가 바뀐 것이 없습니다.',
+  contSame: '부모 이후 목표·맥락·단계·결정 칸·문서에 글자가 바뀐 것이 없습니다.',
+  contSameCompared: '부모 이후 비교한 칸에는 글자가 바뀐 것이 없습니다.',
+  contNotCompared: (s) => `이 라운드에서는 비교하지 않아 같다고 표시하지 않습니다: ${s}`,
   contMissing: (ids) => `더는 없는 부모 문서: ${ids}`,
   contReeval: '전문가들에게 이 변화에 기대던 이전 제안·결론을 다시 평가하고, 새 근거를 이전 근거 옆에 밝히도록 요청했습니다.',
   contStanding: '바뀐 점 요약은 사용자의 진술입니다. 옮겨 온 항목은 지금 자료가 달리 보여 주기 전까지 제안으로 남습니다.',
   contInvalid: '이 라운드의 연속성 자료를 이 콘솔이 읽을 수 없어 표시하지 않습니다. 라운드의 나머지는 그대로입니다.',
-  subject: { stage: '단계', options: '선택지', constraints: '제약', successCriteria: '성공 기준', knownFacts: '알려진 사실', assumptions: '가정', unknowns: '미지수', documents: '문서' },
+  subject: { objective: '목표', context: '맥락', stage: '단계', options: '선택지', constraints: '제약', successCriteria: '성공 기준', knownFacts: '알려진 사실', assumptions: '가정', unknowns: '미지수', documents: '문서' },
 };
 const EN = {
   p2: P2_EN, p3: P3_EN, p4: P4_EN, p6: P6_EN, p7: P7_EN,
@@ -2846,6 +2852,8 @@ function normalizeRound(raw: unknown): ProjectPreviousRound | null {
 /** 후속 라운드 초안과 이전 프로젝트의 차이. 글자가 정확히 같은 것만 같다고 보고, 의미는 따지지 않는다 (서버의 previousRound 가 최종 비교다) */
 interface DraftRound {
   stage: [ProjectStage, ProjectStage]; language: [ResponseLanguage | '', ResponseLanguage | ''];
+  /** 부모의 전체 글과 지금 편집기의 글 (제출과 같이 trim). 정확한 글자 비교만 한다 */
+  text?: Record<TextSubject, [string, string]>;
   previous: string[]; current: string[]; decision: Partial<DecisionFrame>;
   docs: Array<{ name: string; content: string }>; roles: string[] | null;
 }
@@ -2867,6 +2875,7 @@ function draftRoundLines(parent: ConsoleProject, d: DraftRound, m: Messages, nam
   const lines = [
     t.roundStage(stage(d.stage[0]), stage(d.stage[1]), d.stage[0] !== d.stage[1]),
     t.roundLang(lang(d.language[0]), lang(d.language[1]), d.language[0] !== d.language[1]),
+    ...(d.text ? TEXT_SUBJECTS.map(k => t.roundText(m.p7.subject[k], d.text![k][0] !== d.text![k][1])) : []),
     `${t.roundPrev}: ${d.previous.length ? d.previous.map((x, i) => `${opt(i)}: ${x}`).join(' | ') : m.none}`,
     `${t.roundCur}: ${d.current.length ? d.current.map((x, i) => `${opt(i)}: ${x}`).join(' | ') : m.none}`,
     matches.length ? t.roundMatches(matches.join(', ')) : t.roundNoMatches, t.roundPositional,
@@ -2933,8 +2942,9 @@ function memoRefText(p: ConsoleProject, r: MemoReference, m: Messages, name: Nam
 // ── v7 연속성 (src/cloudbite-project-context.ts RoundContinuity). 고정 값·상한만 받고, 틀리면 이 칸만 읽을 수 없다고 밝힌다.
 // 상한은 서버 HANDOFF_LIMITS 와 같다 (제안·질문 3개, 주장 600바이트 ≤ 600자, 전문가 8명, 바뀐 id 12개)
 const CONTINUITY = { repairs: 3, questions: 3, claim: 600, expertIds: 8, changeIds: 12 };
-const CONT_SUBJECTS: ContinuitySubject[] = ['stage', 'options', 'constraints', 'successCriteria', 'knownFacts', 'assumptions', 'unknowns', 'documents'];
+const CONT_SUBJECTS: ContinuitySubject[] = ['objective', 'context', 'stage', 'options', 'constraints', 'successCriteria', 'knownFacts', 'assumptions', 'unknowns', 'documents'];
 const HANDOFF_STATES: HandoffState[] = ['present', 'none', 'unreadable'];
+const TEXT_SUBJECTS: TextSubject[] = ['objective', 'context'];
 function handoffClaim(v: unknown): HandoffClaim | null {
   if (!isObj(v) || typeof v.text !== 'string' || !v.text.trim() || v.text.length > CONTINUITY.claim) return null;
   const expertIds = strArr(v.expertIds, CONTINUITY.expertIds, 80);
@@ -2965,7 +2975,8 @@ function normalizeHandoff(v: unknown): CoachingHandoff | null {
   return { version: 'cloudbite-project-context/v1', source: 'parent-memo-coaching', standing: 'generated-proposal-not-adopted', stance: v.stance as CoachingHandoff['stance'],
     revisedProject: { objective, scope, nextMilestone }, repairs, questions, omissions };
 }
-/** 서버가 만든 연속성. 옛 라운드에는 없다 (undefined). 있는데 모양이 다르면 null */
+/** 서버가 만든 연속성. 옛 라운드에는 없다 (undefined). 있는데 모양이 다르면 null.
+ *  notCompared 가 없는 옛 연속성은 목표·맥락을 비교하지 않았으므로 둘 다 "비교 안 함"으로 밝힌다 (같다고 하지 않는다) */
 function normalizeContinuity(v: unknown): RoundContinuity | null {
   if (!isObj(v) || v.version !== 'cloudbite-project-context/v1' || v.label !== 'previous-round-continuity' || v.trust !== 'untrusted-data'
     || !HANDOFF_STATES.includes(v.parentCoaching as HandoffState) || v.changeSummaryStanding !== 'user-statement-not-verified' || !isBool(v.reevaluate)) return null;
@@ -2978,10 +2989,13 @@ function normalizeContinuity(v: unknown): RoundContinuity | null {
     const out: ContinuityChange = { subject: x.subject as ContinuitySubject, added: x.added, removed: x.removed, changed: x.changed, ...(ids ? { ids } : {}) };
     return out;
   });
+  const notCompared = v.notCompared === undefined ? [...TEXT_SUBJECTS]
+    : Array.isArray(v.notCompared) && v.notCompared.every(x => TEXT_SUBJECTS.includes(x as TextSubject)) ? TEXT_SUBJECTS.filter(x => (v.notCompared as unknown[]).includes(x)) : null;
+  if (!notCompared || changed && changed.some(c => notCompared.includes(c.subject as TextSubject))) return null;
   const missingEvidence = strArr(v.missingEvidence, CONTINUITY.changeIds, 64), instructions = strArr(v.instructions, 8, 600), omissions = every(v.omissions, 64, roundOmission);
   if (!changed || !missingEvidence || !instructions || !omissions) return null;
   return { version: 'cloudbite-project-context/v1', label: 'previous-round-continuity', trust: 'untrusted-data', parentCoaching: v.parentCoaching as HandoffState,
-    ...(prior ? { priorProposals: prior } : {}), changeSummaryStanding: 'user-statement-not-verified', changed, missingEvidence, reevaluate: v.reevaluate, instructions, omissions };
+    ...(prior ? { priorProposals: prior } : {}), changeSummaryStanding: 'user-statement-not-verified', changed, notCompared, missingEvidence, reevaluate: v.reevaluate, instructions, omissions };
 }
 /** 화면·보고서가 같이 쓰는 연속성 줄. 옮긴 제안은 "제안·검증 안 됨" 이름표를 달고, 모델이 쓴 글은 번역하지 않는다 */
 function continuityLines(k: RoundContinuity, m: Messages): string[] {
@@ -2990,7 +3004,8 @@ function continuityLines(k: RoundContinuity, m: Messages): string[] {
     k.parentCoaching === 'present' && pp ? t.contCarried(pp.repairs.length, pp.questions.length) : k.parentCoaching === 'unreadable' ? t.contUnreadable : t.contNone,
     ...(pp ? pp.repairs.map(r => `[${t6.priority[r.priority]} · ${t.proposed}] ${r.change.text} — ${t.checkPending}: ${r.check.text}`) : []),
     ...(pp ? pp.questions.map(q => `[${t.openQ}] ${q.text.text}`) : []),
-    k.changed.length ? t.contChanged(k.changed.map(c => t.subject[c.subject] + (c.ids?.length ? ` (${c.ids.join(', ')})` : '')).join(', ')) : t.contSame,
+    k.changed.length ? t.contChanged(k.changed.map(c => t.subject[c.subject] + (c.ids?.length ? ` (${c.ids.join(', ')})` : '')).join(', ')) : k.notCompared.length ? t.contSameCompared : t.contSame,
+    ...(k.notCompared.length ? [t.contNotCompared(k.notCompared.map(x => t.subject[x]).join(', '))] : []),
     ...(k.missingEvidence.length ? [t.contMissing(k.missingEvidence.join(', '))] : []),
     ...(k.reevaluate ? [t.contReeval] : []),
     t.contStanding,
@@ -6151,6 +6166,7 @@ function boot(): void {
     return {
       stage: [parent.brief.stage ?? 'unspecified', (STAGES.includes(stageSel.value as ProjectStage) ? stageSel.value : 'unspecified') as ProjectStage],
       language: [parent.brief.responseLanguage ?? '', (RESPONSE_LANGS.includes(respSel.value as ResponseLanguage) ? respSel.value : '') as ResponseLanguage | ''],
+      text: { objective: [parent.brief.objective ?? '', objectiveIn.value.trim()], context: [parent.brief.context ?? '', contextIn.value.trim()] },
       previous: parent.brief.decision?.options ?? [], current: frame?.options ?? [], decision: frame ?? {},
       docs: S.docs.map(d => ({ name: d.name, content: d.content })), roles: autoRoute() ? null : [...S.selected],
     };

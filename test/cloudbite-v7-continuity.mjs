@@ -20,7 +20,7 @@ const out = await build({
   bundle: true, write: false, format: 'esm', platform: 'neutral',
 });
 const b = await import('data:text/javascript;base64,' + Buffer.from(out.outputFiles[0].text).toString('base64'));
-const { authorizeRoundParent, buildProjectRound, previousRoundWorkspaceFiles, previousRoundWorkOrderRules, isRoundFail, ROUND_LIMITS, readCoachingHandoff, HANDOFF_LIMITS } = b;
+const { authorizeRoundParent, buildProjectRound, buildRoundContinuity, previousRoundWorkspaceFiles, previousRoundWorkOrderRules, isRoundFail, ROUND_LIMITS, readCoachingHandoff, HANDOFF_LIMITS } = b;
 let pass = 0;
 const test = async (name, fn) => { await fn(); pass++; console.log(`  ok   ${name}`); };
 let fetched = 0;
@@ -63,6 +63,7 @@ const newBrief = (over = {}) => ({ title: 'Pilot r2', objective: 'Choose again.'
   decision: { options: ['Plan B', 'Plan C'], constraints: ['Budget 50k'], successCriteria: ['Live in 8 weeks'], knownFacts: ['3 design partners', '2 teams pre-paid'], assumptions: ['s'], unknowns: ['SLA'] },
   documents: [{ id: 'doc-1', name: 'quote.md', content: 'Total 45k' }, { id: 'doc-3', name: 'new.md', content: 'n' }],
   revision: { parentId: PARENT, changeSummary: 'Ran the pre-pay calls; 2 teams paid.' }, ...over });
+const sameButBrief = (over) => newBrief({ objective: parentBrief.objective, context: parentBrief.context, stage: 'design', decision: parentBrief.decision, documents: parentBrief.documents, ...over });
 const withMemo = async (memo, extra = {}) => { store.get(PARENT).project = parentProject({ ...(memo === undefined ? {} : { memo }), ...extra }); return authorize(); };
 
 // ───────── (1) backend
@@ -113,15 +114,50 @@ await test('continuity: 정확한 글자 비교로 바뀐 칸·사라진 근거�
   const round = await buildProjectRound(await withMemo(MEMO(DMEMO({ coaching: COACHING }))), newBrief());
   const k = round.continuity;
   assert.ok(Object.isFrozen(k) && k.trust === 'untrusted-data' && k.label === 'previous-round-continuity' && k.changeSummaryStanding === 'user-statement-not-verified');
-  assert.deepEqual(k.changed.map(c => c.subject), ['stage', 'options', 'knownFacts', 'documents']);
+  assert.deepEqual(k.changed.map(c => c.subject), ['objective', 'context', 'stage', 'options', 'knownFacts', 'documents']);
+  assert.deepEqual(plain(k.notCompared), []);
   const docs = k.changed.find(c => c.subject === 'documents');
   assert.deepEqual([docs.added, docs.removed, docs.changed, docs.ids], [1, 1, 1, ['doc-1', 'doc-2', 'doc-3']]);
   assert.deepEqual(k.missingEvidence, ['doc-2']);
   assert.equal(k.reevaluate, true);
   assert.equal(k.priorProposals.repairs.length, 3);
   assert.equal(round.comparison.semanticImpact, 'not-analyzed', 'existing comparison untouched');
-  const same = await buildProjectRound(await authorize(), newBrief({ stage: 'design', decision: parentBrief.decision, documents: parentBrief.documents }));
+  const same = await buildProjectRound(await authorize(), sameButBrief({}));
   assert.deepEqual(plain(same.continuity.changed), []); assert.equal(same.continuity.reevaluate, false);
+  assert.deepEqual(plain(same.continuity.notCompared), [], 'same text: compared and unchanged');
+});
+
+// C1: "수정된 프로젝트 사용"은 목표를 바꾸고 맥락에 보완책을 더한다. 그것만 바뀌어도 재평가를 요청해야 한다
+await test('C1 continuity: 목표만·맥락만 바뀌어도 그 칸을 바뀐 것으로 밝히고 재평가를 요청한다 (전체 부모 글의 해시, 잘린 스냅샷 아님)', async () => {
+  const objOnly = await buildProjectRound(await withMemo(MEMO(DMEMO({ coaching: COACHING }))), sameButBrief({ objective: COACHING.revisedProject.objective.text }));
+  assert.deepEqual(plain(objOnly.continuity.changed), [{ subject: 'objective', added: 0, removed: 0, changed: 1 }]);
+  assert.equal(objOnly.continuity.reevaluate, true);
+  const ctxOnly = await buildProjectRound(await authorize(), sameButBrief({ context: 'ctx\n\nProposed repairs (not done or verified yet):\n- [now] Charge a token pilot fee.' }));
+  assert.deepEqual(plain(ctxOnly.continuity.changed), [{ subject: 'context', added: 0, removed: 0, changed: 1 }]);
+  assert.equal(ctxOnly.continuity.reevaluate, true);
+  assert.ok(ctxOnly.continuity.priorProposals.repairs.every(r => r.status === 'proposed-not-executed' && r.verification === 'not-verified'), 'carried proposals stay unadopted');
+  // 스냅샷 상한(2000 바이트) 뒤에서만 다른 긴 목표·맥락도 잡는다. 스냅샷·라운드·작업 공간에는 전체 맥락이 들어가지 않는다
+  const LONG_OBJ = '목'.repeat(1000), LONG_CTX = 'CTXMARK-' + '맥'.repeat(2990);
+  const auth = await withMemo(MEMO(DMEMO({ coaching: COACHING })), { brief: { ...parentBrief, objective: LONG_OBJ + '가', context: LONG_CTX + '가' } });
+  assert.ok(auth.snapshot.omissions.some(o => o.path === 'objective'), 'snapshot objective is byte-capped');
+  assert.ok(!JSON.stringify(auth.snapshot).includes('CTXMARK') && !('context' in auth.snapshot), 'snapshot omits the context text');
+  assert.match(auth.snapshot.objectiveSha256, /^[0-9a-f]{64}$/); assert.match(auth.snapshot.contextSha256, /^[0-9a-f]{64}$/);
+  const tail = await buildProjectRound(auth, sameButBrief({ objective: LONG_OBJ + '나', context: LONG_CTX + '나' }));
+  assert.deepEqual(plain(tail.continuity.changed).map(c => c.subject), ['objective', 'context'], 'tail-only changes beyond the snapshot cap');
+  assert.equal(tail.continuity.reevaluate, true);
+  const same = await buildProjectRound(auth, sameButBrief({ objective: LONG_OBJ + '가', context: LONG_CTX + '가' }));
+  assert.deepEqual(plain(same.continuity.changed), []); assert.equal(same.continuity.reevaluate, false);
+  assert.ok(!JSON.stringify(tail).includes('CTXMARK'), 'round carries no parent context');
+  for (const f of previousRoundWorkspaceFiles(tail, 'role-a')) assert.ok(!f.content.includes('CTXMARK') && !f.content.includes(LONG_OBJ), 'workspace carries no full parent text');
+});
+
+await test('C1 legacy: 해시가 없는 프레임은 목표·맥락을 "비교 안 함"으로 밝히고 같다고 하지 않는다', () => {
+  const frame = { stage: 'design', options: [], lists: {}, documents: [] };
+  const k = buildRoundContinuity({ state: 'none', previous: frame, current: { ...frame, objectiveSha256: 'a'.repeat(64), contextSha256: 'b'.repeat(64) } });
+  assert.deepEqual(plain(k.notCompared), ['objective', 'context']);
+  assert.deepEqual(plain(k.changed), []);
+  const one = buildRoundContinuity({ state: 'none', previous: { ...frame, objectiveSha256: 'a'.repeat(64) }, current: { ...frame, objectiveSha256: 'c'.repeat(64), contextSha256: 'b'.repeat(64) } });
+  assert.deepEqual(plain(one.notCompared), ['context']); assert.deepEqual(plain(one.changed).map(c => c.subject), ['objective']); assert.equal(one.reevaluate, true);
 });
 
 await test('evidence/previous-round.json: 옛 키는 그대로, continuity 는 데이터로만 들어가고, 신뢰 규칙에는 이전 글이 없다', async () => {
@@ -213,6 +249,43 @@ await test('normalizeContinuity: 서버가 만든 값은 그대로, 상태를 "�
     assert.doesNotMatch(md, /undefined|NaN|\[object/);
     assert.ok(core.markdownReport(broken, false, M).includes(M.p7.contInvalid));
   }
+});
+
+await test('C1 UI: 목표·맥락 칸을 정규화하고 EN/KO 이름으로 보이며, 옛 연속성은 "비교 안 함"으로 밝힌다', async () => {
+  for (const M of [EN, KO]) for (const k of ['objective', 'context']) assert.ok(typeof M.p7.subject[k] === 'string' && M.p7.subject[k], k);
+  assert.equal(KO.p6.qWhy.who, '누구의 우선순위와 제약을 고려할지에 영향을 줍니다.');
+  const objOnly = plain(await buildProjectRound(await withMemo(MEMO(DMEMO({ coaching: COACHING }))), sameButBrief({ objective: 'New objective.' })));
+  const n = core.normalizeContinuity(objOnly.continuity);
+  assert.deepEqual(plain(n), objOnly.continuity);
+  for (const M of [EN, KO]) {
+    const lines = core.continuityLines(n, M);
+    assert.ok(lines.includes(M.p7.contChanged(M.p7.subject.objective)) && lines.includes(M.p7.contReeval), 'objective change shown with re-evaluation request');
+    assert.ok(!lines.includes(M.p7.contSame) && !lines.some(l => l.startsWith(M.p7.contNotCompared(''))));
+  }
+  const { notCompared, ...legacyK } = serverRound.continuity;
+  const legacy = core.normalizeContinuity({ ...legacyK, changed: legacyK.changed.filter(c => c.subject !== 'objective' && c.subject !== 'context') });
+  assert.deepEqual(plain(legacy.notCompared), ['objective', 'context'], 'old continuity: not compared, never unchanged');
+  const quiet = core.normalizeContinuity({ ...legacyK, changed: [], missingEvidence: [], reevaluate: false });
+  for (const M of [EN, KO]) {
+    const lines = core.continuityLines(quiet, M);
+    assert.ok(!lines.includes(M.p7.contSame) && lines.includes(M.p7.contSameCompared));
+    assert.ok(lines.includes(M.p7.contNotCompared(`${M.p7.subject.objective}, ${M.p7.subject.context}`)));
+  }
+  const bad = (mut) => { const k = structuredClone(objOnly.continuity); mut(k); return core.normalizeContinuity(k); };
+  assert.equal(bad(k => { k.notCompared = ['title']; }), null);
+  assert.equal(bad(k => { k.notCompared = ['objective']; }), null, 'a subject cannot be both changed and not compared');
+  assert.equal(bad(k => { k.notCompared = 'objective'; }), null);
+  // 로컬 후속 초안: 부모 전체 글과 편집기 글의 정확한 비교만 (의미 주장 없음)
+  const parent = core.normalizeProject({ id: PARENT, status: 'completed', createdAt: 1, updatedAt: 2, brief: parentBrief, experts: [] });
+  const d = (objective, context) => ({ stage: ['design', 'design'], language: ['ko', 'ko'], text: { objective: [parentBrief.objective, objective], context: [parentBrief.context, context] },
+    previous: [], current: [], decision: {}, docs: [], roles: null });
+  for (const M of [EN, KO]) {
+    const changed = core.draftRoundLines(parent, d('Other.', 'ctx'), M, (x) => x);
+    assert.ok(changed.includes(M.p2.roundText(M.p7.subject.objective, true)) && changed.includes(M.p2.roundText(M.p7.subject.context, false)));
+    assert.ok(core.draftRoundLines(parent, d(parentBrief.objective, parentBrief.context), M, (x) => x).includes(M.p2.roundText(M.p7.subject.objective, false)));
+  }
+  assert.match(EN.p2.roundText('objective', true), /meaning not analyzed/); assert.match(KO.p2.roundText('목표', true), /의미는 분석하지 않음/);
+  assert.deepEqual(Object.keys(KO.p2).sort(), Object.keys(EN.p2).sort());
 });
 
 await test('coachDraftBlock: 범위·이정표가 먼저, 보완책은 지금→다음→나중, 질문은 그 뒤; 자리가 모자라면 순서대로 자르고 수를 센다', () => {
@@ -338,6 +411,9 @@ await test('후속 초안: 부모의 열린 항목을 "제안 · 하지 않음"�
     assert.equal(env.byId('cb-stage').value, 'design'); assert.equal(env.byId('cb-resp-lang').value, 'ko', 'response language kept');
     assert.ok(env.fk('x:role-a').checked && env.fk('x:role-c').checked && !env.fk('x:role-d').checked, 'roles kept');
     assert.ok(box.textContent.includes(M.p2.fuParent('Pilot', PARENT)), 'parent kept');
+    const diff = env.all().filter(n => n.className === 'cb-fu-diff').at(-1);
+    assert.ok(diff.textContent.includes(M.p2.roundText(M.p7.subject.objective, true)) && diff.textContent.includes(M.p2.roundText(M.p7.subject.context, true)), `${lang}: draft shows objective/context exact change`);
+    assert.equal(String(env.byId('cb-objective').getAttribute('maxlength')), '1500'); assert.equal(String(env.byId('cb-context').getAttribute('maxlength')), '3000');
     assert.equal(posts(env).length, 0, 'nothing launched');
   }
   // 맥락 한도 근처: 핵심은 넣고 넣지 못한 수를 밝힌다

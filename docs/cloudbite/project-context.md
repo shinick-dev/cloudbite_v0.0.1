@@ -27,8 +27,15 @@ anything, and never writes into known facts or other decision fields.
 2. `authorizeRoundParent` adds optional `coachingState` / `coaching` to the frozen snapshot. Only the parent's
    memo is read — never the parent's own `previousRound` — so ancestry does not recurse.
 3. `buildProjectRound` adds optional `continuity` (`buildRoundContinuity`): carried proposals, changed
-   subjects (stage, options, constraints, success criteria, known facts, assumptions, unknowns, documents by
-   content hash), `missingEvidence` (parent documents absent now), `reevaluate`, fixed instructions.
+   subjects (objective, context, stage, options, constraints, success criteria, known facts, assumptions,
+   unknowns, documents by content hash), `notCompared`, `missingEvidence` (parent documents absent now),
+   `reevaluate`, fixed instructions. Objective and context are compared by SHA-256 of the FULL authorized
+   parent text (hashed in `authorizeRoundParent` before any byte cap; the snapshot keeps only the hashes,
+   never the parent context) against the full current brief text, so an edit past the 2,000-byte snapshot
+   cap still counts. An exact objective/context change sets `reevaluate` — it says the text differs, not what
+   that means, and is not evidence that any check was done. A frame without these hashes lists the subject
+   in `notCompared`; the console treats an older stored continuity without `notCompared` as both subjects not
+   compared and never shows them as unchanged.
    `semanticImpact` stays `not-analyzed`; nothing infers meaning.
 4. `previousRoundWorkspaceFiles` puts `continuity` into the same untrusted
    `evidence/previous-round.json` (all v6 keys kept). `previousRoundWorkOrderRules` adds two constant rules
@@ -53,9 +60,13 @@ recorded as `workspace.continuity`. No provider call is added (6 + 2 bounded cal
   count is shown in the draft note and the change summary. If scope + milestone do not fit, nothing is added
   (v6 behaviour).
 - The follow-up box lists the parent memo's open points tagged "Proposed · not done" / "Check (not verified)"
-  and asks the user to say in "What changed" what they actually did or found.
+  and asks the user to say in "What changed" what they actually did or found. Its local draft comparison
+  also shows objective / context as changed or unchanged by exact text of the parent's full brief against the
+  editor (trimmed like submission); meaning is not analyzed.
 - A child project's previous-round view and Markdown export show the continuity section; an unreadable
-  continuity is disclosed (`invalidContinuity`) without hiding the rest of the round.
+  continuity is disclosed (`invalidContinuity`) without hiding the rest of the round. Objective / context
+  changes appear in the changed-subjects line (KO 목표/맥락); subjects in `notCompared` get their own
+  "not compared, so not shown as unchanged" line.
 - The brief helper picks questions by fixed rules from the stage and empty decision fields (who; decision if
   no options; constraint if none; success/evidence at validation-or-later with empty criteria/facts; biggest
   unknown at early stages with none), shows what each answer influences, keeps answered questions visible,

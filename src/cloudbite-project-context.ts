@@ -46,7 +46,7 @@ export interface CoachingHandoff {
 }
 /** none: no memo, a memo that is not completed, or a legacy memo without coaching. unreadable: present but not this shape. */
 export type HandoffState = 'present' | 'none' | 'unreadable';
-export type ContinuitySubject = 'stage' | 'options' | 'constraints' | 'successCriteria' | 'knownFacts' | 'assumptions' | 'unknowns' | 'documents';
+export type ContinuitySubject = 'objective' | 'context' | 'stage' | 'options' | 'constraints' | 'successCriteria' | 'knownFacts' | 'assumptions' | 'unknowns' | 'documents';
 /** Exact-text / exact-hash change of one subject. Counts only; no semantic impact is inferred. */
 export interface ContinuityChange { subject: ContinuitySubject; added: number; removed: number; changed: number; ids?: string[] }
 export interface RoundContinuity {
@@ -56,6 +56,9 @@ export interface RoundContinuity {
   priorProposals?: CoachingHandoff;
   changeSummaryStanding: 'user-statement-not-verified';
   changed: ContinuityChange[];
+  /** Free-text subjects whose exact comparison was not possible (a frame without full-text hashes). Never reported as
+   *  unchanged. Older stored rounds lack the key; readers treat that as both objective and context not compared. */
+  notCompared: TextSubject[];
   /** Parent documents absent from this round: anything that relied on them needs re-evaluation. */
   missingEvidence: string[];
   reevaluate: boolean;
@@ -63,8 +66,11 @@ export interface RoundContinuity {
   instructions: string[];
   omissions: ContextOmission[];
 }
-/** Exact-text frame of one round, as cloudbite-revision already holds it. */
+export type TextSubject = 'objective' | 'context';
+/** Exact-text frame of one round, as cloudbite-revision already holds it. Objective and context travel only as SHA-256
+ *  of the FULL authorized text (never byte-capped copies); a frame without them is disclosed as not compared. */
 export interface ContinuityFrame {
+  objectiveSha256?: string; contextSha256?: string;
   stage: string; options: readonly string[];
   lists: Partial<Record<'constraints' | 'successCriteria' | 'knownFacts' | 'assumptions' | 'unknowns', readonly string[]>>;
   documents: ReadonlyArray<{ id: string; sha256: string }>;
@@ -161,6 +167,7 @@ function listChange(subject: ContinuitySubject, prev: readonly string[] = [], cu
 /**
  * Exact-text continuity between the authorized parent frame and the new round. Pure; the handoff (if any) is copied.
  * `reevaluate` is true whenever any subject changed or parent evidence is missing — a request to re-check, not a verdict.
+ * An exact objective/context change counts as a change; it says the text differs, not what that means.
  */
 export function buildRoundContinuity(input: { state: HandoffState; handoff?: CoachingHandoff; previous: ContinuityFrame; current: ContinuityFrame }): RoundContinuity {
   const { previous: p, current: c } = input, omissions: ContextOmission[] = [];
@@ -172,7 +179,13 @@ export function buildRoundContinuity(input: { state: HandoffState; handoff?: Coa
   const docAdded = c.documents.filter((d) => !prevDocs.has(d.id)).map((d) => d.id);
   const docRemoved = p.documents.filter((d) => !curDocs.has(d.id)).map((d) => d.id);
   const docChanged = c.documents.filter((d) => prevDocs.has(d.id) && prevDocs.get(d.id) !== d.sha256).map((d) => d.id);
+  const notCompared: TextSubject[] = [];
+  const text = (subject: TextSubject, a: string | undefined, b: string | undefined): ContinuityChange[] => {
+    if (!a || !b) { notCompared.push(subject); return []; }
+    return [{ subject, added: 0, removed: 0, changed: a === b ? 0 : 1 }];
+  };
   const all: ContinuityChange[] = [
+    ...text('objective', p.objectiveSha256, c.objectiveSha256), ...text('context', p.contextSha256, c.contextSha256),
     { subject: 'stage', added: 0, removed: 0, changed: p.stage === c.stage ? 0 : 1 },
     listChange('options', p.options, c.options),
     ...(['constraints', 'successCriteria', 'knownFacts', 'assumptions', 'unknowns'] as const).map((k) => listChange(k, p.lists[k], c.lists[k])),
@@ -184,7 +197,7 @@ export function buildRoundContinuity(input: { state: HandoffState; handoff?: Coa
   return {
     version: PROJECT_CONTEXT_VERSION, label: 'previous-round-continuity', trust: 'untrusted-data', parentCoaching: input.state,
     ...(input.state === 'present' && input.handoff ? { priorProposals: structuredClone(input.handoff) } : {}),
-    changeSummaryStanding: 'user-statement-not-verified', changed, missingEvidence,
+    changeSummaryStanding: 'user-statement-not-verified', changed, notCompared, missingEvidence,
     reevaluate: changed.length > 0 || docRemoved.length > 0, instructions: [...CONTINUITY_INSTRUCTIONS], omissions,
   };
 }
