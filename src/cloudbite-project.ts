@@ -66,6 +66,8 @@ import { CB_RUNNER_PY, RUNNER_DIAGNOSTIC_MAX, runnerCapability, runnerFailureMes
 import { historyIndex, historyRow } from './cloudbite-history';
 import { HISTORY_TTL, HISTORY_ISSUES, type HistoryIdentity, type HistoryFeedback, type HistoryDetail } from './cloudbite-history-contract';
 import { RoutingSession } from './cloudbite-routing';
+import { HUMAN_DIMENSIONS, HUMAN_REVIEW_ISSUES, HUMAN_REVIEW_VERSION, HUMAN_RUBRIC, nextReview, outputFingerprint, parseStoredReview, publicReview,
+  regressionExport, reviewContentHash, type HumanReviewDetail, type HumanReviewInput, type HumanReviewPublic, type HumanReviewStored, type RegressionCandidate } from './cloudbite-human-review';
 import type { CloudbiteRoutingQuery, CloudbiteRoutingDecision } from './cloudbite-contract';
 
 export type CbFail = { error: string; status: number };
@@ -492,9 +494,71 @@ export class CloudbiteProject extends DurableObject<Env> {
     const s = await this.load();
     if (!s?.p.history || s.p.history.deleted || s.p.purgeAt <= this.clock() || (!owner && s.p.history.actor !== actor)) return fail(404, 'history record not found');
     const reports = await this.ctx.storage.get<string>(s.experts.map(e => `artifact:${e.run.id}:out/report.md`));
+    const humanReview = await this.humanReviewDetail(s, reports, actor);
     return { project: this.view(s), model: s.p.history.model, roles: s.p.history.roles,
       reports: Object.fromEntries(s.experts.flatMap(e => { const content = reports.get(`artifact:${e.run.id}:out/report.md`); return content === undefined ? [] : [[e.run.expertId, content]]; })),
-      feedback: s.p.feedback ?? [], expiresAt: s.p.purgeAt, canFeedback: s.p.history.actor === actor && TERMINAL_PROJECT.has(s.p.status) };
+      feedback: s.p.feedback ?? [], expiresAt: s.p.purgeAt, canFeedback: s.p.history.actor === actor && TERMINAL_PROJECT.has(s.p.status), humanReview };
+  }
+
+  // ── person-entered rubric reviews (sidecar `humanreview:<expertId>`; the stored answers are never changed) ──
+  /** Output hashes of the finished live answers that can be rated, and the saved reviews (actor and request ids removed). */
+  private async humanReviewDetail(s: Loaded, reports: Map<string, string>, actor: string): Promise<HumanReviewDetail> {
+    const outputs: HumanReviewDetail['outputs'] = {}, reviews: Record<string, HumanReviewPublic> = {};
+    const finished = s.p.brief.mode === 'live' && TERMINAL_PROJECT.has(s.p.status);
+    if (finished) for (const e of s.experts) if (e.run.status === 'completed' && e.run.opinion)
+      outputs[e.run.expertId] = await outputFingerprint(s.p.id, s.p.brief, e.run.expertId, e.run.opinion, reports.get(`artifact:${e.run.id}:out/report.md`) ?? null);
+    for (const v of (await this.ctx.storage.list({ prefix: 'humanreview:' })).values()) { const r = parseStoredReview(v); if (r) reviews[r.expertId] = publicReview(r); }
+    return { version: HUMAN_REVIEW_VERSION, rubric: HUMAN_RUBRIC, dimensions: HUMAN_DIMENSIONS, issues: HUMAN_REVIEW_ISSUES, outputs, reviews,
+      canReview: finished && s.p.history?.actor === actor };
+  }
+  /** Shared gate for review writes and exports, evaluated inside a transaction. write = only the project's own actor. */
+  private async humanReviewTarget(tx: DurableObjectTransaction, actor: string, owner: boolean, expertId: string, write: boolean) {
+    const p = await tx.get<ProjectRecord>('project'), now = this.clock();
+    // Unknown, expired, deleted and (for non-owners) foreign records look the same: not found.
+    if (!p?.history || p.history.deleted || p.purgeAt <= now || (!owner && p.history.actor !== actor)) return fail(404, 'history record not found');
+    if (write && p.history.actor !== actor) return fail(403, "only the project's own user can review its answers");
+    if (p.brief.mode !== 'live' || !TERMINAL_PROJECT.has(p.status)) return fail(409, 'human review needs a finished live project');
+    const runs = await tx.get<ExpertRecord>(p.runs.map(r => 'expert:' + r));
+    const e = [...runs.values()].find(x => x.run.expertId === expertId);
+    if (!e) return fail(404, 'no such answer in this project');
+    if (e.run.status !== 'completed' || !e.run.opinion) return fail(409, 'only a completed answer can be reviewed');
+    const report = (await tx.get<string>(`artifact:${e.run.id}:out/report.md`)) ?? null;
+    return { p, e, opinion: e.run.opinion, report, output: await outputFingerprint(p.id, p.brief, expertId, e.run.opinion, report), now };
+  }
+  /**
+   * One review per answer, bound to the exact output hash the reader saw (stale -> 409). baseRevision is the revision the
+   * reader loaded (0 = none): a concurrent edit from another tab is a 409 with the saved review, never a silent overwrite.
+   * A retried requestId with the same content returns the saved review without writing; with other content it is a 409.
+   */
+  async historyHumanReview(actor: string, owner: boolean, r: HumanReviewInput): Promise<{ review: HumanReviewPublic; replayed: boolean } | (CbFail & { review?: HumanReviewPublic | null })> {
+    const contentHash = await reviewContentHash(r);
+    return this.ctx.storage.transaction(async tx => {
+      const t = await this.humanReviewTarget(tx, actor, owner, r.expertId, true);
+      if (isCbFail(t)) return t;
+      const key = 'humanreview:' + r.expertId, prev = parseStoredReview(await tx.get(key));
+      const seen = prev?.requests.find(x => x.id === r.requestId);
+      if (seen) return seen.hash === contentHash && prev!.revision === seen.revision ? { review: publicReview(prev!), replayed: true }
+        : seen.hash === contentHash ? { ...fail(409, 'this request was saved earlier and the review has changed since; reload it'), review: publicReview(prev!) }
+        : { ...fail(409, 'this requestId was already used for different content'), review: publicReview(prev!) };
+      if (r.outputSha256 !== t.output.outputSha256) return { ...fail(409, 'the answer you rated is not the saved answer (stale output hash); reload the record'), review: prev ? publicReview(prev) : null };
+      if (r.baseRevision !== (prev?.revision ?? 0)) return { ...fail(409, 'the review changed since you loaded it; reload before saving'), review: prev ? publicReview(prev) : null };
+      const next: HumanReviewStored = nextReview(prev, r, actor, contentHash, t.now);
+      await tx.put(key, next);
+      return { review: publicReview(next), replayed: false };
+    });
+  }
+  /** Bounded regression-candidate export of one saved review (readable by whoever may read the record). */
+  async historyHumanReviewExport(actor: string, owner: boolean, expertId: string): Promise<RegressionCandidate | CbFail> {
+    return this.ctx.storage.transaction(async tx => {
+      const t = await this.humanReviewTarget(tx, actor, owner, expertId, false);
+      if (isCbFail(t)) return t;
+      const review = parseStoredReview(await tx.get('humanreview:' + expertId));
+      if (!review) return fail(404, 'no saved human review for this answer');
+      if (review.outputSha256 !== t.output.outputSha256) return fail(409, 'the saved review is bound to a different output than the stored answer');
+      const h = t.p.history!;
+      return regressionExport({ projectId: t.p.id, createdAt: t.p.createdAt, projectStatus: t.p.status, mode: t.p.brief.mode, model: h.model, brief: t.p.brief,
+        expertId, expertName: t.e.run.name, role: h.roles.find(x => x.id === expertId) ?? null, opinion: t.opinion, report: t.report, output: t.output, review, now: t.now });
+    });
   }
 
   async historyFeedback(actor: string, feedback: Omit<HistoryFeedback, 'at'>): Promise<{ ok: true } | CbFail> {
@@ -529,6 +593,10 @@ export class CloudbiteProject extends DurableObject<Env> {
       // Review, memo, packet and previous-round data quote original opinions or briefs: remove them, and their claims
       // with them (an in-flight attempt cannot write back). The budget ledger is operational bookkeeping and stays.
       await tx.delete([CROSS_REVIEW, 'memo', 'round', 'packets', 'provenance', 'quantitative']);
+      // Person-entered reviews rate the deleted answers: removed in this same transaction, so a late review write
+      // (which re-reads the project inside its own transaction) finds the record deleted and writes nothing.
+      const reviewKeys = [...(await tx.list({ prefix: 'humanreview:' })).keys()];
+      for (let i = 0; i < reviewKeys.length; i += 128) await tx.delete(reviewKeys.slice(i, i + 128));
       if (!p.history.deleted) {
         p.history.deleted = true; p.history.revision++; p.history.nextAt = 0;
         p.brief.title = '[deleted]'; p.brief.objective = '[deleted]'; p.brief.context = ''; p.feedback = [];

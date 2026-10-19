@@ -4,6 +4,7 @@ import { historyDay, historyReport } from './cloudbite-history';
 import { HISTORY_DAYS, HISTORY_TTL, HISTORY_ISSUES, type HistoryFeedback, type HistoryRow } from './cloudbite-history-contract';
 import { PROJECT_ID } from './cloudbite-validate';
 import { boundedText } from './cloudbite-inference';
+import { HUMAN_REVIEW_EXPERT, HUMAN_REVIEW_LIMITS, parseHumanReview } from './cloudbite-human-review';
 
 type Json = (data: unknown, status?: number) => Response;
 const COOKIE = /^cbh_[a-f0-9]{64}$/;
@@ -65,9 +66,26 @@ export async function historyRoute(req: Request, env: Env, url: URL, owner: () =
       return json({ rows: shown.map(({ actor: _actor, roles: _roles, experts, feedback, revision: _revision, deleted: _deleted, ...p }) => ({ ...p, expertCount: experts.length, feedbackCount: feedback.length, ...(isOwner ? { browser: _actor === 'owner' ? 'owner' : 'browser-' + _actor.slice(2, 14) } : {}) })),
         next: rows.length > 50 ? cursor(shown[shown.length - 1]) : null, owner: isOwner, retentionDays: HISTORY_DAYS });
     }
-    const m = path.match(/^\/api\/cloudbite\/history\/(cb[0-9a-f]{32})(\/feedback|\/adopt)?$/);
+    const m = path.match(/^\/api\/cloudbite\/history\/(cb[0-9a-f]{32})(\/feedback|\/adopt|\/human-review)?$/);
     if (!m) return json({ error: 'not found' }, 404);
     const project = env.CLOUDBITE.getByName(m[1]);
+    if (m[2] === '/human-review') {
+      // GET ?expertId= downloads the regression candidate (any reader); POST saves the caller's own review (own actor only).
+      if (req.method === 'GET') {
+        const expertId = url.searchParams.get('expertId') ?? '';
+        if (!HUMAN_REVIEW_EXPERT.test(expertId)) return json({ error: 'invalid expertId' }, 400);
+        const r = await project.historyHumanReviewExport(actor, isOwner, expertId);
+        return isCbFail(r) ? json({ error: r.error }, r.status) : json(r);
+      }
+      if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
+      if (!(req.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) return json({ error: 'content-type must be application/json' }, 415);
+      let raw: unknown;
+      try { raw = JSON.parse(await boundedText(req, HUMAN_REVIEW_LIMITS.body)); } catch { return json({ error: `review must be JSON within ${HUMAN_REVIEW_LIMITS.body / 1024} KiB` }, 400); }
+      const input = parseHumanReview(raw);
+      if ('invalid' in input) return json({ error: input.invalid }, 400);
+      const r = await project.historyHumanReview(actor, isOwner, input);
+      return isCbFail(r) ? json({ error: r.error, ...('review' in r ? { review: r.review } : {}) }, r.status) : json(r);
+    }
     if (req.method === 'GET' && !m[2]) {
       const r = await project.historyRead(actor, isOwner);
       return isCbFail(r) ? json({ error: r.error }, r.status) : json(r);
