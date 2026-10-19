@@ -94,6 +94,7 @@ export async function computerOwnerTag(): Promise<string> {
 
 /** Env subset the computer reads. Keys are Worker secrets; the snapshot is organization-scoped and never inherited. */
 export interface ComputerEnv {
+  CLOUDBITE_COMPUTER_HOT_RESIZE_ENABLED?: string;
   CLOUDBITE_COMPUTER_NOSANA_API_KEY?: string;
   CLOUDBITE_DAYTONA_API_URL?: string;
   CLOUDBITE_DAYTONA_API_KEY?: string;

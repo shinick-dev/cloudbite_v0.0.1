@@ -224,12 +224,14 @@ async function discover(region: CbGpuRegion | null, minVramGb: number, d: CbGpuD
   // Spend the bounded per-country budget on the nearest pairs first (unknown distance last).
   const pairs = free.flatMap((g, i) => countries[i].map((c) => ({ g, c, km: cbGpuDistanceKm(region, c) })))
     .sort((a, b) => (a.km ?? Infinity) - (b.km ?? Infinity) || b.g.available - a.g.available);
-  if (pairs.length > CBG_MAX_AVAILABLE_CALLS) partial = true;
-  const avail = await pool(pairs.slice(0, CBG_MAX_AVAILABLE_CALLS).map((p) => async () => {
+  // Leave room for the sandbox lookup and auth calls under a 50-subrequest Worker budget.
+  const budget=Math.max(0,Math.min(CBG_MAX_AVAILABLE_CALLS,44-free.length));
+  if (pairs.length > budget) partial = true;
+  const avail = await pool(pairs.slice(0, budget).map((p) => async () => {
     try { return parseAvailable(await call(d, '/reservations/available', { requirements: { name: p.g.name, country: p.c } }, deadline)); }
     catch { partial = true; return null; }
   }), CBG_CONCURRENCY);
-  pairs.slice(0, CBG_MAX_AVAILABLE_CALLS).forEach((p, i) => {
+  pairs.slice(0, budget).forEach((p, i) => {
     const a = avail[i];
     if (!a || a.available < 1) return;
     candidates.push({

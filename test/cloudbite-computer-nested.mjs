@@ -691,5 +691,21 @@ await check('python CLI: parsing, Bearer only, UUID requestId, token never print
   assert.notEqual(busy.code, 0); assert.ok(busy.err.includes('error busy'));
 });
 
+await check('GPU preference is scoped, idempotent, free and defaults only its own machine runs',async()=>{
+  const {svc,net}=setup();const {token}=await owner(svc);
+  const selection={ownerMachineId:'cbc-owner-machine-1',requestId:uuid(),candidateId:'gpu-test-US',gpu:'NVIDIA GeForce RTX 4090',country:'US',market:M.CBN_NOSANA_MARKET};
+  assert.equal((await svc.selectGpu(selection)).status,200);
+  assert.equal((await svc.selectGpu(selection)).body.replay,true);
+  assert.equal((await svc.selectGpu({...selection,country:'CA'})).status,409);
+  assert.equal((await svc.gpuSelection('other-machine-id')).body.selection,null);
+  assert.equal(net.calls.length,0,'choosing a preference does not reserve or rent a host');
+  net.on('POST',/^https:\/\/api\.nosana\.com\/reservations\/available$/,()=>json({total:1,price:null,nodes:[]}));
+  nosanaCreateOk(net,'dep-preference');
+  const body={requestId:uuid(),provider:'nosana',command:['nvidia-smi'],timeout:60};
+  const run=await gw(svc,'POST','run',token,body);assert.equal(run.status,202);
+  assert.equal(run.body.job.gpu,selection.gpu);assert.equal(run.body.job.country,'US');
+  await svc.selectGpu({...selection,requestId:uuid(),country:'CA'});
+  const replay=await gw(svc,'POST','run',token,body);assert.equal(replay.body.replay,true);assert.equal(replay.body.job.country,'US','retry preserves original scheduling requirements');
+});
 server.close();
 console.log(`cloudbite-computer-nested: ${count} checks passed`);

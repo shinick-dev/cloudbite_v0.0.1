@@ -622,8 +622,8 @@ export class ComputerService {
         sampledAt: perf.metrics ? new Date(perf.at).toISOString() : null,
         metrics: perf.metrics,
         current: { ...current, usdPerHour: computerHourlyCost(current) },
-        plans: r.status === 'running' ? computerPlans(current) : [],
-        resize: z && this.resizing(r) ? { status: 'pending', cpu: z.cpu, memoryGiB: z.memoryGiB }
+        plans: r.status === 'running' && this.d.env.CLOUDBITE_COMPUTER_HOT_RESIZE_ENABLED !== '0' ? computerPlans(current) : [],
+        resize: this.d.env.CLOUDBITE_COMPUTER_HOT_RESIZE_ENABLED === '0' ? { status: 'failed', error: 'resize_unavailable' } : z && this.resizing(r) ? { status: 'pending', cpu: z.cpu, memoryGiB: z.memoryGiB }
           : z?.state === 'failed' ? { status: 'failed', cpu: z.cpu, memoryGiB: z.memoryGiB, error: z.error ?? 'unknown_outcome' } : { status: 'idle' },
         pricing: { asOf: COMPUTER_PRICING.asOf, url: COMPUTER_PRICING.url, estimated: true },
       };
@@ -644,6 +644,7 @@ export class ComputerService {
       }
       const cpu = input.cpu as number, memoryGiB = input.memoryGiB as number;
       return this.once(r, input.requestId, 'resize', `${cpu}/${memoryGiB}`, async () => {
+        if (this.d.env.CLOUDBITE_COMPUTER_HOT_RESIZE_ENABLED === '0') throw new ComputerError('resize_unavailable', 409);
         if (!r.machine) throw new ComputerError('absent');
         const seen = await this.refresh(r); // settles an earlier increase by GET before anything new
         const m = r.machine as Machine | null;
@@ -662,7 +663,7 @@ export class ComputerService {
         try { await this.d.daytona.resize(this.dt(a), m.id, { cpu, memory: memoryGiB }); z.state = 'pending'; }
         catch (e) {
           if (e instanceof ComputerDaytonaError && !e.uncertain) {
-            const code = e.reason === 'quota' ? 'quota_exceeded' : 'provider_error';
+            const code = e.status === 404 ? 'resize_unavailable' : e.reason === 'quota' ? 'quota_exceeded' : 'provider_error';
             z.state = 'failed'; z.error = code;
             throw new ComputerError(code, code === 'quota_exceeded' ? 409 : 502);
           }

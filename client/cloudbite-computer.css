@@ -101,6 +101,7 @@ p{margin:0 0 12px}
 .cc-gpus{list-style:none;margin:12px 0 0;padding:0;display:grid;grid-template-columns:minmax(0,1fr);gap:10px}
 .cc-gpu-item{border:1px solid var(--line);border-radius:12px;padding:12px;min-width:0;display:grid;gap:4px}
 .cc-gpu-item p{margin:0}
+.cc-gpu-item strong,.cc-chosen p{min-width:0;overflow-wrap:anywhere}
 .cc-gpu-item .cc-btn{margin-top:6px}
 .cc-gpu-off{background:var(--bg)}
 .cc-gpu-off strong{color:var(--muted)}

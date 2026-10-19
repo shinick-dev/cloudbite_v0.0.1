@@ -1,6 +1,6 @@
 // Generated file — do not edit. Sources: client/cloudbite-computer.ts · client/cloudbite-computer.css
 // Rebuild: node tools/build-cloudbite-computer.mjs (--check verifies it is current)
-// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 ccc864f2e3b0e22ab5df3d063be9e98ceec8a5332ff6da56fedc84a0ddd20c09 · css sha256 36f00819125baed4059099d5879ccbde04343c0804af97a195772b88fcbfaebd
+// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 ccb2fb45ef0cbd3dad47860c4ef96542362525a32e97408e730eb8eff96823a5 · css sha256 62187bac5bf4cc9c48f060e1c0aa99a72891eee6153e696c9713bee516e90e0c
 // Routing (runtime): GET CLOUDBITE_COMPUTER_PATH → CLOUDBITE_COMPUTER_HTML, CLOUDBITE_COMPUTER_JS_PATH → CLOUDBITE_COMPUTER_JS (text/javascript),
 // CLOUDBITE_COMPUTER_CSS_PATH → CLOUDBITE_COMPUTER_CSS (text/css). CSP script-src 'self'; style-src 'self' suffices (no inline).
 // The script calls /api/cloudbite/computer/* (sign-in under /api/cloudbite/computer/auth/*) same-origin and links out only to the gateway and k.shinick.dev.
@@ -130,6 +130,7 @@ export const CLOUDBITE_COMPUTER_CSS = [
   ".cc-gpus{list-style:none;margin:12px 0 0;padding:0;display:grid;grid-template-columns:minmax(0,1fr);gap:10px}",
   ".cc-gpu-item{border:1px solid var(--line);border-radius:12px;padding:12px;min-width:0;display:grid;gap:4px}",
   ".cc-gpu-item p{margin:0}",
+  ".cc-gpu-item strong,.cc-chosen p{min-width:0;overflow-wrap:anywhere}",
   ".cc-gpu-item .cc-btn{margin-top:6px}",
   ".cc-gpu-off{background:var(--bg)}",
   ".cc-gpu-off strong{color:var(--muted)}",
@@ -1600,7 +1601,7 @@ export const CLOUDBITE_COMPUTER_JS = [
   "    const ch = S.choice;",
   "    chosenBox.hidden = !ch;",
   "    if (ch) {",
-  "      chosenText.textContent = d.gpuChosen(ch.market ? `${ch.gpu} · ${ch.market}` : ch.gpu, ch.country ?? d.gpuWhereUnknown);",
+  "      chosenText.textContent = d.gpuChosen(ch.gpu, ch.country ?? d.gpuWhereUnknown);",
   "      runText.textContent = d.gpuRun;",
   "      cmdLabel.textContent = d.gpuCmd;",
   "      if (cmdIn.value !== ch.command) cmdIn.value = ch.command;",
@@ -1614,16 +1615,16 @@ export const CLOUDBITE_COMPUTER_JS = [
   "    const lo = c.usdPerHourMin ?? c.usdPerHourMax, hi = c.usdPerHourMax ?? c.usdPerHourMin;",
   "    const price = lo === null || hi === null ? d.gpuNoPrice : d.gpuPrice(money(lo), money(hi));",
   "    const sending = S.gpuOp?.body.candidateId === c.id;",
+  "    const chosen = S.choice?.candidateId === c.id;",
   "    const b = button(`cc-btn${c.selectable ? \"\" : \" cc-quiet\"}`, () => {",
   "      choose(c);",
   "    });",
   "    b.textContent = !c.selectable ? d.gpuUnavailable : sending && S.gpuOp?.phase === \"sending\" ? d.gpuChoosing : d.gpuChoose;",
   "    b.disabled = !c.selectable || !!S.gpuOp;",
-  "    const chosen = S.choice?.candidateId === c.id;",
   "    const li = h(",
   "      \"li\",",
   "      `cc-gpu-item${c.selectable ? \"\" : \" cc-gpu-off\"}${chosen ? \" cc-gpu-chosen\" : \"\"}`,",
-  "      h(\"div\", \"cc-app-head\", h(\"strong\", \"\", c.market ? `${c.gpu} · ${c.market}` : c.gpu), h(\"span\", \"cc-chip\", d.gpuVramVal(c.vramGb === null ? \"–\" : String(c.vramGb)))),",
+  "      h(\"div\", \"cc-app-head\", h(\"strong\", \"\", c.gpu), h(\"span\", \"cc-chip\", d.gpuVramVal(c.vramGb === null ? \"–\" : String(c.vramGb)))),",
   "      h(\"p\", \"cc-fine\", where),",
   "      h(\"p\", \"cc-fine\", `${d.gpuHosts(c.available === null ? \"–\" : String(c.available))} · ${price}`),",
   "      b",

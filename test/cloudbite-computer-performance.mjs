@@ -47,13 +47,13 @@ await test('cgroup v2: CPU delta over the quota, memory current minus inactive f
   assert.equal(M.parseComputerMetrics(out({ u1: 99_000_000 }), ALLOC).cpuPercent, 100, 'clamped');
 });
 
-await test('an unbounded cgroup uses the Daytona allocation, never the host total; host meminfo only backs the used figure', async () => {
+await test('an unbounded cgroup uses the Daytona allocation; host usage cannot substitute for sandbox usage', async () => {
   for (const memMax of ['max', String(2 ** 63 - 4096), String(600 * GIB)]) {
     const m = M.parseComputerMetrics(out({ memMax }), ALLOC);
     assert.equal(m.memoryLimitGiB, 8, memMax); assert.notEqual(m.memoryLimitGiB, 512);
   }
   const fallback = M.parseComputerMetrics(out({ memCurrent: null, memMax: 'max', inactiveFile: null }), ALLOC);
-  assert.equal(fallback.memoryUsedGiB, 8, 'host used (412 GiB) is bounded by the sandbox limit'); assert.equal(fallback.memoryPercent, 100);
+  assert.equal(fallback, null, 'host used memory cannot be reported as sandbox memory');
   assert.equal(M.parseComputerMetrics(out({ memMax: 'max' }), { cpu: 4, memoryGiB: null }), null, 'no knowable limit: unknown, not host total');
 });
 

@@ -1054,7 +1054,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
     const ch = S.choice;
     chosenBox.hidden = !ch;
     if (ch) {
-      chosenText.textContent = d.gpuChosen(ch.market ? `${ch.gpu} · ${ch.market}` : ch.gpu, ch.country ?? d.gpuWhereUnknown);
+      chosenText.textContent = d.gpuChosen(ch.gpu, ch.country ?? d.gpuWhereUnknown);
       runText.textContent = d.gpuRun; cmdLabel.textContent = d.gpuCmd;
       if (cmdIn.value !== ch.command) cmdIn.value = ch.command;
       copyBtn.textContent = d.copy;
@@ -1068,12 +1068,12 @@ function mount(root: HTMLElement, pair: PairLink): void {
     const lo = c.usdPerHourMin ?? c.usdPerHourMax, hi = c.usdPerHourMax ?? c.usdPerHourMin;
     const price = lo === null || hi === null ? d.gpuNoPrice : d.gpuPrice(money(lo), money(hi));
     const sending = S.gpuOp?.body.candidateId === c.id;
+    const chosen = S.choice?.candidateId === c.id;
     const b = button(`cc-btn${c.selectable ? '' : ' cc-quiet'}`, () => { choose(c); });
     b.textContent = !c.selectable ? d.gpuUnavailable : sending && S.gpuOp?.phase === 'sending' ? d.gpuChoosing : d.gpuChoose;
     b.disabled = !c.selectable || !!S.gpuOp;
-    const chosen = S.choice?.candidateId === c.id;
     const li = h('li', `cc-gpu-item${c.selectable ? '' : ' cc-gpu-off'}${chosen ? ' cc-gpu-chosen' : ''}`,
-      h('div', 'cc-app-head', h('strong', '', c.market ? `${c.gpu} · ${c.market}` : c.gpu), h('span', 'cc-chip', d.gpuVramVal(c.vramGb === null ? '–' : String(c.vramGb)))),
+      h('div', 'cc-app-head', h('strong', '', c.gpu), h('span', 'cc-chip', d.gpuVramVal(c.vramGb === null ? '–' : String(c.vramGb)))),
       h('p', 'cc-fine', where), h('p', 'cc-fine', `${d.gpuHosts(c.available === null ? '–' : String(c.available))} · ${price}`), b);
     li.setAttribute('data-candidate', c.id);
     if (chosen) li.setAttribute('aria-current', 'true');

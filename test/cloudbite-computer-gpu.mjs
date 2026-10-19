@@ -139,7 +139,8 @@ await check('bounds and cache: per-country reads capped, nearest spent first; ca
     : url.endsWith('/available') ? json({ total: 1, price: null, nodes: [{ market: M4090 }] }) : null });
   const r = await M.gpuCandidates('us', 24, f.deps);
   const avail = f.calls.filter((c) => c.url.endsWith('/available'));
-  assert.equal(avail.length, M.CBG_MAX_AVAILABLE_CALLS);
+  assert.ok(avail.length>0&&avail.length<=M.CBG_MAX_AVAILABLE_CALLS);
+  assert.ok(f.calls.length<=45,'whole discovery fits the bounded Worker subrequest budget');
   assert.ok(avail.slice(0, 3).every((c) => c.body.requirements.country === 'US'), 'nearest first');
   assert.match(r.note, /Partial/, 'skipped pairs are disclosed');
   assert.ok(f.calls.filter((c) => c.url.endsWith('/requirements')).every((c) => c.body.metrics[0] === 'country'));

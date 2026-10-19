@@ -3,7 +3,7 @@
 import type { ComputerEnv, ComputerAccount } from './cloudbite-computer-contract';
 import { computerAccounts, COMPUTER_REQUEST_ID, isAccount } from './cloudbite-computer-contract';
 import { dt, type Dt } from './lab';
-import { gpuCandidates } from './cloudbite-computer-gpu';
+import { gpuCandidates, cbGpuSelect } from './cloudbite-computer-gpu';
 
 export interface CapacitySandbox { id:string;account:ComputerAccount;name:string;region:string;state:string;cpu:number|null;memoryGiB:number|null }
 type RawSandbox = {id?:unknown;name?:unknown;target?:unknown;region?:unknown;state?:unknown;cpu?:unknown;memory?:unknown};
@@ -52,14 +52,14 @@ interface SelectionRpc {ownerSelectGpuJson(input:{ownerMachineId:string;requestI
 export async function capacityGpuSelect(env:ComputerEnv,input:Record<string,unknown>,nested:SelectionRpc){
   if(typeof input.requestId!=='string'||!COMPUTER_REQUEST_ID.test(input.requestId)||typeof input.candidateId!=='string'||input.candidateId.length>512)return null;
   const sb=await capacitySandbox(env,input.sandboxId,input.account);if(!sb)return null;
-  const found=await gpuCandidates(sb.region,0);
-  const candidate=found.candidates.find(c=>c.id===input.candidateId&&c.selectable&&c.available>0);
-  if(!candidate)return{status:409,body:{error:{code:'gpu_candidate_unavailable',message:'Refresh GPU candidates and select an available option.'}}};
-  const result=JSON.parse(await nested.ownerSelectGpuJson({ownerMachineId:sb.id,requestId:input.requestId,candidateId:candidate.id,gpu:candidate.gpu,country:candidate.country,market:candidate.market}));
+  let candidate;
+  try{candidate=(await cbGpuSelect(input.candidateId)).selection;}
+  catch(e){if(e instanceof Error&&'code' in e&&e.code==='not_available')return{status:409,body:{error:{code:'gpu_candidate_unavailable',message:'Refresh GPU candidates and select an available option.'}}};throw e;}
+  const result=JSON.parse(await nested.ownerSelectGpuJson({ownerMachineId:sb.id,requestId:input.requestId,candidateId:candidate.candidateId,gpu:candidate.gpu,country:candidate.country,market:candidate.market}));
   // Explicit flags work even if the CLI capability was installed for a different sandbox.
   if(result.body?.ok){
     const shell=(s:string)=>"'"+s.replace(/'/g,"'\\''")+"'";
-    result.body.commandExample='cloudbite-compute run --provider nosana --gpu '+shell(candidate.gpu)+(candidate.country?' --country '+candidate.country:'')+' --image nvidia/cuda:12.8.1-base-ubuntu22.04 -- nvidia-smi';
+    result.body.commandExample='cloudbite-compute run --provider nosana --gpu '+shell(candidate.gpu)+(candidate.country?' --country '+candidate.country:'')+' --image python:3.12-slim -- nvidia-smi';
   }
   return result;
 }

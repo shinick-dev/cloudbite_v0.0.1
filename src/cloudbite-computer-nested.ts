@@ -302,6 +302,27 @@ export class CbNestedService {
   private wake(at: number) { return this.s.setAlarm(at); }
 
   // ---- owner RPC ----
+  /** The root verifies sandbox account ownership and current candidate availability before this trusted RPC. */
+  async selectGpu(input: Record<string, unknown>): Promise<Reply> {
+    const {ownerMachineId,requestId,candidateId,gpu,country,market}=input;
+    const sel=cbGpuValidSelection(gpu,country);
+    if(typeof ownerMachineId!=='string'||!MACHINE.test(ownerMachineId)||typeof requestId!=='string'||!UUID.test(requestId)||!sel||typeof candidateId!=='string'||candidateId.length>200||(market!==null&&(typeof market!=='string'||!MARKET.test(market))))return err(400,'bad_request','invalid GPU selection');
+    return this.serial(async()=>{
+      const key='gpu-selection:'+ownerMachineId;
+      const old=await this.s.get<{selection:{candidateId:string;gpu:string;country:string;market:string|null};ops:Array<{id:string;fp:string;selection:unknown}>}>(key);
+      const fp=JSON.stringify([candidateId,sel.gpu,sel.country]);
+      const prior=old?.ops.find(x=>x.id===requestId);
+      if(prior)return prior.fp===fp?ok({selection:prior.selection,replay:true}):err(409,'conflict','requestId was already used for a different selection');
+      const selection={candidateId,gpu:sel.gpu,country:sel.country,market:market as string|null};
+      await this.s.put({[key]:{selection,ops:[...(old?.ops??[]),{id:requestId,fp,selection}].slice(-16)}});
+      return ok({selection});
+    });
+  }
+  async gpuSelection(ownerMachineId:string):Promise<Reply>{
+    if(!MACHINE.test(ownerMachineId))return err(400,'bad_request','invalid sandbox');
+    const record=await this.s.get<{selection:unknown}>('gpu-selection:'+ownerMachineId);
+    return ok({selection:record?.selection??null});
+  }
   async configure(input: { requestId: string; ownerMachineId: string }): Promise<Reply> {
     if (!input || typeof input.requestId !== 'string' || !UUID.test(input.requestId)) return err(400, 'bad_request', 'requestId must be a lowercase UUID');
     if (typeof input.ownerMachineId !== 'string' || !MACHINE.test(input.ownerMachineId)) return err(400, 'bad_request', 'ownerMachineId is invalid');
@@ -387,6 +408,11 @@ export class CbNestedService {
   async run(cap: Capability, body: unknown): Promise<Reply> {
     const p = cbNestedParseRun(body);
     if (typeof p === 'string') return err(400, 'bad_request', p);
+    if(p.provider==='nosana'&&!p.requirements){
+      const prior=await this.s.get<string>('req:'+p.requestId);
+      if(prior){const job=await this.s.get<NestedJob>('job:'+prior);if(job?.requirements)p.requirements={...job.requirements};}
+      else{const saved=await this.s.get<{selection:CbNestedRequirements}>('gpu-selection:'+cap.ownerMachineId);if(saved?.selection)p.requirements={gpu:saved.selection.gpu,country:saved.selection.country};}
+    }
     if (p.provider === 'daytona' ? !this.d.daytona() : !this.d.nosanaKey()) return err(503, 'not_configured', `${p.provider} is not configured`);
     const gateway = this.d.gateway();
     if (!gateway) return err(503, 'not_configured', 'nested compute gateway is not configured');
@@ -821,6 +847,8 @@ export class CloudbiteComputerNested extends DurableObject<Env> {
   revokeAll() { return this.service().revokeAll(); }
   ownerJobs() { return this.service().ownerJobs(); }
   async ownerJobsJson(): Promise<string> { return JSON.stringify(await this.service().ownerJobs()); }
+  async ownerSelectGpuJson(input:Record<string,unknown>):Promise<string>{return JSON.stringify(await this.service().selectGpu(input));}
+  async ownerGpuSelectionJson(ownerMachineId:string):Promise<string>{return JSON.stringify(await this.service().gpuSelection(ownerMachineId));}
   async configureJson(input: { ownerMachineId: string; requestId: string }): Promise<string> { return JSON.stringify(await this.service().configure(input)); }
   fetch(req: Request) { return this.service().fetch(req); }
   async alarm() { await this.service().alarm(); }

@@ -69,8 +69,8 @@ export const isComputerPlan = (cpu: unknown, memoryGiB: unknown) => COMPUTER_PLA
 
 /**
  * Parse the sample. `alloc` is the Daytona allocation, used only when the cgroup does not bound the sandbox. Memory used is
- * cgroup current minus reclaimable inactive file cache; the host meminfo is a fallback for the used figure only, bounded by
- * the limit. Returns null when the memory limit or load cannot be known.
+ * cgroup current minus reclaimable inactive file cache. Host usage is not sandbox usage; missing cgroup counters stay
+ * unknown. Returns null when the memory limit, usage or load cannot be known.
  */
 export function parseComputerMetrics(raw: string, alloc: { cpu: number | null; memoryGiB: number | null }): ComputerMetrics | null {
   const line = raw.slice(-8192).split('\n').map((l) => l.trim()).reverse().find((l) => l.startsWith('{'));
@@ -78,15 +78,14 @@ export function parseComputerMetrics(raw: string, alloc: { cpu: number | null; m
   let j: Record<string, unknown>;
   try { j = JSON.parse(line); } catch { return null; }
   if (!j || typeof j !== 'object' || j.v !== 1) return null;
-  const hostTotal = num(j.hostTotal), hostAvailable = num(j.hostAvailable);
+  const hostTotal = num(j.hostTotal);
   // A cgroup limit counts only if it actually bounds the sandbox ("max" or the v1 sentinel do not).
   const cgLimit = num(j.memMax);
   const bounded = cgLimit !== null && cgLimit > 0 && cgLimit < 2 ** 60 && (hostTotal === null || cgLimit < hostTotal);
   const limit = bounded ? cgLimit : alloc.memoryGiB && alloc.memoryGiB > 0 ? alloc.memoryGiB * GiB : null;
   if (!limit) return null;
   const current = num(j.memCurrent), inactive = num(j.inactiveFile) ?? 0;
-  const used = current !== null ? Math.max(0, current - inactive)
-    : hostTotal !== null && hostAvailable !== null && hostTotal >= hostAvailable ? hostTotal - hostAvailable : null;
+  const used = current !== null ? Math.max(0, current - inactive) : null;
   if (used === null) return null;
   const load = typeof j.load === 'string' ? num(j.load.split(/\s+/)[0]) : null;
   if (load === null) return null;

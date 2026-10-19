@@ -732,7 +732,8 @@ await test('GPU: Choose records a preference only (no rental), shows a copyable 
   assert.deepEqual(Object.keys(p.body), ['requestId', 'sandboxId', 'account', 'candidateId']);
   assert.match(p.body.requestId, UUID);
   assert.deepEqual({ ...p.body, requestId: 0 }, { requestId: 0, sandboxId: 'sb-1', account: 'primary', candidateId: 'rtx4090-US' });
-  assert.match(e.text(), /Chosen for remote GPU jobs: NVIDIA RTX 4090 · 4090-us · US\. Nothing is rented and no job is running\./);
+  assert.match(e.text(), /Chosen for remote GPU jobs: NVIDIA RTX 4090 · US\. Nothing is rented and no job is running\./);
+  assert.ok(!e.text().includes('4090-us'),'provider market identifiers stay out of user-facing labels');
   assert.match(e.text(), /A paid job starts only when you run this command/);
   assert.equal(byId(e, 'cc-gpu-cmd').value, cmd);
   assert.equal(byId(e, 'cc-gpu-cmd').getAttribute('readonly'), '');

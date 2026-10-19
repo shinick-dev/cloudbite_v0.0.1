@@ -595,4 +595,9 @@ await test('R9 resize validation: explicit cost ack, fixed increase plans only, 
   assert.equal(resizeOps(w2).length + resizeOps(w4).length, 0);
 });
 
+await test('disabled live resize exposes no plans and never calls the provider',async()=>{
+  const w=world({...ENV,CLOUDBITE_COMPUTER_HOT_RESIZE_ENABLED:'0'});await ready(w);w.fake.metrics=sampleOut();
+  const p=await w.svc.performance(OWNER);assert.deepEqual(p.plans,[]);assert.equal(p.resize.error,'resize_unavailable');
+  const r=await w.svc.resize(OWNER,RES());assert.equal(r.error.code,'resize_unavailable');assert.equal(resizeOps(w).length,0);
+});
 console.log(`${passed} cloudbite-computer-service tests passed`);
