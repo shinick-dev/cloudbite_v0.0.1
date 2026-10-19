@@ -9,6 +9,7 @@ import { CB_ACTIVITY_BODY_MAX, CB_COMPLETE_BODY_MAX, CB_CREATE_BODY_MAX, CB_INFE
 import { cbHash, cbProjectId, isCbFail, type CbFail } from './cloudbite-project';
 import type { PmcImportErrorCode } from './cloudbite-pmc';
 import { authorizeRoundParent, buildProjectRound, isRoundFail, type ProjectPreviousRound } from './cloudbite-revision';
+import { authorizeAuthorResponseParent, buildAuthorResponsePlan } from './cloudbite-author-response';
 import type { CloudbiteAccessSession } from './cloudbite-access-contract';
 import type { HistoryDetail } from './cloudbite-history-contract';
 import { JEV_MODEL, routingReady, routingQuery, isRoutingFailure } from './cloudbite-routing';
@@ -121,6 +122,15 @@ async function revisionRound(env: Env, brief: ProjectBrief, actor: string | unde
   let read: HistoryDetail | CbFail;
   try { read = PROJECT_ID.test(parentId) ? await env.CLOUDBITE!.getByName(parentId).historyRead(actor, owner) as HistoryDetail | CbFail : { error: 'parent project not found', status: 404 }; }
   catch { return { error: 'parent project could not be read; retry shortly', status: 503 }; }
+  if (brief.revision.reviewSnapshotHash) {
+    const auth = await authorizeAuthorResponseParent({ parentId, actor, owner, read, now: Date.now() });
+    if (isRoundFail(auth)) return auth;
+    if (auth.snapshotHash !== brief.revision.reviewSnapshotHash) return { error: 'the requested parent cross-review is stale', status: 409 };
+    const plan = await buildAuthorResponsePlan(auth, brief);
+    if (isRoundFail(plan)) return plan;
+    const round = await buildProjectRound(auth.round, brief);
+    return isRoundFail(round) ? round : { ...round, authorResponse: plan };
+  }
   // authorizeRoundParent's WeakSet authorization cannot cross RPC: authorize and build here, pass only the built round.
   const auth = await authorizeRoundParent({ parentId, actor, owner, read, now: Date.now() });
   return isRoundFail(auth) ? auth : buildProjectRound(auth, brief);

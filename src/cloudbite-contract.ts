@@ -33,7 +33,11 @@ export type ResponseLanguage = 'ko' | 'en';
 /** Requested upper bounds (integers): maxExperts 1-100, maxModelCalls 1-804 in total, maxReviewCalls 0-3, maxMemoCalls 0-1. */
 export interface ProjectBudget { maxExperts: number; maxModelCalls: number; maxReviewCalls: number; maxMemoCalls: number }
 /** A user's claim that this brief revises an earlier project; parentId is not proof of ownership. */
-export interface ProjectRevision { parentId: string; changeSummary: string }
+export interface ProjectRevision {
+  parentId: string; changeSummary: string;
+  /** Explicit author-response round, bound to the authorized parent's completed cross-review. */
+  reviewSnapshotHash?: string;
+}
 /** Code-assembled work order for one selected role. optionIds are option-1..8 of the brief's decision snapshot. */
 export interface ExpertAssignment {
   expertId: string; stage: ProjectStage; question: string; optionIds: string[];
@@ -81,6 +85,12 @@ export interface ProjectCrossReview {
   coverage?: CrossReviewCoverage; disclosure?: string;
   /** Per finding: which cited texts were actually in the reviewer's input. Never changes a verdict. */
   textAvailability?: CrossReviewTextAvailability[];
+  /** Exact stored artifact excerpts supplied to the reviewers. Reading is not execution or verification. */
+  artifactCoverage?: Array<{
+    expertId: string; packetSha256: string;
+    files: Array<{ path: string; sha256: string; startLine: number; endLine: number; totalLines: number; excerptTruncated: boolean; storedTruncated: boolean }>;
+    omitted: Array<{ path: string; reason: string }>;
+  }>;
 }
 export interface CloudbiteRoutingQuery {
   title: string; objective: string; context: string; requestId: string;
@@ -130,6 +140,8 @@ export interface ExpertRun {
   error?: string;
   updatedAt: number;
   assignment?: ExpertAssignment;
+  /** Response to parent review, separate from the unchanged six-key opinion and its completion status. */
+  authorResponse?: import('./cloudbite-author-response').AuthorResponseParsed | { invalid: string };
 }
 export interface ProjectRun {
   id: string;
@@ -153,6 +165,8 @@ export interface ProjectRun {
   evidencePackets?: import('./cloudbite-evidence-packet').EvidencePacket[];
   /** Follow-up round: bounded, labelled reference to the parent project (untrusted data, never fresh opinions). */
   previousRound?: import('./cloudbite-revision').ProjectPreviousRound;
+  /** Epistemic origin and explicit user adoption; neither is independent fact verification. */
+  provenance?: { ledger: import('./cloudbite-provenance').ProvenanceLedger; state: import('./cloudbite-provenance').ProvenanceState };
 }
 // Public mirrors of leaf types whose modules import server-only configuration (cloudbite-config → state), so the
 // browser build (tsconfig.client.json) can read them. src/cloudbite-project.ts asserts at compile time that each

@@ -74,7 +74,7 @@ OUT = os.path.join(ROOT, 'out')
 WORK = os.path.join(ROOT, 'work')
 CAP_FILE = os.path.join(ROOT, '.cloudbite', 'capability.json')
 EXTRA = re.compile(r'^out/[a-z0-9][a-z0-9_-]{0,47}(\.[a-z0-9_-]{1,16})?\.(md|txt|json|csv)$')
-RESERVED = {'out/result.json', 'out/report.md', 'out/manifest.json', 'out/done', 'out/knowledge.json', 'out/diagnostic.json'}
+RESERVED = {'out/result.json', 'out/report.md', 'out/manifest.json', 'out/done', 'out/knowledge.json', 'out/diagnostic.json', 'out/author-response.json'}
 DIRECTIONS = ('support', 'conditional', 'concern', 'abstain')
 # out/result.json is a flat ExpertOpinion (the workspace's RESULT.schema.json); limits come from the persona contract.
 OPINION_KEYS = ('direction', 'confidence', 'summary', 'evidence', 'assumptions', 'nextActions')
@@ -125,6 +125,7 @@ failure = {'code': 'final_turn_tool', 'turn': 0, 'repairs': 0, 'http': 0}
 extras = []
 knowledge = None
 language = None
+author_findings = None
 knowledge_trace = []
 retrieved_sources = set()
 project_document_ids = set()
@@ -259,11 +260,30 @@ def final_problem(act):
     if not isinstance(report, str) or not report.strip(): return 'final_format', 'report must be non-empty markdown'
     problem = check_peer_statement(report)
     if problem: return 'final_peer_review', problem
+    problem = author_response_problem(act.get('authorResponse'))
+    if problem: return 'final_format', problem
     if language and final_language(act['opinion'], report)[0] == 'mismatch':
         return 'final_language', ('final narrative is not in the selected response language (%s, %s): write summary, evidence explanations, '
                                   'assumptions, nextActions and report prose in %s; keep quotes, code, URLs, IDs and citation tokens unchanged'
                                   % (language, LANGUAGE_NAMES[language], LANGUAGE_NAMES[language]))
     return None, None
+
+
+def author_response_problem(value):
+    if author_findings is None: return None
+    if not isinstance(value, dict) or set(value) != {'responses'} or not isinstance(value['responses'], list):
+        return 'author-response round requires sibling authorResponse: {"responses":[{"findingId":...,"disposition":"revise|withdraw|maintain","rationale":...}]} in final'
+    expected = {f['findingId'] for f in author_findings['findings']}
+    seen, prose = set(), []
+    for r in value['responses']:
+        if not isinstance(r, dict) or set(r) != {'findingId', 'disposition', 'rationale'}: return 'invalid authorResponse entry'
+        fid = r['findingId']
+        if not isinstance(fid, str) or fid not in expected or fid in seen: return 'unknown, foreign or duplicate authorResponse findingId'
+        if r['disposition'] not in ('revise', 'withdraw', 'maintain'): return 'invalid authorResponse disposition'
+        if not isinstance(r['rationale'], str) or not r['rationale'].strip() or len(r['rationale']) > 600: return 'authorResponse rationale must contain 1-600 characters'
+        seen.add(fid); prose.append(r['rationale'])
+    if language and language_integrity(prose, language)[0] == 'mismatch': return 'authorResponse rationale must use the selected response language'
+    return None
 
 
 def final_language(o, report):
@@ -322,7 +342,7 @@ def write_file(path, content):
 def decision_text():
     """Complete optional decision/evidence inputs, shared by every role; never tool instructions."""
     parts = []
-    for name in ('DECISION.md', 'evidence/documents.json', 'evidence/previous-round.json'):
+    for name in ('DECISION.md', 'evidence/documents.json', 'evidence/previous-round.json', 'evidence/provenance.txt', 'evidence/author-response-findings.json'):
         path = os.path.join(ROOT, name)
         if not os.path.isfile(path): continue
         with open(path, encoding='utf-8') as f: body = f.read(128 * 1024 + 1)
@@ -354,7 +374,7 @@ def workspace_text():
             p = os.path.relpath(os.path.join(dirpath, name), ROOT).replace(os.sep, '/')
             if p == 'runner.py':
                 continue
-            if p in ('DECISION.md', 'evidence/documents.json', 'evidence/previous-round.json'):
+            if p in ('DECISION.md', 'evidence/documents.json', 'evidence/previous-round.json', 'evidence/provenance.txt', 'evidence/author-response-findings.json'):
                 continue
             with open(os.path.join(dirpath, name), encoding='utf-8', errors='replace') as f:
                 body = f.read(12000)
@@ -482,12 +502,15 @@ Confidence is your own self-assessment, not calibrated accuracy. Use a tool when
 as soon as one useful tool result supports your opinion. You have %d turns; the last turn must be final."""
 
 
-def finish(status, opinion=None, report='', error=''):
+def finish(status, opinion=None, report='', error='', author_response=None):
     if status == 'ok':
         with open(os.path.join(OUT, 'result.json'), 'w', encoding='utf-8') as f:
             json.dump(flat_opinion(opinion), f, ensure_ascii=False, indent=2)
         with open(os.path.join(OUT, 'report.md'), 'w', encoding='utf-8') as f:
             f.write(report[:MAX_FILE])
+        if author_findings is not None:
+            with open(os.path.join(OUT, 'author-response.json'), 'w', encoding='utf-8') as f:
+                json.dump(author_response, f, ensure_ascii=False)
         if knowledge is not None:
             used = {i for t in knowledge_trace for i in t['sourceIds']}
             audit = {'version': knowledge['manifest']['version'], 'validation': 'curated-unvalidated',
@@ -509,7 +532,7 @@ def finish(status, opinion=None, report='', error=''):
             json.dump({'schema': DIAGNOSTIC_SCHEMA, 'code': failure['code'], 'turn': failure['turn'],
                        'repairs': failure['repairs'], 'http': failure['http'], 'calls': calls}, f)
     with open(os.path.join(OUT, 'manifest.json'), 'w', encoding='utf-8') as f:
-        json.dump({'files': (['out/knowledge.json'] if knowledge is not None and status == 'ok' else []) + extras}, f)
+        json.dump({'files': (['out/knowledge.json'] if knowledge is not None and status == 'ok' else []) + (['out/author-response.json'] if author_findings is not None and status == 'ok' else []) + extras}, f)
     with open(os.path.join(OUT, 'done'), 'w') as f:
         f.write(status)
     try:
@@ -519,7 +542,7 @@ def finish(status, opinion=None, report='', error=''):
 
 
 def main():
-    global cap
+    global cap, author_findings
     os.makedirs(OUT, exist_ok=True)
     try:
         os.close(os.open(os.path.join(OUT, '.started'), os.O_CREAT | os.O_EXCL | os.O_WRONLY))
@@ -532,6 +555,10 @@ def main():
     activity('status', 'runner started (python %s, %d turns)' % (sys.version.split()[0], rounds))
     load_knowledge()
     load_language()
+    response_path = os.path.join(ROOT, 'evidence', 'author-response-findings.json')
+    if os.path.isfile(response_path):
+        with open(response_path, encoding='utf-8') as f: author_findings = json.loads(f.read(32 * 1024 + 1))
+        if not isinstance(author_findings, dict) or not isinstance(author_findings.get('findings'), list): raise RuntimeError('invalid author-response workspace')
     document_path = os.path.join(ROOT, 'evidence', 'documents.json')
     if os.path.isfile(document_path):
         with open(document_path, encoding='utf-8') as f: document_data = json.loads(f.read(128 * 1024))
@@ -591,7 +618,7 @@ def main():
                 continue
             activity('thought', 'turn %d: final opinion %s (self-assessed confidence %s)' % (step, act['opinion']['direction'], act['opinion']['confidence']))
             accepted_language(act['opinion'], act['report'], 'turn %d' % step)
-            finish('ok', act['opinion'], act['report'])
+            finish('ok', act['opinion'], act['report'], author_response=act.get('authorResponse'))
             return 0
     finish('error', error='no valid final opinion within %d turns' % rounds)
     return 1
@@ -642,7 +669,7 @@ def repair(messages, rounds, problem):
             continue
         activity('thought', 'final repair %d: final opinion %s (self-assessed confidence %s)' % (attempt, act['opinion']['direction'], act['opinion']['confidence']))
         accepted_language(act['opinion'], act['report'], 'final repair %d' % attempt)
-        finish('ok', act['opinion'], act['report'])
+        finish('ok', act['opinion'], act['report'], author_response=act.get('authorResponse'))
         return 0
     used = failure['repairs']
     finish('error', error='no valid final opinion within %d turns and %d final repair attempt%s; last problem: %s' % (

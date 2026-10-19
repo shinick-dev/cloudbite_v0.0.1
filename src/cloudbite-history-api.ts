@@ -65,7 +65,7 @@ export async function historyRoute(req: Request, env: Env, url: URL, owner: () =
       return json({ rows: shown.map(({ actor: _actor, roles: _roles, experts, feedback, revision: _revision, deleted: _deleted, ...p }) => ({ ...p, expertCount: experts.length, feedbackCount: feedback.length, ...(isOwner ? { browser: _actor === 'owner' ? 'owner' : 'browser-' + _actor.slice(2, 14) } : {}) })),
         next: rows.length > 50 ? cursor(shown[shown.length - 1]) : null, owner: isOwner, retentionDays: HISTORY_DAYS });
     }
-    const m = path.match(/^\/api\/cloudbite\/history\/(cb[0-9a-f]{32})(\/feedback)?$/);
+    const m = path.match(/^\/api\/cloudbite\/history\/(cb[0-9a-f]{32})(\/feedback|\/adopt)?$/);
     if (!m) return json({ error: 'not found' }, 404);
     const project = env.CLOUDBITE.getByName(m[1]);
     if (req.method === 'GET' && !m[2]) {
@@ -84,6 +84,10 @@ export async function historyRoute(req: Request, env: Env, url: URL, owner: () =
       b = JSON.parse(raw);
       if (!b || typeof b !== 'object' || Array.isArray(b)) throw new Error();
     } catch { return json({ error: 'feedback must be a JSON object within 8 KiB' }, 400); }
+    if (m[2] === '/adopt') {
+      const r = await project.historyAdopt(actor, isOwner, b);
+      return isCbFail(r) ? json({ error: r.error }, r.status) : json(r);
+    }
     const issue = HISTORY_ISSUES.find(x => x === b.issue);
     if (Object.keys(b).some(k => !['expertId', 'rating', 'issue', 'comment'].includes(k)) || typeof b.expertId !== 'string' ||
       (b.rating !== 'helpful' && b.rating !== 'unhelpful') || typeof b.comment !== 'string' || b.comment.length > 1000 ||
