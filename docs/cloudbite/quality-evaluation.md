@@ -101,6 +101,48 @@ Rubric anchors, forbidden phrases and notes are evaluation-only: they are not in
 (the test checks `src/` for case IDs and rubric notes). One non-held-out case, `q-synthetic-falsify-pilot-qa`,
 matches the unified-release synthetic QA brief so a recorded export can be bound; it is a smoke case, not a benchmark.
 
+## Batches of recorded runs — `tools/cloudbite-quality-batch.mjs`
+
+```
+node tools/cloudbite-quality-batch.mjs run --manifest MANIFEST.json [--out DIR] [--seed SEED] [--ratings RATINGS.jsonl] [--force]
+```
+
+A bounded local batch over exports that were already saved. It re-uses `evaluateCase` and `compareRuns` per entry, so
+fingerprints, case binding, credential/personal-data refusal, ignored-output and no-overwrite rules are the same as
+above; nothing is fetched and no model is called.
+
+- **Manifest** (`version: "cloudbite-quality-batch/v1"`, `batchId`, 1-20 `entries`): each entry names `caseId`, `input`,
+  a declared `provenance`, optionally `baseline` + `baselineProvenance` and an operator-supplied `collection`
+  (`collectedAt`/`method`/`note`, copied as `verified: false`). Provenance is required and never inferred from a
+  filename. Paths must be relative, stay under the manifest's folder and reach a regular `.json` file without a
+  symlink or junction; URLs, UNC/device, drive and absolute paths are refused. Everything is read and checked before
+  the first file is written, so a refusal leaves no output.
+- **Evidence classes** (never pooled): `observed-live-held-out`, `observed-live-smoke` (live run of a non-held-out
+  case), `observed-live-conflict` (declared live but `brief.mode` disagrees — not counted as live), `synthetic-qa`
+  (smoke, **not held-out proof**) and `test-synthetic`.
+- **Summary** (`summary.json|md`): per entry the stored role status counts, end-to-end and per-role durations only
+  when terminal records carry plausible epoch-ms timestamps (else `UNAVAILABLE` with the reason), reserved model
+  calls from `project.usage` (else `NOT_RECORDED`), and USD cost `UNKNOWN` — exports carry call counts, not priced
+  token usage, so no money or token figure is derived. Structure, heuristic flags, automated judgment (`NOT_RUN`) and
+  human status are listed as separate layers. There is no aggregate accuracy, score or winner.
+- **Failure taxonomy** (`failure-taxonomy.json|md`): run failures (project/role/cross-review status, role error kind
+  using the history report's classification), content-review gaps (heuristic flags, citation ID issues, unscored
+  dimensions) and evaluation issues (schema, binding, provenance conflict, non-comparable baseline), kept apart.
+- **Baseline vs candidate** (`comparisons/`): compared only when case, question, stage and material match and both
+  sides are valid and bound; otherwise `NOT_COMPARED`. Structural changes list the metrics where the candidate is
+  worse (failed roles, invalid citations, relevance warnings, …). Human per-dimension regressions use only the same
+  reviewer's scores on **both** exact inputs; anything else stays `NOT_SCORED`. No winner is declared.
+- **Blind review** (`review/`): one packet per bound entry with the question, supplied material and each answer as
+  `Answer A/B` — model, prompt/knowledge hashes, sandbox IDs, self-reported confidence, cross-review verdicts and
+  flags are left out. Answer order is a deterministic function of `--seed` (default `batchId`, which is predictable;
+  pass a private seed). `review/rating-template.jsonl` holds one blank row per answer bound to its exact
+  `inputSha256`, with `reviewer`/`ratedAt` null: an unfilled row is rejected by `--ratings` and stays `NOT_SCORED`.
+  `blind-mapping.json` (which answer is baseline/candidate, and the seed) is written separately — keep it from
+  reviewers. Exports are copied byte-for-byte to `cases/<caseId>__<sha12>/original.json` and never modified.
+
+Exit codes: 0 written and every input valid/bound and every baseline comparable; 3 written with a mismatch; 2 refused.
+Collection hand-off for live runs: `docs/cloudbite/quality-pilot.md`.
+
 ## Remaining independent human review
 
 The harness does not judge quality. Before any quality claim:
@@ -115,4 +157,4 @@ The harness does not judge quality. Before any quality claim:
 - Review heuristic false positives/negatives: keyword anchors can miss paraphrases and can be satisfied by an answer
   that merely mentions the right words.
 
-Tests: `node test/cloudbite-quality-eval.mjs`.
+Tests: `node test/cloudbite-quality-eval.mjs` and `node test/cloudbite-quality-batch.mjs`.
