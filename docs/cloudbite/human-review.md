@@ -70,35 +70,38 @@ only a one-way `reviewer-<16 hex>` label, never the cookie, token or actor id.
 ## Offline importer
 
 ```
-node tools/cloudbite-human-review-import.mjs --input <candidate.json|dir> [--out .artifacts/human-review-import] [--batch-id ID] [--evaluate] [--force]
+npm run evaluate:cloudbite:human -- --input candidate.json --provenance observed-live --out .artifacts/human-review-import --evaluate
 ```
 
 It re-verifies every hash, keeps the latest revision per output, writes
-HistoryDetail exports, `cloudbite-quality-batch/v1` manifests (baseline chaining
-per question) and rating files bound to the export bytes. Ratings are written
+HistoryDetail exports, `cloudbite-quality-batch/v1` manifests and rating files bound to the export bytes. Baselines
+require the same question, stage, material and expert role in a different, strictly earlier project; different roles
+in one run remain unpaired. Ratings are written
 only when a person scored at least one dimension; unscored dimensions stay
 `NOT_SCORED`. `--evaluate` runs the existing batch, so before/after comparisons
 use the same question and rubric and only the same reviewer's scores are
-compared. Coordinator/model comments are never imported as human ratings. It
+compared. The importer never generates scores; it converts the explicitly saved reviewer annotations. It
 refuses credential-looking content and paths outside the repo unless told
 otherwise.
 
+Provenance is operator-declared, with a conservative `test-synthetic` default. Declare `observed-live` only for actual
+production answers; use `synthetic-qa` for UI simulations. Content hashes establish internal consistency, not provider
+origin. See `human-review-import.md` for pairing, provenance and import refusal rules.
+
 ## Core-claim findings (shared UI)
 
-If a cross-review report carries the optional `claimFindings` (≤6 per report:
+If a cross-review report carries the optional `claimFindings` (≤3 per report, ≤6 including evidence findings:
 `{targetExpertId, target:{kind:'summary'|'assumption'|'nextAction', index, quote},
 verdict, issue, rationale}`), the console checks the shape and shows them under
 **Core-claim checks**; a malformed list is dropped for that report with a notice,
 leaving evidence verdicts intact. The author-response button also opens when a
 `supported` evidence verdict carries claim support `partial`, `contradicted` or
-`insufficient`, or a core finding is `challenged`/`insufficient`. The server
-author-response planner on this base still accepts only challenged/insufficient
-evidence findings; it needs the sibling server change before those new cases can
-be planned.
+`insufficient`, or a core finding is `challenged`/`insufficient`. The server planner and console both support those
+cases, retaining the ordinary verdict and the source reading separately. Core quotes must occur in the named field;
+the server rechecks the parent authorization and exact target before preparing a new child project.
 
 ## Limits
 
 - Same-person, same-model, non-blind judgments; no inter-rater agreement.
-- No package script was added (package.json is coordinator-owned); run tests with
-  `node test/cloudbite-v5-human-review.mjs` and
-  `node test/cloudbite-v5-human-review-ui.mjs`.
+- Run `npm run test:cloudbite:v5` for the focused integration regressions. Synthetic QA scores are test data, not a
+  completed human quality evaluation of the revised model prompts.

@@ -412,7 +412,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .cb-hr-issue input[type=checkbox] { accent-color: var(--blue); }
 .cb-hr-issuebox input[type=text] { font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); padding: 7px 10px; margin-left: 24px; max-width: calc(100% - 24px); }
 .cb-hr-hash { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-.cb-hr-saved { border-left: 3px solid var(--blue); padding: 4px 0 4px 12px; margin: 8px 0; }
+.cb-hr-saved { border-top: 1px solid var(--line); padding: 8px 0; margin: 8px 0; }
 .cb-hr-scores, .cb-hr-issues { list-style: none; padding: 0; margin: 6px 0; display: grid; gap: 4px; max-width: 65ch; }
 .cb-hr-scores li { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding: 4px 0; }
 @media (max-width: 560px) { .cb-hr-grid { grid-template-columns: minmax(0, 1fr); } }

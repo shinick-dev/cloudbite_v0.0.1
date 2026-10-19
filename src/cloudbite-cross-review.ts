@@ -123,7 +123,7 @@ export function reviewPlan(completed: CompletedOpinion[], catalogue: readonly Ex
     reviewers: reviewers.map((r) => r.expertId), assignments,
     coverage: { completedOpinions: completed.length, assignedOpinions: assigned.size, unassigned, reviewers: reviewers.length, maxReviewers: CB_CROSS_REVIEW_MAX_REVIEWERS, maxPeersPerReviewer: CB_CROSS_REVIEW_MAX_PEERS },
     disclosure: `Selective cross-review: ${reviewers.length} reviewer(s), at most ${CB_CROSS_REVIEW_MAX_PEERS} peers each. ${assigned.size} of ${completed.length} completed opinions were assigned to a reviewer`
-      + (unassigned.length ? `; ${unassigned.length} were not reviewed.` : '.') + ' A reviewer judges only the evidence items it names; this is not a review of every opinion or claim, and not a verification.',
+      + (unassigned.length ? `; ${unassigned.length} were not reviewed.` : '.') + ' A reviewer judges only the named evidence items and supplied core-claim targets; this is not a review of every opinion or claim, and not a verification.',
   };
 }
 

@@ -76,23 +76,18 @@ the field bounds, 6 documents, 3 full reports, packets, provenance) gets a small
 truncation, instead of overflowing. Ordinary 5-10 role projects keep the 3 KiB per-expert cap and an identical expert
 section; prompts without annotations are byte-identical to the pre-repair builder (`test/cloudbite-v5-memo-bound.mjs`).
 
-## Known limits (integration owned elsewhere)
+## Console and limits
 
-- `client/cloudbite-console.ts` reads `AuthorResponseFinding.evidenceIndex/evidenceText` (lines 2350, 5281, 5283):
-  with the union type, `tsc -p tsconfig.client.json` reports 3 TS2339 errors until it narrows on `kind !== 'core-claim'`.
-- The browser normalizer in `src/cloudbite-page.ts` (`normalizeAuthorPlan`) rejects the whole plan when a finding
-  has `verdict: 'supported'` or no integer `evidenceIndex`; it must accept the new finding shapes to render them.
-- `MemoCoverage` gained optional `sourceAssessments` / `coreClaims`; the contract mirror does not list them yet
-  (still mutually assignable); the UI does not render them yet.
-- Stored readings are shape-checked, not re-verified against the packet; a well-formed forged reading inside the
-  caller's own history is accepted as a reading (never as truth).
-
-**Console (client repair).** `normalizeAuthorPlan` now reads the server's exact leaf shapes: an evidence finding keeps
+`normalizeAuthorPlan` reads the server's leaf shapes: an evidence finding keeps
 its ordinary verdict (`supported` only beside a non-supported, well-formed `sourceAssessment`, with `eligibleBy` /
 `sourceConflict` re-derived and required to match) and `kind: 'core-claim'` findings keep target kind/index/quote/
-`textSha256`, `targetText` and issue; any fabricated, foreign or stale finding makes the whole plan "unreadable" (no
-text or index is invented). The child view and the Markdown report show both readings (EN/KO), the exact quotes and
+`textSha256`, `targetText` and issue. Malformed shapes are unreadable; the server validates role authority and current
+target text before issuing the plan. No text or index is invented. The child view and Markdown report show both readings (EN/KO), the exact quotes and
 the "model reading, not verification" note. Core-claim checks are read only within the server bounds (≤3 per report,
 ≤6 with evidence findings; otherwise only the core part is disclosed as unreadable), and the "ask authors" button
 requires the quote to occur in the named summary/assumption/next-action slot (the server re-checks).
 Test: `node test/cloudbite-v5-author-plan-ui.mjs` (server-built plans, fake DOM).
+
+The stored memo coverage includes source/core counts and omissions; the console does not yet render that entire
+coverage table. Stored source readings are shape-checked by downstream consumers; the original review packet is not
+stored for rechecking quotations there. These are model readings, never truth or a source-authenticity guarantee.
