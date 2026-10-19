@@ -15,7 +15,8 @@ import { build } from 'esbuild';
 
 const tmp = mkdtempSync(join(tmpdir(), 'cloudbite-backend-v3-'));
 const built = await build({ stdin: { contents: `export { default, CloudbiteProject, CloudbiteAccess, CloudbiteHistory } from './src/index.ts'; export { CLOUDBITE_EXPERTS, phaseOnePack } from './src/cloudbite-personas.ts';
-export { REVIEW_ROLE_IDS } from './src/cloudbite-knowledge.ts'; export { CB_MEMO_MAX_TOKENS } from './src/cloudbite-memo.ts'; export { CB_ARTIFACT_FILES } from './src/cloudbite-config.ts';
+export { REVIEW_ROLE_IDS } from './src/cloudbite-knowledge.ts'; export { CB_MEMO_MAX_TOKENS, CB_MEMO_STALE } from './src/cloudbite-memo.ts'; export { CB_ARTIFACT_FILES } from './src/cloudbite-config.ts';
+export { CB_WORKSPACE_LEDGER } from './src/cloudbite-project.ts'; export { buildProvenanceLedger } from './src/cloudbite-provenance.ts'; export { CB_CROSS_REVIEW_STALE } from './src/cloudbite-cross-review.ts';
 export { validateCollectedAuthorResponse, verifyAuthorResponsePlan } from './src/cloudbite-author-response.ts';`, resolveDir: process.cwd(), loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'esm', loader: { '.ps1': 'text' }, plugins: [{ name: 'cf', setup(b) {
     b.onResolve({ filter: /^cloudflare:workers$/ }, () => ({ path: 'cf', namespace: 'stub' }));
@@ -95,7 +96,7 @@ function world() {
 async function call(w, method, path, { headers = {}, body, raw } = {}) {
   const r = await M.default.fetch(new Request(BASE + path, { method, headers: { ...(method !== 'GET' ? { origin: BASE, 'content-type': 'application/json' } : {}), ...headers }, ...(body !== undefined || raw !== undefined ? { body: raw ?? JSON.stringify(body) } : {}) }), w.env, { waitUntil() {} });
   const text = await r.text(); let data; try { data = JSON.parse(text); } catch {}
-  return { status: r.status, data, text };
+  return { status: r.status, data, text, headers: r.headers };
 }
 
 const ROLES = M.CLOUDBITE_EXPERTS.filter((e) => M.phaseOnePack(e.id) && !M.REVIEW_ROLE_IDS.has(e.id)).slice(0, 3);
@@ -117,6 +118,15 @@ const memo = (w, x) => call(w, 'POST', `/api/cloudbite/projects/${x.id}/memo`, {
 const read = (w, x) => call(w, 'GET', '/api/cloudbite/projects/' + x.id, { headers: x.auth });
 const visitorHistory = () => { const token = 'cbh_' + randomBytes(32).toString('hex'); return { headers: { cookie: `__Host-cb-history=${token}` }, actor: 'v_' + hash(token) }; };
 const snap = (w, id) => JSON.stringify([...w.store(id).m.entries()]);
+/** An approved visitor access session (the backend-v2 shape). */
+async function visitor(w) {
+  const r = await call(w, 'POST', '/api/cloudbite/access/requests', { body: { name: 'Visitor', purpose: 'try Cloudbite' }, headers: { 'cf-connecting-ip': '203.0.113.' + Math.floor(Math.random() * 250) } });
+  assert.equal(r.status, 201, r.text);
+  const v = { cookie: r.headers.get('set-cookie').split(';')[0], id: r.data.request.id };
+  assert.equal((await call(w, 'POST', `/api/cloudbite/access/requests/${v.id}/approve`, { body: {}, headers: OWNER })).status, 200);
+  return v;
+}
+const memoCalls = () => N.calls.filter((c) => c.kind === 'memo');
 
 /** Live project via the real API, then seeded as finished with stored report/extra artifacts (no sandbox, no alarm). */
 async function finished(w, { b = brief(), artifacts = (id) => ({ 'out/report.md': `# Report of ${id}\nARTIFACT-TEXT-${id}\n` }) } = {}) {
@@ -243,11 +253,95 @@ await test('carry: only exact active adoptions reach an authorized follow-up; ot
   const files = w.obj(c.data.project.id).workspace(def(e.run.expertId), p.brief, e.run.assignment, round);
   const prov = files.find((f) => f.path === 'evidence/provenance.txt').content;
   assert.ok(prov.includes(chosen.text), 'workspace shows the adopted text'); assert.ok(!prov.includes(other.text), 'workspace omits the unadopted proposal');
+  // The child's own brief is labelled as the current round, never as the parent (the parent arrives only as carried adoptions).
+  const ledgerAs = (label) => M.buildProvenanceLedger(label, p.brief, [], { carried: round.adoptedClaims }).snapshot;
+  assert.ok(prov.includes(ledgerAs(M.CB_WORKSPACE_LEDGER)), 'workspace ledger is the current round'); assert.ok(!prov.includes(ledgerAs(parent.id)), 'not labelled as the parent');
   // Corrupt parent state: nothing is carried (fail closed), the follow-up itself still works.
   const parent2 = await finished(w);
   w.store(parent2.id).m.set('provenance', { garbage: true });
   const c2 = await create(w, brief({ revision: { parentId: parent2.id, changeSummary: 'Again.' } }));
   assert.equal(c2.status, 201, c2.text); assert.deepEqual(w.store(c2.data.project.id).m.get('round').adoptedClaims, []);
+});
+
+// ── memo start vs adoption, stale attempts vs adoption, parent ownership ──
+await test('memo start race: an adoption committed between the memo load and its claim answers 409 with no claim, budget or call; an explicit retry includes it', async () => {
+  const w = world(), x = await finished(w), s = w.store(x.id);
+  N.memoIds = x.created.brief.expertIds;
+  const { ledger } = (await history(w, x.id)).data.project.provenance;
+  const c = ledger.claims.find((k) => k.origin === 'generated-opinion' && k.text.endsWith(THRESHOLD));
+  const budgetBefore = JSON.stringify(s.m.get('budget'));
+  // One-shot gate: when the memo hashes its prompt snapshot (built from the pre-claim load, with provenance), adopt over HTTP first.
+  const subtle = globalThis.crypto.subtle, digest = subtle.digest.bind(subtle);
+  let armed = true, adopted;
+  subtle.digest = async (alg, data) => {
+    if (armed && new TextDecoder().decode(data).includes('"provenance":')) { armed = false; adopted = await adopt(w, x.id, { claimId: c.id, text: c.text, snapshot: ledger.snapshot }); }
+    return digest(alg, data);
+  };
+  let r;
+  try { r = await memo(w, x); } finally { delete subtle.digest; }
+  assert.ok(adopted, 'the gate fired between load and claim'); assert.equal(adopted.status, 200, adopted.text);
+  assert.equal(r.status, 409, r.text); assert.match(r.data.error, /changed/);
+  assert.equal(s.m.has('memo'), false, 'no claim or attempt recorded'); assert.equal(JSON.stringify(s.m.get('budget')), budgetBefore, 'nothing reserved');
+  assert.equal(memoCalls().length, 0, 'no provider call');
+  const again = await memo(w, x);
+  assert.equal(again.status, 200, again.text); assert.equal(again.data.memo.status, 'completed', JSON.stringify(again.data.memo));
+  assert.equal(memoCalls().length, 1);
+  assert.ok(memoCalls()[0].req.messages.map((m) => m.content).join('\n').includes(c.text), 'the explicit retry carries the adopted text');
+  assert.equal((await memo(w, x)).data.memo.status, 'completed'); assert.equal(memoCalls().length, 1, 'still one paid attempt');
+});
+
+await test('adoption after a stale memo/review: settled failed atomically (no retry, no refund); a fresh running one still 409; the late paid result cannot overwrite', async () => {
+  const w = world(), x = await finished(w), s = w.store(x.id);
+  N.memoIds = x.created.brief.expertIds;
+  const { ledger } = (await history(w, x.id)).data.project.provenance;
+  const c = ledger.claims.find((k) => k.origin === 'generated-opinion');
+  const req = { claimId: c.id, text: c.text, snapshot: ledger.snapshot };
+  const orig = globalThis.fetch;
+  let release, entered;
+  const gate = new Promise((r) => { release = r; }), inFlight = new Promise((r) => { entered = r; });
+  globalThis.fetch = async (u, init) => { entered(); await gate; return orig(u, init); };
+  try {
+    const pending = memo(w, x);
+    await inFlight;
+    const claimed = JSON.stringify(s.m.get('budget'));
+    assert.equal(s.m.get('memo').memo.status, 'running');
+    s.m.set('crossreview', { review: { status: 'running', startedAt: Date.now(), reports: [] }, claim: 'r1', reviewers: [] });
+    const blocked = await adopt(w, x.id, req);
+    assert.equal(blocked.status, 409, 'a fresh running memo/review still blocks: ' + blocked.text);
+    offset = Math.max(M.CB_MEMO_STALE, M.CB_CROSS_REVIEW_STALE) + 1000;
+    const ok = await adopt(w, x.id, req);
+    assert.equal(ok.status, 200, ok.text);
+    assert.equal(s.m.get('memo').memo.status, 'failed'); assert.match(s.m.get('memo').memo.error, /lost/);
+    assert.equal(s.m.get('crossreview').review.status, 'failed'); assert.match(s.m.get('crossreview').review.error, /not retried/);
+    assert.equal(s.m.get('provenance').adoptions.length, 1);
+    assert.equal(JSON.stringify(s.m.get('budget')), claimed, 'no refund or reset');
+    release();
+    const late = await pending;
+    assert.equal(late.status, 409, late.text);
+    assert.equal(s.m.get('memo').memo.status, 'failed', 'the late result did not overwrite the settled attempt');
+    assert.equal(JSON.stringify(s.m.get('budget')), claimed);
+  } finally { release(); globalThis.fetch = orig; }
+  assert.equal(memoCalls().length, 1, 'one paid attempt');
+  assert.equal((await memo(w, x)).data.memo.status, 'failed', 'never rerun'); assert.equal(memoCalls().length, 1);
+});
+
+await test('follow-up parent: a foreign visitor gets 404; the owner may open its own child from a readable visitor parent, carrying that user\'s adoption as a reference', async () => {
+  const w = world(), parent = await finished(w), s = w.store(parent.id);
+  const v = visitorHistory();
+  s.m.set('project', { ...s.m.get('project'), history: { ...s.m.get('project').history, actor: v.actor } });
+  const { ledger } = (await history(w, parent.id)).data.project.provenance;
+  const c = ledger.claims.find((k) => k.origin === 'generated-opinion');
+  assert.equal((await adopt(w, parent.id, { claimId: c.id, text: c.text, snapshot: ledger.snapshot }, v.headers)).status, 200);
+  const before = snap(w, parent.id);
+  const other = await visitor(w), stored = w.stored().length;
+  const foreign = await create(w, brief({ mode: 'demo', revision: { parentId: parent.id, changeSummary: 'not mine' } }), { cookie: other.cookie });
+  assert.equal(foreign.status, 404, foreign.text); assert.equal(w.stored().length, stored, 'no child for a foreign visitor');
+  const child = await create(w, brief({ revision: { parentId: parent.id, changeSummary: 'Owner follow-up.' } }));
+  assert.equal(child.status, 201, child.text);
+  const carried = w.store(child.data.project.id).m.get('round').adoptedClaims;
+  assert.deepEqual(carried.map((a) => [a.projectId, a.claimId, a.actor]), [[parent.id, c.id, v.actor]], 'original actor kept, not re-attributed to the owner');
+  assert.equal(snap(w, parent.id), before, 'the visitor\'s parent is untouched');
+  assert.equal((await adopt(w, parent.id, { claimId: c.id, text: c.text, snapshot: ledger.snapshot })).status, 403, 'the owner still cannot adopt for that user');
 });
 
 // ── cross-review reads stored artifact text ──

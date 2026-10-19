@@ -155,7 +155,11 @@ export async function cbHash(s: string) {
 }
 /** Deterministic project id for a create requestId: a retried/lost create maps to the same project. */
 export async function cbProjectId(requestId: string) { return 'cb' + (await cbHash(`cloudbite-project|${requestId}`)).slice(0, 32); }
+/** Ledger label of a follow-up workspace's own brief: the current round, never the parent (whose claims arrive only as carried adoptions). */
+export const CB_WORKSPACE_LEDGER = 'current-round';
 const clean = (s: string, max: number) => s.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, ' ').slice(0, max);
+
+const CB_REVIEW_LOST = 'cross-review did not finish in time; it is not retried (one paid attempt per project)';
 
 export class CloudbiteProject extends DurableObject<Env> {
   // Actor-specific router instances use the existing binding, not project records or sandbox capacity.
@@ -174,7 +178,7 @@ export class CloudbiteProject extends DurableObject<Env> {
       ...previousRoundWorkspaceFiles(round, expert.id),
       ...(round.authorResponse ? authorResponseWorkspaceFiles(round.authorResponse, expert.id) : []),
       { path: 'evidence/provenance.txt', content: renderProvenanceWorkspace(
-        buildProvenanceLedger(round.parentId, brief, [], { carried: round.adoptedClaims }), emptyProvenanceState(round.parentId), defaultResponseLanguage(brief), 6 * 1024) },
+        buildProvenanceLedger(CB_WORKSPACE_LEDGER, brief, [], { carried: round.adoptedClaims }), emptyProvenanceState(CB_WORKSPACE_LEDGER), defaultResponseLanguage(brief), 6 * 1024) },
     ] : [];
     if (!round || !extra.length) return files;
     const rules = '\n\n## Previous round\n\n' + [...previousRoundWorkOrderRules(round),
@@ -257,7 +261,14 @@ export class CloudbiteProject extends DurableObject<Env> {
       if (p.brief.mode !== 'live' || !TERMINAL_PROJECT.has(p.status) || p.status === 'cancelled') return fail(409, 'adoption needs a finished live project');
       const m = await tx.get<unknown>([...p.runs.map(r => `expert:${r}`), 'provenance', 'round', 'memo', CROSS_REVIEW]);
       const memo = m.get('memo') as MemoRecord | undefined, cr = m.get(CROSS_REVIEW) as CrossReviewRecord | undefined;
-      if (memo?.memo.status === 'running' || cr?.review.status === 'running') return fail(409, 'wait for the running review or memo before adopting a claim');
+      // A live attempt blocks adoption (it would change that attempt's inputs). A stale one is closed as failed here, in the
+      // same transaction, exactly as the token routes would (never retried, nothing refunded); its late result is discarded by its claim guard.
+      const memoLive = memo?.memo.status === 'running' && settleStaleMemo(memo.memo, now) === memo.memo;
+      const reviewLive = cr?.review.status === 'running' && cr.review.startedAt + CB_CROSS_REVIEW_STALE > now;
+      if (memoLive || reviewLive) return fail(409, 'wait for the running review or memo before adopting a claim');
+      const settled: Record<string, unknown> = {};
+      if (memo?.memo.status === 'running') settled.memo = { ...memo, memo: settleStaleMemo(memo.memo, now) } satisfies MemoRecord;
+      if (cr?.review.status === 'running') settled[CROSS_REVIEW] = { ...cr, review: { ...cr.review, status: 'failed', completedAt: now, error: CB_REVIEW_LOST } } satisfies CrossReviewRecord;
       const saved = m.get('provenance');
       const state = saved === undefined ? emptyProvenanceState(p.id) : parseProvenanceState(saved, p.id);
       if (!state) return fail(409, 'the stored adoption state is invalid');
@@ -267,7 +278,7 @@ export class CloudbiteProject extends DurableObject<Env> {
       const adoption = validateAdoption(ledger, state, raw, { projectId: p.id, actor, at: now });
       if ('invalid' in adoption) return fail(409, adoption.invalid);
       p.updatedAt = now; p.history.revision++; p.history.nextAt = 0;
-      await tx.put({ project: p, provenance: applyAdoption(state, adoption) });
+      await tx.put({ ...settled, project: p, provenance: applyAdoption(state, adoption) });
       return null;
     });
     if (result) return result;
@@ -732,7 +743,7 @@ export class CloudbiteProject extends DurableObject<Env> {
       await this.ctx.storage.transaction(async (tx) => {
         const [p, cur] = await Promise.all([tx.get<ProjectRecord>('project'), tx.get<CrossReviewRecord>(CROSS_REVIEW)]);
         if (!p || p.history?.deleted || !cur || cur.claim !== cr.claim || cur.review.status !== 'running') return;
-        cur.review = { ...cur.review, status: 'failed', completedAt: now, error: 'cross-review did not finish in time; it is not retried (one paid attempt per project)' };
+        cur.review = { ...cur.review, status: 'failed', completedAt: now, error: CB_REVIEW_LOST };
         p.updatedAt = now;
         if (p.history) { p.history.revision++; p.history.nextAt = 0; }
         await tx.put({ project: p, [CROSS_REVIEW]: cur });
@@ -791,6 +802,9 @@ export class CloudbiteProject extends DurableObject<Env> {
       // A live (non-stale) cross-review finishing during the memo would change its inputs and discard this paid call: never overlap.
       const cr = await tx.get<CrossReviewRecord>(CROSS_REVIEW);
       if (cr?.review.status === 'running' && cr.review.startedAt + CB_CROSS_REVIEW_STALE > now) return fail(409, 'a cross-review is running for this project; request the decision memo after it finishes');
+      // The prompt was built from a load before this transaction (with awaits in between): an adoption or other input change
+      // committed meanwhile makes it stale. Refuse before any claim, reservation or call; the user may request the memo again.
+      if (!(await this.memoCurrentIn(tx, p, cr, memoPrompt.snapshot))) return fail(409, 'the memo inputs changed while it was starting (for example a claim was adopted); nothing was charged, request the memo again');
       const usage = await this.ledgerIn(tx, p);
       const r = usage ? reserveBudget(usage, { phase: 'memo', seq: usage.memo + 1 }) : null;
       if (!r?.ok) return fail(429, r ? r.message : budgetDenialMessage('invalid-usage'));
@@ -808,9 +822,7 @@ export class CloudbiteProject extends DurableObject<Env> {
       if (!live(p, after)) return fail(410, 'the project was deleted or expired during the memo; the result was discarded');
       if (!cur || cur.claim !== claim || cur.memo.status !== 'running') return fail(409, 'this memo attempt is no longer current; the result was discarded');
       // Inputs changed meanwhile (e.g. a cross-review finished): this attempt answered a different question.
-      const experts = await tx.get<ExpertRecord>(p.runs.map((r) => `expert:${r}`));
-      const fresh = { p, experts: p.runs.map((r) => experts.get(`expert:${r}`)!).filter(Boolean), cr, packets: s.packets, round: s.round, provenance: s.provenance };
-      const stable = isMemoSnapshotCurrent(memoPrompt.snapshot, p.brief, this.completed(fresh), this.memoOptions(fresh));
+      const stable = await this.memoCurrentIn(tx, p, cr, memoPrompt.snapshot);
       cur.memo = !stable ? failedMemo(cur.memo, 'memo inputs changed during the attempt; it is not retried (one paid attempt per project)', after)
         : 'invalid' in parsed ? failedMemo(cur.memo, clean(parsed.invalid, 300), after) : completedMemo(cur.memo, parsed, after);
       p.updatedAt = after;
@@ -820,6 +832,14 @@ export class CloudbiteProject extends DurableObject<Env> {
     });
     if (written) return written;
     return this.afterMemo();
+  }
+
+  /** Whether a memo snapshot still matches the inputs read inside this transaction (opinions, review, packets, round, adoptions). */
+  private async memoCurrentIn(tx: DurableObjectTransaction, p: ProjectRecord, cr: CrossReviewRecord | undefined, snapshot: string): Promise<boolean> {
+    const m = await tx.get<unknown>([...p.runs.map((r) => `expert:${r}`), 'packets', 'round', 'provenance']);
+    const fresh: Loaded = { p, experts: p.runs.map((r) => m.get(`expert:${r}`) as ExpertRecord).filter(Boolean), cr,
+      packets: m.get('packets') as EvidencePacket[] | undefined, round: m.get('round') as ProjectPreviousRound | undefined, provenance: m.get('provenance') };
+    return isMemoSnapshotCurrent(snapshot, p.brief, this.completed(fresh), this.memoOptions(fresh));
   }
 
   private async afterMemo(): Promise<ProjectRun | CbFail> {

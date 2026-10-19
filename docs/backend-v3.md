@@ -11,17 +11,34 @@ DOs over memory storage, fake Nosana only, no sandbox).
 - Body is exactly `{ claimId, text, snapshot }`; actor and time are the server's (`validateAdoption` refuses any other key).
 - Only the project's own history actor adopts. An owner session that can read another browser's project gets 403:
   adopting is the user's statement, like feedback, and must not be made on that user's behalf.
-- Refused (409): unfinished, cancelled or demo project; a running cross-review or memo; stale snapshot; text not
+- Refused (409): unfinished, cancelled or demo project; a live (non-stale) running cross-review or memo; stale snapshot; text not
   identical; user statements, carried or truncated claims; duplicates (concurrent identical adoptions serialize in the
   DO transaction, one wins). A stored state that does not parse for this project fails closed (409) and is not overwritten.
 - Adoption changes only the `provenance` key and the history revision: no budget change, no model call, the six-key
   opinions and any finished memo stay byte-identical.
+- A stale running memo (`CB_MEMO_STALE`) or cross-review (`CB_CROSS_REVIEW_STALE`) does not block adoption forever: the
+  adopt transaction closes it as failed exactly like the token routes (never retried, nothing refunded, the budget
+  reservation stays), so a history-only client is not stuck. A late paid result is then discarded by its claim guard.
+
+## Memo start vs adoption
+
+The memo prompt is built from a load before its claim transaction. The claim transaction re-reads opinions, cross-review,
+packets, `round` and `provenance` and recomputes the snapshot: if anything changed (for example an adoption committed
+meanwhile) it answers 409 before any claim, reservation or provider call, and the user may request the memo again. The
+commit transaction checks the snapshot against the same transaction-read inputs (never the pre-claim load), so an attempt
+whose inputs changed during the call is recorded as failed (one paid attempt, no retry).
 
 ## Carry into a follow-up
 
 `authorizeRoundParent` reads the parent through `historyRead` and carries `nextRoundCarry` (exact active adoptions only).
 Unadopted generated thresholds are never carried; they stay proposals. A corrupt parent state carries nothing.
-The child workspace gets `evidence/provenance.txt` (untrusted data) with the carried text.
+The child workspace gets `evidence/provenance.txt` (untrusted data) with the carried text; its ledger is labelled
+`current-round` (`CB_WORKSPACE_LEDGER`), never as the parent project, whose claims arrive only as carried adoptions.
+
+Parent ownership: a visitor's follow-up parent must be that visitor's own project (another visitor's parent is 404).
+The owner session reads every project, so — as for normal revisions before v3 — the owner may explicitly open its own
+child from any readable parent, including a visitor's. Carried adoptions keep their original actor and time as a
+reference (never re-attributed to the owner); the owner still cannot adopt on the visitor's project (403).
 
 ## Cross-review reads stored artifacts
 
@@ -36,7 +53,8 @@ Request: a normal create/preview with `revision: { parentId, changeSummary, revi
 preview and create; part of the routing and brief hashes).
 
 - Live child only (400 otherwise, before the parent is read).
-- Parent bound by this request's own history actor (`historyRead`); a foreign/deleted/expired parent is 404.
+- Parent bound by this request's own history actor (`historyRead`); a foreign visitor's, deleted or expired parent is
+  404 (the owner-read-all exception above applies to the owner session).
 - Parent cross-review must be completed and its `snapshotHash` equal the requested one (409 stale).
 - `expertIds` must be affected completed authors (`buildAuthorResponsePlan`); the plan is built by the API, never from
   the body (unknown `revision.*` or top-level `round` fields are 400).
