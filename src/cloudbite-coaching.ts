@@ -19,3 +19,5 @@ export interface ProjectCoaching {
   revisedProject: { objective: MemoClaim; scope: MemoClaim; nextMilestone: MemoClaim };
   questions: MemoClaim[];
 }
+/** Fixed standing of every coaching proposal: model-generated advice, not adopted by the user, not verified. */
+export const CB_COACHING_STANDING = 'generated-proposal-not-adopted' as const;
