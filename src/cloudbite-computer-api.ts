@@ -127,9 +127,9 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
   const computer=env.CLOUDBITE_COMPUTER.get(env.CLOUDBITE_COMPUTER.idFromName('owner'));
   const tag=await computerOwnerTag();
   if(req.method==='GET' && op==='snapshots'){const result=await computer.computerSnapshots(tag);return json(result,'status' in result&&typeof result.status==='number'?result.status:200);}
-  if(req.method==='GET' && op==='latency/ping')return json(latencyPing());
+  if(req.method==='GET' && op==='latency/ping'){const result=latencyPing();return json(result.body,result.status);}
   if(req.method==='GET' && op==='latency/backend'){
-    try{return json(await latencyBackend(env,computer,tag));}catch{return error('latency_unavailable',503);}
+    try{const result=await latencyBackend(env,computer,tag);return json(result.body,result.status);}catch{return error('latency_unavailable',503);}
   }
   if(req.method==='GET' && op==='costs'){
     try{return json(await computerCosts(env));}catch{return error('costs_unavailable',503);}
