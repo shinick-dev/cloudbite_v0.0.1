@@ -36,7 +36,7 @@ export interface ClaimSupportSlot {
 }
 export interface ClaimSupportPassage {
   passageId: string;
-  kind: 'document' | 'workspace' | 'curated-card';
+  kind: 'document' | 'workspace' | 'curated-card' | 'original-corpus';
   textOrigin: ClaimSupportTextOrigin;
   /** doc:ID, source:PROJECT.md / source:DECISION.md, or card:ID for a curated card. */
   ref: string;
@@ -192,6 +192,10 @@ function packetWithSlots(brief: ProjectBrief, all: readonly SlotChoice[], k: num
         // Knowledge availability comes from the peer's bound packet only; without one the retrieval is unverified.
         const pr = packet?.references.find((y) => y.evidenceIndex === x.i && y.kind === 'knowledge' && y.id === r.id);
         if (pr) availability = pr.availability;
+        if (pr?.availability === 'original-corpus-text') {
+          for (const c of packet!.originals?.filter(c => c.sourceId === r.id) ?? [])
+            if (c.text.trim()) keys.push(add('original:' + x.peer.expertId + ':' + c.chunkId, { kind: 'original-corpus', textOrigin: 'imported-original-excerpt', source: c.text, preTruncated: false }, ref));
+        }
         if (pr?.availability === 'curated-card-text' && packet!.binding === 'bound') {
           const canonical = canonicalSource(x.peer.expertId, r.id);
           for (const c of packet!.cards.filter((c) => c.sourceIds.some((s) => canonicalSource(x.peer.expertId, s) === canonical)))
@@ -206,7 +210,7 @@ function packetWithSlots(brief: ProjectBrief, all: readonly SlotChoice[], k: num
   // Passage IDs are assigned in first-citation order; text is cut to fit the shared byte budget.
   const ordered = [...candidates.values()];
   const kept = ordered.slice(0, L.passages);
-  const publicRef = (key: string) => boundRef(key.startsWith('card:') ? 'card:' + key.split(':')[2] : key);
+  const publicRef = (key: string) => boundRef(key.startsWith('card:') ? 'card:' + key.split(':')[2] : key.startsWith('original:') ? 'chunk:' + key.split(':')[2] : key);
   type OmittedPassage = ClaimSupportContext['omitted']['passages'][number];
   const limitCut: OmittedPassage[] = ordered.slice(L.passages).map((c) => ({ ref: publicRef(c.key), reason: 'passage-limit' }));
   const budgetCut = (c: Candidate): OmittedPassage => ({ ref: publicRef(c.key), reason: 'byte-budget' });

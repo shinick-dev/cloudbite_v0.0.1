@@ -150,13 +150,13 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
   const ns = env.CLOUDBITE;
 
   // ── sandbox runner callbacks: workers.dev gateway host, per-expert capability only ──
-  const w = path.match(/^\/p\/_cloudbite\/worker\/([^/]+)\/([^/]+)\/(inference|activity|complete)$/);
+  const w = path.match(/^\/p\/_cloudbite\/worker\/([^/]+)\/([^/]+)\/(inference|activity|complete|corpus)$/);
   if (path.startsWith('/p/_cloudbite/')) {
     if (!w || !PROJECT_ID.test(w[1]) || !RUN_ID.test(w[2])) return json({ error: 'not found' }, 404);
     if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
     if (req.headers.get('origin')) return json({ error: 'bad origin' }, 403); // runner calls are never browser requests
     if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);
-    const max = w[3] === 'inference' ? CB_INFERENCE_BODY_MAX : w[3] === 'activity' ? CB_ACTIVITY_BODY_MAX : CB_COMPLETE_BODY_MAX;
+    const max = w[3] === 'corpus' ? 8192 : w[3] === 'inference' ? CB_INFERENCE_BODY_MAX : w[3] === 'activity' ? CB_ACTIVITY_BODY_MAX : CB_COMPLETE_BODY_MAX;
     const b = await readJson(req, max);
     if ('error' in b) return json({ error: b.error }, b.status);
     return result(json, await ns.getByName(w[1]).worker(w[2], bearer(req), w[3], b.ok));

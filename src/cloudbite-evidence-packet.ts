@@ -6,6 +6,7 @@
 // card→source resolution that matches the pack). The audit's own copies, and any claim such as sourcePagesFetched,
 // are ignored. Source metadata (title/URL/license) is not original page text; original external source text is
 // never fetched by role search, so every knowledge reference carries originalText: 'not-fetched'.
+import { corpusEvidence, type CorpusReceipt } from './cloudbite-corpus-evidence';
 import type { ExpertOpinion, ProjectBrief } from './cloudbite-contract';
 import { sha256Hex } from './cloudbite-knowledge';
 import { phaseOnePack } from './cloudbite-personas';
@@ -28,6 +29,8 @@ export type TextAvailability =
   | 'curated-card-text-omitted'  // bound and observed, but its card text was cut by the packet bounds
   | 'retrieval-unverified'       // ID is in the role catalogue but the retrieval could not be bound (no/legacy/stale/foreign/invalid audit)
   | 'not-retrieved'              // ID is in the role catalogue but the bound audit shows no retrieval: catalogue presence only
+  | 'original-corpus-text'       // exact licensed original excerpt, bound to a server-held search receipt
+  | 'original-corpus-text-omitted' // retrieved original excerpt omitted by packet bounds
   | 'unknown-id';                // not a supplied document, workspace file or source of this role
 
 export interface KnowledgePackLike {
@@ -36,8 +39,8 @@ export interface KnowledgePackLike {
   sources: ReadonlyArray<{ id: string; title: string; url: string; license: string; aliases: readonly string[]; checkStatus?: unknown; checkedAt?: unknown }>;
 }
 export interface EvidencePacketCard { id: string; term: string; summary: string; kind: string; sourceIds: string[]; provenance: string; retrievalReasons: string[]; truncated: boolean }
-export interface EvidencePacketSource { id: string; title: string; url: string; license: string; checkStatus: string; checkedAt: string; originalText: 'not-fetched' }
-export interface EvidencePacketReference { evidenceIndex: number; kind: 'document' | 'workspace' | 'knowledge'; id: string; availability: TextAvailability; originalText?: 'not-fetched' }
+export interface EvidencePacketSource { id: string; title: string; url: string; license: string; checkStatus: string; checkedAt: string; originalText: 'not-fetched' | 'stored-excerpt' }
+export interface EvidencePacketReference { evidenceIndex: number; kind: 'document' | 'workspace' | 'knowledge'; id: string; availability: TextAvailability; originalText?: 'not-fetched' | 'stored-excerpt' }
 export interface EvidencePacket {
   schema: typeof EVIDENCE_PACKET_SCHEMA;
   expertId: string;
@@ -50,7 +53,8 @@ export interface EvidencePacket {
   cards: EvidencePacketCard[];
   sources: EvidencePacketSource[];
   references: EvidencePacketReference[];
-  omitted: { cards: number; sources: number; references: number; observedIds: number; unidentifiedIds: number; truncatedSummaries: number };
+  originals?: Array<{ chunkId: string; sourceId: string; text: string; sha256: string; indexSha256: string; headingPath: string[] }>;
+  omitted: { cards: number; sources: number; references: number; observedIds: number; unidentifiedIds: number; truncatedSummaries: number; originalChunks?: number };
   /** Fixed: role search never fetches original source pages, whatever an audit claims. */
   originalSourceTextFetched: false;
   auditNotes: string[];
@@ -65,6 +69,8 @@ export interface EvidencePacketInput {
   audit?: unknown;
   /** Application-owned pack; defaults to the catalogue pack of expertId. null forces no-pack. */
   pack?: KnowledgePackLike | null;
+  /** Server-owned receipts only, never the runner audit or browser input. */
+  corpusReceipts?: readonly CorpusReceipt[];
 }
 
 const ID = /^[a-zA-Z0-9_-]{1,80}$/;
@@ -231,6 +237,11 @@ export function buildEvidencePacket(input: EvidencePacketInput, budget: number =
   const b = bind(input.expertId, pack, input.audit);
   const h = pack && pack.expertId === input.expertId ? packHashes(pack) : null;
   const allRefs = evidenceReferences(input.brief, input.opinion, b.binding === 'foreign' ? undefined : pack, b.binding, b.observedSources);
+  const originalEntries = input.corpusReceipts?.length ? corpusEvidence(input.expertId, input.corpusReceipts) : [];
+  const originalCited = new Set(allRefs.filter(r => r.kind === 'knowledge').map(r => r.id));
+  // Keep room for cited original evidence before filling the packet with uncited curated orientation cards.
+  const reserveOriginal = Math.min(Math.floor(max / 2), originalEntries.filter(e => originalCited.has(e.source.id)).slice(0, 2).reduce((n, e) => n + utf8(e.chunk.text) + 650, 0));
+  const curatedMax = max - reserveOriginal;
   const body: Omit<EvidencePacket, 'bytes' | 'sha256'> = {
     schema: EVIDENCE_PACKET_SCHEMA, expertId: input.expertId, binding: b.binding, bindingNote: b.note,
     pack: h && pack ? { version: pack.version, cardsSha256: h.cardsSha256, sourcesSha256: h.sourcesSha256 } : null,
@@ -261,11 +272,11 @@ export function buildEvidencePacket(input: EvidencePacketInput, budget: number =
         id: s.id, title: truncateUtf8(s.title, 200), url: truncateUtf8(s.url, 300), license: truncateUtf8(s.license, 120),
         checkStatus: typeof s.checkStatus === 'string' ? truncateUtf8(s.checkStatus, 20) : 'not-recorded', checkedAt: typeof s.checkedAt === 'string' ? truncateUtf8(s.checkedAt, 40) : '', originalText: 'not-fetched' }));
       body.cards.push(card); body.sources.push(...newSources);
-      if (sizeOf(body) > max) {
+      if (sizeOf(body) > curatedMax) {
         // Try a shorter summary before omitting the card entirely.
-        const over = sizeOf(body) - max, keep = utf8(card.summary) - over - 8;
+        const over = sizeOf(body) - curatedMax, keep = utf8(card.summary) - over - 8;
         if (keep >= EVIDENCE_PACKET_LIMITS.minTruncatedSummaryBytes) { card.summary = truncateUtf8(card.summary, keep); card.truncated = true; }
-        if (sizeOf(body) > max) { body.cards.pop(); body.sources.splice(body.sources.length - newSources.length); body.omitted.cards++; continue; }
+        if (sizeOf(body) > curatedMax) { body.cards.pop(); body.sources.splice(body.sources.length - newSources.length); body.omitted.cards++; continue; }
       }
       if (card.truncated) body.omitted.truncatedSummaries++;
       for (const s of newSources) sourceIds.add(s.id);
@@ -275,6 +286,36 @@ export function buildEvidencePacket(input: EvidencePacketInput, budget: number =
     // Re-derive availability now that the included card set is known (omitted text is reported, never implied).
     const final = evidenceReferences(input.brief, input.opinion, pack, b.binding, b.observedSources, included).slice(0, body.references.length);
     body.references.splice(0, body.references.length, ...final);
+  }
+  if (input.corpusReceipts?.length) {
+    const entries = originalEntries;
+    body.originals = [];
+    body.omitted.originalChunks = 0;
+    const observed = new Set(entries.map(e => e.source.id));
+    // Cited original sources first; snippets remain whole so the stored chunk SHA binds exact displayed text.
+    const cited = new Set(body.references.filter(r => r.kind === 'knowledge').map(r => r.id));
+    const ordered = [...entries.filter(e => cited.has(e.source.id)), ...entries.filter(e => !cited.has(e.source.id))];
+    for (const { chunk, source, indexSha256 } of ordered) {
+      const item = { chunkId: chunk.id, sourceId: source.id, text: chunk.text, sha256: chunk.sha256, indexSha256, headingPath: chunk.headingPath };
+      const src: EvidencePacketSource = { id: source.id, title: truncateUtf8(source.title, 200), url: truncateUtf8(source.url, 300), license: truncateUtf8(source.license, 120), checkStatus: 'imported-licensed', checkedAt: source.retrievedAt, originalText: 'stored-excerpt' };
+      const newSource = !body.sources.some(s => s.id === source.id);
+      body.originals.push(item);
+      if (newSource) body.sources.push(src);
+      if (sizeOf(body) > max - 128) { body.originals.pop(); if (newSource) body.sources.pop(); body.omitted.originalChunks++; }
+    }
+    for (const ref of body.references) if (ref.kind === 'knowledge' && observed.has(ref.id)) {
+      ref.availability = body.originals.some(c => c.sourceId === ref.id) ? 'original-corpus-text' : 'original-corpus-text-omitted';
+      ref.originalText = 'stored-excerpt';
+    }
+    // Availability annotations also consume bytes. Drop whole excerpts, then references, rather than claim missing text is present.
+    while (sizeOf(body) > max && body.originals.length) {
+      const cut = body.originals.pop()!; body.omitted.originalChunks++;
+      if (!body.originals.some(c => c.sourceId === cut.sourceId)) {
+        body.sources = body.sources.filter(s => !(s.id === cut.sourceId && s.originalText === 'stored-excerpt'));
+        for (const r of body.references) if (r.id === cut.sourceId && r.kind === 'knowledge') r.availability = 'original-corpus-text-omitted';
+      }
+    }
+    while (sizeOf(body) > max && body.references.length) body.references.pop();
   }
   body.omitted.references = allRefs.length - body.references.length;
   return sealed(body);

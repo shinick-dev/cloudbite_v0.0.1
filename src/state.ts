@@ -140,6 +140,7 @@ export interface Env extends ComputerEnv {
   CLOUDBITE_DAYTONA_TERTIARY_API_URL?: string;
   CLOUDBITE_DAYTONA_TERTIARY_SNAPSHOT?: string;  // organization-scoped; never inherited from another account
   CLOUDBITE_NOSANA_BASE_URL?: string;   // OpenAI 호환 …/v1
+  CLOUDBITE_EMBEDDING_API_KEY?: string; // Server-only corpus-query embeddings; never uploaded to sandboxes.
   CLOUDBITE_NOSANA_API_KEY?: string;    // Worker secret
   CLOUDBITE_NOSANA_MODEL?: string;
   TYPESAFE_API_KEY?: string;          // Cloudbite Jev router only; Worker secret, never sent to the browser

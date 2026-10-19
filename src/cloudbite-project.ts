@@ -28,6 +28,9 @@
 // Each expert is pinned to one Daytona account (primary/secondary/tertiary) at admission, before its first create; every later
 // call and cleanup for it uses that account only. Records without an account are legacy and resolve to primary.
 import { DurableObject } from 'cloudflare:workers';
+import { CORPUS } from './cloudbite-corpus.generated';
+import { searchCorpus } from './cloudbite-corpus-search';
+import { corpusReceipt, type CorpusReceipt } from './cloudbite-corpus-evidence';
 import type { Env } from './state';
 import type { CrossReviewReport, ExpertActivity, ExpertArtifact, ExpertAssignment, ExpertDefinition, ExpertRun, ProjectBrief, ProjectCrossReview, ProjectPreview, ProjectRun, ProjectStatus, ProjectUsage } from './cloudbite-contract';
 import type * as C from './cloudbite-contract';
@@ -94,6 +97,7 @@ interface Internal {
   sandboxId?: string; toolbox?: string;
   capHash?: string; capExp?: number;
   calls: number; inflightUntil?: number; posts: number;
+  corpusIndex?: string; corpusCalls?: number; corpusBusy?: { id: string; until: number };
   admittedAt?: number; deadline?: number; nextAt: number; doneSignal?: boolean;
   seq: number; failures: number;
   account?: CbAccountId; binding?: string; // pinned Daytona account + credential binding (absent = legacy primary)
@@ -387,6 +391,12 @@ export class CloudbiteProject extends DurableObject<Env> {
     if (isCbFail(plan)) return plan;
     const b = plan.budget, live = brief.mode === 'live';
     const warnings = [...b.notes];
+    if (live && brief.expertIds.some(id => CORPUS.sources.some(s => s.roles.includes(id)))) {
+      const ko = defaultResponseLanguage(brief) === 'ko';
+      warnings.push(ko
+        ? '\uc6d0\ubb38 \uac80\uc0c9: \ud574\ub2f9 \uc804\ubb38\uac00\ub2f9 \ucd5c\ub300 7\ud68c. \uc758\ubbf8 \uac80\uc0c9\uc740 \ucd5c\ub300 1,000\uc790\uc758 \uac80\uc0c9\uc5b4\ub97c OpenAI\ub85c \uc804\uc1a1\ud558\uba70 Nosana \ub2f5\ubcc0 \ud638\ucd9c\uacfc \ubcc4\ub3c4\uc785\ub2c8\ub2e4. \uc5f0\uacb0 \uc2e4\ud328 \uc2dc \ud0a4\uc6cc\ub4dc \uac80\uc0c9\uc73c\ub85c \uc804\ud658\ub429\ub2c8\ub2e4.'
+        : 'Original-reference search: at most 7 searches per covered expert. Semantic search sends up to 1,000 query characters to OpenAI, separately from Nosana answer calls. Unavailable embeddings fall back to keyword search.');
+    }
     if (!live) warnings.push('Demo mode: a simulated run; no sandbox or model call is made, so every live maximum is 0.');
     if (routing) warnings.push(`The cached Jev routing decision expires at ${new Date(routing.expiresAt).toISOString()}; create before then or route again.`);
     if (opts.round) warnings.push(`Follow-up of ${opts.round.parentId}: earlier opinions are untrusted reference data for the new roles, never fresh results.`);
@@ -613,7 +623,7 @@ export class CloudbiteProject extends DurableObject<Env> {
     });
     if (bad) return bad;
     // Delete the source artifact and retrieval-audit copies too; cleanup claims/owned sandbox IDs stay until provider cleanup settles.
-    const keys = [...(await this.ctx.storage.list({ prefix: 'artifact:' })).keys(), ...(await this.ctx.storage.list({ prefix: 'audit:' })).keys()];
+    const keys = [...(await this.ctx.storage.list({ prefix: 'artifact:' })).keys(), ...(await this.ctx.storage.list({ prefix: 'audit:' })).keys(), ...(await this.ctx.storage.list({ prefix: 'corpus:' })).keys()];
     for (let i = 0; i < keys.length; i += 128) await this.ctx.storage.delete(keys.slice(i, i + 128));
     await this.publishHistory();
     await this.wake(this.clock() + 1000);
@@ -805,7 +815,8 @@ export class CloudbiteProject extends DurableObject<Env> {
     for (const id of order) {
       const e = done.find((x) => x.run.expertId === id), a = e && audits.get(`audit:${e.run.id}`);
       if (!e || !a) continue;
-      inputs.push({ brief: s.p.brief, expertId: id, opinion: e.run.opinion!, audit: a.content ?? (a.oversize ? '' : undefined) });
+      inputs.push({ brief: s.p.brief, expertId: id, opinion: e.run.opinion!, audit: a.content ?? (a.oversize ? '' : undefined),
+        corpusReceipts: await this.ctx.storage.get<CorpusReceipt[]>(`corpus:${e.run.id}`) });
     }
     return inputs.length ? buildEvidencePackets(inputs) : undefined;
   }
@@ -1004,7 +1015,7 @@ export class CloudbiteProject extends DurableObject<Env> {
    * only) are disclosed first as one metadata record per packet, naming the packet hash.
    */
   private async memoOptions(s: Loaded, store: Pick<DurableObjectStorage, 'get'> = this.ctx.storage): Promise<MemoInputOptions> {
-    const disclosures: MemoEvidencePacket[] = [], sources: MemoEvidencePacket[] = [], taken = new Set<string>(), seen = new Set<string>();
+    const disclosures: MemoEvidencePacket[] = [], sources: MemoEvidencePacket[] = [], originals: MemoEvidencePacket[] = [], taken = new Set<string>(), seen = new Set<string>();
     const fnv = (t: string) => { let h = 0x811c9dc5; for (let i = 0; i < t.length; i++) h = Math.imul(h ^ t.charCodeAt(i), 0x01000193); return (h >>> 0).toString(16).padStart(8, '0'); };
     const unique = (prefix: string, raw: string) => {
       const slug = raw.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-+$/, '');
@@ -1024,16 +1035,23 @@ export class CloudbiteProject extends DurableObject<Env> {
       for (const src of p.sources) {
         if (seen.has(src.id)) continue;
         seen.add(src.id);
-        const tail = ` (${src.license}; original text not fetched)`;
+        const tail = ` (${src.license}; ${src.originalText === 'stored-excerpt' ? 'licensed original excerpt imported' : 'original text not fetched'})`;
         // Not pre-validated: a record the leaf rejects is counted there as invalid, never dropped silently.
         sources.push({ id: unique('src', src.id), kind: 'source-metadata', label: (src.title || src.id).slice(0, CB_MEMO_PACKET_LIMITS.label), expertId: p.expertId,
           origin: src.url.slice(0, Math.max(0, CB_MEMO_PACKET_LIMITS.origin - tail.length)) + tail });
       }
     }
+    for (const p of s.packets ?? []) {
+      for (const c of p.originals ?? []) originals.push({ id: unique('original', `${p.expertId}-${c.chunkId}`), kind: 'source-excerpt', expertId: p.expertId,
+        label: `Licensed original excerpt: ${c.sourceId}`.slice(0, CB_MEMO_PACKET_LIMITS.label), text: c.text.slice(0, CB_MEMO_PACKET_LIMITS.text),
+        origin: `chunk ${c.chunkId}; sha256 ${c.sha256}; corpus ${c.indexSha256}; imported excerpt only, not the whole source` });
+      if ((p.omitted.originalChunks ?? 0) > 0) disclosures.push({ id: unique('orig-omit', p.expertId), kind: 'source-metadata', expertId: p.expertId,
+        label: `${p.omitted.originalChunks} original corpus chunk(s) omitted by evidence-packet bounds`, origin: `evidence packet sha256 ${p.sha256}` });
+    }
     const selection = selectMemoArtifacts(s.experts);
     const artifactContents = selection.entries.length ? await store.get<unknown>(selection.entries.map(a => a.key)) : new Map<string, unknown>();
     // Generated artifacts come after disclosures and source records, so they never displace a source from the leaf cap.
-    const packets = [...disclosures, ...sources, ...memoArtifactPackets(selection, artifactContents)];
+    const packets = [...disclosures, ...sources, ...originals, ...memoArtifactPackets(selection, artifactContents)];
     const reviews = s.cr && s.cr.review.status !== 'running' ? s.cr.review.reports : [];
     return { coaching: true, team: s.experts.map((e) => ({ expertId: e.run.expertId, name: e.run.name, status: e.run.status })),
       ...(reviews.length ? { reviews } : {}), ...(packets.length ? { packets } : {}),
@@ -1149,6 +1167,37 @@ export class CloudbiteProject extends DurableObject<Env> {
       if (!ok || !valid) return ended();
       await this.wake(now);
       return { ok: true };
+    }
+    if (action === 'corpus') {
+      const b = body as { query?: unknown; indexSha256?: unknown } | null;
+      if (!b || typeof b.query !== 'string' || !b.query.trim() || b.query.length > 1000) return fail(400, 'corpus query must be 1-1000 characters');
+      if (!e.int.corpusIndex || b.indexSha256 !== e.int.corpusIndex || e.int.corpusIndex !== CORPUS.sha256) return fail(409, 'corpus snapshot changed or unavailable');
+      const claim = rand(16);
+      const reserved = await this.ctx.storage.transaction(async tx => {
+        const [p, x] = await Promise.all([tx.get<ProjectRecord>('project'), tx.get<ExpertRecord>(`expert:${run}`)]);
+        if (!p || !x || p.status !== 'running' || x.int.phase === 'final' || x.int.capHash !== h || (x.int.capExp ?? 0) <= this.clock()) return ended();
+        if ((x.int.corpusBusy?.until ?? 0) > this.clock()) return fail(429, 'one corpus search at a time');
+        if ((x.int.corpusCalls ?? 0) >= 7) return fail(429, 'corpus search budget exhausted');
+        x.int.corpusCalls = (x.int.corpusCalls ?? 0) + 1;
+        x.int.corpusBusy = { id: claim, until: this.clock() + 15_000 };
+        await tx.put(`expert:${run}`, x);
+        return { ok: true };
+      });
+      if ('error' in reserved) return reserved;
+      let result;
+      try { result = await searchCorpus(CORPUS, e.run.expertId, b.query, this.env.CLOUDBITE_EMBEDDING_API_KEY); }
+      catch { result = null; }
+      // Do not expose a reply until its server-owned receipt has committed under the same live capability.
+      return this.ctx.storage.transaction(async tx => {
+        const [p, x, receipts] = await Promise.all([tx.get<ProjectRecord>('project'), tx.get<ExpertRecord>(`expert:${run}`), tx.get<CorpusReceipt[]>(`corpus:${run}`)]);
+        if (!p || !x || p.status !== 'running' || x.int.phase === 'final' || x.int.capHash !== h || (x.int.capExp ?? 0) <= this.clock() || x.int.corpusBusy?.id !== claim) return ended();
+        x.int.corpusBusy = undefined;
+        this.log(x, 'tool', result ? `original corpus ${x.int.corpusCalls}/7: ${result.strategy}; ${result.hits.length} chunks${result.degraded ? '; degraded: ' + result.degraded : ''}` : 'original corpus unavailable');
+        await tx.put(`expert:${run}`, x);
+        if (!result) return fail(503, 'corpus search unavailable');
+        await tx.put(`corpus:${run}`, [...(receipts ?? []), corpusReceipt(result)].slice(0, 7));
+        return result;
+      });
     }
     if (action !== 'inference') return fail(404, 'unknown worker action');
 
@@ -1340,8 +1389,9 @@ export class CloudbiteProject extends DurableObject<Env> {
         const token = `cbw_${rand(32)}`;
         const capHash = await cbHash(token);
         // Persist the capability hash before it leaves this object; any earlier capability is replaced (revoked).
-        if (!await this.commit(run, claim, (x) => { x.int.capHash = capHash; x.int.capExp = now + CB_CAPABILITY_TTL; })) return;
-        const cap = runnerCapability(cfg.gateway, pid, run, e.run.expertId, token, now);
+        const corpus = CORPUS.sources.some(s => s.roles.includes(e.run.expertId)) ? { indexSha256: CORPUS.sha256 } : undefined;
+        if (!await this.commit(run, claim, (x) => { x.int.capHash = capHash; x.int.capExp = now + CB_CAPABILITY_TTL; x.int.corpusIndex = corpus?.indexSha256; })) return;
+        const cap = { ...runnerCapability(cfg.gateway, pid, run, e.run.expertId, token, now), ...(corpus ? { corpus } : {}) };
         const all = [...files, { path: 'runner.py', content: CB_RUNNER_PY }, { path: '.cloudbite/capability.json', content: JSON.stringify(cap) }];
         // Paths are validated plain names ([A-Za-z0-9_.-]), safe inside single quotes.
         const dirs = [...new Set(['.cloudbite', 'out', 'work', ...all.map((f) => f.path.split('/').slice(0, -1).join('/')).filter(Boolean)])];

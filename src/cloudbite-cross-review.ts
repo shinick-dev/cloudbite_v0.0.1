@@ -175,6 +175,7 @@ const CORE_SCHEMA = [
 const PACKET_SYSTEM = [
   'peerEvidence holds one bounded packet per peer, built by the application, not by the peer. cards are curated knowledge cards the runner observed that peer retrieving, bound to the application pack; card text is a project-authored paraphrase, not the original source.',
   'sources are metadata records: a title, URL or license is not page text. originalText "not-fetched" means the original external source text is unavailable in this review. references give each cited ID\'s availability: supplied-project-text, missing-project-text, curated-card-text, curated-card-text-omitted (cut by bounds), retrieval-unverified, not-retrieved (catalogue presence only) or unknown-id. omitted counts mean content was left out; never assume what it said.',
+  'originals, when present, are exact licensed corpus excerpts bound by server-held search receipts; original-corpus-text means that excerpt is present, original-corpus-text-omitted means it was cut. A search hit is not proof that a claim is supported.',
   'Use challenged only when available text contradicts or does not support the claim. Use insufficient when the claim depends on text that is missing, omitted, unverified, unknown, or only in an original source that was not fetched; unavailable is not the same as wrong.',
 ].join('\n');
 
@@ -288,7 +289,7 @@ export interface FindingTextAvailability {
   /** available: every cited text was in the review input; partial/unavailable: some/none was; uncited: no reference. */
   textBasis: 'available' | 'partial' | 'unavailable' | 'uncited';
 }
-const AVAILABLE: ReadonlySet<TextAvailability> = new Set(['supplied-project-text', 'curated-card-text']);
+const AVAILABLE: ReadonlySet<TextAvailability> = new Set(['supplied-project-text', 'curated-card-text', 'original-corpus-text']);
 /**
  * Deterministic metadata beside each parsed finding: which cited texts were actually in the reviewer's input.
  * It never changes the verdict; insufficient on unavailable text is a gap, not a contradiction.
