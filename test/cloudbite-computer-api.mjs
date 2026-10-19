@@ -12,6 +12,8 @@ try {
   x.onResolve({filter:/^\.\/cloudbite-owner$/},()=>({path:'owner',namespace:'test'}));
   x.onResolve({filter:/^\.\/cloudbite-computer-auth-api$/},()=>({path:'auth',namespace:'test'}));
   x.onResolve({filter:/^\.\/lab$/},()=>({path:'lab',namespace:'test'}));
+  x.onResolve({filter:/^\.\/cloudbite-computer-capacity-api$/},()=>({path:'capacity',namespace:'capacity-test'}));
+  x.onLoad({filter:/.*/,namespace:'capacity-test'},()=>({contents:"export const capacitySandboxes=async()=>({ok:true,sandboxes:[],partial:false});export const capacityGpuCandidates=async()=>({ok:true,candidates:[]});export const capacityGpuSelect=async()=>({status:200,body:{ok:true,selection:{gpu:'test'}}});"}));
   x.onLoad({filter:/.*/,namespace:'test'},({path})=>({contents:path==='auth'?"export const computerAuthRoute=async()=>null;export const personalComputerCookieValid=async()=>false;":path==='state'?"export const sha=async()=> '0123456789abcdef0123456789abcdef'; export const isFail=x=>!!x?.error;":path==='owner'?"export const ownerCookieValid=async r=>r.headers.get('cookie')==='owner=yes';":"export const download=async()=>{throw Error('unexpected download')};export class DtError extends Error{};export const dt=async()=>{throw Error('unexpected provider call')};"}));
  }}]});
  const file=join(dir,'api.mjs');await writeFile(file,b.outputFiles[0].text);const{computerRoute}=await import(pathToFileURL(file));
@@ -34,5 +36,14 @@ try {
   assert.equal(blocked.status,410,'old RP APIs must stay retired even for same-site desktop requests');
  }
  const q=new Request(gw+'/p/_cloudbite/computer/desktop/');r=await computerRoute(q,{...env,CLOUDBITE_CANONICAL_ONLY:'0'},new URL(q.url),state);assert.equal(r.status,404);
+ rpc.computerPerformance=async()=>{calls.push('performance');return{ok:true,metrics:null}};
+ rpc.computerResize=async(_tag,input)=>{calls.push('resize');assert.equal(input.acknowledgeCost,true);return{ok:true,status:'running'}};
+ r=await request('/api/cloudbite/computer/performance');assert.equal(r.status,401);
+ r=await request('/api/cloudbite/computer/performance',{headers:{cookie:'owner=yes'}});assert.equal(r.status,200);assert.equal(calls.at(-1),'performance');
+ r=await request('/api/cloudbite/computer/gpu/candidates');assert.equal(r.status,401);
+ r=await request('/api/cloudbite/computer/compute/sandboxes',{headers:{cookie:'owner=yes'}});assert.equal(r.status,200);
+ r=await request('/api/cloudbite/computer/resize',{method:'POST',headers:{cookie:'owner=yes',origin:'https://attacker.invalid','content-type':'application/json'},body:'{"acknowledgeCost":true}'});assert.equal(r.status,403);assert.notEqual(calls.at(-1),'resize');
+ r=await request('/api/cloudbite/computer/resize',{method:'POST',headers:{cookie:'owner=yes',origin:base,'content-type':'application/json'},body:'{"acknowledgeCost":true}'});assert.equal(r.status,200);assert.equal(calls.at(-1),'resize');
+ r=await request('/api/cloudbite/computer/gpu/select',{method:'POST',headers:{cookie:'owner=yes',origin:base,'content-type':'application/json'},body:'{}'});assert.equal(r.status,503,'GPU selection requires configured nested service');
  console.log('cloudbite-computer-api: auth, capability-origin isolation, CSRF and body limits passed');
 }finally{await rm(dir,{recursive:true,force:true});}

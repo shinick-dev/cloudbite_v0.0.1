@@ -10,6 +10,7 @@ import type { CbNestedInstall } from './cloudbite-computer-nested';
 import { CLOUDBITE_COMPUTER_HTML, CLOUDBITE_COMPUTER_JS, CLOUDBITE_COMPUTER_CSS } from './cloudbite-computer-page';
 import { COMPUTER_COMPOSE_JS, COMPUTER_COMPOSE_CSS, COMPUTER_COMPOSE_HEAD, COMPUTER_COMPOSE_JS_PATH, COMPUTER_COMPOSE_CSS_PATH, COMPUTER_COMPOSE_INPUT_PATH } from './cloudbite-computer-compose';
 import { boundedText } from './cloudbite-inference';
+import { capacitySandboxes, capacityGpuCandidates, capacityGpuSelect } from './cloudbite-computer-capacity-api';
 
 const API = '/api/cloudbite/computer';
 const PAGE = '/cloudbite/computer';
@@ -112,6 +113,12 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
   const computer=env.CLOUDBITE_COMPUTER.get(env.CLOUDBITE_COMPUTER.idFromName('owner'));
   const tag=await computerOwnerTag();
   if(req.method==='GET' && op==='state'){const result=await computer.computerState(tag);return json(result,'status' in result&&typeof result.status==='number'?result.status:200);}
+  if(req.method==='GET' && op==='performance'){const result=await computer.computerPerformance(tag);return json(result,'status' in result&&typeof result.status==='number'?result.status:200);}
+  if(req.method==='GET' && op==='compute/sandboxes')return json(await capacitySandboxes(env));
+  if(req.method==='GET' && op==='gpu/candidates'){
+    try{const result=await capacityGpuCandidates(env,url.searchParams);return result?json(result):error('bad_sandbox_selection',400);}
+    catch{return error('gpu_catalog_unavailable',503);}
+  }
   const nested=env.CLOUDBITE_COMPUTER_NESTED?.get(env.CLOUDBITE_COMPUTER_NESTED.idFromName('owner'));
   if(req.method==='GET' && op==='nested/jobs') {
     if(!nested)return error('not_configured',503);
@@ -121,6 +128,11 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
   if(req.headers.get('origin')!==env.ORIGIN && admin===null)return error('bad_origin',403);
   if(req.headers.get('origin') && req.headers.get('origin')!==env.ORIGIN)return error('bad_origin',403);
   const input=await body(req); if(!input)return error('bad_request',400);
+  if(op==='gpu/select'){
+    if(!nested)return error('not_configured',503);
+    try{const result=await capacityGpuSelect(env,input,nested);return result?json(result.body,result.status):error('bad_gpu_selection',400);}
+    catch{return error('gpu_catalog_unavailable',503);}
+  }
   if(op==='nested/configure') {
     if(!nested)return error('not_configured',503);
     if(typeof input.requestId!=='string' || !COMPUTER_REQUEST_ID.test(input.requestId))return error('bad_request',400);
@@ -151,6 +163,7 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
     case 'stop': result=await computer.computerStop(tag,input);break;
     case 'extend': result=await computer.computerExtend(tag,input);break;
     case 'snapshot': result=await computer.computerSnapshot(tag,input);break;
+    case 'resize': result=await computer.computerResize(tag,input);break;
     case 'launch': result=await computer.computerLaunch(tag);break;
     default:return error('not_found',404);
   }

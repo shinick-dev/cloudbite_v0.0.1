@@ -89,16 +89,36 @@ p{margin:0 0 12px}
 .cc-ind-yes{background:var(--ok-soft);border-color:#b7e4cf;color:var(--ok)}
 .cc-ind-no{background:var(--warn-soft);border-color:#f6c6cd;color:var(--warn)}
 .cc-nested{margin:6px 0 0}
+
+/* performance and size: the review box is the explicit cost step before Apply */
+.cc-price{margin:4px 0 0}
+.cc-price .cc-fine{margin:0}
+.cc-review{border:2px solid var(--blue);border-radius:12px;padding:12px;margin:12px 0 0;background:var(--pale)}
+.cc-review .cc-facts{margin:8px 0}
+.cc-perf>.cc-btn{width:100%}
+
+/* remote GPU candidates: one per row on a phone; unavailable hosts stay listed but cannot be chosen */
+.cc-gpus{list-style:none;margin:12px 0 0;padding:0;display:grid;grid-template-columns:minmax(0,1fr);gap:10px}
+.cc-gpu-item{border:1px solid var(--line);border-radius:12px;padding:12px;min-width:0;display:grid;gap:4px}
+.cc-gpu-item p{margin:0}
+.cc-gpu-item strong,.cc-chosen p{min-width:0;overflow-wrap:anywhere}
+.cc-gpu-item .cc-btn{margin-top:6px}
+.cc-gpu-off{background:var(--bg)}
+.cc-gpu-off strong{color:var(--muted)}
+.cc-gpu-chosen{border:2px solid var(--ok)}
+.cc-gpu>.cc-btn{width:100%}
+.cc-chosen{border-top:1px solid var(--line);margin-top:12px;padding-top:12px}
+.cc-cmd{font-family:ui-monospace,'Cascadia Mono',Consolas,'Courier New',monospace;font-size:16px;overflow-x:auto}
 .cc-footer{margin-top:20px;display:flex;justify-content:flex-end}
 
 @media (min-width:600px){
-  .cc-apps{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .cc-apps,.cc-gpus{grid-template-columns:repeat(2,minmax(0,1fr))}
   h1{font-size:32px}
 }
 @media (min-width:900px){
   .cc-main{padding:36px 24px 48px}
   .cc-grid{grid-template-columns:minmax(0,3fr) minmax(0,2fr);align-items:start}
-  .cc-apps-card{grid-column:1/-1}
+  .cc-apps-card,.cc-gpu{grid-column:1/-1}
   .cc-apps{grid-template-columns:repeat(3,minmax(0,1fr))}
 }
 @media (prefers-reduced-motion:no-preference){.cc-btn{transition:background-color .15s,border-color .15s,color .15s}}

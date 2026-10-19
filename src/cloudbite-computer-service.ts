@@ -1,7 +1,9 @@
 // CloudbiteComputer DO: the single owner machine record, its lifecycle ledger and desktop capabilities.
 // Rules: the ledger is written before every cloud mutation; an unconfirmed outcome becomes `unknown` and is reconciled by
 // exact name + labels, never retried blindly; accounts never switch; stop keeps the filesystem; GET/state never mutates cloud
-// resources. Long work (start, snapshot) is polled by the DO alarm, never held in one Worker request.
+// resources. Long work (start, snapshot, resize) is polled by the DO alarm, never held in one Worker request. A hot resize only
+// increases CPU/RAM of the running machine (processes, desktop sessions and snapshots stay); it is pending until a later GET
+// observes the new allocation, and an unanswered request is reconciled by GET, never re-sent.
 import { DurableObject } from 'cloudflare:workers';
 import { COMPUTER_PROBE_COMMAND, computerToolCatalog, parseComputerProbe, type ComputerProbe } from './cloudbite-computer-tools';
 import type { Dt } from './lab';
@@ -11,9 +13,13 @@ import {
   COMPUTER_TICKET_MS, COMPUTER_TICKET_PARAM, ComputerError, computerAccounts, computerErrorBody, computerLabels, computerName,
   computerProxySuffixes, isAccount,
   type ComputerAccount, type ComputerAccountConfig, type ComputerEnv, type ComputerErrorCode, type ComputerMachineRef, type ComputerSnapshotView,
-  type ComputerState, type ComputerStatus, type DesktopStatus,
+  type ComputerPerformance, type ComputerState, type ComputerStatus, type DesktopStatus,
 } from './cloudbite-computer-contract';
 import { ComputerDaytonaError, computerUpstreamOrigin, restDaytona, type ComputerDaytona, type ComputerSandbox, type ComputerSnapshotInfo } from './cloudbite-computer-daytona';
+import {
+  COMPUTER_METRICS_CACHE_MS, COMPUTER_METRICS_COMMAND, COMPUTER_METRICS_TIMEOUT_S, COMPUTER_PRICING, computerHourlyCost, computerPlans,
+  isComputerPlan, parseComputerMetrics, type ComputerMetrics,
+} from './cloudbite-computer-performance';
 
 export interface ComputerStore {
   get<T>(key: string): Promise<T | undefined>;
@@ -38,6 +44,10 @@ interface Machine {
 interface Op { id: string; kind: string; fp?: string; error?: { code: ComputerErrorCode; status: number } }
 /** A capture is ours only if Daytona names our sandbox as its source, or it appeared after our preflight saw the name free. */
 interface SnapshotRec extends ComputerSnapshotView { polls: number; requestedAt?: number; sourceId?: string; preflightAbsent?: boolean }
+/** One hot CPU/RAM increase. requesting = written before the POST; unknown = unanswered; pending = answered, not yet observed. */
+interface ResizeRec { cpu: number; memoryGiB: number; state: 'requesting' | 'unknown' | 'pending' | 'done' | 'failed'; error: ComputerErrorCode | null; polls: number }
+/** Last cgroup sample of one machine run; a null sample is cached too, so a failing sample is not retried in a burst. */
+interface PerfRec { at: number; machineId: string; epoch: number; metrics: ComputerMetrics | null }
 interface Rec {
   ownerTag: string | null;
   machine: Machine | null;
@@ -49,6 +59,8 @@ interface Rec {
   desktopEpoch: number;
   probe?: ComputerProbe | null; probeEpoch?: number | null; probeTries?: number;
   reconcilePolls: number;
+  resize?: ResizeRec | null;
+  perf?: PerfRec | null;
   ops: Op[];
   tickets: Array<{ h: string; exp: number }>;
   sessions: Array<{ h: string; exp: number }>;
@@ -60,6 +72,9 @@ const KEY = 'computer', PREVIEW_KEY = 'computer-preview';
 const OPS_MAX = 64, TICKETS_MAX = 8, SESSIONS_MAX = 8, RECONCILE_MAX = 30, SNAPSHOT_MAX_POLLS = 360, DESKTOP_LAUNCH_MAX = 3, PROBE_TRIES = 3;
 const PREVIEW_MS = 10 * 60 * 1000, SNAPSHOT_SKEW_MS = 60_000, PROBE_TIMEOUT_S = 60;
 const SNAPSHOT_BUSY = ['waiting_stop', 'requesting', 'unknown', 'snapshotting'];
+const RESIZE_PENDING = ['requesting', 'unknown', 'pending'];
+const RESIZE_MAX_POLLS = 60; // answered increase: about 10 minutes of alarms before it is reported unconfirmed
+const RESIZE_KEYS = new Set(['requestId', 'cpu', 'memoryGiB', 'acknowledgeCost']);
 const LABELS: Record<ComputerAccount, string> = { primary: 'Primary', secondary: 'Secondary', tertiary: 'Tertiary' };
 const WAKING = new Set(['creating', 'starting', 'restoring', 'pulling_snapshot', 'pending_build', 'building_snapshot', 'resuming']);
 
@@ -71,7 +86,7 @@ const COOKIE_RE = /^[A-Za-z0-9_-]{43}$/;
 const b64url = (b: Uint8Array) => btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
 export function mapProviderState(s: string | undefined): ComputerStatus {
-  if (s === 'started') return 'running';
+  if (s === 'started' || s === 'resizing') return 'running'; // a hot resize keeps the machine and its processes running
   if (s === 'stopped' || s === 'archived') return 'stopped';
   if (s === 'stopping' || s === 'archiving') return 'stopping';
   if (s === 'snapshotting') return 'snapshotting';
@@ -141,19 +156,24 @@ export class ComputerService {
     else if (r.desktop === 'not_running') r.desktop = 'starting';
   }
 
-  /** Read-only provider refresh / reconcile (GET only). */
-  private async refresh(r: Rec) {
-    const m = r.machine; if (!m) return;
-    const a = this.account(m.account); if (!a) { r.error = 'not_configured'; return; }
+  /** Read-only provider refresh / reconcile (GET only). True only when this read observed our labelled machine. */
+  private async refresh(r: Rec): Promise<boolean> {
+    const m = r.machine; if (!m) return false;
+    const a = this.account(m.account); if (!a) { r.error = 'not_configured'; return false; }
     let sb: ComputerSandbox | null;
     try { sb = await this.d.daytona.get(this.dt(a), m.id ?? m.name); }
-    catch { if (m.created !== 'owned') r.status = 'unknown'; return; }
-    if (sb && this.owned(r, sb)) { this.adopt(r, sb); r.reconcilePolls = 0; return; }
-    if (sb) { r.status = 'error'; r.error = 'provider_error'; return; } // a same-named sandbox without our labels: never touch it
-    if (m.created === 'owned') { r.machine = null; r.status = 'absent'; r.error = 'provider_error'; r.sessionEndsAt = null; r.desktop = 'not_running'; this.down(r); return; }
+    catch { if (m.created !== 'owned') r.status = 'unknown'; return false; }
+    if (sb && this.owned(r, sb)) { this.adopt(r, sb); r.reconcilePolls = 0; this.settleResize(r, sb); return true; }
+    if (sb) { r.status = 'error'; r.error = 'provider_error'; return false; } // a same-named sandbox without our labels: never touch it
+    if (m.created === 'owned') {
+      r.machine = null; r.status = 'absent'; r.error = 'provider_error'; r.sessionEndsAt = null; r.desktop = 'not_running'; this.down(r);
+      if (this.resizing(r)) r.resize = { ...r.resize!, state: 'failed', error: 'provider_error' };
+      return false;
+    }
     // Unknown create and nothing by that exact name yet: keep checking, then report without retrying.
     if (++r.reconcilePolls >= RECONCILE_MAX) { r.machine = null; r.status = 'absent'; r.error = 'unknown_outcome'; r.reconcilePolls = 0; }
     else r.status = 'unknown';
+    return false;
   }
 
   /**
@@ -185,9 +205,11 @@ export class ComputerService {
     const now = this.d.now();
     const pending = r.status === 'starting' || r.status === 'stopping' || r.status === 'unknown' || r.status === 'snapshotting'
       || (r.status === 'running' && r.desktop === 'starting')
-      || (!!r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state)) || this.probeDue(r);
+      || (!!r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state)) || this.probeDue(r) || this.resizing(r);
     const fast = r.status === 'starting' || (r.status === 'running' && r.desktop === 'starting');
-    const times = [pending ? now + (fast ? 1000 : COMPUTER_POLL_MS) : null, r.status === 'running' && r.sessionEndsAt ? r.sessionEndsAt : null].filter((x): x is number => x !== null);
+    // The alarm defers the session stop while a resize is pending; the deadline must not become a 1 s poll meanwhile.
+    const deadline = r.status === 'running' && r.sessionEndsAt ? (this.resizing(r) ? Math.max(r.sessionEndsAt, now + COMPUTER_POLL_MS) : r.sessionEndsAt) : null;
+    const times = [pending ? now + (fast ? 1000 : COMPUTER_POLL_MS) : null, deadline].filter((x): x is number => x !== null);
     if (times.length) await this.d.store.setAlarm(Math.max(now + 1000, Math.min(...times)));
     else await this.d.store.deleteAlarm();
   }
@@ -229,7 +251,7 @@ export class ComputerService {
           const m = r.machine as Machine | null;
           if (m && m.created !== 'owned') throw new ComputerError('unknown_outcome');
         } else if (r.machine) await this.refresh(r);
-        if (r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state)) throw new ComputerError('busy');
+        if ((r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state)) || this.resizing(r)) throw new ComputerError('busy');
         if (!r.machine) return this.create(r, a);
         if (r.status === 'running') { this.extendSessions(r); return this.view(r); }
         if (r.status === 'starting') return this.view(r);
@@ -292,6 +314,7 @@ export class ComputerService {
         if (!r.machine) throw new ComputerError('absent');
         await this.refresh(r);
         if (r.machine?.created !== 'owned') throw new ComputerError('unknown_outcome');
+        if (this.resizing(r)) throw new ComputerError('busy');
         if (r.status === 'stopped' || r.status === 'stopping') return this.view(r);
         if (r.status !== 'running' && r.status !== 'starting') throw new ComputerError('busy');
         await this.stopMachine(r);
@@ -331,7 +354,7 @@ export class ComputerService {
         if (!r.machine) throw new ComputerError('absent');
         await this.refresh(r);
         if (r.machine?.created !== 'owned') throw new ComputerError('unknown_outcome');
-        if (r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state)) throw new ComputerError('busy');
+        if ((r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state)) || this.resizing(r)) throw new ComputerError('busy');
         // A taken name is a definite refusal: a prepared base image or an earlier capture is never reported as this capture.
         if (computerAccounts(this.d.env).some((a) => a.snapshot === name)) throw new ComputerError('snapshot_exists');
         const a = this.account(r.machine.account); if (!a) throw new ComputerError('not_configured');
@@ -443,7 +466,12 @@ export class ComputerService {
       try {
         if (r.machine) await this.refresh(r);
         const now = this.d.now();
-        if (r.machine?.created === 'owned' && r.status === 'running' && r.sessionEndsAt && r.sessionEndsAt <= now) {
+        if (this.resizing(r)) {
+          const z = r.resize!;
+          if (z.state === 'requesting') z.state = 'unknown'; // persisted mid-request (eviction/deploy): reconcile, never resend
+          if (++z.polls >= (z.state === 'pending' ? RESIZE_MAX_POLLS : RECONCILE_MAX)) { z.state = 'failed'; z.error = 'unknown_outcome'; }
+        }
+        if (r.machine?.created === 'owned' && r.status === 'running' && r.sessionEndsAt && r.sessionEndsAt <= now && !this.resizing(r)) {
           try { await this.stopMachine(r); } catch { /* recorded on r */ }
         }
         if (r.status !== 'running') { r.desktopLaunches = 0; r.desktopLaunchAt = null; }
@@ -547,7 +575,103 @@ export class ComputerService {
     if (r.ownerTag && r.ownerTag !== ownerTag) return fail('bad_request', 403);
     const m = r.machine;
     if (r.ownerTag !== ownerTag || !m || m.created !== 'owned' || !m.id) return fail('absent');
-    return { ok: true, machine: { id: m.id, account: m.account, name: m.name, labels: computerLabels(ownerTag, m.account), status: r.status } };
+    return { ok: true, machine: { id: m.id, account: m.account, name: m.name, labels: computerLabels(ownerTag, m.account), status: r.status, region: m.region } };
+  }
+
+  private resizing(r: Rec) { return !!r.resize && RESIZE_PENDING.includes(r.resize.state); }
+
+  /** Observed allocation settles a pending increase; nothing is re-sent. 'resizing' proves a request landed and is applying. */
+  private settleResize(r: Rec, sb: ComputerSandbox) {
+    const z = r.resize; if (!z || !this.resizing(r)) return;
+    if (sb.state === 'resizing') { z.state = 'pending'; return; }
+    if (sb.state === 'error' || sb.state === 'build_failed') { z.state = 'failed'; z.error = 'provider_error'; return; }
+    if (typeof sb.cpu === 'number' && typeof sb.memory === 'number' && sb.cpu >= z.cpu && sb.memory >= z.memoryGiB) {
+      z.state = 'done'; z.error = null; r.perf = null; // the old sample describes the old limits
+    }
+  }
+
+  /** Fixed read-only cgroup sample, bounded; any failure is an unknown sample (null), never zeros. */
+  private async sample(r: Rec): Promise<ComputerMetrics | null> {
+    const m = r.machine!, a = this.account(m.account); if (!a || !m.id) return null;
+    try {
+      const out = await this.d.daytona.exec(this.dt(a), { id: m.id, toolboxProxyUrl: m.sandbox?.toolboxProxyUrl }, COMPUTER_METRICS_COMMAND, COMPUTER_METRICS_TIMEOUT_S);
+      return out.exitCode === 0 ? parseComputerMetrics(String(out.result ?? ''), { cpu: m.cpu, memoryGiB: m.memoryGiB }) : null;
+    } catch { return null; }
+  }
+
+  /** Metrics, estimated cost and hot-increase plans. Provider reads happen at most once per COMPUTER_METRICS_CACHE_MS. */
+  performance(ownerTag: string) {
+    return this.run(async (r): Promise<ComputerPerformance> => {
+      this.bind(r, ownerTag);
+      if (!r.machine) throw new ComputerError('absent');
+      const now = this.d.now(), p = r.perf;
+      const fresh = !!p && p.machineId === r.machine.id && p.epoch === (r.desktopEpoch ?? 0) && now >= p.at && now - p.at < COMPUTER_METRICS_CACHE_MS;
+      if (!fresh) {
+        await this.refresh(r);
+        const m = r.machine as Machine | null;
+        if (!m) throw new ComputerError('absent');
+        if (m.created !== 'owned' || !m.id) throw new ComputerError('unknown_outcome');
+        r.perf = { at: now, machineId: m.id, epoch: r.desktopEpoch ?? 0, metrics: r.status === 'running' ? await this.sample(r) : null };
+      }
+      const m = r.machine!, perf = r.perf!, z = r.resize;
+      if (m.created !== 'owned' || !m.id) throw new ComputerError('unknown_outcome');
+      if (m.cpu === null || m.memoryGiB === null || m.diskGiB === null) throw new ComputerError('provider_error', 502);
+      const current = { cpu: m.cpu, memoryGiB: m.memoryGiB, diskGiB: m.diskGiB };
+      return {
+        machineId: m.id,
+        sampledAt: perf.metrics ? new Date(perf.at).toISOString() : null,
+        metrics: perf.metrics,
+        current: { ...current, usdPerHour: computerHourlyCost(current) },
+        plans: r.status === 'running' && this.d.env.CLOUDBITE_COMPUTER_HOT_RESIZE_ENABLED !== '0' ? computerPlans(current) : [],
+        resize: this.d.env.CLOUDBITE_COMPUTER_HOT_RESIZE_ENABLED === '0' ? { status: 'failed', error: 'resize_unavailable' } : z && this.resizing(r) ? { status: 'pending', cpu: z.cpu, memoryGiB: z.memoryGiB }
+          : z?.state === 'failed' ? { status: 'failed', cpu: z.cpu, memoryGiB: z.memoryGiB, error: z.error ?? 'unknown_outcome' } : { status: 'idle' },
+        pricing: { asOf: COMPUTER_PRICING.asOf, url: COMPUTER_PRICING.url, estimated: true },
+      };
+    });
+  }
+
+  /**
+   * Hot CPU/RAM increase of the running owned machine to one fixed plan, with explicit cost acknowledgement. The ledger is
+   * written before the single POST; a definite refusal is final for that requestId; an unanswered POST is reconciled by GET.
+   * The body names no machine: the target is always the owner-checked record.
+   */
+  resize(ownerTag: string, body: Record<string, unknown>) {
+    return this.run(async (r) => {
+      this.bind(r, ownerTag);
+      const input: Record<string, unknown> = body && typeof body === 'object' ? body : {};
+      if (Object.keys(input).some((k) => !RESIZE_KEYS.has(k)) || input.acknowledgeCost !== true || !isComputerPlan(input.cpu, input.memoryGiB)) {
+        throw new ComputerError('bad_request', 400);
+      }
+      const cpu = input.cpu as number, memoryGiB = input.memoryGiB as number;
+      return this.once(r, input.requestId, 'resize', `${cpu}/${memoryGiB}`, async () => {
+        if (this.d.env.CLOUDBITE_COMPUTER_HOT_RESIZE_ENABLED === '0') throw new ComputerError('resize_unavailable', 409);
+        if (!r.machine) throw new ComputerError('absent');
+        const seen = await this.refresh(r); // settles an earlier increase by GET before anything new
+        const m = r.machine as Machine | null;
+        if (!m) throw new ComputerError('absent');
+        if (m.created !== 'owned' || !m.id) throw new ComputerError('unknown_outcome');
+        if (this.resizing(r) || (r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state))) throw new ComputerError('busy');
+        if (r.status !== 'running') throw new ComputerError(r.status === 'unknown' ? 'unknown_outcome' : 'not_running');
+        if (!seen) throw new ComputerError('unknown_outcome', 503); // no fresh owner-checked read: nothing is sent, the id stays usable
+        if (m.cpu === null || m.memoryGiB === null) throw new ComputerError('unknown_outcome');
+        if (cpu < m.cpu || memoryGiB < m.memoryGiB || (cpu === m.cpu && memoryGiB === m.memoryGiB)) throw new ComputerError('bad_request', 400);
+        const a = this.account(m.account); if (!a) throw new ComputerError('not_configured');
+        if (!this.d.daytona.resize) throw new ComputerError('resize_unavailable');
+        const z: ResizeRec = { cpu, memoryGiB, state: 'requesting', error: null, polls: 0 };
+        r.resize = z;
+        await this.save(r); // ledger before mutation
+        try { await this.d.daytona.resize(this.dt(a), m.id, { cpu, memory: memoryGiB }); z.state = 'pending'; }
+        catch (e) {
+          if (e instanceof ComputerDaytonaError && !e.uncertain) {
+            const code = e.status === 404 ? 'resize_unavailable' : e.reason === 'quota' ? 'quota_exceeded' : 'provider_error';
+            z.state = 'failed'; z.error = code;
+            throw new ComputerError(code, code === 'quota_exceeded' ? 409 : 502);
+          }
+          z.state = 'unknown';
+        }
+        return this.view(r);
+      });
+    });
   }
 }
 
@@ -574,5 +698,7 @@ export class CloudbiteComputer extends DurableObject<ComputerEnv> {
   computerDesktopUpstream(cookie: string) { return this.svc.desktopUpstream(cookie); }
   computerDesktopPreviewRejected(cookie: string) { return this.svc.desktopPreviewRejected(cookie); }
   computerMachine(ownerTag: string) { return this.svc.machine(ownerTag); }
+  computerPerformance(ownerTag: string) { return this.svc.performance(ownerTag); }
+  computerResize(ownerTag: string, input: Record<string, unknown>) { return this.svc.resize(ownerTag, input); }
   async alarm() { await this.svc.alarm(); }
 }

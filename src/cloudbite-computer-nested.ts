@@ -15,7 +15,9 @@
 //     revokeAll()                    -> { ok, revoked }
 //     ownerJobs()                    -> { ok, jobs: CbNestedJobView[] }
 //   Gateway (stub.fetch(request) for /p/_cloudbite/computer/nested/*; terminal Bearer only, any Origin header is refused):
-//     POST run          Bearer capability  { requestId: UUID, provider: 'daytona'|'nosana', image?, timeout?, command: string[] }
+//     POST run          Bearer capability  { requestId: UUID, provider: 'daytona'|'nosana', image?, timeout?, gpu?, country?, command: string[] }
+//                       gpu + country (Nosana only, both or neither): the job is created with requirements { name, country } and
+//                       no market, after a public availability read shows a free host; it never falls back to the pinned market.
 //     GET  jobs         Bearer capability
 //     POST stop         Bearer capability  { requestId: UUID, jobId }
 //     POST result/<id>  Bearer callback    { exitCode, timedOut, output, truncated }   (Daytona jobs only)
@@ -37,6 +39,7 @@ import { dt, DtError, type Dt, type Sandbox } from './lab';
 import { cbDeleteSandbox, cbExec, cbFindByLabels, cbGetSandbox, cbUpload, CbDaytonaError, type CbSandbox } from './cloudbite-daytona';
 import { cloudbiteConfig, type CbAccountId } from './cloudbite-config';
 import { isJobAddress, parseRunnerStdout, readNosanaJobResult, RESULT_MARKER, workStdout, type NosanaJobResult } from './cloudbite-computer-nosana-results';
+import { cbGpuAvailability, cbGpuValidSelection } from './cloudbite-computer-gpu';
 
 export const CBN_CAP_TTL = 2 * 3600_000;
 export const CBN_MAX_CAPS = 3;
@@ -76,6 +79,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const JOB_ID = /^nj[0-9a-f]{24}$/;
 const IMAGE = /^[a-z0-9][a-z0-9._\/-]{0,150}(?::[\w][\w.-]{0,63})?(?:@sha256:[0-9a-f]{64})?$/;
 const MACHINE = /^[\w.:-]{1,128}$/;
+const MARKET = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/;
 
 export type CbNestedProvider = 'daytona' | 'nosana';
@@ -86,6 +90,7 @@ interface Capability { id: string; ownerMachineId: string; scopes: string[]; cre
 interface NestedJob {
   id: string; requestId: string; capId: string; ownerMachineId: string;
   provider: CbNestedProvider; image: string; command: string[]; timeoutSec: number;
+  requirements?: CbNestedRequirements; // Nosana GPU selection, fixed at admission; no market is ever substituted
   status: CbNestedStatus; createdAt: number; deadline: number; finishedAt?: number;
   name: string;                 // deterministic provider resource name
   account?: CbAccountId;        // Daytona account the sandbox lives in
@@ -96,6 +101,7 @@ interface NestedJob {
   callbackHash?: string;        // Daytona only; a Nosana job has no callback
   providerState?: string;       // Nosana job state from the authenticated deployment job list
   providerJob?: string;         // Nosana job address from that list
+  providerMarket?: string;      // market that list reported for a requirements-scheduled job
   collectUntil?: number;        // Nosana: COMPLETED, result being collected until this time
   result?: { exitCode: number | null; timedOut: boolean; output: string; truncated: boolean; at: number };
   cleanup: Cleanup; cleanupTries: number;
@@ -107,7 +113,10 @@ export interface CbNestedJobView {
   createdAt: string; deadline: string; finishedAt: string | null; cleanup: Cleanup; error: string | null;
   result: { exitCode: number | null; timedOut: boolean; output: string; truncated: boolean } | null;
   providerState: string | null; public: boolean; note: string | null;
+  gpu: string | null; country: string | null;
 }
+
+export interface CbNestedRequirements { gpu: string; country: string }
 
 /** What the root installs on the owner machine (server side only; never sent to a browser). */
 export interface CbNestedInstall {
@@ -152,12 +161,12 @@ export function cbNestedTail(s: string, max = CBN_OUTPUT_MAX): { text: string; c
   return { text: new TextDecoder().decode(b.slice(b.byteLength - max)).replace(/^�+/, ''), cut: true };
 }
 
-export interface CbNestedRunInput { requestId: string; provider: CbNestedProvider; image: string; timeoutSec: number; command: string[] }
+export interface CbNestedRunInput { requestId: string; provider: CbNestedProvider; image: string; timeoutSec: number; command: string[]; requirements?: CbNestedRequirements }
 /** Validate a run body. Metadata must be plain; the command is the owner's own intentional remote command. */
 export function cbNestedParseRun(b: unknown): CbNestedRunInput | string {
   if (!b || typeof b !== 'object' || Array.isArray(b)) return 'body must be a JSON object';
   const o = b as Record<string, unknown>;
-  for (const k of Object.keys(o)) if (!['requestId', 'provider', 'image', 'timeout', 'command'].includes(k)) return `unknown field ${k.slice(0, 32)}`;
+  for (const k of Object.keys(o)) if (!['requestId', 'provider', 'image', 'timeout', 'gpu', 'country', 'command'].includes(k)) return `unknown field ${k.slice(0, 32)}`;
   if (typeof o.requestId !== 'string' || !UUID.test(o.requestId)) return 'requestId must be a lowercase UUID';
   if (o.provider !== 'daytona' && o.provider !== 'nosana') return 'provider must be daytona or nosana';
   const image = o.image === undefined ? CBN_DEFAULT_IMAGE : o.image;
@@ -168,7 +177,14 @@ export function cbNestedParseRun(b: unknown): CbNestedRunInput | string {
   if (!Array.isArray(c) || c.length < 1 || c.length > 64) return 'command must be 1..64 strings';
   if (!c.every((a) => typeof a === 'string' && a.length <= 4096 && !CONTROL.test(a)) || !c[0]) return 'command arguments must be plain strings without control characters';
   if (bytes(JSON.stringify(c)) > 16 * 1024) return 'command is too long';
-  return { requestId: o.requestId, provider: o.provider, image, timeoutSec, command: c as string[] };
+  let requirements: CbNestedRequirements | undefined;
+  if (o.gpu !== undefined || o.country !== undefined) {
+    if (o.provider !== 'nosana') return 'gpu and country apply to provider nosana only';
+    const sel = cbGpuValidSelection(o.gpu, o.country);
+    if (!sel) return 'gpu and country must be given together: a plain GPU model name and an ISO country code';
+    requirements = sel;
+  }
+  return { requestId: o.requestId, provider: o.provider, image, timeoutSec, command: c as string[], ...(requirements ? { requirements } : {}) };
 }
 
 function view(j: NestedJob): CbNestedJobView {
@@ -178,6 +194,7 @@ function view(j: NestedJob): CbNestedJobView {
     result: j.result ? { exitCode: j.result.exitCode, timedOut: j.result.timedOut, output: j.result.output, truncated: j.result.truncated } : null,
     providerState: j.providerState ?? null, public: j.provider === 'nosana',
     note: j.provider === 'nosana' ? CBN_NOSANA_PUBLIC_NOTE : null,
+    gpu: j.requirements?.gpu ?? null, country: j.requirements?.country ?? null,
   };
 }
 
@@ -247,10 +264,10 @@ function nosanaJobArg(j: NestedJob) {
 }
 
 /** Deployment job body -> result, only when its market and its 'work' op command are exactly this job's. */
-export function cbNestedNosanaJobResult(body: unknown, expectedArg: string): NosanaJobResult {
+export function cbNestedNosanaJobResult(body: unknown, expectedArg: string, expectedMarket: string = CBN_NOSANA_MARKET): NosanaJobResult {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { kind: 'unavailable' };
   const o = body as Record<string, unknown>;
-  if (o.market !== CBN_NOSANA_MARKET || !('jobResult' in o)) return { kind: 'unavailable' };
+  if (o.market !== expectedMarket || !('jobResult' in o)) return { kind: 'unavailable' };
   const ops = (o.jobDefinition as { ops?: unknown } | null)?.ops;
   const work = Array.isArray(ops) ? ops.filter((x) => x && (x as { id?: unknown }).id === 'work') : [];
   const cmd = (work[0] as { args?: { cmd?: unknown } } | undefined)?.args?.cmd;
@@ -285,6 +302,27 @@ export class CbNestedService {
   private wake(at: number) { return this.s.setAlarm(at); }
 
   // ---- owner RPC ----
+  /** The root verifies sandbox account ownership and current candidate availability before this trusted RPC. */
+  async selectGpu(input: Record<string, unknown>): Promise<Reply> {
+    const {ownerMachineId,requestId,candidateId,gpu,country,market}=input;
+    const sel=cbGpuValidSelection(gpu,country);
+    if(typeof ownerMachineId!=='string'||!MACHINE.test(ownerMachineId)||typeof requestId!=='string'||!UUID.test(requestId)||!sel||typeof candidateId!=='string'||candidateId.length>200||(market!==null&&(typeof market!=='string'||!MARKET.test(market))))return err(400,'bad_request','invalid GPU selection');
+    return this.serial(async()=>{
+      const key='gpu-selection:'+ownerMachineId;
+      const old=await this.s.get<{selection:{candidateId:string;gpu:string;country:string;market:string|null};ops:Array<{id:string;fp:string;selection:unknown}>}>(key);
+      const fp=JSON.stringify([candidateId,sel.gpu,sel.country]);
+      const prior=old?.ops.find(x=>x.id===requestId);
+      if(prior)return prior.fp===fp?ok({selection:prior.selection,replay:true}):err(409,'conflict','requestId was already used for a different selection');
+      const selection={candidateId,gpu:sel.gpu,country:sel.country,market:market as string|null};
+      await this.s.put({[key]:{selection,ops:[...(old?.ops??[]),{id:requestId,fp,selection}].slice(-16)}});
+      return ok({selection});
+    });
+  }
+  async gpuSelection(ownerMachineId:string):Promise<Reply>{
+    if(!MACHINE.test(ownerMachineId))return err(400,'bad_request','invalid sandbox');
+    const record=await this.s.get<{selection:unknown}>('gpu-selection:'+ownerMachineId);
+    return ok({selection:record?.selection??null});
+  }
   async configure(input: { requestId: string; ownerMachineId: string }): Promise<Reply> {
     if (!input || typeof input.requestId !== 'string' || !UUID.test(input.requestId)) return err(400, 'bad_request', 'requestId must be a lowercase UUID');
     if (typeof input.ownerMachineId !== 'string' || !MACHINE.test(input.ownerMachineId)) return err(400, 'bad_request', 'ownerMachineId is invalid');
@@ -370,9 +408,20 @@ export class CbNestedService {
   async run(cap: Capability, body: unknown): Promise<Reply> {
     const p = cbNestedParseRun(body);
     if (typeof p === 'string') return err(400, 'bad_request', p);
+    if(p.provider==='nosana'&&!p.requirements){
+      const prior=await this.s.get<string>('req:'+p.requestId);
+      if(prior){const job=await this.s.get<NestedJob>('job:'+prior);if(job?.requirements)p.requirements={...job.requirements};}
+      else{const saved=await this.s.get<{selection:CbNestedRequirements}>('gpu-selection:'+cap.ownerMachineId);if(saved?.selection)p.requirements={gpu:saved.selection.gpu,country:saved.selection.country};}
+    }
     if (p.provider === 'daytona' ? !this.d.daytona() : !this.d.nosanaKey()) return err(503, 'not_configured', `${p.provider} is not configured`);
     const gateway = this.d.gateway();
     if (!gateway) return err(503, 'not_configured', 'nested compute gateway is not configured');
+    // A GPU selection must have a free host now (public read, before any ledger record or paid create). A replay skips it.
+    if (p.requirements && !(await this.s.get<string>(`req:${p.requestId}`))) {
+      const free = await cbGpuAvailability(p.requirements.gpu, p.requirements.country).then((a) => a.available, () => null);
+      if (free === null) return err(503, 'availability_unknown', 'Nosana availability for this GPU and country could not be read; nothing was started');
+      if (free < 1) return err(409, 'not_available', 'no free Nosana host for this GPU and country right now; nothing was started');
+    }
     const callback = p.provider === 'daytona' ? this.token('cbr_') : null;
     const admitted = await this.serial(async (): Promise<Reply | NestedJob> => {
       const now = this.d.now();
@@ -380,7 +429,8 @@ export class CbNestedService {
       if (prior) {
         const j = await this.s.get<NestedJob>(`job:${prior}`);
         if (!j) return err(409, 'conflict', 'requestId was already used');
-        const same = j.provider === p.provider && j.image === p.image && j.timeoutSec === p.timeoutSec && JSON.stringify(j.command) === JSON.stringify(p.command);
+        const same = j.provider === p.provider && j.image === p.image && j.timeoutSec === p.timeoutSec && JSON.stringify(j.command) === JSON.stringify(p.command)
+          && j.requirements?.gpu === p.requirements?.gpu && j.requirements?.country === p.requirements?.country;
         return same ? ok({ job: view(j), replay: true }) : err(409, 'conflict', 'requestId was already used for a different run');
       }
       const all = await this.jobs();
@@ -391,6 +441,7 @@ export class CbNestedService {
       const j: NestedJob = {
         id, requestId: p.requestId, capId: cap.id, ownerMachineId: cap.ownerMachineId,
         provider: p.provider, image: p.image, command: p.command, timeoutSec: p.timeoutSec,
+        ...(p.requirements ? { requirements: { ...p.requirements } } : {}),
         status: 'creating', createdAt: now,
         deadline: now + (p.provider === 'nosana' ? minutes * 60_000 : Math.min(CBN_MAX_SECONDS * 1000, p.timeoutSec * 1000 + 60_000)) + CBN_GRACE,
         name: `cbn-${id}`, ...(dy ? { account: dy.account } : {}),
@@ -463,7 +514,9 @@ export class CbNestedService {
     // Public job definition: no callback URL, no token, no key. The runner prints its bounded JSON result to stdout.
     const job = nosanaJobArg(j);
     const body = {
-      idempotency_key: j.idempotencyKey, name: j.name, market: CBN_NOSANA_MARKET, replicas: 1,
+      // A selection schedules by requirements across markets (market omitted); no selection keeps the pinned RTX 4090 market.
+      idempotency_key: j.idempotencyKey, name: j.name,
+      ...(j.requirements ? { requirements: { name: j.requirements.gpu, country: j.requirements.country } } : { market: CBN_NOSANA_MARKET }), replicas: 1,
       timeout: Math.min(CBN_NOSANA_MAX_MINUTES, Math.ceil(j.timeoutSec / 60) + 2), autostart: true, strategy: 'SIMPLE',
       job_definition: {
         version: '0.1', type: 'container',
@@ -634,8 +687,10 @@ export class CbNestedService {
       for (let page = 0; page < CBN_NOSANA_PAGES; page++) {
         const q = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
         const list = await nosana<{ jobs?: NosanaJob[]; pagination?: NosanaPage }>(key, 'GET', `/deployments/${encodeURIComponent(j.resourceId)}/jobs${q}`);
-        // Only a job of this exact deployment on the pinned market counts.
-        found = (Array.isArray(list.jobs) ? list.jobs : []).find((x) => x && x.deployment === j.resourceId && x.market === CBN_NOSANA_MARKET && typeof x.job === 'string');
+        // Only a job of this exact deployment counts: on the pinned market, or (selection) on the market the host manager
+        // chose for the deployment's own requirements.
+        found = (Array.isArray(list.jobs) ? list.jobs : []).find((x) => x && x.deployment === j.resourceId && typeof x.job === 'string'
+          && (j.requirements ? typeof x.market === 'string' && MARKET.test(x.market) : x.market === CBN_NOSANA_MARKET));
         cursor = list.pagination?.cursor_next;
         if (found || !cursor) break;
       }
@@ -645,6 +700,7 @@ export class CbNestedService {
     return this.patch(j.id, (x) => {
       if (terminal(x.status)) return;
       x.providerState = f.state; x.providerJob = f.job;
+      if (x.requirements) x.providerMarket ??= f.market;
       if (f.state === 'RUNNING') x.status = 'running';
       else if (f.state === 'COMPLETED') {
         // Keep the deployment (SIMPLE strategy: the job is done, nothing more runs) until its result is read.
@@ -661,7 +717,8 @@ export class CbNestedService {
     let got: NosanaJobResult = { kind: 'unavailable' };
     if (key && j.resourceId && isJobAddress(j.providerJob)) {
       const r = await nosanaDeploymentJob(key, j.resourceId, j.providerJob);
-      got = r.status === 'ok' ? cbNestedNosanaJobResult(r.json, nosanaJobArg(j)) : { kind: r.status };
+      const market = j.requirements ? j.providerMarket : CBN_NOSANA_MARKET;
+      got = r.status !== 'ok' ? { kind: r.status } : market ? cbNestedNosanaJobResult(r.json, nosanaJobArg(j), market) : { kind: 'unavailable' };
       // The deployment job body may lag; the public indexer/IPFS copy of the same job is the fallback.
       if (got.kind === 'pending') { const pub = await readNosanaJobResult(j.providerJob).catch(() => null); if (pub?.kind === 'ready') got = pub; }
     }
@@ -790,6 +847,8 @@ export class CloudbiteComputerNested extends DurableObject<Env> {
   revokeAll() { return this.service().revokeAll(); }
   ownerJobs() { return this.service().ownerJobs(); }
   async ownerJobsJson(): Promise<string> { return JSON.stringify(await this.service().ownerJobs()); }
+  async ownerSelectGpuJson(input:Record<string,unknown>):Promise<string>{return JSON.stringify(await this.service().selectGpu(input));}
+  async ownerGpuSelectionJson(ownerMachineId:string):Promise<string>{return JSON.stringify(await this.service().gpuSelection(ownerMachineId));}
   async configureJson(input: { ownerMachineId: string; requestId: string }): Promise<string> { return JSON.stringify(await this.service().configure(input)); }
   fetch(req: Request) { return this.service().fetch(req); }
   async alarm() { await this.service().alarm(); }
@@ -855,14 +914,19 @@ for i in range(4):
 // Owner-machine CLI. Reads the root-installed private config; never prints the token.
 export const CBN_CLI_PY = String.raw`#!/usr/bin/env python3
 """cloudbite-compute: run bounded extra compute (Daytona CPU / Nosana GPU) from this Cloudbite computer."""
-import json, os, stat, sys, time, uuid, urllib.request, urllib.error
+import json, os, re, stat, sys, time, uuid, urllib.request, urllib.error
 from urllib.parse import urlparse
 CONFIG = os.path.expanduser(os.environ.get('CLOUDBITE_COMPUTE_CONFIG', '~/.config/cloudbite/compute.json'))
 USAGE = '''usage:
   cloudbite-compute doctor
   cloudbite-compute jobs
-  cloudbite-compute run --provider daytona|nosana [--image IMAGE] [--timeout SECONDS] [--no-wait] -- COMMAND [ARGS...]
-  cloudbite-compute stop JOBID'''
+  cloudbite-compute run --provider daytona|nosana [--image IMAGE] [--timeout SECONDS] [--gpu MODEL --country CC] [--no-wait] -- COMMAND [ARGS...]
+  cloudbite-compute stop JOBID
+
+  --gpu MODEL --country CC (nosana only, always together): run on exactly that GPU model in that country,
+    e.g. --gpu 'NVIDIA GeForce RTX 4090' --country US. The gateway refuses the run when no free host exists
+    there; it never falls back to another GPU, country or market. Without them nosana uses the RTX 4090 market.
+  A remote GPU job is a bounded remote container, not a local GPU. Its image and command are public.'''
 
 class Usage(Exception): pass
 
@@ -879,21 +943,29 @@ def parse(argv):
     if '--' not in rest: raise Usage('run needs -- before the command')
     i = rest.index('--'); opts, command = rest[:i], rest[i + 1:]
     if not command: raise Usage('run needs a command after --')
-    out = {'cmd': 'run', 'provider': None, 'image': None, 'timeout': 300, 'wait': True, 'command': command}
+    out = {'cmd': 'run', 'provider': None, 'image': None, 'timeout': 300, 'wait': True, 'gpu': None, 'country': None, 'command': command}
     j = 0
     while j < len(opts):
         o = opts[j]
         if o == '--no-wait': out['wait'] = False; j += 1; continue
-        if o not in ('--provider', '--image', '--timeout') or j + 1 >= len(opts): raise Usage('bad option: %s' % o[:40])
+        if o not in ('--provider', '--image', '--timeout', '--gpu', '--country') or j + 1 >= len(opts): raise Usage('bad option: %s' % o[:40])
         v = opts[j + 1]; j += 2
         if o == '--provider':
             if v not in ('daytona', 'nosana'): raise Usage('--provider must be daytona or nosana')
             out['provider'] = v
         elif o == '--image': out['image'] = v
+        elif o == '--gpu':
+            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9 ._()+/-]{0,79}', v): raise Usage('--gpu must be a plain GPU model name')
+            out['gpu'] = v
+        elif o == '--country':
+            if not re.fullmatch(r'[A-Z]{2}', v): raise Usage('--country must be an ISO code such as US')
+            out['country'] = v
         else:
             if not v.isdigit() or not 10 <= int(v) <= 600: raise Usage('--timeout must be 10..600 seconds')
             out['timeout'] = int(v)
     if not out['provider']: raise Usage('--provider is required')
+    if (out['gpu'] is None) != (out['country'] is None): raise Usage('--gpu and --country must be given together')
+    if out['gpu'] and out['provider'] != 'nosana': raise Usage('--gpu/--country need --provider nosana')
     return out
 
 def load():
@@ -919,7 +991,8 @@ def call(c, method, sub, body=None):
         raise SystemExit('error: gateway unreachable (outcome unknown; check "jobs" before retrying)')
 
 def show(j):
-    print('%s  %-8s %-10s cleanup=%s  %s' % (j['id'], j['provider'], j['status'], j['cleanup'], ' '.join(j['command'])[:80]))
+    where = ' gpu=%s/%s' % (j['gpu'], j['country']) if j.get('gpu') else ''
+    print('%s  %-8s %-10s cleanup=%s%s  %s' % (j['id'], j['provider'], j['status'], j['cleanup'], where, ' '.join(j['command'])[:80]))
 
 def main(argv):
     try: a = parse(argv)
@@ -935,6 +1008,7 @@ def main(argv):
         show(call(c, 'POST', 'stop', {'requestId': str(uuid.uuid4()), 'jobId': a['jobId']})['job']); return 0
     body = {'requestId': str(uuid.uuid4()), 'provider': a['provider'], 'timeout': a['timeout'], 'command': a['command']}
     if a['image']: body['image'] = a['image']
+    if a['gpu']: body['gpu'] = a['gpu']; body['country'] = a['country']
     if a['provider'] == 'nosana':
         print('notice: Nosana GPU job definitions (image and command) are public; never put API keys or secrets in them.', file=sys.stderr)
     job = call(c, 'POST', 'run', body)['job']; show(job)

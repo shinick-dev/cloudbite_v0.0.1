@@ -48,6 +48,22 @@ await test('404 reads are absent; no answer is an uncertain status 0; definitive
   await assert.rejects(M.restDaytona.stop(C, 'x'), (e) => e.status === 400 && !e.uncertain);
 });
 
+await test('resize posts CPU/RAM only to the sandbox path; quota refusals are classified without exposing the message', async () => {
+  reply = () => Response.json({ id: 'sb1', state: 'resizing', cpu: 4, memory: 8 });
+  assert.deepEqual(await M.restDaytona.resize(C, 'sb1', { cpu: 8, memory: 16, disk: 99 }), { id: 'sb1', state: 'resizing', cpu: 4, memory: 8 });
+  assert.equal(calls[0].method, 'POST'); assert.equal(calls[0].url, `${C.api}/sandbox/sb1/resize`);
+  assert.deepEqual(JSON.parse(calls[0].body), { cpu: 8, memory: 16 }, 'disk is never sent');
+  reply = () => new Response('{"message":"Total CPU quota exceeded (max 10) for org secret-org"}', { status: 403 });
+  await assert.rejects(M.restDaytona.resize(C, 'sb1', { cpu: 16, memory: 32 }),
+    (e) => e instanceof M.ComputerDaytonaError && e.status === 403 && e.reason === 'quota' && !e.uncertain && !/secret|quota exceeded/i.test(e.message));
+  reply = () => new Response('{"message":"bad"}', { status: 400 });
+  await assert.rejects(M.restDaytona.resize(C, 'sb1', { cpu: 8, memory: 16 }), (e) => e.status === 400 && e.reason === undefined && !e.uncertain);
+  reply = () => new Response('{"message":"limit exceeded, try later"}', { status: 503 });
+  await assert.rejects(M.restDaytona.resize(C, 'sb1', { cpu: 8, memory: 16 }), (e) => e.status === 503 && e.uncertain && e.reason === undefined);
+  reply = () => { throw new TypeError('network'); };
+  await assert.rejects(M.restDaytona.resize(C, 'sb1', { cpu: 8, memory: 16 }), (e) => e.status === 0 && e.uncertain);
+});
+
 await test('upstream origin must be the exact desktop port host for this sandbox', async () => {
   const S = ['.proxy.daytona.works'], id = 'sb-0123abcd';
   assert.equal(M.computerUpstreamOrigin(`https://8082-${id}.proxy.daytona.works`, id, S), `https://8082-${id}.proxy.daytona.works`);

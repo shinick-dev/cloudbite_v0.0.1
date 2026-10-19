@@ -533,6 +533,78 @@ await check('provider not configured: refused without storing a job or calling o
 
 // ---- generated Python: runner and CLI against a local HTTP server ----
 const py = spawnSync('python3', ['--version']).status === 0 ? 'python3' : 'python';
+await check('nosana GPU selection: availability read first, requirements {name,country} with no market, no fallback, immutable ledger', async () => {
+  const GPU = 'NVIDIA GeForce RTX 3090', OTHER = 'CA5pMpqkYFKtme7K31pNB1s62X2SdhEv1nN9RdxKCpuQ';
+  const { svc, net, st } = setup();
+  const { token } = await owner(svc);
+  let free = 2;
+  net.on('POST', /^https:\/\/api\.nosana\.com\/reservations\/available$/, () => free === 'down' ? new Response('', { status: 503 })
+    : json({ total: free, price: { minUsdPerHour: 0.17, maxUsdPerHour: 0.17 }, nodes: free ? [{ nodeAddress: 'G1MpHgK1nPJcwEr5Ju8dGpE6dwWaYJcrkZMr422aoTN2', market: OTHER }] : [] }));
+  nosanaCreateOk(net, 'dep-S');
+  const body = { requestId: uuid(), provider: 'nosana', gpu: GPU, country: 'US', timeout: 120, command: ['nvidia-smi'] };
+  const r = await gw(svc, 'POST', 'run', token, body);
+  assert.equal(r.status, 202, JSON.stringify(r.body));
+  assert.deepEqual([r.body.job.gpu, r.body.job.country, r.body.job.status], [GPU, 'US', 'queued']);
+  noSecrets(r.body); assert.ok(!JSON.stringify(r.body).includes('G1MpHg'), 'node addresses are never returned');
+  assert.deepEqual(net.calls.map((c) => c.method + ' ' + c.url), ['POST https://api.nosana.com/reservations/available', 'POST https://client-manager.k8s.prd.nosana.com/deployments/create']);
+  assert.equal(net.calls[0].auth, null, 'the public availability read carries no key');
+  assert.deepEqual(JSON.parse(net.calls[0].body), { requirements: { name: GPU, country: 'US' } });
+  const b = JSON.parse(net.calls[1].body);
+  assert.ok(!('market' in b), 'requirements scheduling omits the market');
+  assert.deepEqual(b.requirements, { name: GPU, country: 'US' });
+  assert.equal(b.job_definition.ops[0].args.gpu, true);
+  assert.deepEqual(st.m.get('job:' + r.body.job.id).requirements, { gpu: GPU, country: 'US' });
+  // Replay: no second availability read or create; a different selection under the same requestId conflicts.
+  net.reset(); free = 0;
+  const again = await gw(svc, 'POST', 'run', token, body);
+  assert.equal(again.body.replay, true);
+  assert.equal(net.calls.length, 0);
+  assert.equal((await gw(svc, 'POST', 'run', token, { ...body, country: 'NL' })).status, 409);
+  assert.equal(net.calls.length, 0, 'conflicting replay never reads or creates');
+  // Zero free hosts, or unreadable availability: refused before any ledger record or paid create.
+  const before = [...st.m.keys()].filter((k) => k.startsWith('job:')).length;
+  const none = await gw(svc, 'POST', 'run', token, { ...body, requestId: uuid() });
+  assert.deepEqual([none.status, none.body.error.code], [409, 'not_available']);
+  free = 'down';
+  const down = await gw(svc, 'POST', 'run', token, { ...body, requestId: uuid() });
+  assert.deepEqual([down.status, down.body.error.code], [503, 'availability_unknown']);
+  assert.equal([...st.m.keys()].filter((k) => k.startsWith('job:')).length, before);
+  assert.ok(!net.calls.some((c) => c.url.includes('/deployments/create')), 'no create without a free host');
+  // Polling accepts the deployment's own job on whatever market the host manager chose; a garbage market is ignored.
+  net.reset();
+  let market = 'not a market';
+  net.on('GET', /\/deployments\/dep-S\/jobs/, () => json({ jobs: [{ job: 'JobS', deployment: 'dep-S', market, state: 'RUNNING' }], pagination: { cursor_next: null } }));
+  await svc.alarm();
+  assert.equal(st.m.get('job:' + r.body.job.id).status, 'queued');
+  market = OTHER; await svc.alarm();
+  const stored = st.m.get('job:' + r.body.job.id);
+  assert.deepEqual([stored.status, stored.providerMarket, stored.requirements.country], ['running', OTHER, 'US']);
+  // The result is read only for the market recorded for this job.
+  const arg = b.job_definition.ops[0].args.cmd.at(-1);
+  const res = { market: OTHER, jobResult: null, jobDefinition: { ops: [{ id: 'work', args: { cmd: ['x', arg] } }] } };
+  assert.equal(M.cbNestedNosanaJobResult(res, arg, OTHER).kind, 'pending');
+  assert.equal(M.cbNestedNosanaJobResult(res, arg).kind, 'unavailable', 'default expects the pinned market');
+});
+
+await check('nosana GPU selection validation: nosana only, both fields, plain values; no selection keeps the pinned market', async () => {
+  const { svc, net } = setup();
+  const { token } = await owner(svc);
+  const base = { requestId: uuid(), provider: 'nosana', command: ['nvidia-smi'] };
+  for (const extra of [{ gpu: 'NVIDIA GeForce RTX 4090' }, { country: 'US' }, { gpu: 'NVIDIA GeForce RTX 4090', country: 'us' },
+    { gpu: 'RTX;rm -rf /', country: 'US' }, { gpu: 'x'.repeat(81), country: 'US' }, { gpu: 4090, country: 'US' }, { gpu: 'A\nB', country: 'US' }])
+    assert.equal((await gw(svc, 'POST', 'run', token, { ...base, requestId: uuid(), ...extra })).status, 400, JSON.stringify(extra));
+  const dy = await gw(svc, 'POST', 'run', token, { ...base, provider: 'daytona', gpu: 'NVIDIA GeForce RTX 4090', country: 'US' });
+  assert.equal(dy.status, 400); assert.match(dy.body.error.message, /nosana only/);
+  assert.equal(net.calls.length, 0, 'nothing is read or created for an invalid selection');
+  nosanaCreateOk(net, 'dep-P');
+  const plain = await gw(svc, 'POST', 'run', token, base);
+  assert.equal(plain.status, 202);
+  const b = JSON.parse(net.calls[0].body);
+  assert.equal(b.market, M.CBN_NOSANA_MARKET); assert.ok(!('requirements' in b));
+  assert.deepEqual([plain.body.job.gpu, plain.body.job.country], [null, null]);
+  assert.equal(net.calls.length, 1, 'no availability read without a selection');
+});
+
 const seen = [];
 let reply = (req, body) => ({ status: 200, json: { ok: true } });
 const server = createServer((req, res) => {
@@ -588,7 +660,10 @@ await check('python CLI: parsing, Bearer only, UUID requestId, token never print
   const jobView = { id: 'nj' + 'a'.repeat(24), provider: 'nosana', status: 'running', cleanup: 'none', command: ['nvidia-smi'] };
   for (const [args, msg] of [[[], 'usage'], [['run', '--provider', 'nosana'], 'needs --'], [['run', '--', 'x'], '--provider is required'],
     [['run', '--provider', 'gcp', '--', 'x'], 'daytona or nosana'], [['run', '--provider', 'nosana', '--timeout', '9000', '--', 'x'], '10..600'],
-    [['stop'], 'exactly one'], [['jobs', 'x'], 'no arguments'], [['frobnicate'], 'unknown command']]) {
+    [['stop'], 'exactly one'], [['jobs', 'x'], 'no arguments'], [['frobnicate'], 'unknown command'],
+    [['run', '--provider', 'nosana', '--gpu', 'NVIDIA GeForce RTX 4090', '--', 'x'], 'together'], [['run', '--provider', 'nosana', '--country', 'US', '--', 'x'], 'together'],
+    [['run', '--provider', 'daytona', '--gpu', 'NVIDIA GeForce RTX 4090', '--country', 'US', '--', 'x'], 'need --provider nosana'],
+    [['run', '--provider', 'nosana', '--gpu', 'RTX;id', '--country', 'US', '--', 'x'], 'plain GPU'], [['run', '--provider', 'nosana', '--gpu', 'A', '--country', 'usa', '--', 'x'], 'ISO code']]) {
     const r = await runPy(['-I', cli, ...args], env);
     assert.equal(r.code, 2, args.join(' ')); assert.ok(r.err.includes(msg), r.err);
   }
@@ -601,6 +676,13 @@ await check('python CLI: parsing, Bearer only, UUID requestId, token never print
   assert.equal(seen[0].url, P + '/run'); assert.equal(seen[0].auth, 'Bearer ' + tok); assert.equal(seen[0].origin, undefined);
   assert.match(sent.requestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.deepEqual([sent.provider, sent.timeout, sent.image, sent.command], ['nosana', 120, 'pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime', ['python', '-c', 'print(1)']]);
+  const help = await runPy(['-I', cli, '--help'], env);
+  assert.ok(help.err.includes('--gpu MODEL --country CC') && help.err.includes('never falls back'), help.err);
+  seen.length = 0;
+  const sel = await runPy(['-I', cli, 'run', '--provider', 'nosana', '--gpu', 'NVIDIA GeForce RTX 4090', '--country', 'US', '--no-wait', '--', 'nvidia-smi'], env);
+  assert.equal(sel.code, 0, sel.err);
+  const selBody = JSON.parse(seen[0].body);
+  assert.deepEqual([selBody.gpu, selBody.country, selBody.provider], ['NVIDIA GeForce RTX 4090', 'US', 'nosana']);
   const doc = await runPy(['-I', cli, 'doctor'], env);
   assert.equal(doc.code, 0, doc.err); assert.ok(doc.out.includes('gateway: ok (1 jobs)'));
   for (const o of [run, doc]) assert.ok(!(o.out + o.err).includes(tok), 'token never printed');
@@ -609,5 +691,21 @@ await check('python CLI: parsing, Bearer only, UUID requestId, token never print
   assert.notEqual(busy.code, 0); assert.ok(busy.err.includes('error busy'));
 });
 
+await check('GPU preference is scoped, idempotent, free and defaults only its own machine runs',async()=>{
+  const {svc,net}=setup();const {token}=await owner(svc);
+  const selection={ownerMachineId:'cbc-owner-machine-1',requestId:uuid(),candidateId:'gpu-test-US',gpu:'NVIDIA GeForce RTX 4090',country:'US',market:M.CBN_NOSANA_MARKET};
+  assert.equal((await svc.selectGpu(selection)).status,200);
+  assert.equal((await svc.selectGpu(selection)).body.replay,true);
+  assert.equal((await svc.selectGpu({...selection,country:'CA'})).status,409);
+  assert.equal((await svc.gpuSelection('other-machine-id')).body.selection,null);
+  assert.equal(net.calls.length,0,'choosing a preference does not reserve or rent a host');
+  net.on('POST',/^https:\/\/api\.nosana\.com\/reservations\/available$/,()=>json({total:1,price:null,nodes:[]}));
+  nosanaCreateOk(net,'dep-preference');
+  const body={requestId:uuid(),provider:'nosana',command:['nvidia-smi'],timeout:60};
+  const run=await gw(svc,'POST','run',token,body);assert.equal(run.status,202);
+  assert.equal(run.body.job.gpu,selection.gpu);assert.equal(run.body.job.country,'US');
+  await svc.selectGpu({...selection,requestId:uuid(),country:'CA'});
+  const replay=await gw(svc,'POST','run',token,body);assert.equal(replay.body.replay,true);assert.equal(replay.body.job.country,'US','retry preserves original scheduling requirements');
+});
 server.close();
 console.log(`cloudbite-computer-nested: ${count} checks passed`);
