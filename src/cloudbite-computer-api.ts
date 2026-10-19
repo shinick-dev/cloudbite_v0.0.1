@@ -11,6 +11,8 @@ import { CLOUDBITE_COMPUTER_HTML, CLOUDBITE_COMPUTER_JS, CLOUDBITE_COMPUTER_CSS 
 import { COMPUTER_COMPOSE_JS, COMPUTER_COMPOSE_CSS, COMPUTER_COMPOSE_HEAD, COMPUTER_COMPOSE_JS_PATH, COMPUTER_COMPOSE_CSS_PATH, COMPUTER_COMPOSE_INPUT_PATH } from './cloudbite-computer-compose';
 import { boundedText } from './cloudbite-inference';
 import { capacitySandboxes, capacityGpuCandidates, capacityGpuSelect } from './cloudbite-computer-capacity-api';
+import {webJobsContext,webJobsRun,webJobsStop,webJobOutput} from './cloudbite-computer-jobs-api';
+import {CLOUDBITE_COMPUTER_JOBS_HTML,CLOUDBITE_COMPUTER_JOBS_JS,CLOUDBITE_COMPUTER_JOBS_CSS} from './cloudbite-computer-jobs-page';
 
 const API = '/api/cloudbite/computer';
 const PAGE = '/cloudbite/computer';
@@ -96,10 +98,11 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
       return new Response(response.status===101?null:response.body,{status:response.status,statusText:response.statusText,headers:h,...(response.webSocket?{webSocket:response.webSocket}:{})});
     } catch{return error('desktop_unavailable',502);}
   }
-  if(p===PAGE || p===PAGE+'.js' || p===PAGE+'.css') {
+  if(p===PAGE || p===PAGE+'.js' || p===PAGE+'.css' || p===PAGE+'/jobs' || p===PAGE+'/jobs.js' || p===PAGE+'/jobs.css') {
     if(req.method!=='GET')return error('method_not_allowed',405);
-    const kind=p===PAGE?'text/html; charset=utf-8':p.endsWith('.js')?'text/javascript; charset=utf-8':'text/css; charset=utf-8';
-    const content=p===PAGE?CLOUDBITE_COMPUTER_HTML:p.endsWith('.js')?CLOUDBITE_COMPUTER_JS:CLOUDBITE_COMPUTER_CSS;
+    const jobs=p.startsWith(PAGE+'/jobs');
+    const kind=p===PAGE || p===PAGE+'/jobs'?'text/html; charset=utf-8':p.endsWith('.js')?'text/javascript; charset=utf-8':'text/css; charset=utf-8';
+    const content=jobs?(p.endsWith('.js')?CLOUDBITE_COMPUTER_JOBS_JS:p.endsWith('.css')?CLOUDBITE_COMPUTER_JOBS_CSS:CLOUDBITE_COMPUTER_JOBS_HTML):(p===PAGE?CLOUDBITE_COMPUTER_HTML:p.endsWith('.js')?CLOUDBITE_COMPUTER_JS:CLOUDBITE_COMPUTER_CSS);
     return new Response(content,{headers:{...headers,'content-type':kind,'x-frame-options':'DENY',
       'content-security-policy':"default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"}});
   }
@@ -120,6 +123,17 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
     catch{return error('gpu_catalog_unavailable',503);}
   }
   const nested=env.CLOUDBITE_COMPUTER_NESTED?.get(env.CLOUDBITE_COMPUTER_NESTED.idFromName('owner'));
+  if(req.method==='GET' && op==='jobs/context'){
+    if(!nested)return error('not_configured',503);
+    try{const result=await webJobsContext(env,computer,nested,tag,url.searchParams);return json(result.body,result.status);}catch{return error('job_context_unavailable',503);}
+  }
+  const output=/^jobs\/(nj[0-9a-f]{24})\/output$/.exec(op);
+  if(req.method==='GET' && output){
+    if(!nested)return error('not_configured',503);
+    const result=await webJobOutput(nested,output[1]);
+    if(result.text===null)return error(result.status===404?'job_not_found':'output_not_ready',result.status);
+    return new Response(result.text,{headers:{...headers,'content-type':'text/plain; charset=utf-8','content-disposition':`attachment; filename="${output[1]}.txt"`,'content-security-policy':"default-src 'none'"}});
+  }
   if(req.method==='GET' && op==='nested/jobs') {
     if(!nested)return error('not_configured',503);
     const result=JSON.parse(await nested.ownerJobsJson());return json(result.body,result.status);
@@ -127,7 +141,12 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
   if(req.method!=='POST')return error('method_not_allowed',405);
   if(req.headers.get('origin')!==env.ORIGIN && admin===null)return error('bad_origin',403);
   if(req.headers.get('origin') && req.headers.get('origin')!==env.ORIGIN)return error('bad_origin',403);
-  const input=await body(req); if(!input)return error('bad_request',400);
+  const input=await body(req,op==='jobs/run'?64*1024:8192); if(!input)return error('bad_request',400);
+  if(op==='jobs/run'||op==='jobs/stop'){
+    if(!nested)return error('not_configured',503);
+    try{const result=op==='jobs/run'?await webJobsRun(env,computer,nested,tag,input):await webJobsStop(nested,input);return json(result.body,result.status);}
+    catch{return error('unknown_outcome',503);}
+  }
   if(op==='gpu/select'){
     if(!nested)return error('not_configured',503);
     try{const result=await capacityGpuSelect(env,input,nested);return result?json(result.body,result.status):error('bad_gpu_selection',400);}

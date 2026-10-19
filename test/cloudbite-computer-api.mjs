@@ -13,6 +13,10 @@ try {
   x.onResolve({filter:/^\.\/cloudbite-computer-auth-api$/},()=>({path:'auth',namespace:'test'}));
   x.onResolve({filter:/^\.\/lab$/},()=>({path:'lab',namespace:'test'}));
   x.onResolve({filter:/^\.\/cloudbite-computer-capacity-api$/},()=>({path:'capacity',namespace:'capacity-test'}));
+  x.onResolve({filter:/^\.\/cloudbite-computer-jobs-api$/},()=>({path:'jobs',namespace:'jobs-test'}));
+  x.onResolve({filter:/^\.\/cloudbite-computer-jobs-page$/},()=>({path:'page',namespace:'jobs-page-test'}));
+  x.onLoad({filter:/.*/,namespace:'jobs-test'},()=>({contents:"export const webJobsContext=async()=>({status:200,body:{ok:true}});export const webJobsRun=async()=>({status:202,body:{ok:true}});export const webJobsStop=webJobsRun;export const webJobOutput=async()=>({status:200,text:'test output'});"}));
+  x.onLoad({filter:/.*/,namespace:'jobs-page-test'},()=>({contents:"export const CLOUDBITE_COMPUTER_JOBS_HTML='<!doctype html><title>Jobs</title>';export const CLOUDBITE_COMPUTER_JOBS_JS='';export const CLOUDBITE_COMPUTER_JOBS_CSS='';"}));
   x.onLoad({filter:/.*/,namespace:'capacity-test'},()=>({contents:"export const capacitySandboxes=async()=>({ok:true,sandboxes:[],partial:false});export const capacityGpuCandidates=async()=>({ok:true,candidates:[]});export const capacityGpuSelect=async()=>({status:200,body:{ok:true,selection:{gpu:'test'}}});"}));
   x.onLoad({filter:/.*/,namespace:'test'},({path})=>({contents:path==='auth'?"export const computerAuthRoute=async()=>null;export const personalComputerCookieValid=async()=>false;":path==='state'?"export const sha=async()=> '0123456789abcdef0123456789abcdef'; export const isFail=x=>!!x?.error;":path==='owner'?"export const ownerCookieValid=async r=>r.headers.get('cookie')==='owner=yes';":"export const download=async()=>{throw Error('unexpected download')};export class DtError extends Error{};export const dt=async()=>{throw Error('unexpected provider call')};"}));
  }}]});
@@ -46,4 +50,7 @@ try {
  r=await request('/api/cloudbite/computer/resize',{method:'POST',headers:{cookie:'owner=yes',origin:base,'content-type':'application/json'},body:'{"acknowledgeCost":true}'});assert.equal(r.status,200);assert.equal(calls.at(-1),'resize');
  r=await request('/api/cloudbite/computer/gpu/select',{method:'POST',headers:{cookie:'owner=yes',origin:base,'content-type':'application/json'},body:'{}'});assert.equal(r.status,503,'GPU selection requires configured nested service');
  console.log('cloudbite-computer-api: auth, capability-origin isolation, CSRF and body limits passed');
+ r=await request('/api/cloudbite/computer/jobs/context');assert.equal(r.status,401);
+ r=await request('/api/cloudbite/computer/jobs/run',{method:'POST',headers:{cookie:'owner=yes',origin:'https://attacker.invalid','content-type':'application/json'},body:'{}'});assert.equal(r.status,403);
+ r=await request('/cloudbite/computer/jobs');assert.equal(r.status,200);assert.match(r.headers.get('content-security-policy'),/script-src 'self'/);
 }finally{await rm(dir,{recursive:true,force:true});}

@@ -22,6 +22,10 @@ const POLL_FAST_MS = 3000;
 const POLL_SLOW_MS = 8000;
 const POLL_FAST_COUNT = 20;
 const POLL_MAX = 90;
+// paid-session countdown: ticks only while visible and running; inside the warning window it ticks every second
+const SESSION_WARN_MS = 10 * 60 * 1000;
+const TICK_MS = 5000;
+const TICK_WARN_MS = 1000;
 const SNAPSHOT_NAME = /^[a-z0-9](?:[a-z0-9-]{1,46})[a-z0-9]$/;
 // optional short prefix, then 32 random bytes as canonical unpadded base64url (43 chars)
 const PAIR_TOKEN = /^(?:[a-z][a-z0-9]{0,15}_)?([A-Za-z0-9_-]{43})$/;
@@ -66,9 +70,10 @@ type Candidate = {
 type Candidates = { key: string; region: string; observedAt: string | null; note: string; list: Candidate[] };
 type GpuChoice = { candidateId: string; gpu: string; country: string | null; market: string | null; command: string };
 type GpuOp = { requestId: string; key: string; body: Record<string, unknown>; phase: 'sending' | 'uncertain' };
-type Reply = { ok: true; status: number; body: unknown } | { ok: false; status: number; code: string };
+type Reply = { ok: true; status: number; body: unknown; date: number } | { ok: false; status: number; code: string };
 type Lang = 'en' | 'ko';
 type Msg = { text: () => string; kind: 'ok' | 'warn' | 'info' } | null;
+type Phase = 'none' | 'normal' | 'warn' | 'over';
 
 // ───────────────────────── Catalogue (what each service offers — never whether it is set up) ─────────────────────────
 
@@ -158,8 +163,16 @@ const DICT = {
     } as Record<Status, string>,
     loadingState: 'Loading machine state…', stateFailed: 'Could not load the machine state.', refresh: 'Refresh', refreshing: 'Refreshing…',
     name: 'Name', account: 'Account', region: 'Region', resources: 'Resources', cpuMem: (c: string, m: string, d: string) => `${c} vCPU · ${m} GiB RAM · ${d} GiB disk`,
-    session: 'Paid session', sessionEnds: (t: string, mins: number) => `Ends ${t} (${mins < 1 ? 'under a minute' : `${mins} min`} left). The machine then stops; data is kept.`,
-    sessionOver: 'Session time is up; the machine should be stopping.', noSession: 'No paid session is running.',
+    session: 'Paid session', sessionEnds: (t: string, left: string) => `Ends ${t} (${left} left). The machine then stops; files on disk are kept.`,
+    leftLong: (h: number, m: number) => (h ? `${h} h ${m} min` : `${m} min`),
+    sessionOver: 'time is up.', noSession: 'No paid session is running.',
+    sessionWarn: 'Less than 10 minutes left. When time runs out the machine stops by itself: files on disk are kept, but open programs, terminals and anything only in memory (RAM) are closed and not saved. Extend sets the end to 2 hours from now.',
+    sessionChecking: 'Time is up. Checking with the server — the desktop cannot be opened until it answers.',
+    sessionEnding: 'The paid session ended and the server reports the machine is stopping. Files on disk are kept; open programs and anything only in memory (RAM) are being closed.',
+    sessionEnded: 'The paid session ended and the server reports the machine stopped. Files on disk are kept; programs that were open and anything only in memory (RAM) were closed and are not restored. Resume starts a new session.',
+    extendDone: (t: string) => `Session extended — it now ends ${t}.`, extendChecking: 'Extend was accepted. Checking the new end time…',
+    extendNotRunning: 'The machine was no longer running, so the session was not extended. Resume starts it again; programs that were open are not restored.',
+    extendUnclear: 'The server accepted Extend but shows no later end time. Press Refresh before relying on it.',
     sessionNote: 'Cost depends on your provider account and usage. Cloudbite does not guarantee a price.',
     chooseAccount: 'Provider account', accountUnavailable: 'not available', noAccounts: 'No provider account is configured on the server.',
     start: 'Start machine', resume: 'Resume', open: 'Open desktop', stop: 'Stop', extend: 'Extend session',
@@ -192,6 +205,7 @@ const DICT = {
     webLauncher: 'Web launcher on desktop', brokerKey: 'Key via broker — not checked', signInNote: 'Sign-in happens in the desktop and is not tracked here.',
     connected: 'Signed in / key set', notConnected: 'Not connected',
     machineOffNote: 'Install status comes from the running machine; start it to check.',
+    jobsOpen: 'Run CPU/GPU jobs on the web',
     nestedTitle: 'Nested compute (Daytona, Nosana)', nestedLead: 'Asks the server to set up scoped Daytona and Nosana command-line access inside this machine. Only the server\'s answer says whether it worked.',
     nestedConfigure: 'Set up nested compute', nestedConfiguring: 'Setting up…', nestedJobs: 'Show nested jobs', nestedLoading: 'Loading jobs…',
     nestedNone: 'The server reports no nested jobs.', nestedFailed: 'Could not load nested jobs.', nestedNeedsRunning: 'Available while the machine is running.',
@@ -260,8 +274,16 @@ const DICT = {
     } as Record<Status, string>,
     loadingState: '머신 상태를 불러오는 중…', stateFailed: '머신 상태를 불러오지 못했습니다.', refresh: '새로 고침', refreshing: '새로 고치는 중…',
     name: '이름', account: '계정', region: '지역', resources: '자원', cpuMem: (c: string, m: string, d: string) => `vCPU ${c} · RAM ${m} GiB · 디스크 ${d} GiB`,
-    session: '유료 세션', sessionEnds: (t: string, mins: number) => `${t} 종료 (${mins < 1 ? '1분 미만' : `${mins}분`} 남음). 그때 머신이 중지되며 데이터는 남습니다.`,
-    sessionOver: '세션 시간이 끝났습니다. 머신이 중지되는 중이어야 합니다.', noSession: '진행 중인 유료 세션이 없습니다.',
+    session: '유료 세션', sessionEnds: (t: string, left: string) => `${t} 종료 (${left} 남음). 그때 머신이 중지되며 디스크의 파일은 남습니다.`,
+    leftLong: (h: number, m: number) => (h ? `${h}시간 ${m}분` : `${m}분`),
+    sessionOver: '시간이 끝났습니다.', noSession: '진행 중인 유료 세션이 없습니다.',
+    sessionWarn: '10분도 남지 않았습니다. 시간이 끝나면 머신이 스스로 중지됩니다. 디스크의 파일은 남지만 열린 프로그램·터미널과 메모리(RAM)에만 있는 내용은 닫히며 저장되지 않습니다. 연장하면 종료 시각이 지금부터 2시간 뒤로 바뀝니다.',
+    sessionChecking: '시간이 끝났습니다. 서버에 확인하는 중이며, 답을 받을 때까지 데스크톱을 열 수 없습니다.',
+    sessionEnding: '유료 세션이 끝났고 서버가 머신이 중지 중이라고 알립니다. 디스크의 파일은 남고, 열린 프로그램과 메모리(RAM)에만 있는 내용은 닫히는 중입니다.',
+    sessionEnded: '유료 세션이 끝났고 서버가 머신이 중지됐다고 알립니다. 디스크의 파일은 남지만 열려 있던 프로그램과 메모리(RAM)에만 있던 내용은 닫혔으며 되살아나지 않습니다. 재개하면 새 세션이 시작됩니다.',
+    extendDone: (t: string) => `세션을 연장했습니다 — 이제 ${t}에 끝납니다.`, extendChecking: '연장 요청이 접수됐습니다. 새 종료 시각을 확인하는 중…',
+    extendNotRunning: '머신이 이미 실행 중이 아니어서 세션을 연장하지 않았습니다. 재개하면 다시 시작하지만 열려 있던 프로그램은 되살아나지 않습니다.',
+    extendUnclear: '서버가 연장 요청을 받았지만 더 늦은 종료 시각을 보여 주지 않습니다. 믿기 전에 새로 고침을 누르세요.',
     sessionNote: '비용은 공급자 계정과 사용량에 따릅니다. Cloudbite 는 가격을 보장하지 않습니다.',
     chooseAccount: '공급자 계정', accountUnavailable: '사용 불가', noAccounts: '서버에 설정된 공급자 계정이 없습니다.',
     start: '머신 시작', resume: '재개', open: '데스크톱 열기', stop: '중지', extend: '세션 연장',
@@ -294,6 +316,7 @@ const DICT = {
     webLauncher: '데스크톱 웹 실행기', brokerKey: '중계 키 — 확인 안 됨', signInNote: '로그인은 데스크톱 안에서 하며 여기서 추적하지 않습니다.',
     connected: '로그인 / 키 설정됨', notConnected: '연결 안 됨',
     machineOffNote: '설치 상태는 실행 중인 머신이 알려 줍니다. 확인하려면 시작하세요.',
+    jobsOpen: '웹에서 CPU·GPU 작업 실행',
     nestedTitle: '중첩 컴퓨트 (Daytona, Nosana)', nestedLead: '이 머신 안에 범위가 제한된 Daytona·Nosana 명령줄 접근을 설정해 달라고 서버에 요청합니다. 성공 여부는 서버 응답으로만 압니다.',
     nestedConfigure: '중첩 컴퓨트 설정', nestedConfiguring: '설정 중…', nestedJobs: '중첩 작업 보기', nestedLoading: '작업 불러오는 중…',
     nestedNone: '서버가 보고한 중첩 작업이 없습니다.', nestedFailed: '중첩 작업을 불러오지 못했습니다.', nestedNeedsRunning: '머신이 실행 중일 때 쓸 수 있습니다.',
@@ -365,9 +388,10 @@ async function call(path: string, body?: unknown): Promise<Reply> {
       ? { method: 'GET', credentials: 'same-origin', cache: 'no-store' }
       : { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   } catch { return { ok: false, status: 0, code: '' }; }
-  let parsed: unknown = null;
+  let parsed: unknown = null, date = NaN;
   try { parsed = await res.json(); } catch { /* no body */ }
-  if (res.ok && !(isObj(parsed) && parsed.error !== undefined && parsed.error !== null)) return { ok: true, status: res.status, body: parsed };
+  try { date = Date.parse(res.headers.get('date') ?? ''); } catch { /* no headers */ }
+  if (res.ok && !(isObj(parsed) && parsed.error !== undefined && parsed.error !== null)) return { ok: true, status: res.status, body: parsed, date };
   return { ok: false, status: res.ok ? 502 : res.status, code: errorCode(parsed) };
 }
 
@@ -620,6 +644,8 @@ function mount(root: HTMLElement, pair: PairLink): void {
     pairing: pair.present, paired: false, enrollBusy: false, enrollMsg: null as Msg,
     state: null as MachineState | null, loading: false, loadMsg: null as Msg,
     account: '' as AccountId | '', op: null as Op | null, opMsg: null as Msg,
+    // expired: this page saw the paid session run out (never set by an explicit Stop); extendCheck: an Extend answer still needs the new end time
+    expired: false, extendCheck: false,
     launching: false, launchUrl: '', launchMsg: null as Msg, snapName: '', snapMsg: null as Msg, termOpen: false,
     jobs: null as NestedJob[] | null, jobsLoading: false, jobsMsg: null as Msg,
     // performance card: fetched only from Check now (or right after a size change answer), never by polling
@@ -631,6 +657,8 @@ function mount(root: HTMLElement, pair: PairLink): void {
     cands: null as Candidates | null, candLoading: false, candMsg: null as Msg, gpuOp: null as GpuOp | null, gpuMsg: null as Msg, choice: null as GpuChoice | null, copyMsg: null as Msg,
   };
   let pollTimer: ReturnType<typeof setTimeout> | null = null, polls = 0, clockTimer: ReturnType<typeof setTimeout> | null = null, loadSeq = 0;
+  // skew: server clock (Date header of GET state) minus this device's clock, so a wrong phone clock does not end the session early
+  let skew = 0, shownPhase: Phase = 'none', expiryChecked = '';
   // bumped on sign-out and on every selection change, so an answer that arrives late is dropped instead of drawn
   let perfSeq = 0, sbSeq = 0, candSeq = 0, gpuSeq = 0;
 
@@ -657,7 +685,8 @@ function mount(root: HTMLElement, pair: PairLink): void {
 
   const statusPill = h('span', 'cc-pill'), statusLead = h('p', 'cc-muted'), machineH = h('h2');
   const facts = h('dl', 'cc-facts');
-  const sessionLine = h('p', 'cc-session'), sessionNote = h('p', 'cc-fine');
+  const sessionLine = h('p', 'cc-session'), sessionNote = h('p', 'cc-fine'), sessionWarn = h('p', 'cc-msg'), expiryMsg = h('p', 'cc-msg');
+  sessionWarn.setAttribute('role', 'status'); expiryMsg.setAttribute('role', 'status');
   const accountLabel = h('label', 'cc-field-label'), accountSel = h('select', 'cc-select');
   accountSel.id = 'cc-account'; accountLabel.setAttribute('for', 'cc-account');
   accountSel.addEventListener('change', () => { S.account = ACCOUNT_IDS.includes(accountSel.value as AccountId) ? accountSel.value as AccountId : ''; render(); });
@@ -680,7 +709,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
   loadMsg.setAttribute('role', 'status');
   const keepTitle = h('h3'), keepText = h('p', 'cc-muted');
   const machineCard = h('section', 'cc-card cc-machine',
-    h('div', 'cc-machine-head', machineH, statusPill), statusLead, loadMsg, facts, sessionLine, sessionNote,
+    h('div', 'cc-machine-head', machineH, statusPill), statusLead, loadMsg, facts, sessionLine, sessionNote, sessionWarn, expiryMsg,
     accountWrap, accountNote, actions, opBox, launchBox, h('div', 'cc-keep', keepTitle, keepText));
 
   const phoneTitle = h('h2'), phoneLead = h('p', 'cc-muted'), phonePaired = h('p', 'cc-msg cc-ok'), phoneMsg = h('p', 'cc-msg');
@@ -712,7 +741,8 @@ function mount(root: HTMLElement, pair: PairLink): void {
   nestedMsg.setAttribute('role', 'status');
   const nestedBtn = button('cc-btn', () => { begin('nested/configure', {}); });
   const jobsBtn = button('cc-btn cc-quiet', () => { void loadJobs(); });
-  const nestedCard = h('section', 'cc-card', nestedTitle, nestedLead, h('div', 'cc-actions', nestedBtn, jobsBtn), nestedMsg, jobsList);
+  const webJobs = h('a', 'cc-btn cc-primary');
+  const nestedCard = h('section', 'cc-card', nestedTitle, nestedLead, h('div', 'cc-actions', nestedBtn, jobsBtn, webJobs), nestedMsg, jobsList);
 
   const keysTitle = h('h2'), keysLead = h('p', 'cc-muted');
   const brokerLink = link('cc-btn', BROKER_URL, true), vaultLink = link('cc-btn', VAULT_URL, true);
@@ -773,7 +803,8 @@ function mount(root: HTMLElement, pair: PairLink): void {
   const copyMsg = h('p', 'cc-msg');
   copyMsg.setAttribute('role', 'status');
   const jobsNote = h('p', 'cc-fine');
-  const chosenBox = h('div', 'cc-chosen', chosenText, runText, h('div', 'cc-field', cmdLabel, cmdIn), copyBtn, copyMsg, jobsNote);
+  const gpuWebJobs = h('a', 'cc-btn cc-primary');
+  const chosenBox = h('div', 'cc-chosen', chosenText, runText, h('div', 'cc-field', cmdLabel, cmdIn), copyBtn, copyMsg, gpuWebJobs, jobsNote);
   const gpuCard = h('section', 'cc-card cc-gpu', gpuTitle, gpuLead, gpuNoSwitch, h('div', 'cc-actions', sbBtn), sbMsg, sbWrap, vramWrap, findBtn,
     candMsg, candHead, distNote, candNote, candList, gpuMsg, gpuRetryRow, chosenBox);
 
@@ -838,14 +869,15 @@ function mount(root: HTMLElement, pair: PairLink): void {
     if (m) facts.replaceChildren(
       ...fact(d.name, m.name || m.id || '–'), ...fact(d.account, m.account || '–'), ...fact(d.region, m.region || '–'),
       ...fact(d.resources, d.cpuMem(fmt(m.cpu), fmt(m.memoryGiB), fmt(m.diskGiB))));
-    const ends = st?.sessionEndsAt ? Date.parse(st.sessionEndsAt) : NaN;
-    if (Number.isFinite(ends)) {
-      const mins = Math.floor((ends - Date.now()) / 60000);
-      const t = new Date(ends).toLocaleTimeString(lang === 'ko' ? 'ko-KR' : 'en-US', { hour: '2-digit', minute: '2-digit' });
-      sessionLine.textContent = `${d.session}: ${ends <= Date.now() ? d.sessionOver : d.sessionEnds(t, mins)}`;
-    } else sessionLine.textContent = `${d.session}: ${d.noSession}`;
+    const phase = sessionPhase();
+    shownPhase = phase;
+    sessionLine.textContent = sessionText(d);
     sessionLine.hidden = !st;
     sessionNote.textContent = d.sessionNote; sessionNote.hidden = !st;
+    setMsg(sessionWarn, phase === 'warn' ? { text: () => d.sessionWarn, kind: 'warn' } : null);
+    setMsg(expiryMsg, phase === 'over' ? { text: () => d.sessionChecking, kind: 'warn' }
+      : S.expired && status === 'stopped' ? { text: () => d.sessionEnded, kind: 'info' }
+      : S.expired && status === 'stopping' ? { text: () => d.sessionEnding, kind: 'info' } : null);
 
     // accounts: choose only when there is no machine; an existing machine keeps its account
     const accounts = st?.configuredAccounts ?? [];
@@ -872,12 +904,14 @@ function mount(root: HTMLElement, pair: PairLink): void {
     startBtn.disabled = busy || (status === 'stopped' ? accountGone : !S.account);
     openBtn.hidden = status !== 'running';
     openBtn.textContent = S.launching ? d.opening : d.open;
-    openBtn.disabled = S.launching || !st?.ready;
-    openBtn.title = st?.ready ? '' : d.notReady;
+    // after the local deadline the desktop stays closed until the server answers again
+    openBtn.disabled = S.launching || !st?.ready || phase === 'over';
+    openBtn.title = phase === 'over' ? d.sessionChecking : st?.ready ? '' : d.notReady;
     stopBtn.hidden = !(status === 'running' || status === 'starting' || (status === 'error' && !!m));
     stopBtn.textContent = S.op?.kind === 'stop' && S.op.phase === 'sending' ? d.stopping : d.stop;
     stopBtn.disabled = busy;
     extendBtn.hidden = status !== 'running';
+    extendBtn.className = `cc-btn${phase === 'warn' || phase === 'over' ? ' cc-primary' : ''}`;
     extendBtn.textContent = S.op?.kind === 'extend' && S.op.phase === 'sending' ? d.extending : d.extend;
     extendBtn.disabled = busy;
     refreshBtn.textContent = S.loading ? d.refreshing : d.refresh;
@@ -888,6 +922,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
     retryBtn.textContent = d.retry; forgetBtn.textContent = d.forget;
     retryBtn.hidden = forgetBtn.hidden = S.op?.phase !== 'uncertain';
 
+    if (phase === 'over') S.launchUrl = '';
     launchBox.hidden = !S.launchUrl && !S.launchMsg;
     setMsg(launchMsg, S.launchUrl ? { text: () => d.openReady, kind: 'ok' } : S.launchMsg);
     launchLink.hidden = !S.launchUrl;
@@ -925,6 +960,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
 
     // nested compute
     nestedTitle.textContent = d.nestedTitle; nestedLead.textContent = d.nestedLead;
+    webJobs.textContent=d.jobsOpen;webJobs.setAttribute('href','/cloudbite/computer/jobs?lang='+lang);
     const nestedOk = status === 'running';
     nestedBtn.textContent = S.op?.kind === 'nested/configure' && S.op.phase === 'sending' ? d.nestedConfiguring : d.nestedConfigure;
     nestedBtn.disabled = busy || !nestedOk;
@@ -1040,6 +1076,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
     const cs = S.cands && S.cands.key === S.sandbox ? S.cands : null;
     setMsg(candMsg, S.candMsg ?? (cs && !cs.list.length ? { text: () => d.gpuNone, kind: 'info' } : null));
     const sb = sbs.find(s => sandboxKey(s) === S.sandbox);
+    gpuWebJobs.textContent=d.jobsOpen;gpuWebJobs.setAttribute('href','/cloudbite/computer/jobs?lang='+lang+(sb?'&sandboxId='+encodeURIComponent(sb.id)+'&account='+encodeURIComponent(sb.account):''));
     candHead.hidden = distNote.hidden = !cs;
     candHead.textContent = cs ? `${d.gpuFrom(sb?.name || sb?.id || '–', cs.region)} · ${d.gpuObserved(when(cs.observedAt))}` : '';
     distNote.textContent = `${d.gpuDistanceNote} ${d.gpuFee}`;
@@ -1108,7 +1145,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
   // ── polling: only while visible and something is pending ──
   function pendingWork(): boolean {
     const s = S.state?.status;
-    return !!S.op || (!!s && TRANSITIONAL.includes(s)) || (s === 'running' && !S.state?.ready);
+    return !!S.op || (!!s && TRANSITIONAL.includes(s)) || (s === 'running' && (!S.state?.ready || sessionPhase() === 'over'));
   }
   function stopPoll(): void { if (pollTimer !== null) { clearTimeout(pollTimer); pollTimer = null; } }
   function schedule(): void {
@@ -1116,20 +1153,73 @@ function mount(root: HTMLElement, pair: PairLink): void {
     if (S.auth !== 'in' || document.visibilityState !== 'visible' || !pendingWork() || polls >= POLL_MAX) return;
     pollTimer = setTimeout(() => { pollTimer = null; polls++; void loadState(); }, polls < POLL_FAST_COUNT ? POLL_FAST_MS : POLL_SLOW_MS);
   }
+  // ── paid-session clock: display only. It never extends, starts or stops anything; the server owns the deadline ──
+  const clock = () => Date.now() + skew;
+  function sessionPhase(): Phase {
+    const st = S.state, ends = st?.status === 'running' && st.sessionEndsAt ? Date.parse(st.sessionEndsAt) : NaN;
+    if (!Number.isFinite(ends)) return 'none';
+    const left = ends - clock();
+    return left <= 0 ? 'over' : left <= SESSION_WARN_MS ? 'warn' : 'normal';
+  }
+  function sessionText(d: Dict): string {
+    const ends = S.state?.sessionEndsAt ? Date.parse(S.state.sessionEndsAt) : NaN;
+    if (!Number.isFinite(ends)) return `${d.session}: ${d.noSession}`;
+    const left = ends - clock();
+    if (left <= 0) return `${d.session}: ${d.sessionOver}`;
+    const t = new Date(ends).toLocaleTimeString(lang === 'ko' ? 'ko-KR' : 'en-US', { hour: '2-digit', minute: '2-digit' });
+    let rest: string;
+    if (left <= SESSION_WARN_MS) { const sec = Math.ceil(left / 1000); rest = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`; }
+    else { const m = Math.floor(left / 60000); rest = d.leftLong(Math.floor(m / 60), m % 60); }
+    return `${d.session}: ${d.sessionEnds(t, rest)}`;
+  }
+  function stopClock(): void { if (clockTimer !== null) { clearTimeout(clockTimer); clockTimer = null; } }
   function tickClock(): void {
-    if (clockTimer !== null) { clearTimeout(clockTimer); clockTimer = null; }
-    if (S.auth !== 'in' || document.visibilityState !== 'visible' || !S.state?.sessionEndsAt) return;
-    clockTimer = setTimeout(() => { clockTimer = null; render(); tickClock(); }, 30000);
+    stopClock();
+    if (S.auth !== 'in' || document.visibilityState !== 'visible') return;
+    const phase = sessionPhase();
+    if (phase === 'none') return;
+    if (phase === 'over') { checkExpiry(); return; } // past the deadline only the server's answer moves things on (bounded polling)
+    clockTimer = setTimeout(() => {
+      clockTimer = null;
+      if (sessionPhase() !== shownPhase) render(); else sessionLine.textContent = sessionText(T());
+      tickClock();
+    }, phase === 'warn' ? TICK_WARN_MS : TICK_MS);
+  }
+  /** the local deadline passed: drop any desktop ticket and ask the server once; it alone says whether the machine stopped */
+  function checkExpiry(): void {
+    const ends = S.state?.sessionEndsAt ?? '';
+    if (!ends || expiryChecked === ends) return;
+    expiryChecked = ends; S.expired = true; S.launchUrl = '';
+    polls = 0; render(); void loadState();
   }
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') { polls = 0; if (S.auth === 'in') void loadState(); }
-    else { stopPoll(); if (clockTimer !== null) { clearTimeout(clockTimer); clockTimer = null; } }
+    else { stopPoll(); stopClock(); }
   });
+
+  /** every server state goes through here: a session seen running out and then stopped is reported as ended, never as kept in memory */
+  function applyState(st: MachineState): void {
+    const prev = S.state, prevEnds = prev?.status === 'running' && prev.sessionEndsAt ? Date.parse(prev.sessionEndsAt) : NaN;
+    if (Number.isFinite(prevEnds) && prevEnds <= clock() && (st.status === 'stopped' || st.status === 'stopping')) S.expired = true;
+    const ends = st.sessionEndsAt ? Date.parse(st.sessionEndsAt) : NaN;
+    if (st.status === 'starting' || st.status === 'absent' || (st.status === 'running' && Number.isFinite(ends) && ends > clock())) S.expired = false;
+    S.state = st;
+    if (S.extendCheck) { S.extendCheck = false; S.opMsg = extendMsg(st); }
+  }
+  /** Extend counts only when the server shows a running machine with a deadline still ahead */
+  function extendMsg(st: MachineState): Msg {
+    const ends = st.sessionEndsAt ? Date.parse(st.sessionEndsAt) : NaN;
+    if (st.status === 'running' && Number.isFinite(ends) && ends > clock()) {
+      const t = new Date(ends).toLocaleTimeString(lang === 'ko' ? 'ko-KR' : 'en-US', { hour: '2-digit', minute: '2-digit' });
+      return { text: () => T().extendDone(t), kind: 'ok' };
+    }
+    return st.status === 'running' ? { text: () => T().extendUnclear, kind: 'warn' } : { text: () => T().extendNotRunning, kind: 'warn' };
+  }
 
   // ── server calls ──
   function signedOut(): void {
-    stopPoll(); resetCapacity();
-    S.auth = 'out'; S.state = null; S.launchUrl = ''; S.paired = false; S.enrollMsg = null;
+    stopPoll(); stopClock(); resetCapacity();
+    S.auth = 'out'; S.state = null; S.expired = false; S.extendCheck = false; S.launchUrl = ''; S.paired = false; S.enrollMsg = null;
     void checkSession();
   }
 
@@ -1213,8 +1303,9 @@ function mount(root: HTMLElement, pair: PairLink): void {
     if (seq !== loadSeq) return;
     S.loading = false;
     if (r.ok) {
+      if (Number.isFinite(r.date)) { const k = r.date - Date.now(); skew = Math.abs(k) > 5000 ? k : 0; } // Date has 1 s resolution
       const st = normalizeState(r.body);
-      if (st) { S.state = st; S.loadMsg = null; }
+      if (st) { applyState(st); S.loadMsg = null; }
       else S.loadMsg = { text: () => T().stateFailed, kind: 'warn' };
     } else if (r.status === 401 || r.status === 403) { signedOut(); return; }
     else S.loadMsg = { text: () => `${T().stateFailed} ${r.status === 0 ? T().netErr : r.code ? T().rejected(r.code) : T().httpErr(r.status)}`, kind: 'warn' };
@@ -1239,7 +1330,8 @@ function mount(root: HTMLElement, pair: PairLink): void {
       S.op = null; S.opMsg = { text: () => T().done[op.kind], kind: 'ok' };
       if (op.kind === 'snapshot') { S.snapName = ''; S.snapMsg = null; }
       const st = isObj(r.body) && typeof r.body.status === 'string' ? normalizeState(r.body) : null;
-      if (st) S.state = st;
+      if (op.kind === 'extend') { S.extendCheck = true; S.opMsg = { text: () => T().extendChecking, kind: 'info' }; }
+      if (st) applyState(st);
       settleResize();
       polls = 0; render(); void loadState(); return;
     }
@@ -1403,10 +1495,11 @@ function mount(root: HTMLElement, pair: PairLink): void {
   }
 
   async function launch(): Promise<void> {
-    if (S.launching || S.state?.status !== 'running') return;
+    if (S.launching || S.state?.status !== 'running' || sessionPhase() === 'over') return;
     S.launching = true; S.launchUrl = ''; S.launchMsg = null; render();
     const r = await call(`${API}/launch`, {});
     S.launching = false;
+    if (r.ok && sessionPhase() === 'over') { render(); return; } // a ticket that arrives after the deadline is not offered
     if (r.ok) {
       const url = isObj(r.body) ? safeDesktopUrl(r.body.url) : null;
       if (url) S.launchUrl = url; else S.launchMsg = { text: () => T().openBad, kind: 'warn' };
@@ -1451,17 +1544,17 @@ function mount(root: HTMLElement, pair: PairLink): void {
 
   async function logout(): Promise<void> {
     if (S.authBusy) return;
-    S.authBusy = true; stopPoll(); render();
+    S.authBusy = true; stopPoll(); stopClock(); render();
     const r = await call(`${AUTH_API}/logout`, {});
     S.authBusy = false;
     if (r.ok && isObj(r.body) && r.body.authenticated === false) {
       resetCapacity();
-      S.auth = 'out'; S.state = null; S.op = null; S.opMsg = null; S.launchUrl = ''; S.paired = false; S.enrollMsg = null; S.authMsg = { text: () => T().signedOut, kind: 'ok' };
+      S.auth = 'out'; S.state = null; S.op = null; S.opMsg = null; S.launchUrl = ''; S.expired = false; S.extendCheck = false; S.paired = false; S.enrollMsg = null; S.authMsg = { text: () => T().signedOut, kind: 'ok' };
     } else {
       S.authMsg = { text: () => (r.ok ? T().sessionFailed : r.status === 0 ? T().netErr : T().httpErr(r.status)), kind: 'warn' };
       S.opMsg = S.authMsg;
     }
-    render(); schedule();
+    render(); schedule(); tickClock();
   }
 
   render();

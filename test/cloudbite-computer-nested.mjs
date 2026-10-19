@@ -180,7 +180,7 @@ await check('nosana run: exact client-manager create body, master key only in th
   const b = JSON.parse(c.body);
   assert.match(b.idempotency_key, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.equal(b.market, '97G9NnvBDQ2WpKu6fasoMsAKmfj63C9rhysJnkeWodAf');
-  assert.deepEqual([b.replicas, b.strategy, b.autostart, b.timeout], [1, 'SIMPLE', true, 7]);
+  assert.deepEqual([b.replicas, b.strategy, b.autostart, b.timeout], [1, 'SIMPLE', true, 50]);
   assert.equal(b.name, 'cbn-' + r.body.job.id);
   assert.deepEqual(Object.keys(b.job_definition), ['version', 'type', 'ops']);
   const op = b.job_definition.ops[0];
@@ -194,7 +194,8 @@ await check('nosana run: exact client-manager create body, master key only in th
   assert.ok(!('callbackHash' in st.m.get('job:' + r.body.job.id)), 'a Nosana job has no callback secret');
   assert.equal(r.body.job.public, true); assert.match(r.body.job.note, /public/);
   const timed = await gw(svc, 'POST', 'run', token, { requestId: uuid(), provider: 'nosana', timeout: 600, command: ['x'] });
-  assert.equal(JSON.parse(net.calls[1].body).timeout, 10, 'Nosana timeout capped at 10 minutes');
+  assert.equal(JSON.parse(net.calls[1].body).timeout, 50, 'credit-paid provider reservation requires 50 minutes');
+  assert.ok(Date.parse(timed.body.job.deadline)-Date.parse(timed.body.job.createdAt)<20*60_000,'local cleanup deadline remains bounded independently of the provider reservation');
   assert.equal(timed.status, 202);
 });
 
