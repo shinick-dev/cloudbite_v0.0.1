@@ -3,6 +3,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -10,7 +11,9 @@ IMAGE = Path(__file__).parent.parent/'images/cloudbite-computer'
 WRAPPER, SHELL, RC = IMAGE/'terminal-wrapper.sh', IMAGE/'shell.sh', IMAGE/'shell-rc.sh'
 SH = shutil.which('sh')
 BASH = shutil.which('bash')
-assert SH, 'POSIX sh required'
+if not SH:
+    print('SKIP cloudbite-computer-terminal: POSIX sh is unavailable; run this suite on Linux')
+    sys.exit(0)
 tmp = Path(tempfile.mkdtemp(prefix='cloudbite-terminal-'))
 
 def script(name, body):

@@ -111,6 +111,17 @@ node test/cloudbite-computer-ui.mjs
 
 ## 8. 2026-10-19 화면·CLI 로그인 복구
 
+### 후속: 실제 기본 터미널과 한글 입력 (2026-10-19)
+
+앞선 bash -lc 검증은 실제 데스크톱의 기본 터미널을 대표하지 않았다. 사용자 재현 뒤 /proc의 환경 메타데이터만 확인해, 기존 xfce4-terminal 서버가 오래된 NVM-first PATH를 유지하고 /bin/sh를 실행하며 GTK 입력기 설정도 없음을 확인했다. 사용자 명령 기록·자격증명은 읽지 않았다.
+
+- 기본 Terminal 실행은 새 프로세스로 시작하며 개인 bashrc 뒤에 공통 프로필을 적용한다. 패널/메뉴의 기본 Terminal도 이 경로를 쓴다. 기존 창과 실행 중인 프로그램을 강제 종료하지 않는다.
+- 예전 터미널이 기억하는 NVM의 Claude/Codex/OpenCode 심볼릭 링크도 준비된 실행 파일로 연결한다. 원래 링크는 .cloudbite-base로 보존한다. 일반 파일은 덮어쓰지 않는다.
+- IBus·ibus-hangul·GTK 모듈·Noto CJK 글꼴·한국어 UTF-8 로캘을 준비한다. 새 터미널은 IBus 환경을 받고, 한/영은 Shift+Space로 전환한다.
+- 사용자 VM의 실제 GUI bash에서 Claude 2.1.302와 GTK_IM_MODULE=ibus를 확인했다. 영문 물리 키 입력 gksrmf dlqfur가 “한글 입력”으로 조합되어 파일에 정확히 저장됐다. gui-korean-terminal.png와 user-vm-native-input-proof.json이 근거다.
+- 새 기본 이미지 cloudbite-computer-3d400ff85b2e도 새 VM에서 cold start와 stop/start 뒤 같은 GUI 검사를 통과했다. Shift+Space를 연속 사용해 gksrmf → 한글 → gksrmf 전환을 실제 검증했다. QA VM은 삭제했고 사용자의 기존 VM은 켜두었다.
+- 실제 운영의 de6a7ea/8f059c5 계열을 기반으로 통합했다. 별도 운영의 raw REST env 수정과 결정·근거·교차검토 기능을 보존하며 npm run deploy 보호 경로로 배포한다.
+
 갱신 기본 앱 이미지: cloudbite-computer-d2e6a902c06d (active). 현재 사용자 VM은 기존 파일·브라우저 프로필을 보존한 채 같은 시작 스크립트로 보정했다.
 
 - 사용자 VM을 재생성하지 않고 1920×1080으로 보정했다. 구형 base의 Xvfb 시작 크기가 최대 1024×768이므로 환경변수/RandR만으로는 커지지 않았다. configure-display.py가 dpkg-divert로 원본 Xvfb를 보존하고 시작 인자의 화면 0 크기를 보정한다. --remove로 복구 가능. 새 생성 요청에도 공식 raw REST env.VNC_RESOLUTION을 전달한다.
