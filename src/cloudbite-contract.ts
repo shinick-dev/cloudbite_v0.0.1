@@ -77,6 +77,10 @@ export interface ProjectCrossReview {
   reports: CrossReviewReport[]; error?: string;
   /** No sandbox is created for this bounded server-side second pass. */
   execution: 'server-nosana';
+  /** Planned reviewer/peer coverage of this attempt (after budget trimming) and its plain-language limits. */
+  coverage?: import('./cloudbite-cross-review').ReviewPlan['coverage']; disclosure?: string;
+  /** Per finding: which cited texts were actually in the reviewer's input. Never changes a verdict. */
+  textAvailability?: import('./cloudbite-cross-review').FindingTextAvailability[];
 }
 export interface CloudbiteRoutingQuery {
   title: string; objective: string; context: string; requestId: string;
@@ -139,7 +143,22 @@ export interface ProjectRun {
   evidenceClaims?: EvidenceClaim[];
   crossReview?: ProjectCrossReview;
   assignments?: ExpertAssignment[];
+  /** Opt-in final decision memo (src/cloudbite-memo.ts): one paid attempt, a derived interpretation, never a vote. */
+  memo?: import('./cloudbite-memo').ProjectMemo;
+  /** Model-call ledger of this project (src/cloudbite-budget.ts): caps and reserved counts, not money or tokens. */
+  usage?: ProjectUsage;
+  /** Observed citation/retrieval counts beside each self-assessed confidence; never a probability or accuracy score. */
+  evidenceSignals?: import('./cloudbite-evidence').EvidenceSignals;
+  /** Application-built evidence packets of completed experts, in completed order, under one total byte bound. */
+  evidencePackets?: import('./cloudbite-evidence-packet').EvidencePacket[];
 }
+/** Public budget view plus the separate, uncounted routing calls and the sandbox upper bound (not actual spend). */
+export type ProjectUsage = import('./cloudbite-budget').BudgetPublic & {
+  /** Typed Jev routing calls of the routing decision this project was created from; 0 for manual selection. */
+  jevCalls: number;
+  /** One Daytona sandbox per selected expert at most; an upper bound, not a spend figure. */
+  sandboxMaximum: number;
+};
 export interface CloudbiteBootstrap {
   experts: ExpertDefinition[];
   configuration: { liveReady: boolean; missing: string[]; maxExperts: number; maxConcurrent?: number; historyRetentionDays?: number;
