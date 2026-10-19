@@ -101,7 +101,24 @@ export interface ClaimSupportAssessment {
   citedText: ClaimSupportCitedText;
   packetSha256: string;
 }
-export interface CrossReviewReport { reviewerExpertId: string; findings: CrossReviewFinding[]; summary: string }
+export interface CrossReviewReport {
+  reviewerExpertId: string; findings: CrossReviewFinding[]; summary: string;
+  /** Core-claim findings (src/cloudbite-core-claims.ts); absent on historical reports and when none were given. */
+  claimFindings?: CoreClaimFinding[];
+}
+export type CoreClaimTargetKind = 'summary' | 'assumption' | 'nextAction';
+export type CoreClaimIssue = 'unsupported-premise' | 'causal-overreach' | 'missing-assumption' | 'other';
+/**
+ * One reviewer's reading of a peer's summary, assumption or next action. The server checks only that quote is exact text
+ * of that target field (summary index 0; others zero-based); the verdict is never verification or calibrated accuracy.
+ */
+export interface CoreClaimFinding {
+  targetExpertId: string;
+  target: { kind: CoreClaimTargetKind; index: number; quote: string };
+  verdict: 'supported' | 'challenged' | 'insufficient';
+  issue: CoreClaimIssue;
+  rationale: string;
+}
 export interface ProjectCrossReview {
   status: 'running' | 'completed' | 'failed'; snapshotHash: string; startedAt: number; completedAt?: number;
   reports: CrossReviewReport[]; error?: string;

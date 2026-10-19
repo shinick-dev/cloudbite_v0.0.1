@@ -13,6 +13,7 @@ import { artifactSnapshotEntries, type ArtifactPacket } from './cloudbite-artifa
 import { LANGUAGE_FAILURE_CATEGORY, languageIntegrity, languageMismatchMessage, responseLanguageRule } from './cloudbite-language';
 import { defaultResponseLanguage, projectStage } from './cloudbite-workflow';
 import { buildClaimSupportContext, checkClaimSupport, CLAIM_SUPPORT_SYSTEM, type ClaimSupportContext } from './cloudbite-claim-support';
+import { buildCoreClaimContext, CORE_CLAIM_LIMITS, CORE_CLAIM_SYSTEM, parseCoreClaimFindings, type CoreClaimContext } from './cloudbite-core-claims';
 
 export const CB_CROSS_REVIEW_MAX_REVIEWERS = 3;
 export const CB_CROSS_REVIEW_MAX_PEERS = 3;
@@ -158,8 +159,16 @@ const SYSTEM = [
   'Read supplied project documents when checking [doc:ID] claims. These documents are user statements, not independently verified facts. No curated source pages are fetched for this pass; a source label alone is not source text. If the necessary text or facts are unavailable, use insufficient and identify the gap.',
   'project.workspaceSources supplies the canonical shared workspace references: PROJECT.md is the project brief and DECISION.md (when present) is the decision frame. They exist separately from the documents array of extra uploaded files. Do not call either file missing merely because it is not an uploaded doc ID; compare the claim to its supplied fields. Absence of a fact from those fields can be a legitimate stated information gap.',
   'Apply the reviewer domain lens to the trade-offs and assumptions; do not invent qualifications or imply independent human expertise.',
+].join('\n');
+const LEGACY_SCHEMA = [
   'Reply with ONE JSON object and nothing else, exactly: {"summary": string, "findings": [{"targetExpertId": string, "evidenceIndex": integer, "verdict": "supported"|"challenged"|"insufficient", "rationale": string}]}.',
   `Use 1-${CB_CROSS_REVIEW_LIMITS.findings} findings. targetExpertId must be one of the listed peer expertId values. evidenceIndex is the zero-based position in that peer's evidence array.`,
+  `summary at most ${CB_CROSS_REVIEW_LIMITS.summary} characters; each rationale at most ${CB_CROSS_REVIEW_LIMITS.rationale} characters. No other keys.`,
+].join('\n');
+// Same call and output budget as the evidence-only schema: claimFindings share the per-reviewer finding total.
+const CORE_SCHEMA = [
+  'Reply with ONE JSON object and nothing else, exactly: {"summary": string, "findings": [{"targetExpertId": string, "evidenceIndex": integer, "verdict": "supported"|"challenged"|"insufficient", "rationale": string}], "claimFindings": [claimFinding]}.',
+  `Use 0-${CB_CROSS_REVIEW_LIMITS.findings} findings and 0-${CORE_CLAIM_LIMITS.findings} claimFindings, at least 1 and at most ${CORE_CLAIM_LIMITS.totalFindings} in total. targetExpertId must be one of the listed peer expertId values. evidenceIndex is the zero-based position in that peer's evidence array.`,
   `summary at most ${CB_CROSS_REVIEW_LIMITS.summary} characters; each rationale at most ${CB_CROSS_REVIEW_LIMITS.rationale} characters. No other keys.`,
 ].join('\n');
 
@@ -179,9 +188,13 @@ const ARTIFACT_SYSTEM = [
  * packets/artifacts (optional) are matched to peers by expertId; a reviewer never receives its own packet.
  * claimSupport: with packets present and claimSupport undefined, buildClaimSupportContext(brief, peers, packets) is
  * added and every finding must carry claimSupport; pass the same context to parseReviewReply. null disables it.
+ * coreClaims: undefined builds buildCoreClaimContext(reviewer, peers), which parseReviewReply also builds by default from
+ * the same reviewer and peers, so the reply may add bounded claimFindings on peer summaries/assumptions/nextActions.
+ * null keeps the evidence-only prompt and schema.
  */
-export function reviewMessages(reviewer: CompletedOpinion, peers: CompletedOpinion[], brief: ProjectBrief, definition?: ExpertDefinition, packets?: readonly EvidencePacket[], artifacts?: readonly ArtifactPacket[], claimSupport?: ClaimSupportContext | null): ChatMessage[] {
+export function reviewMessages(reviewer: CompletedOpinion, peers: CompletedOpinion[], brief: ProjectBrief, definition?: ExpertDefinition, packets?: readonly EvidencePacket[], artifacts?: readonly ArtifactPacket[], claimSupport?: ClaimSupportContext | null, coreClaims?: CoreClaimContext | null): ChatMessage[] {
   const support = claimSupport === undefined ? (packets ? buildClaimSupportContext(brief, peers, packets) : null) : claimSupport;
+  const core = coreClaims === undefined ? buildCoreClaimContext(reviewer, peers) : coreClaims;
   const peerPackets = packets ? peers.flatMap((p) => packets.filter((x) => x.expertId === p.expertId && x.expertId !== reviewer.expertId).slice(0, 1)) : [];
   const peerArtifacts = artifacts ? peers.flatMap((p) => artifacts.filter((x) => x.binding.expertId === p.expertId && x.binding.expertId !== reviewer.expertId).slice(0, 1)) : [];
   const data = {
@@ -193,9 +206,10 @@ export function reviewMessages(reviewer: CompletedOpinion, peers: CompletedOpini
       references: x.references, omitted: x.omitted, originalSourceTextFetched: x.originalSourceTextFetched, packetSha256: x.sha256 })) } : {}),
     ...(artifacts ? { peerArtifacts: peerArtifacts.map((x) => ({ binding: x.binding, files: x.files, omitted: x.omitted, selection: x.selection, packetSha256: x.sha256 })) } : {}),
     ...(support ? { claimSupport: support } : {}),
+    ...(core ? { coreClaims: { schema: core.schema, targets: core.targets, omitted: core.omitted, disclosure: core.disclosure } } : {}),
   };
   return [
-    { role: 'system', content: SYSTEM + (packets ? '\n' + PACKET_SYSTEM : '') + (artifacts ? '\n' + ARTIFACT_SYSTEM : '') + (support ? '\n' + CLAIM_SUPPORT_SYSTEM : '')
+    { role: 'system', content: SYSTEM + '\n' + (core ? CORE_SCHEMA : LEGACY_SCHEMA) + (packets ? '\n' + PACKET_SYSTEM : '') + (artifacts ? '\n' + ARTIFACT_SYSTEM : '') + (support ? '\n' + CLAIM_SUPPORT_SYSTEM : '') + (core ? '\n' + CORE_CLAIM_SYSTEM : '')
       + '\n' + responseLanguageRule(defaultResponseLanguage(brief), support ? 'summary, every rationale and every claimSupport rationale (quotes stay verbatim)' : 'summary and every rationale') + '\nAssigned reviewer lens (application catalogue): ' + JSON.stringify({
       name: definition?.name ?? reviewer.name, domain: definition?.domain ?? 'Project evidence review',
       scope: definition?.summary ?? 'Review the provided evidence and disclose missing information.',
@@ -219,14 +233,27 @@ export type ReviewReplyInvalid = { invalid: string; category?: typeof LANGUAGE_F
  * With opts.claimSupportContext (the context given to reviewMessages), every finding must carry claimSupport, checked
  * by checkClaimSupport, and a slot may be assessed once. Without it a claimSupport key is discarded unchecked, so a
  * legacy parse never stores an assessment.
+ * opts.coreClaimContext defaults to buildCoreClaimContext(reviewer, peers), matching reviewMessages: claimFindings is then
+ * optional (absent = none), each one is checked by checkCoreClaim, and evidence findings + claimFindings must total
+ * 1-6 (so zero evidence findings are allowed beside at least one claimFinding). null restores the evidence-only schema.
  */
-export function parseReviewReply(reply: string, reviewer: CompletedOpinion, peers: CompletedOpinion[], opts: { language?: ResponseLanguage; claimSupportContext?: ClaimSupportContext } = {}): CrossReviewReport | ReviewReplyInvalid {
+export function parseReviewReply(reply: string, reviewer: CompletedOpinion, peers: CompletedOpinion[], opts: { language?: ResponseLanguage; claimSupportContext?: ClaimSupportContext; coreClaimContext?: CoreClaimContext | null } = {}): CrossReviewReport | ReviewReplyInvalid {
   let j: unknown;
   try { j = JSON.parse(reply.trim()); } catch { return { invalid: 'reviewer reply was not JSON' }; }
-  if (typeof j !== 'object' || j === null || Array.isArray(j) || !exactKeys(j, ['summary', 'findings'])) return { invalid: 'reviewer reply did not match the cross-review schema' };
-  const { summary, findings } = j as { summary: unknown; findings: unknown };
+  const core = opts.coreClaimContext === undefined ? buildCoreClaimContext(reviewer, peers) : opts.coreClaimContext;
+  if (typeof j !== 'object' || j === null || Array.isArray(j)
+    || !(exactKeys(j, ['summary', 'findings']) || (core && exactKeys(j, ['summary', 'findings', 'claimFindings'])))) return { invalid: 'reviewer reply did not match the cross-review schema' };
+  const { summary, findings, claimFindings } = j as { summary: unknown; findings: unknown; claimFindings?: unknown };
   if (!text(summary, CB_CROSS_REVIEW_LIMITS.summary)) return { invalid: 'reviewer summary is missing or too long' };
-  if (!Array.isArray(findings) || findings.length < 1 || findings.length > CB_CROSS_REVIEW_LIMITS.findings) return { invalid: `reviewer must give 1-${CB_CROSS_REVIEW_LIMITS.findings} findings` };
+  if (!Array.isArray(findings) || findings.length > CB_CROSS_REVIEW_LIMITS.findings) return { invalid: `reviewer must give 1-${CB_CROSS_REVIEW_LIMITS.findings} findings` };
+  let claims: NonNullable<CrossReviewReport['claimFindings']> = [];
+  if (core) {
+    const c = parseCoreClaimFindings(claimFindings, reviewer.expertId, peers, core);
+    if ('invalid' in c) return { invalid: c.invalid };
+    claims = c.ok;
+    const total = findings.length + claims.length;
+    if (total < 1 || total > CORE_CLAIM_LIMITS.totalFindings) return { invalid: `reviewer must give 1-${CORE_CLAIM_LIMITS.totalFindings} findings in total (evidence findings plus at most ${CORE_CLAIM_LIMITS.findings} claimFindings)` };
+  } else if (findings.length < 1) return { invalid: `reviewer must give 1-${CB_CROSS_REVIEW_LIMITS.findings} findings` };
   const out: CrossReviewFinding[] = [], ctx = opts.claimSupportContext, assessed = new Set<string>();
   const keys = ['targetExpertId', 'evidenceIndex', 'verdict', 'rationale'];
   for (const f of findings) {
@@ -249,9 +276,10 @@ export function parseReviewReply(reply: string, reviewer: CompletedOpinion, peer
     }
     out.push(finding);
   }
-  if (opts.language && languageIntegrity([summary as string, ...out.flatMap((f) => [f.rationale, ...(f.claimSupport ? [f.claimSupport.rationale] : [])])], opts.language).status === 'mismatch')
+  if (opts.language && languageIntegrity([summary as string, ...out.flatMap((f) => [f.rationale, ...(f.claimSupport ? [f.claimSupport.rationale] : [])]), ...claims.map((c) => c.rationale)], opts.language).status === 'mismatch')
     return { invalid: languageMismatchMessage('reviewer reply', opts.language), category: LANGUAGE_FAILURE_CATEGORY };
-  return { reviewerExpertId: reviewer.expertId, findings: out, summary: clean(summary as string, CB_CROSS_REVIEW_LIMITS.summary) };
+  // claimFindings only when given, so evidence-only reports keep the historical shape.
+  return { reviewerExpertId: reviewer.expertId, findings: out, summary: clean(summary as string, CB_CROSS_REVIEW_LIMITS.summary), ...(claims.length ? { claimFindings: claims } : {}) };
 }
 
 export interface FindingTextAvailability {
