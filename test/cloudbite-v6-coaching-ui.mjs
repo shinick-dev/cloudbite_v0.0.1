@@ -53,6 +53,10 @@ await test('사전: p6 의 EN·KO 열쇠가 같고, 제안·로컬 도우미라�
   for (const k of ['q', 'qHint', 'qLabel', 'stance', 'kind', 'priority']) assert.deepEqual(Object.keys(KO.p6[k]).sort(), Object.keys(EN.p6[k]).sort(), k);
   assert.match(EN.p6.helperNote, /No model call/); assert.match(KO.p6.helperNote, /모델 호출이 없/);
   assert.match(EN.p6.badge, /not adopted or validated/); assert.match(KO.p6.badge, /채택·검증되지 않음/);
+  // 메모 단추는 새 이점(개선안)을 드러내고, 설명은 한 번 호출·해석·원문 보존 사실을 그대로 둔 채 범위 제안·보완책을 말한다
+  assert.equal(EN.p2.memoBtn, 'Build project improvement plan (1 model call)'); assert.equal(KO.p2.memoBtn, '프로젝트 개선안 만들기 (모델 호출 1회)');
+  assert.match(EN.p2.memoExplain, /one server-side Nosana call.*revised scope and concrete repairs.*derived interpretation.*original opinions stay unchanged/i);
+  assert.match(KO.p2.memoExplain, /호출 한 번.*수정된 범위 제안과 구체적인 보완책.*해석.*원래 의견은 바뀌지 않습니다/);
   assert.ok(!/\d+\s*(%|\/\s*10|points?)/.test(JSON.stringify(EN.p6)), 'no numeric score wording');
   for (const D of [EN, KO]) for (const k of ['hTie', 'hSupport', 'hConditional', 'hConcern', 'hAbstain']) {
     assert.ok(/not decision quality or consensus|결정의 질이나 합의가 아닙니다/.test(D[k]), `${k} is neutral`);
@@ -80,7 +84,9 @@ await test('normalizeMemo: 올바른 coaching 은 값 그대로, 옛 메모는 �
     'foreign stance': c => { c.stance = 'go'; }, 'foreign kind': c => { c.repairs[0].kind = 'risk'; }, 'foreign priority': c => { c.repairs[1].priority = 'urgent'; },
     'four repairs': c => { c.repairs.push(c.repairs[0], c.repairs[1]); }, 'four questions': c => { c.questions.push(c.questions[0], c.questions[1]); },
     'extra key': c => { c.score = 0.9; }, 'missing key': c => { delete c.questions; }, 'extra repair key': c => { c.repairs[0].confidence = 80; },
-    'missing revised field': c => { delete c.revisedProject.scope; }, 'claim over 280': c => { c.viablePath.text = 'x'.repeat(281); }, 'empty claim': c => { c.questions[0].text = '  '; },
+    'missing revised field': c => { delete c.revisedProject.scope; }, 'claim over 200': c => { c.viablePath.text = 'x'.repeat(201); },
+    'claim extra key': c => { c.viablePath.confidence = 80; }, 'nine expertIds': c => { c.questions[0].expertIds = Array.from({ length: 9 }, (_, i) => `x${i}`); },
+    'seven refs': c => { c.repairs[0].check.refs = Array.from({ length: 7 }, () => ({ kind: 'brief', field: 'context' })); }, 'empty claim': c => { c.questions[0].text = '  '; },
     'bad ref': c => { c.repairs[0].check.refs = [{ kind: 'web', id: 'u' }]; }, 'version': c => { c.version = 'cloudbite-coaching/v2'; },
     'repairs not a list': c => { c.repairs = {}; }, 'claim not an object': c => { c.revisedProject.objective = 'Do it'; },
   };
@@ -93,6 +99,13 @@ await test('normalizeMemo: 올바른 coaching 은 값 그대로, 옛 메모는 �
   const none = core.normalizeMemo(MEMO(DMEMO({ coaching: null })));
   assert.equal(none.memo.invalidCoaching, true, 'null is not silently ignored');
   assert.equal(core.normalizeMemo(MEMO(DMEMO({ coaching: { ...COACHING, repairs: [], questions: [] } }))).memo.coaching.repairs.length, 0, 'empty lists are allowed');
+  // 경계: 코칭 주장 200자·전문가 8명·근거 6개는 받는다. 옛 메모 주장은 280자 상한 그대로(서버 CB_MEMO_LIMITS.claim)이고 코칭 상한이 옮겨 가지 않는다
+  const edge = structuredClone(COACHING);
+  edge.viablePath = claim('y'.repeat(200), Array.from({ length: 8 }, (_, i) => `x${i}`), Array.from({ length: 6 }, () => ({ kind: 'brief', field: 'context' })));
+  const e = core.normalizeMemo(MEMO(DMEMO({ coaching: edge })));
+  assert.equal(e.memo.invalidCoaching, undefined, 'coaching claim at the caps is accepted'); assert.equal(e.memo.coaching.viablePath.text.length, 200);
+  const legacyLong = core.normalizeMemo(MEMO(DMEMO({ nextActions: [claim('z'.repeat(280), ['x1'])] })));
+  assert.equal(legacyLong.memo.nextActions[0].text.length, 280, 'legacy memo claims keep their own path');
 });
 
 await test('보고서(EN/KO): 수정 제안을 세부 비판보다 앞에, 제안이라고 밝히고, 원문은 번역하지 않는다. 틀린 칸·선택지 없음·옛 needs-options 도 적는다', () => {

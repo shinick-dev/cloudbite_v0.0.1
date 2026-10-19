@@ -25,7 +25,8 @@ import type { ClaimSupportAssessment, QuantitativeCheckRecord } from '../src/clo
 import type { QuantitativeRequest } from '../src/cloudbite-quantitative';
 import type { HumanDimension, HumanReviewDetail, HumanReviewIssue, HumanReviewPublic } from '../src/cloudbite-human-review';
 // v6 코칭: src/cloudbite-coaching.ts 의 ProjectCoaching 과 같은 모양을 여기 둔다. 그 파일은 cloudbite-memo 를 거쳐 Workers 타입을 끌어와
-// 브라우저 타입 검사(tsconfig.client.json)를 깨므로 가져오지 않는다. 공유 계약(cloudbite-contract)에 들어오면 그쪽 타입으로 바꾼다
+// 브라우저 타입 검사(tsconfig.client.json)를 깨므로 가져오지 않는다. 서버 DecisionMemo(cloudbite-memo)에는 coaching 이 들어갔지만
+// 콘솔이 쓰는 미러(cloudbite-contract DecisionMemo)에는 아직 없으므로 아래 교차 타입을 남긴다. 미러에 들어오면 그쪽 타입으로 바꾼다
 interface CoachingRepair {
   issue: MemoClaim; kind: 'unknown' | 'adverse-evidence' | 'tradeoff' | 'constraint'; priority: 'now' | 'next' | 'later';
   change: MemoClaim; check: MemoClaim; decisionTrigger: MemoClaim;
@@ -166,8 +167,8 @@ const PROJECT_MAX: ProjectMaxExperts = 100;
 // ── 워크플로 2단계 문구 (결정 메모 · 관찰 신호 · 후속 라운드). EN.p2 / KO.p2 로 붙고, KO 는 같은 모양이어야 타입 검사를 통과한다
 const P2_EN = {
   memoTitle: 'Decision memo',
-  memoExplain: 'Optional final memo: one server-side Nosana call reads the completed, valid opinions of this live project, finished cross-review findings and evidence metadata. It is a derived interpretation, not a vote count, an accuracy score or calibrated confidence. The original opinions stay unchanged.',
-  memoBtn: 'Write decision memo (1 model call)',
+  memoExplain: 'Optional final step: one server-side Nosana call reads the completed, valid opinions of this live project, finished cross-review findings and evidence metadata, and writes the decision memo with a proposed revised scope and concrete repairs. It is a derived interpretation and a proposal you have not adopted, not a vote count, an accuracy score or calibrated confidence. The original opinions stay unchanged.',
+  memoBtn: 'Build project improvement plan (1 model call)',
   memoOneAttempt: 'Each project gets one memo attempt and it is never retried. For another round, start a follow-up from History; it runs as a new project.',
   memoNeedOpinion: 'The memo needs a finished, non-cancelled live run with at least one completed, valid opinion.',
   memoNoBudget: 'This project has no memo call left (its memo cap is 0 or already used), so a memo cannot be requested.',
@@ -272,8 +273,8 @@ const P2_EN = {
 };
 const P2_KO: typeof P2_EN = {
   memoTitle: '결정 메모',
-  memoExplain: '선택 기능인 최종 메모입니다. 서버의 Nosana 호출 한 번이 이 실제 실행의 완료된 유효 의견, 끝난 교차 검토 판정, 근거 메타데이터를 읽습니다. 투표 집계·정확도 점수·보정된 확신도가 아니라 해석입니다. 원래 의견은 바뀌지 않습니다.',
-  memoBtn: '결정 메모 쓰기 (모델 호출 1회)',
+  memoExplain: '선택 기능인 마지막 단계입니다. 서버의 Nosana 호출 한 번이 이 실제 실행의 완료된 유효 의견, 끝난 교차 검토 판정, 근거 메타데이터를 읽고, 결정 메모와 함께 수정된 범위 제안과 구체적인 보완책을 씁니다. 투표 집계·정확도 점수·보정된 확신도가 아니라 해석이며, 채택하지 않은 제안입니다. 원래 의견은 바뀌지 않습니다.',
+  memoBtn: '프로젝트 개선안 만들기 (모델 호출 1회)',
   memoOneAttempt: '프로젝트마다 메모는 한 번만 시도하며 다시 시도하지 않습니다. 다음 라운드는 사용 기록에서 후속 라운드를 시작해 새 프로젝트로 실행합니다.',
   memoNeedOpinion: '메모는 취소되지 않고 끝난 실제 실행에 완료된 유효 의견이 하나 이상 있어야 합니다.',
   memoNoBudget: '이 프로젝트에는 남은 메모 호출이 없어(메모 상한 0 또는 이미 사용) 메모를 요청할 수 없습니다.',
@@ -2633,15 +2634,17 @@ function decisionMemo(raw: unknown): ConsoleDecisionMemo | null {
     comparison, dissent, criticalUnknowns, changeTriggers, nextActions, basis: 'derived-interpretation', confidence: 'not-calibrated',
     ...(coaching ? { coaching } : coaching === null ? { invalidCoaching: true } : {}) };
 }
-// ── v6 메모 코칭 (src/cloudbite-coaching.ts 와 같은 모양). 정확한 열쇠·고정 값·상한(제안 3개·질문 3개, 주장 280자)만 받는다
+// ── v6 메모 코칭 (src/cloudbite-coaching.ts 와 같은 모양). 정확한 열쇠·고정 값·상한만 받는다. 상한은 서버 CB_MEMO_COACHING_LIMITS
+// (제안 3개·질문 3개, 주장 200자)와 주장의 CB_MEMO_LIMITS(전문가 8명·근거 6개)를 따른다. 옛 메모 주장(memoClaim)은 그대로다
 const COACH_STANCES: ProjectCoaching['stance'][] = ['proceed-with-scope', 'clarify-first', 'rework', 'pause'];
 const COACH_KINDS: CoachingRepair['kind'][] = ['unknown', 'adverse-evidence', 'tradeoff', 'constraint'];
 const COACH_PRIORITIES: CoachingRepair['priority'][] = ['now', 'next', 'later'];
-const COACH = { items: 3, claim: 280 };
+const COACH = { items: 3, claim: 200, expertIds: 8, refs: 6 };
 const exactKeys = (o: Record<string, unknown>, keys: readonly string[]) => Object.keys(o).length === keys.length && keys.every(k => k in o);
 function coachClaim(c: unknown): MemoClaim | null {
-  const x = memoClaim(c);
-  return x && isObj(c) && typeof c.text === 'string' && c.text.trim() !== '' && c.text.length <= COACH.claim ? x : null;
+  if (!isObj(c) || !exactKeys(c, ['text', 'expertIds', 'refs']) || typeof c.text !== 'string' || c.text.trim() === '' || c.text.length > COACH.claim
+    || !Array.isArray(c.expertIds) || c.expertIds.length > COACH.expertIds || !Array.isArray(c.refs) || c.refs.length > COACH.refs) return null;
+  return memoClaim(c);
 }
 function projectCoaching(raw: unknown): ProjectCoaching | null {
   if (!isObj(raw) || !exactKeys(raw, ['version', 'stance', 'viablePath', 'repairs', 'revisedProject', 'questions']) || raw.version !== 'cloudbite-coaching/v1'
@@ -3899,9 +3902,10 @@ function boot(): void {
   // 브리프 도우미 (선택, v6): 브라우저 안의 정해진 질문 세 개. 모델 호출 없음. 답은 고정 입력란이라 언어 전환·다시 그리기에도 남는다.
   // 미리 보기는 그 순간의 목표·맥락·답에 묶이고, 사용자가 Apply 를 눌러야 맥락 끝에 이름표 묶음으로 더해진다 (덮어쓰지 않는다)
   const COACH_QS: CoachQ[] = ['who', 'decision', 'constraint'];
+  const COACH_ANSWER_MAX = 280; // 브리프 도우미 답의 입력 상한 (메모 코칭 주장 상한 COACH.claim 과는 따로다)
   const coachIns = {} as Record<CoachQ, HTMLTextAreaElement>;
   for (const q of COACH_QS) {
-    const ta = attr(h('textarea', { id: `cb-coach-${q}`, rows: 2, maxlength: COACH.claim, 'data-fk': `coach:${q}` }), 'placeholder', m => m.p6.qHint[q]);
+    const ta = attr(h('textarea', { id: `cb-coach-${q}`, rows: 2, maxlength: COACH_ANSWER_MAX, 'data-fk': `coach:${q}` }), 'placeholder', m => m.p6.qHint[q]);
     ta.addEventListener('input', () => renderCoach());
     coachIns[q] = ta;
   }

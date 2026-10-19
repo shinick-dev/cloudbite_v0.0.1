@@ -22,10 +22,19 @@ Client-only changes in `client/cloudbite-console.ts` / `.css` (bundled into `src
 ## 2. `memo.coaching` display
 
 - Local mirror types `ProjectCoaching` / `CoachingRepair` and `ConsoleDecisionMemo = DecisionMemo & { coaching?, invalidCoaching? }`
-  (no shared-file change, no runtime import). **Switch to the shared contract type after the backend merges.**
+  (no shared-file change, no runtime import). The backend's `DecisionMemo` in `src/cloudbite-memo.ts` now carries
+  `coaching?`, but the browser mirror the console imports (`src/cloudbite-contract.ts` `DecisionMemo`) does not, and
+  `src/cloudbite-coaching.ts` cannot be imported under `tsconfig.client.json` (it pulls Workers types through
+  `cloudbite-memo`). So the `coaching?` intersection stays until the contract mirror gains it; `invalidCoaching` is a
+  UI-only sidecar either way.
 - Normalisation (`projectCoaching`): exact keys at every level, version `cloudbite-coaching/v1`, closed enums
-  for stance/kind/priority, ≤3 repairs and ≤3 questions, every claim via the existing `memoClaim` plus
-  non-empty text ≤280 chars. Any violation (including `coaching: null`) keeps the memo and sets
+  for stance/kind/priority, ≤3 repairs and ≤3 questions (server `CB_MEMO_COACHING_LIMITS`). Every coaching claim has
+  exactly the keys `text`, `expertIds`, `refs` (an extra key is rejected, not ignored), non-empty text ≤200 chars
+  (server `CB_MEMO_COACHING_LIMITS.claim`), ≤8 expertIds and ≤6 refs (server `CB_MEMO_LIMITS`), then the existing
+  `memoClaim` shape check. Legacy memo claims keep their own path and the server's 280-char legacy bound; the
+  brief helper's answer fields keep their own 280-char input cap. These are shape checks only: they mirror server
+  bounds and are not semantic validation (citations, ordering and attribution rules stay the server's, and passing
+  them is not evidence that a claim is true). Any violation (including `coaching: null`) keeps the memo and sets
   `invalidCoaching`, shown as an alert line in the memo and in the export. Absent field = legacy memo,
   shown with a short help line.
 - Rendered right after the memo summary, ahead of recommendation/comparison/dissent, under
@@ -36,6 +45,10 @@ Client-only changes in `client/cloudbite-console.ts` / `.css` (bundled into `src
 - Thin briefs: client eligibility already allowed a memo without options; the help text now says so, and a
   memo with an empty comparison says "no decision options were given". The legacy `needs-options` memo
   status is still displayed (marked as the earlier rule).
+- The memo action reads "Build project improvement plan (1 model call)" / "프로젝트 개선안 만들기 (모델 호출 1회)"; the
+  memo title stays "Decision memo". The short explanation now says the single call also proposes a revised scope and
+  concrete repairs, and keeps the one-attempt, derived-interpretation and originals-unchanged facts. No new button,
+  no automatic call.
 - Loading/error/retry use the existing one-call memo flow unchanged.
 
 ## 3. Revised project → next-round draft

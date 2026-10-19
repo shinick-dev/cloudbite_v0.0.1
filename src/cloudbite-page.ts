@@ -1,6 +1,6 @@
 // 만든 파일 — 직접 고치지 말 것. 소스: client/cloudbite-console.ts · client/cloudbite-console.css
 // 다시 만들기: node tools/build-cloudbite-console.mjs (--check 로 최신인지 확인)
-// esbuild 0.28.1 transform (ES2022, 묶지 않음) · ts sha256 b7aa4d61a9303b20cfd78a0312421b401efe07987221a04a3d7ffea74d9bf46a · css sha256 bd3a8412e525178240c214cf6334c7f969d2c300471f7a62e2eacd0cb70e4375
+// esbuild 0.28.1 transform (ES2022, 묶지 않음) · ts sha256 aa0a6fab34e73770bc404e1885846c11558ddb576f97a5d3d6fc687657c5e1a7 · css sha256 bd3a8412e525178240c214cf6334c7f969d2c300471f7a62e2eacd0cb70e4375
 // 라우팅(런타임 담당): GET / 와 /cloudbite → CLOUDBITE_HTML, CLOUDBITE_JS_PATH → CLOUDBITE_JS (text/javascript),
 // CLOUDBITE_CSS_PATH → CLOUDBITE_CSS (text/css). CSP 는 script-src 'self'; style-src 'self' 면 충분하다 (인라인 없음).
 export const CLOUDBITE_JS_PATH = "/cloudbite/console.js";
@@ -738,8 +738,8 @@ export const CLOUDBITE_JS = [
   "const PROJECT_MAX = 100;",
   "const P2_EN = {",
   "  memoTitle: \"Decision memo\",",
-  "  memoExplain: \"Optional final memo: one server-side Nosana call reads the completed, valid opinions of this live project, finished cross-review findings and evidence metadata. It is a derived interpretation, not a vote count, an accuracy score or calibrated confidence. The original opinions stay unchanged.\",",
-  "  memoBtn: \"Write decision memo (1 model call)\",",
+  "  memoExplain: \"Optional final step: one server-side Nosana call reads the completed, valid opinions of this live project, finished cross-review findings and evidence metadata, and writes the decision memo with a proposed revised scope and concrete repairs. It is a derived interpretation and a proposal you have not adopted, not a vote count, an accuracy score or calibrated confidence. The original opinions stay unchanged.\",",
+  "  memoBtn: \"Build project improvement plan (1 model call)\",",
   "  memoOneAttempt: \"Each project gets one memo attempt and it is never retried. For another round, start a follow-up from History; it runs as a new project.\",",
   "  memoNeedOpinion: \"The memo needs a finished, non-cancelled live run with at least one completed, valid opinion.\",",
   "  memoNoBudget: \"This project has no memo call left (its memo cap is 0 or already used), so a memo cannot be requested.\",",
@@ -859,8 +859,8 @@ export const CLOUDBITE_JS = [
   "};",
   "const P2_KO = {",
   "  memoTitle: \"결정 메모\",",
-  "  memoExplain: \"선택 기능인 최종 메모입니다. 서버의 Nosana 호출 한 번이 이 실제 실행의 완료된 유효 의견, 끝난 교차 검토 판정, 근거 메타데이터를 읽습니다. 투표 집계·정확도 점수·보정된 확신도가 아니라 해석입니다. 원래 의견은 바뀌지 않습니다.\",",
-  "  memoBtn: \"결정 메모 쓰기 (모델 호출 1회)\",",
+  "  memoExplain: \"선택 기능인 마지막 단계입니다. 서버의 Nosana 호출 한 번이 이 실제 실행의 완료된 유효 의견, 끝난 교차 검토 판정, 근거 메타데이터를 읽고, 결정 메모와 함께 수정된 범위 제안과 구체적인 보완책을 씁니다. 투표 집계·정확도 점수·보정된 확신도가 아니라 해석이며, 채택하지 않은 제안입니다. 원래 의견은 바뀌지 않습니다.\",",
+  "  memoBtn: \"프로젝트 개선안 만들기 (모델 호출 1회)\",",
   "  memoOneAttempt: \"프로젝트마다 메모는 한 번만 시도하며 다시 시도하지 않습니다. 다음 라운드는 사용 기록에서 후속 라운드를 시작해 새 프로젝트로 실행합니다.\",",
   "  memoNeedOpinion: \"메모는 취소되지 않고 끝난 실제 실행에 완료된 유효 의견이 하나 이상 있어야 합니다.\",",
   "  memoNoBudget: \"이 프로젝트에는 남은 메모 호출이 없어(메모 상한 0 또는 이미 사용) 메모를 요청할 수 없습니다.\",",
@@ -3546,11 +3546,11 @@ export const CLOUDBITE_JS = [
   "const COACH_STANCES = [\"proceed-with-scope\", \"clarify-first\", \"rework\", \"pause\"];",
   "const COACH_KINDS = [\"unknown\", \"adverse-evidence\", \"tradeoff\", \"constraint\"];",
   "const COACH_PRIORITIES = [\"now\", \"next\", \"later\"];",
-  "const COACH = { items: 3, claim: 280 };",
+  "const COACH = { items: 3, claim: 200, expertIds: 8, refs: 6 };",
   "const exactKeys = (o, keys) => Object.keys(o).length === keys.length && keys.every((k) => k in o);",
   "function coachClaim(c) {",
-  "  const x = memoClaim(c);",
-  "  return x && isObj(c) && typeof c.text === \"string\" && c.text.trim() !== \"\" && c.text.length <= COACH.claim ? x : null;",
+  "  if (!isObj(c) || !exactKeys(c, [\"text\", \"expertIds\", \"refs\"]) || typeof c.text !== \"string\" || c.text.trim() === \"\" || c.text.length > COACH.claim || !Array.isArray(c.expertIds) || c.expertIds.length > COACH.expertIds || !Array.isArray(c.refs) || c.refs.length > COACH.refs) return null;",
+  "  return memoClaim(c);",
   "}",
   "function projectCoaching(raw) {",
   "  if (!isObj(raw) || !exactKeys(raw, [\"version\", \"stance\", \"viablePath\", \"repairs\", \"revisedProject\", \"questions\"]) || raw.version !== \"cloudbite-coaching/v1\" || !COACH_STANCES.includes(raw.stance)) return null;",
@@ -5295,9 +5295,10 @@ export const CLOUDBITE_JS = [
   "    fuCancelBtn",
   "  );",
   "  const COACH_QS = [\"who\", \"decision\", \"constraint\"];",
+  "  const COACH_ANSWER_MAX = 280;",
   "  const coachIns = {};",
   "  for (const q of COACH_QS) {",
-  "    const ta = attr(h(\"textarea\", { id: `cb-coach-${q}`, rows: 2, maxlength: COACH.claim, \"data-fk\": `coach:${q}` }), \"placeholder\", (m) => m.p6.qHint[q]);",
+  "    const ta = attr(h(\"textarea\", { id: `cb-coach-${q}`, rows: 2, maxlength: COACH_ANSWER_MAX, \"data-fk\": `coach:${q}` }), \"placeholder\", (m) => m.p6.qHint[q]);",
   "    ta.addEventListener(\"input\", () => renderCoach());",
   "    coachIns[q] = ta;",
   "  }",
