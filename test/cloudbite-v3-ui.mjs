@@ -1,6 +1,6 @@
 // Cloudbite 콘솔의 제품 v3 화면 (src/cloudbite-page.ts 의 CLOUDBITE_JS) 을 브라우저 없이 고정한다:
 // 주장 출처의 엄격한 정리·지위·숫자 제안 강조·펼칠 때만 그리기, 정확한 글로만 채택하고 실패·미확인이면 다시 보내기 전에 읽기,
-// 검토자가 읽은 산출물 범위, 저자 응답(계획·응답·거부·없음)과 "저자에게 응답 요청" 후속 초안의 고정 본문.
+// 검토자가 읽은 산출물 범위, 작성자 응답(계획·응답·거부·없음)과 "작성자에게 응답 요청" 후속 초안의 고정 본문.
 // test/cloudbite-decision-ui.mjs 와 같은 모양의 작은 가짜 DOM 이다. 실제 브라우저·서버·공급자 증거가 아니다.
 //   node tools/build-cloudbite-console.mjs && node test/cloudbite-v3-ui.mjs
 import assert from 'node:assert/strict';
@@ -50,7 +50,7 @@ const brief = (over = {}) => ({ title: 'T', objective: 'O', context: '', expertI
 const projectRaw = (over = {}) => ({ id: ID, status: 'completed', createdAt: Date.now(), updatedAt: 5, brief: brief(), experts: [run(1), run(2), run(3)], crossReview: REVIEW,
   provenance: { ledger: LEDGER(BASE_CLAIMS), state: STATE() }, ...over });
 
-await test('사전: p3 문구는 EN·KO 가 같은 열쇠를 갖고, 채택·산출물·저자 응답이 검증이 아니라고 밝힌다', () => {
+await test('사전: p3 문구는 EN·KO 가 같은 열쇠를 갖고, 채택·산출물·작성자 응답이 검증이 아니라고 밝힌다', () => {
   assert.deepEqual(Object.keys(KO.p3).sort(), Object.keys(EN.p3).sort());
   for (const k of ['provGroup', 'provStanding', 'provOriginName', 'provRef', 'artReason', 'arDisposition', 'arStatus']) assert.deepEqual(Object.keys(KO.p3[k]).sort(), Object.keys(EN.p3[k]).sort(), k);
   assert.match(EN.p3.provAdoptAsk, /not verification/); assert.match(EN.p3.provAdoptAsk, /memo stays unchanged/);
@@ -94,7 +94,7 @@ await test('산출물 범위: 파일·해시·줄 범위·잘림·빠진 이유�
   assert.match(core.markdownReport(broken, false, KO), /산출물 범위를 이 화면이 읽을 수 없어/);
 });
 
-// 저자 응답 계획 (서버 buildAuthorResponsePlan 의 모양)
+// 작성자 응답 계획 (서버 buildAuthorResponsePlan 의 모양)
 const F1 = 'arf_' + '1'.repeat(32), F2 = 'arf_' + '2'.repeat(32), F3 = 'arf_' + '3'.repeat(32);
 const PLAN = {
   version: 'cloudbite-author-response/v1', kind: 'author-response-follow-up', trust: 'untrusted-data', parentId: PARENT, parentStatus: 'completed',
@@ -122,7 +122,7 @@ const parsedResponse = (expertId, responses, expected) => ({ expertId, responses
 const childRaw = (x1Response, x3Response) => projectRaw({ id: ID, provenance: undefined, crossReview: undefined, brief: brief({ expertIds: ['x1', 'x3'], revision: { parentId: PARENT, changeSummary: 'Answer the review', reviewSnapshotHash: HASH } }),
   experts: [run(1, x1Response === undefined ? {} : { authorResponse: x1Response }), run(3, x3Response === undefined ? {} : { authorResponse: x3Response })], previousRound: ROUND });
 
-await test('저자 응답: 계획·응답을 엄격히 받고, 지적마다 수정·철회·유지와 없음·거부를 의견 상태와 따로 보고서에 적는다', () => {
+await test('작성자 응답: 계획·응답을 엄격히 받고, 지적마다 수정·철회·유지와 없음·거부를 의견 상태와 따로 보고서에 적는다', () => {
   const p = core.normalizeProject(childRaw(parsedResponse('x1', [{ findingId: F1, disposition: 'withdraw', rationale: 'Agreed, too strong' }], 2), { invalid: 'author response has an unknown key' }));
   assert.equal(p.brief.revision.reviewSnapshotHash, HASH, 'revision hash survives normalization');
   assert.deepEqual(plain(p.previousRound.authorResponse), PLAN);
@@ -149,7 +149,7 @@ await test('저자 응답: 계획·응답을 엄격히 받고, 지적마다 수�
     assert.equal(core.normalizeAuthorResponse(bad, 'x1'), null);
 });
 
-await test('해당 저자: 반박·부족이고 검토자·대상이 서로 다른 완료 저자이며 근거 칸이 있는 것만 (자기 지적·없는 칸·지지는 아님)', () => {
+await test('해당 작성자: 반박·부족이고 검토자·대상이 서로 다른 완료 작성자이며 근거 칸이 있는 것만 (자기 지적·없는 칸·지지는 아님)', () => {
   const p = core.normalizeProject(projectRaw());
   assert.deepEqual(plain(core.authorResponseAffected(p)), ['x1', 'x3']);
   assert.equal(core.authorResponseEligible(p), true);
@@ -317,7 +317,7 @@ await test('채택 버튼은 진행 중인 검토·메모가 있으면 없고, �
   assert.match(env2.detail().textContent, /주장 출처를 이 화면이 읽을 수 없어/);
 });
 
-await test('저자에게 응답 요청: 해당 저자만 미리 고르고, 해당하지 않는 역할은 막으며, reviewSnapshotHash 가 고정 본문으로 미리보기·만들기에 그대로 간다', async () => {
+await test('작성자에게 응답 요청: 해당 작성자만 미리 고르고, 해당하지 않는 역할은 막으며, reviewSnapshotHash 가 고정 본문으로 미리보기·만들기에 그대로 간다', async () => {
   const env = fakeEnv((url, init) => {
     if (url.startsWith('/api/cloudbite/history?')) return json(200, { rows: [ROW], next: null, owner: false, retentionDays: 30 });
     if (url === `/api/cloudbite/history/${ID}`) return json(200, detailOf(projectRaw()));
@@ -331,6 +331,7 @@ await test('저자에게 응답 요청: 해당 저자만 미리 고르고, 해�
   assert.equal(box.hidden, false);
   assert.match(box.textContent, /Author response round\. Only these affected authors can be selected: Expert 1, Expert 3\./);
   assert.deepEqual(['x1', 'x2', 'x3'].map(id => env.fk(`x:${id}`).checked), [true, false, true], 'only affected authors are preselected');
+  assert.equal(env.fk('x:x2').disabled, true, 'unaffected roles cannot be selected in the author-response draft');
   const tok = env.byId('cb-token'); tok.value = 'adm-secret-123'; tok.dispatch('input'); await env.flush();
   const sum = env.fk('fu-summary'); sum.value = 'Please answer the findings'; sum.dispatch('input'); await env.flush();
   // 해당하지 않는 역할을 더하면 계획을 준비하지 않는다
@@ -366,7 +367,7 @@ await test('보통 후속 라운드는 그대로: reviewSnapshotHash 를 보내�
   assert.deepEqual(JSON.parse(env.previews[0].init.body).revision, { parentId: ID, changeSummary: 'Changed scope' });
 });
 
-await test('후속 프로젝트 화면: 저자 응답 계획과 응답을 그리고 (수정·철회·유지·없음·거부), 원래 의견과 새 의견은 따로 남는다', async () => {
+await test('후속 프로젝트 화면: 작성자 응답 계획과 응답을 그리고 (수정·철회·유지·없음·거부), 원래 의견과 새 의견은 따로 남는다', async () => {
   const child = { ...childRaw(parsedResponse('x1', [{ findingId: F1, disposition: 'maintain', rationale: 'Still holds' }, { findingId: F2, disposition: 'revise', rationale: 'Will add data' }], 2),
     { invalid: 'author response language mismatch' }), id: 'cb' + 'c'.repeat(32) };
   const row = { ...ROW, id: child.id };

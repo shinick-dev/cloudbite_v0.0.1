@@ -24,7 +24,7 @@ import type { AuthorResponseParsed, AuthorResponsePlan } from '../src/cloudbite-
 
 type Mode = 'demo' | 'live';
 type View = 'home' | 'guide' | 'help' | 'settings' | 'history';
-/** invalidAuthorResponse: 서버가 보낸 저자 응답을 읽을 수 없다 (서버가 거부한 응답 { invalid } 와는 다르다) */
+/** invalidAuthorResponse: 서버가 보낸 작성자 응답을 읽을 수 없다 (서버가 거부한 응답 { invalid } 와는 다르다) */
 type ConsoleExpert = ExpertRun & { invalidOpinion?: boolean; invalidAuthorResponse?: boolean };
 type ConsoleReview = ProjectCrossReview & { invalidArtifactCoverage?: boolean };
 type Provenance = { ledger: ProvenanceLedger; state: ProvenanceState };
@@ -358,7 +358,7 @@ const P2_KO: typeof P2_EN = {
   memoReading: '저장된 메모 상태를 읽는 중입니다 (새 메모 요청은 보내지 않습니다)…',
 };
 
-// ── 제품 v3 문구 (주장 출처·채택 · 검토가 읽은 산출물 · 저자 응답). EN.p3 / KO.p3, KO 는 같은 모양
+// ── 제품 v3 문구 (주장 출처·채택 · 검토가 읽은 산출물 · 작성자 응답). EN.p3 / KO.p3, KO 는 같은 모양
 const P3_EN = {
   provTitle: 'Claim provenance',
   provNote: 'Who wrote each claim and whether you adopted it. This is structure, not fact-checking: nothing here verifies a claim, retrieves a source or reads full reports.',
@@ -469,8 +469,8 @@ const P3_KO: typeof P3_EN = {
     binary: '바이너리', 'unsafe-path': '안전하지 않은 경로', 'duplicate-path': '중복 경로', 'file-limit': '파일 수 한도', budget: '읽기 한도' },
   artNone: '검토자에게 저장된 산출물 글이 주어지지 않았습니다.',
   artInvalid: '서버가 보낸 산출물 범위를 이 화면이 읽을 수 없어 표시하지 않습니다.',
-  arTitle: '저자 응답',
-  arNote: '저자가 자기 근거에 대한 검토 지적에 답했습니다. 응답은 저자의 입장일 뿐 검증이나 검토자에 대한 판정이 아닙니다. 이전 프로젝트의 원래 의견과 메모는 바뀌지 않습니다.',
+  arTitle: '작성자 응답',
+  arNote: '작성자가 자기 근거에 대한 검토 지적에 답했습니다. 응답은 작성자의 입장일 뿐 검증이나 검토자에 대한 판정이 아닙니다. 이전 프로젝트의 원래 의견과 메모는 바뀌지 않습니다.',
   arFinding: (reviewer: string, verdict: string, author: string, n: number) => `${reviewer} · ${verdict} · ${author}, 근거 ${n}`,
   arOriginal: (dir: string, conf: number) => `원래 의견(이전 프로젝트, 바뀌지 않음): ${dir} · 자체 평가 확신도 ${conf}%`,
   arDisposition: { revise: '수정', withdraw: '철회', maintain: '유지' },
@@ -482,16 +482,16 @@ const P3_KO: typeof P3_EN = {
   arUnreadable: '서버가 보낸 응답을 이 화면이 읽을 수 없어 표시하지 않습니다.',
   arSeparate: '위의 역할 의견 상태와는 별개입니다.',
   arCapped: (included: number, eligible: number) => `해당 지적 ${eligible}개 중 ${included}개를 넣었습니다.`,
-  arUnselected: (s: string) => `고르지 않은 해당 저자: ${s}`,
-  arPlanInvalid: '서버가 보낸 저자 응답 계획을 이 화면이 읽을 수 없어 표시하지 않습니다.',
+  arUnselected: (s: string) => `고르지 않은 해당 작성자: ${s}`,
+  arPlanInvalid: '서버가 보낸 작성자 응답 계획을 이 화면이 읽을 수 없어 표시하지 않습니다.',
   arReviewer: '검토자의 근거',
-  arEvidence: '저자의 원래 근거',
-  arAsk: '저자에게 응답 요청',
-  arAskHelp: '근거가 반박되었거나 부족하다고 지적된 저자들을 위한 새 후속 프로젝트를 엽니다. 어떤 저자를 실행할지 고르고 계획을 준비해 실행을 확인합니다. 자동으로 실행되거나 비용이 드는 것은 없으며 이 프로젝트는 바뀌지 않습니다.',
-  arNone: '반박되었거나 부족하다고 지적된 완료 저자가 없어 응답할 것이 없습니다.',
-  fuAuthor: (names: string) => `저자 응답 라운드. 해당 저자만 고를 수 있습니다: ${names}. 새 프로젝트는 자기의 보통 예산을 씁니다.`,
-  fuAuthorOnly: '저자 응답: 해당 저자만 직접 고르세요 (Jev 경로 선택은 쓰지 않습니다).',
-  fuAuthorNone: '저자 응답: 해당 저자를 한 명 이상 고르세요.',
+  arEvidence: '작성자의 원래 근거',
+  arAsk: '작성자에게 응답 요청',
+  arAskHelp: '근거가 반박되었거나 부족하다고 지적된 작성자들을 위한 새 후속 프로젝트를 엽니다. 어떤 작성자를 실행할지 고르고 계획을 준비해 실행을 확인합니다. 자동으로 실행되거나 비용이 드는 것은 없으며 이 프로젝트는 바뀌지 않습니다.',
+  arNone: '반박되었거나 부족하다고 지적된 완료 작성자가 없어 응답할 것이 없습니다.',
+  fuAuthor: (names: string) => `작성자 응답 라운드. 해당 작성자만 고를 수 있습니다: ${names}. 새 프로젝트에는 별도의 실행 예산이 적용됩니다.`,
+  fuAuthorOnly: '작성자 응답: 해당 작성자만 직접 고르세요 (Jev 경로 선택은 쓰지 않습니다).',
+  fuAuthorNone: '작성자 응답: 해당 작성자를 한 명 이상 고르세요.',
 };
 
 const EN = {
@@ -1816,7 +1816,7 @@ function normalizeProject(raw: unknown): ConsoleProject | null {
     ? { parentId: b.revision.parentId, changeSummary: clip(b.revision.changeSummary, REVISION.changeSummary),
       ...(typeof b.revision.reviewSnapshotHash === 'string' && SHA256.test(b.revision.reviewSnapshotHash) ? { reviewSnapshotHash: b.revision.reviewSnapshotHash } : {}) } : null;
   const prov = opt(raw.provenance, v => normalizeProvenance(v, id));
-  // 저자 응답 계획은 이전 라운드 안의 선택 필드다: 읽을 수 없으면 그 계획만 빼고 그렇다고 밝힌다 (비교·참고는 그대로)
+  // 작성자 응답 계획은 이전 라운드 안의 선택 필드다: 읽을 수 없으면 그 계획만 빼고 그렇다고 밝힌다 (비교·참고는 그대로)
   let authorPlan: AuthorResponsePlan | null | undefined;
   if (round && isObj(raw.previousRound) && raw.previousRound.authorResponse !== undefined && raw.previousRound.authorResponse !== null) {
     authorPlan = normalizeAuthorPlan(raw.previousRound.authorResponse, round.parentId);
@@ -2165,7 +2165,7 @@ function provenanceLines(pv: Provenance, m: Messages): string[] {
   ];
 }
 
-// ───────── 저자 응답 (src/cloudbite-author-response.ts): 계획은 이전 라운드 안에, 응답은 각 역할 실행 옆에 따로 있다
+// ───────── 작성자 응답 (src/cloudbite-author-response.ts): 계획은 이전 라운드 안에, 응답은 각 역할 실행 옆에 따로 있다
 const DISPOSITIONS = ['revise', 'withdraw', 'maintain'] as const;
 const AR_FINDING = /^arf_[0-9a-f]{32}$/;
 function normalizeAuthorResponse(raw: unknown, expertId: string): AuthorResponseParsed | { invalid: string } | null {
@@ -2212,7 +2212,7 @@ function normalizeAuthorPlan(raw: unknown, parentId: string): AuthorResponsePlan
   const omissions = every(raw.omissions, 200, o => isObj(o) && typeof o.path === 'string' && (o.omittedBytes === undefined || isInt(o.omittedBytes)) && (o.omittedItems === undefined || isInt(o.omittedItems))
     ? { path: clip(o.path, 120), ...(o.omittedBytes !== undefined ? { omittedBytes: o.omittedBytes as number } : {}), ...(o.omittedItems !== undefined ? { omittedItems: o.omittedItems as number } : {}) } : null);
   if (!roles || !unselected || !authors || !findings || !omittedIds || !excluded || !omissions || !isObj(cap) || !isInt(cap.limit) || !isInt(cap.eligibleSelected) || !isInt(cap.included)) return null;
-  // 지적은 그 저자 것이어야 한다: 계획의 묶음이 서로 맞지 않으면 읽지 않는다
+  // 지적은 그 작성자 것이어야 한다: 계획의 묶음이 서로 맞지 않으면 읽지 않는다
   if (findings.some(f => !authors.some(a => a.expertId === f.targetExpertId && a.findingIds.includes(f.findingId)))) return null;
   return { version: 'cloudbite-author-response/v1', kind: 'author-response-follow-up', trust: 'untrusted-data', parentId, parentStatus: raw.parentStatus as ProjectStatus,
     crossReview: { snapshotHash: cr.snapshotHash, completedAt: cr.completedAt as number | null, reviewers, findings: cr.findings, supported: cr.supported, eligible: cr.eligible },
@@ -2220,7 +2220,7 @@ function normalizeAuthorPlan(raw: unknown, parentId: string): AuthorResponsePlan
     capped: { limit: cap.limit, eligibleSelected: cap.eligibleSelected, included: cap.included, omittedFindingIds: omittedIds },
     unselectedAuthors: unselected, excluded, omissions, disclosure: clip(raw.disclosure, 2000), planSha256: raw.planSha256 };
 }
-/** 저자 응답을 요청할 수 있는 저자: 서버 후보와 같은 조건 (반박·부족, 검토자·대상 모두 완료 저자이고 서로 다름, 근거 칸이 있음) */
+/** 작성자 응답을 요청할 수 있는 작성자: 서버 후보와 같은 조건 (반박·부족, 검토자·대상 모두 완료 작성자이고 서로 다름, 근거 칸이 있음) */
 function authorResponseAffected(p: ConsoleProject): string[] {
   const cr = p.crossReview;
   if (!cr || cr.status !== 'completed' || !SHA256.test(cr.snapshotHash)) return [];
@@ -2233,11 +2233,11 @@ function authorResponseAffected(p: ConsoleProject): string[] {
   }
   return p.experts.map(e => e.expertId).filter(id => hit.has(id));
 }
-/** 저자 응답 요청 버튼을 낼 수 있는 프로젝트: 끝난 실제 실행 + 완료된 교차 검토 (부모 권한은 서버가 다시 확인한다) */
+/** 작성자 응답 요청 버튼을 낼 수 있는 프로젝트: 끝난 실제 실행 + 완료된 교차 검토 (부모 권한은 서버가 다시 확인한다) */
 function authorResponseEligible(p: ConsoleProject): boolean {
   return followUpEligible(p) && p.status !== 'cancelled' && p.crossReview?.status === 'completed' && authorResponseAffected(p).length > 0;
 }
-/** 저자 응답 줄 (화면·보고서 공용). 지적마다 응답·없음, 역할마다 거부·읽을 수 없음·아직 없음을 의견 상태와 따로 적는다 */
+/** 작성자 응답 줄 (화면·보고서 공용). 지적마다 응답·없음, 역할마다 거부·읽을 수 없음·아직 없음을 의견 상태와 따로 적는다 */
 function authorResponseLines(plan: AuthorResponsePlan, experts: ConsoleExpert[], m: Messages, name: NameOf): Array<{ author: string; head: string; original: string; lines: string[] }> {
   const t = m.p3;
   return plan.authors.map(a => {
@@ -3148,7 +3148,7 @@ function boot(): void {
      *  blocked 만 예외다: 서버가 409 로 시작하지 않았고 GET 으로 시도 기록이 없음을 확인했다 (예약 없음) → 유료 버튼을 다시 낼 수 있다 */
     memo: null as null | { projectId: string; phase: 'running' | 'reading' | 'unknown' | 'failed' | 'blocked' | 'settled'; error: Text | null; polls: number },
     /** 사용 기록에서 시작한 후속 라운드 초안: 부모 id 와 서버가 읽어 준 부모 프로젝트(참고·비교용), 사용자가 쓰는 바뀐 점 요약 */
-    /** authorResponse: 저자 응답 라운드 (부모의 완료된 교차 검토 해시와 고를 수 있는 해당 저자). 없으면 보통 후속 라운드 */
+    /** authorResponse: 작성자 응답 라운드 (부모의 완료된 교차 검토 해시와 고를 수 있는 해당 작성자). 없으면 보통 후속 라운드 */
     followUp: null as null | { parentId: string; parent: ConsoleProject; changeSummary: string; authorResponse?: { reviewSnapshotHash: string; affected: string[] } },
     /** 실제 실행 전 준비한 계획. body 는 미리보기에 보낸 바로 그 JSON 문자열이며, 실행은 이 문자열을 그대로 보낸다 (기본값을 덧붙이지 않는다).
      *  sig 는 준비한 순간의 의미 있는 입력 전체. 하나라도 바뀌면 계획을 버린다 */
@@ -3732,7 +3732,8 @@ function boot(): void {
     const opt = (e: ExpertDefinition, prefix: string) => {
       const on = S.selected.has(e.id);
       const id = `cb-${prefix}-${e.id}`;
-      const cb = h('input', { type: 'checkbox', id, 'data-fk': `${prefix}:${e.id}`, checked: on, disabled: busy || (!on && full) });
+      const outsideResponse = !!S.followUp?.authorResponse && !S.followUp.authorResponse.affected.includes(e.id);
+      const cb = h('input', { type: 'checkbox', id, 'data-fk': `${prefix}:${e.id}`, checked: on, disabled: busy || outsideResponse || (!on && full) });
       cb.addEventListener('change', () => toggleExpert(e.id, cb.checked));
       return h('label', { class: `cb-expert-opt${on ? ' is-on' : ''}`, for: id }, cb,
         h('span', { class: 'cb-opt-text' }, h('span', { class: 'cb-opt-name' }, e.name), h('span', { class: 'cb-opt-desc' }, roleBlurb(e))));
@@ -3871,7 +3872,8 @@ function boot(): void {
     const row = (e: PoolEntry) => {
       const ok = poolRunnable(e), on = isSel(e), id = `cb-xp-${e.id}`;
       // 계획 중인 역할은 늘 잠긴 상자다 — 고를 수도, 제출될 수도 없다
-      const cb = h('input', { type: 'checkbox', id, 'data-fk': `xp:${e.id}`, checked: on, disabled: !ok || busy || auto || (!on && full) });
+      const outsideResponse = !!S.followUp?.authorResponse && (!e.expertId || !S.followUp.authorResponse.affected.includes(e.expertId));
+      const cb = h('input', { type: 'checkbox', id, 'data-fk': `xp:${e.id}`, checked: on, disabled: !ok || busy || auto || outsideResponse || (!on && full) });
       if (ok) cb.addEventListener('change', () => toggleExpert(e.expertId!, cb.checked));
       const def = ok ? findDef(e.expertId!) : undefined;
       const meta = [e.categoryLabel[lang], def && def.name !== e.name ? m.poolRunsAs(def.name) : ''].filter(Boolean).join(' · ');
@@ -4633,7 +4635,7 @@ function boot(): void {
         })) : h('p', { class: 'cb-help' }, m.reviewNoFindings)));
     }
     if (cr) kids.push(...artifactKids(p, cr, opened, prefix));
-    // 저자 응답 요청: 끝난 실제 실행의 완료된 검토에서만, 누를 때 후속 초안만 연다 (실행·비용 없음)
+    // 작성자 응답 요청: 끝난 실제 실행의 완료된 검토에서만, 누를 때 후속 초안만 연다 (실행·비용 없음)
     if (cr?.status === 'completed' && followUpEligible(p) && p.status !== 'cancelled') {
       kids.push(authorResponseAffected(p).length
         ? h('div', { class: 'cb-ar-ask' }, h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'ar-ask', disabled: locked(), onclick: () => startAuthorResponse(p) }, m.p3.arAsk),
@@ -4998,7 +5000,7 @@ function boot(): void {
     const name = (id: string) => ops.find(o => o.expertId === id)?.name ?? expertName(p, id);
     return [...roundBaseKids(p, r, prefix, opened, name), ...authorPlanKids(p, r.authorResponse, prefix, opened, name)];
   }
-  /** 저자 응답: 지적마다 저자의 수정·철회·유지와 근거, 없음·일부·거부를 역할의 의견 상태와 따로 보인다. 원래 의견은 바뀌지 않은 이전 기록이다 */
+  /** 작성자 응답: 지적마다 작성자의 수정·철회·유지와 근거, 없음·일부·거부를 역할의 의견 상태와 따로 보인다. 원래 의견은 바뀌지 않은 이전 기록이다 */
   function authorPlanKids(p: ConsoleProject, plan: AuthorResponsePlan | undefined, prefix: string, opened: Set<string>, name: NameOf): Kid[] {
     const m = M, t = m.p3;
     if (p.invalidAuthorPlan) return [h('p', { class: 'cb-warn' }, t.arPlanInvalid)];
@@ -5190,7 +5192,7 @@ function boot(): void {
     renderAll();
     fuSummaryIn.focus();
   }
-  /** 저자 응답 요청: 보통 후속 초안을 열고, 반박·부족 지적을 받은 완료 저자만 직접 고르기로 미리 채운다. 아무것도 실행하지 않는다 */
+  /** 작성자 응답 요청: 보통 후속 초안을 열고, 반박·부족 지적을 받은 완료 작성자만 직접 고르기로 미리 채운다. 아무것도 실행하지 않는다 */
   function startAuthorResponse(parent: ConsoleProject): void {
     if (locked() || !authorResponseEligible(parent)) return;
     const affected = authorResponseAffected(parent);
@@ -5352,7 +5354,7 @@ function boot(): void {
       if (S.mode !== 'live') S.formErrors.push({ field: 'revision', text: m => m.p2.fuNeedLive });
       if (!change) S.formErrors.push({ field: 'revision', text: m => m.p2.fuNeedSummary });
       else if (change.length > REVISION.changeSummary) S.formErrors.push({ field: 'revision', text: m => m.p2.fuSummaryLong(REVISION.changeSummary) });
-      // 저자 응답: 해당 저자만 직접 고른다 (해당하지 않는 역할·Jev 자동 선택 없음). 서버가 다시 확인한다
+      // 작성자 응답: 해당 작성자만 직접 고른다 (해당하지 않는 역할·Jev 자동 선택 없음). 서버가 다시 확인한다
       const ar = fu.authorResponse;
       if (ar && (auto || f.expertIds.some(id => !ar.affected.includes(id)))) S.formErrors.push({ field: 'revision', text: m => m.p3.fuAuthorOnly });
       else if (ar && !f.expertIds.length) S.formErrors.push({ field: 'revision', text: m => m.p3.fuAuthorNone });
