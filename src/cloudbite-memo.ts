@@ -391,28 +391,33 @@ const POSITIVE_AGREEMENT = new RegExp([...AGREEMENT, ...VOTE].join('|'), 'i');
 const POSITIVE_NON_VOTE = new RegExp(AGREEMENT.join('|'), 'i');
 const PAST_VOTE = /\bvoted\b|\bvotes? (?:was|were|has been|had been) (?:taken|held|cast)\b|\bvote (?:showed|went|favou?red|chose)\b|투표(?:했|하였|결과|에서|로 결정(?:했|하였|되었|됐|됨))/i;
 const NEGATED = /\b(?:no|not|never|none|nor|neither|without|cannot|unable|absence|absent|lack(?:s|ed|ing)?)\b|n't\b|없|않|아니|못|불가|부재/i;
-const UNCERTAIN = /\b(?:unclear|unknown|uncertain|unverified|unconfirmed|unestablished|undetermined|undecided|unsure|whether|if|hypothetical(?:ly)?|suppose|assuming)\b|\binsufficient (?:evidence|basis|information)\b|불분명|불확실|불명확|미확인|미정|알 수 없|모르|여부|근거가 부족|만약|라면|(?:는|은)지(?![만도])/i;
 const QUOTED = new RegExp(LANGUAGE_PATTERNS.strip[4], 'g');
 const CLAUSES = /[.;!?。\n]|,\s*(?:but|however|although)\b|그러나|하지만|반면/i;
 // Uncertainty only exempts the agreement predicate it governs: a conditional/concessive tail ("..., even though cost is
 // uncertain", "... if the budget allows", "동의했지만 비용은 불확실하다") is split off so its words cannot waive the main
 // assertion, while a leading hypothetical ("If all experts agree, proceed") keeps its "if" with the predicate.
 const SUBCLAUSES = /(?=\b(?:even (?:if|though)|if|though|although|unless|whether or not)\b)|(?<=지만|는데|더라도)/i;
-/** Uncertainty must govern the agreement, not an unrelated cost/schedule in the same clause. Still a heuristic. */
-function uncertaintyAboutAgreement(c: string): boolean {
-  if (!UNCERTAIN.test(c)) return false;
-  return /^\s*(?:if\b|suppose\b|assuming\b|hypothetically\b|만약)/i.test(c)
-    || /\bwhether\s+(?:(?:all|most|any|the|a)\s+)*(?:consensus|agreement|unanimity|votes?|experts?|panel|team)\b/i.test(c)
-    || /\b(?:consensus|agreement|unanimity|votes?)\s+(?:is|was|remains|has been|seems)\s+(?:unclear|unknown|uncertain|unverified|unconfirmed|unestablished|undetermined|undecided|unsure)\b/i.test(c)
-    || /(?:합의|동의|만장일치|투표)\s*(?:의\s*)?여부/.test(c)
-    || /(?:합의|동의|만장일치|투표)(?:가|에|를|로)?\s*(?:(?:형성|도달|이루|진행|되|했|하였|됐|였)[가-힣 ]{0,8})?(?:는|은)지(?![만도])/.test(c)
-    || /(?:합의|동의|만장일치|투표)(?:은|는|가|이)?\s*(?:불분명|불확실|불명확|미확인|미정|알 수 없|근거가 부족)/.test(c);
+// Uncertainty must govern the matched agreement predicate itself, never an unrelated cost/schedule word in the same
+// clause ("All experts agreed on option-1 with unknown cost", "Budget is unknown and all experts agreed"). EN governs
+// from before the match with no comma/semicolon in between ("If all experts agree, ...", "It is unclear whether every
+// expert supports X", "It is unverified that all experts agreed"; so "If anything, all experts agreed" does not) or as
+// the match's own copula ("Consensus among experts is unclear"); KO governs from the predicate's own ending
+// ("다수가 찬성했는지는", "전원 동의 여부는", "동의했다고 보기는 불확실하다"). Still a heuristic, not a semantic guarantee.
+const POSITIVE_AGREEMENT_ALL = new RegExp(POSITIVE_AGREEMENT.source, 'gi');
+const UNCERTAIN_WORD = '(?:unclear|unknown|uncertain|unverified|unconfirmed|unestablished|undetermined|undecided|unsure|not (?:known|clear|certain|verified|established))';
+const GOVERNS_BEFORE = new RegExp(`(?:^\\s*hypothetically\\b.*|(?:^\\s*(?:if|suppose|assuming)\\b|^\\s*만약|\\bwhether\\b|\\b${UNCERTAIN_WORD}\\s+(?:that|if)\\b)[^,;]{0,60})$`, 'i');
+const GOVERNS_AFTER_EN = new RegExp(`^(?:consensus|unanimity|votes?)(?:\\s+(?:among|between|on|for|of|about|regarding|in|over)(?:\\s+[\\w-]+){1,3})?\\s+(?:is|was|remains|has been|seems|appears)\\s+(?:still\\s+)?${UNCERTAIN_WORD}\\b`, 'i');
+const GOVERNS_AFTER_KO = /^(?:[가-힣]{0,8}?(?:는|은)지(?![만도])|\s*(?:의\s*)?여부|[가-힣]{0,6}?(?:다고|라고)\s*(?:보기|하기|단정하기)[가-힣]{0,2}\s*(?:불분명|불확실|불명확|어렵|알 수 없)|(?:은|는|가|이)?\s*(?:불분명|불확실|불명확|미확인|미정|알 수 없|근거가 부족))/;
+function governedByUncertainty(c: string, m: RegExpMatchArray): boolean {
+  const i = m.index ?? 0;
+  return GOVERNS_BEFORE.test(c.slice(0, i)) || GOVERNS_AFTER_EN.test(c.slice(i)) || GOVERNS_AFTER_KO.test(c.slice(i + m[0].length));
 }
 /** `prospective`: the text is a proposed action/trigger (changeTriggers, nextActions), where a non-past vote is a proposal. */
 export function claimsUnsupportedAgreement(t: string, opts: { prospective?: boolean } = {}): boolean {
   return t.replace(QUOTED, ' ').split(CLAUSES).flatMap((c) => c.split(SUBCLAUSES)).some((c) => {
-    if (!POSITIVE_AGREEMENT.test(c) || NEGATED.test(c) || uncertaintyAboutAgreement(c)) return false;
-    return !opts.prospective || POSITIVE_NON_VOTE.test(c) || PAST_VOTE.test(c);
+    if (NEGATED.test(c)) return false;
+    return [...c.matchAll(POSITIVE_AGREEMENT_ALL)].some((m) => !governedByUncertainty(c, m)
+      && (!opts.prospective || POSITIVE_NON_VOTE.test(m[0]) || PAST_VOTE.test(c)));
   });
 }
 

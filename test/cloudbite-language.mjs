@@ -337,6 +337,30 @@ await check('memo: uncertainty, quoted expert words and proposed future votes ar
   }
   badKo({ dissent: '전원이 동의했지만 비용은 불확실하다.' }, '전원 동의 + 무관한 불확실성');
   badKo({ summary: '전원이 동의했지만 비용은 불확실하다.' }, '전원 동의 + 무관한 불확실성(summary)');
+  // A1/A3: ordinary honest uncertainty about the agreement itself stays allowed (anchored to the matched predicate).
+  for (const d of ['It is unclear whether every expert supports option-2.', 'It is unclear whether each of the experts agreed on option-1.',
+    'It is unclear whether there was a consensus on option-2.', 'It is unknown whether the decision was unanimous.',
+    'It is unclear whether exp-a voted for option-2.', 'It is unknown whether the majority of experts support option-2.',
+    'Consensus among experts is unclear.', 'The consensus on option-2 is unclear.', 'It is unverified that all experts agreed on option-1.',
+    'It is unclear whether all experts agree on option-2.', 'Suppose all experts agree; then proceed.',
+    'Assuming the majority of experts support option-2, start the pilot.']) {
+    okEn({ dissent: d }, d); assert.equal(MM.claimsUnsupportedAgreement(d), false, d);
+  }
+  for (const d of ['다수가 찬성했는지는 불분명하다.', '모든 전문가가 지지했는지는 불분명하다.', '모든 전문가가 동의했다고 보기는 불확실하다.',
+    '전원이 동의했는지는 알 수 없다.', '합의 여부는 확인되지 않았다.', '전원 동의 여부는 불분명하다.', '만장일치였는지는 불분명하다.']) {
+    okKo({ dissent: d }, d); assert.equal(MM.claimsUnsupportedAgreement(d), false, d);
+  }
+  okKo({ c3: '만약 전원이 동의하면 option-1로 진행한다.' }, '만약 가정 트리거');
+  // R1 retained in KO and A2: uncertainty elsewhere, or an idiomatic "if", does not govern the asserted agreement.
+  for (const d of ['All experts agreed on option-1, whose cost is unclear.', 'Unanimously, the experts chose option-1 despite uncertain costs.',
+    'The decision was unanimous and the timeline is unclear.', 'If anything, all experts agreed on option-1.', 'If so, all experts agreed on option-1.',
+    'It is unclear whether costs rise, and all experts agreed on option-1.']) {
+    badEn({ dissent: d }, d); badEn({ summary: d }, d); assert.equal(MM.claimsUnsupportedAgreement(d), true, d);
+  }
+  for (const d of ['모든 전문가가 동의했고 비용은 미정이다.', '비용은 불확실하나 전원이 찬성했다.', '만장일치로 Plan B를 골랐으며 일정은 미정이다.',
+    '일정이 맞는지는 불분명한데 모든 전문가가 동의했다.']) {
+    badKo({ dissent: d }, d); assert.equal(MM.claimsUnsupportedAgreement(d), true, d);
+  }
   okEn({ c3: 'If all experts agree, proceed with option-1.' }, 'leading hypothetical trigger');
   okEn({ c4: 'Proceed with option-1 if all experts agree.' }, 'trailing conditional governing the agreement');
   assert.equal(MM.claimsUnsupportedAgreement('Hold a team vote on option-1 after the pilot.'), true, 'outside action fields the vote heuristic still applies');
