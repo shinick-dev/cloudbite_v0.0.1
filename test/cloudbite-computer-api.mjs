@@ -15,6 +15,11 @@ try {
   x.onResolve({filter:/^\.\/cloudbite-computer-capacity-api$/},()=>({path:'capacity',namespace:'capacity-test'}));
   x.onResolve({filter:/^\.\/cloudbite-computer-jobs-api$/},()=>({path:'jobs',namespace:'jobs-test'}));
   x.onResolve({filter:/^\.\/cloudbite-computer-jobs-page$/},()=>({path:'page',namespace:'jobs-page-test'}));
+  x.onResolve({filter:/^\.\/cloudbite-computer-(snapshots|latency|costs)-page$/},({path})=>({path:path.split('-').at(-2),namespace:'manage-page-test'}));
+  x.onLoad({filter:/.*/,namespace:'manage-page-test'},({path})=>({contents:`export const CLOUDBITE_COMPUTER_${path.toUpperCase()}_HTML='<!doctype html><title>${path}</title>';export const CLOUDBITE_COMPUTER_${path.toUpperCase()}_JS='';export const CLOUDBITE_COMPUTER_${path.toUpperCase()}_CSS='';`}));
+  x.onResolve({filter:/^\.\/cloudbite-computer-latency$/},()=>({path:'latency',namespace:'manage-helper-test'}));
+  x.onResolve({filter:/^\.\/cloudbite-computer-costs$/},()=>({path:'costs',namespace:'manage-helper-test'}));
+  x.onLoad({filter:/.*/,namespace:'manage-helper-test'},({path})=>({contents:path==='latency'?"export const latencyPing=()=>({ok:true});export const latencyBackend=async()=>({ok:true});":"export const computerCosts=async()=>({ok:true});"}));
   x.onLoad({filter:/.*/,namespace:'jobs-test'},()=>({contents:"export const webJobsContext=async()=>({status:200,body:{ok:true}});export const webJobsRun=async()=>({status:202,body:{ok:true}});export const webJobsStop=webJobsRun;export const webJobOutput=async()=>({status:200,text:'test output'});"}));
   x.onLoad({filter:/.*/,namespace:'jobs-page-test'},()=>({contents:"export const CLOUDBITE_COMPUTER_JOBS_HTML='<!doctype html><title>Jobs</title>';export const CLOUDBITE_COMPUTER_JOBS_JS='';export const CLOUDBITE_COMPUTER_JOBS_CSS='';"}));
   x.onLoad({filter:/.*/,namespace:'capacity-test'},()=>({contents:"export const capacitySandboxes=async()=>({ok:true,sandboxes:[],partial:false});export const capacityGpuCandidates=async()=>({ok:true,candidates:[]});export const capacityGpuSelect=async()=>({status:200,body:{ok:true,selection:{gpu:'test'}}});"}));
@@ -53,4 +58,25 @@ try {
  r=await request('/api/cloudbite/computer/jobs/context');assert.equal(r.status,401);
  r=await request('/api/cloudbite/computer/jobs/run',{method:'POST',headers:{cookie:'owner=yes',origin:'https://attacker.invalid','content-type':'application/json'},body:'{}'});assert.equal(r.status,403);
  r=await request('/cloudbite/computer/jobs');assert.equal(r.status,200);assert.match(r.headers.get('content-security-policy'),/script-src 'self'/);
+ for(const op of ['snapshots','latency/ping','latency/backend','costs']){
+  r=await request('/api/cloudbite/computer/'+op);assert.equal(r.status,401,op+' requires owner');
+ }
+ rpc.computerSnapshots=async()=>({ok:true,items:[]});
+ for(const op of ['snapshots','latency/ping','latency/backend','costs']){
+  r=await request('/api/cloudbite/computer/'+op,{headers:{cookie:'owner=yes'}});assert.equal(r.status,200,op);assert.equal(r.headers.get('cache-control'),'no-store');
+ }
+ for(const page of ['snapshots','latency','costs'])for(const ext of ['', '.js','.css']){
+  r=await request('/cloudbite/computer/'+page+ext);assert.equal(r.status,200);assert.match(r.headers.get('content-security-policy'),/frame-ancestors 'none'/);
+ }
+ let snapshotCalls=0;
+ rpc.computerSnapshot=async(tag,input)=>{snapshotCalls++;assert.deepEqual(input,{requestId:'test-request',name:'test-env'});return{ok:true};};
+ rpc.computerSelectSnapshot=async()=>({ok:true});
+ const post=(op,input,origin=base)=>request('/api/cloudbite/computer/'+op,{method:'POST',headers:{cookie:'owner=yes',origin,'content-type':'application/json'},body:JSON.stringify(input)});
+ r=await post('snapshots/capture',{requestId:'test-request',name:'test-env'});assert.equal(r.status,400);assert.equal(snapshotCalls,0);
+ r=await post('snapshots/capture',{requestId:'test-request',name:'test-env',acknowledgeStop:true},'https://attacker.invalid');assert.equal(r.status,403);assert.equal(snapshotCalls,0);
+ r=await post('snapshots/capture',{requestId:'test-request',name:'test-env',acknowledgeStop:true,upstream:'https://attacker.invalid'});assert.equal(r.status,400);assert.equal(snapshotCalls,0);
+ r=await post('snapshots/capture',{requestId:'test-request',name:'test-env',acknowledgeStop:true});assert.equal(r.status,200);assert.equal(snapshotCalls,1);
+ r=await post('snapshots/select',{requestId:'x',name:'test-env',account:'primary',apiKey:'forged'});assert.equal(r.status,400);
+ r=await post('snapshots/select',{requestId:'x',name:'test-env',account:'primary'},'https://attacker.invalid');assert.equal(r.status,403);
+ console.log('computer management: owner/CSRF gates, stop acknowledgement, trusted input boundary and three same-origin pages passed');
 }finally{await rm(dir,{recursive:true,force:true});}

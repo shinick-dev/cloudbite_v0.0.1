@@ -13,9 +13,19 @@ import { boundedText } from './cloudbite-inference';
 import { capacitySandboxes, capacityGpuCandidates, capacityGpuSelect } from './cloudbite-computer-capacity-api';
 import {webJobsContext,webJobsRun,webJobsStop,webJobOutput} from './cloudbite-computer-jobs-api';
 import {CLOUDBITE_COMPUTER_JOBS_HTML,CLOUDBITE_COMPUTER_JOBS_JS,CLOUDBITE_COMPUTER_JOBS_CSS} from './cloudbite-computer-jobs-page';
+import {CLOUDBITE_COMPUTER_SNAPSHOTS_HTML,CLOUDBITE_COMPUTER_SNAPSHOTS_JS,CLOUDBITE_COMPUTER_SNAPSHOTS_CSS} from './cloudbite-computer-snapshots-page';
+import {CLOUDBITE_COMPUTER_LATENCY_HTML,CLOUDBITE_COMPUTER_LATENCY_JS,CLOUDBITE_COMPUTER_LATENCY_CSS} from './cloudbite-computer-latency-page';
+import {CLOUDBITE_COMPUTER_COSTS_HTML,CLOUDBITE_COMPUTER_COSTS_JS,CLOUDBITE_COMPUTER_COSTS_CSS} from './cloudbite-computer-costs-page';
+import {latencyPing,latencyBackend} from './cloudbite-computer-latency';
+import {computerCosts} from './cloudbite-computer-costs';
 
 const API = '/api/cloudbite/computer';
 const PAGE = '/cloudbite/computer';
+const EXTRA_PAGES:Record<string,readonly[string,string,string]>={
+ snapshots:[CLOUDBITE_COMPUTER_SNAPSHOTS_HTML,CLOUDBITE_COMPUTER_SNAPSHOTS_JS,CLOUDBITE_COMPUTER_SNAPSHOTS_CSS],
+ latency:[CLOUDBITE_COMPUTER_LATENCY_HTML,CLOUDBITE_COMPUTER_LATENCY_JS,CLOUDBITE_COMPUTER_LATENCY_CSS],
+ costs:[CLOUDBITE_COMPUTER_COSTS_HTML,CLOUDBITE_COMPUTER_COSTS_JS,CLOUDBITE_COMPUTER_COSTS_CSS],
+};
 const headers = { 'cache-control':'no-store', 'x-content-type-options':'nosniff', 'referrer-policy':'no-referrer' };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {status, headers:{...headers,'content-type':'application/json'}});
 const error = (code: string, status: number) => json({error:{code,message:code}},status);
@@ -98,11 +108,12 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
       return new Response(response.status===101?null:response.body,{status:response.status,statusText:response.statusText,headers:h,...(response.webSocket?{webSocket:response.webSocket}:{})});
     } catch{return error('desktop_unavailable',502);}
   }
-  if(p===PAGE || p===PAGE+'.js' || p===PAGE+'.css' || p===PAGE+'/jobs' || p===PAGE+'/jobs.js' || p===PAGE+'/jobs.css') {
+  const extraPage=/^\/cloudbite\/computer\/(snapshots|latency|costs)(\.js|\.css)?$/.exec(p);
+  if(extraPage || p===PAGE || p===PAGE+'.js' || p===PAGE+'.css' || p===PAGE+'/jobs' || p===PAGE+'/jobs.js' || p===PAGE+'/jobs.css') {
     if(req.method!=='GET')return error('method_not_allowed',405);
     const jobs=p.startsWith(PAGE+'/jobs');
-    const kind=p===PAGE || p===PAGE+'/jobs'?'text/html; charset=utf-8':p.endsWith('.js')?'text/javascript; charset=utf-8':'text/css; charset=utf-8';
-    const content=jobs?(p.endsWith('.js')?CLOUDBITE_COMPUTER_JOBS_JS:p.endsWith('.css')?CLOUDBITE_COMPUTER_JOBS_CSS:CLOUDBITE_COMPUTER_JOBS_HTML):(p===PAGE?CLOUDBITE_COMPUTER_HTML:p.endsWith('.js')?CLOUDBITE_COMPUTER_JS:CLOUDBITE_COMPUTER_CSS);
+    const kind=!p.endsWith('.js')&&!p.endsWith('.css')?'text/html; charset=utf-8':p.endsWith('.js')?'text/javascript; charset=utf-8':'text/css; charset=utf-8';
+    const content=extraPage?EXTRA_PAGES[extraPage[1]][extraPage[2]==='.js'?1:extraPage[2]==='.css'?2:0]:jobs?(p.endsWith('.js')?CLOUDBITE_COMPUTER_JOBS_JS:p.endsWith('.css')?CLOUDBITE_COMPUTER_JOBS_CSS:CLOUDBITE_COMPUTER_JOBS_HTML):(p===PAGE?CLOUDBITE_COMPUTER_HTML:p.endsWith('.js')?CLOUDBITE_COMPUTER_JS:CLOUDBITE_COMPUTER_CSS);
     return new Response(content,{headers:{...headers,'content-type':kind,'x-frame-options':'DENY',
       'content-security-policy':"default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"}});
   }
@@ -115,6 +126,14 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
   const op=p.slice(API.length+1);
   const computer=env.CLOUDBITE_COMPUTER.get(env.CLOUDBITE_COMPUTER.idFromName('owner'));
   const tag=await computerOwnerTag();
+  if(req.method==='GET' && op==='snapshots'){const result=await computer.computerSnapshots(tag);return json(result,'status' in result&&typeof result.status==='number'?result.status:200);}
+  if(req.method==='GET' && op==='latency/ping')return json(latencyPing());
+  if(req.method==='GET' && op==='latency/backend'){
+    try{return json(await latencyBackend(env,computer,tag));}catch{return error('latency_unavailable',503);}
+  }
+  if(req.method==='GET' && op==='costs'){
+    try{return json(await computerCosts(env));}catch{return error('costs_unavailable',503);}
+  }
   if(req.method==='GET' && op==='state'){const result=await computer.computerState(tag);return json(result,'status' in result&&typeof result.status==='number'?result.status:200);}
   if(req.method==='GET' && op==='performance'){const result=await computer.computerPerformance(tag);return json(result,'status' in result&&typeof result.status==='number'?result.status:200);}
   if(req.method==='GET' && op==='compute/sandboxes')return json(await capacitySandboxes(env));
@@ -142,6 +161,17 @@ export async function computerRoute(req: Request, env: Env, url: URL, state: Dur
   if(req.headers.get('origin')!==env.ORIGIN && admin===null)return error('bad_origin',403);
   if(req.headers.get('origin') && req.headers.get('origin')!==env.ORIGIN)return error('bad_origin',403);
   const input=await body(req,op==='jobs/run'?64*1024:8192); if(!input)return error('bad_request',400);
+  if(op==='snapshots/capture'){
+    if(input.acknowledgeStop!==true)return error('stop_confirmation_required',400);
+    if(Object.keys(input).some(k=>!['requestId','name','acknowledgeStop'].includes(k)))return error('bad_request',400);
+    const result=await computer.computerSnapshot(tag,{requestId:input.requestId,name:input.name});
+    return json(result,'status' in result&&typeof result.status==='number'?result.status:200);
+  }
+  if(op==='snapshots/select'){
+    if(Object.keys(input).some(k=>!['requestId','account','name'].includes(k)))return error('bad_request',400);
+    const result=await computer.computerSelectSnapshot(tag,input);
+    return json(result,'status' in result&&typeof result.status==='number'?result.status:200);
+  }
   if(op==='jobs/run'||op==='jobs/stop'){
     if(!nested)return error('not_configured',503);
     try{const result=op==='jobs/run'?await webJobsRun(env,computer,nested,tag,input):await webJobsStop(nested,input);return json(result.body,result.status);}

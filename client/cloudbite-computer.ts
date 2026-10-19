@@ -206,6 +206,7 @@ const DICT = {
     connected: 'Signed in / key set', notConnected: 'Not connected',
     machineOffNote: 'Install status comes from the running machine; start it to check.',
     jobsOpen: 'Run CPU/GPU jobs on the web',
+    manageNav: 'Computer management', snapshotsOpen: 'Saved environments', latencyOpen: 'Connection latency', costsOpen: 'Costs and limits',
     nestedTitle: 'Nested compute (Daytona, Nosana)', nestedLead: 'Asks the server to set up scoped Daytona and Nosana command-line access inside this machine. Only the server\'s answer says whether it worked.',
     nestedConfigure: 'Set up nested compute', nestedConfiguring: 'Setting up…', nestedJobs: 'Show nested jobs', nestedLoading: 'Loading jobs…',
     nestedNone: 'The server reports no nested jobs.', nestedFailed: 'Could not load nested jobs.', nestedNeedsRunning: 'Available while the machine is running.',
@@ -317,6 +318,7 @@ const DICT = {
     connected: '로그인 / 키 설정됨', notConnected: '연결 안 됨',
     machineOffNote: '설치 상태는 실행 중인 머신이 알려 줍니다. 확인하려면 시작하세요.',
     jobsOpen: '웹에서 CPU·GPU 작업 실행',
+    manageNav: '컴퓨터 관리', snapshotsOpen: '저장한 환경', latencyOpen: '연결 지연', costsOpen: '비용과 한도',
     nestedTitle: '중첩 컴퓨트 (Daytona, Nosana)', nestedLead: '이 머신 안에 범위가 제한된 Daytona·Nosana 명령줄 접근을 설정해 달라고 서버에 요청합니다. 성공 여부는 서버 응답으로만 압니다.',
     nestedConfigure: '중첩 컴퓨트 설정', nestedConfiguring: '설정 중…', nestedJobs: '중첩 작업 보기', nestedLoading: '작업 불러오는 중…',
     nestedNone: '서버가 보고한 중첩 작업이 없습니다.', nestedFailed: '중첩 작업을 불러오지 못했습니다.', nestedNeedsRunning: '머신이 실행 중일 때 쓸 수 있습니다.',
@@ -708,9 +710,11 @@ function mount(root: HTMLElement, pair: PairLink): void {
   const loadMsg = h('p', 'cc-msg');
   loadMsg.setAttribute('role', 'status');
   const keepTitle = h('h3'), keepText = h('p', 'cc-muted');
+  const snapshotsLink = link('cc-btn', '#'), latencyLink = link('cc-btn', '#'), costsLink = link('cc-btn', '#');
+  const manageNav = h('nav', 'cc-actions', snapshotsLink, latencyLink, costsLink);
   const machineCard = h('section', 'cc-card cc-machine',
     h('div', 'cc-machine-head', machineH, statusPill), statusLead, loadMsg, facts, sessionLine, sessionNote, sessionWarn, expiryMsg,
-    accountWrap, accountNote, actions, opBox, launchBox, h('div', 'cc-keep', keepTitle, keepText));
+    accountWrap, accountNote, actions, opBox, launchBox, h('div', 'cc-keep', keepTitle, keepText), manageNav);
 
   const phoneTitle = h('h2'), phoneLead = h('p', 'cc-muted'), phonePaired = h('p', 'cc-msg cc-ok'), phoneMsg = h('p', 'cc-msg');
   phoneMsg.setAttribute('role', 'status');
@@ -929,6 +933,10 @@ function mount(root: HTMLElement, pair: PairLink): void {
     launchLink.setAttribute('href', S.launchUrl || '#');
     launchLink.textContent = d.openLink; launchHint.textContent = d.openNewTab; launchHint.hidden = !S.launchUrl;
     keepTitle.textContent = d.keepTitle; keepText.textContent = d.keep;
+    manageNav.setAttribute('aria-label', d.manageNav);
+    for (const [a, label, path] of [[snapshotsLink, d.snapshotsOpen, 'snapshots'], [latencyLink, d.latencyOpen, 'latency'], [costsLink, d.costsOpen, 'costs']] as const) {
+      a.textContent = label; a.setAttribute('href', '/cloudbite/computer/' + path + '?lang=' + lang);
+    }
 
     // terminal help
     termTitle.textContent = d.termTitle; termBtn.textContent = d.termBtn;
