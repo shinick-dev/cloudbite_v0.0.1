@@ -8,7 +8,14 @@
 import type {
   CloudbiteBootstrap, CloudbiteRoutingHarness, CrossReviewFinding, CrossReviewReport, DecisionFrame, EvidenceClaim, ExpertActivity, ExpertArtifact,
   ExpertDefinition, ExpertOpinion, ExpertRun, ExpertStatus, OpinionDirection, ProjectBrief, ProjectCrossReview, ProjectDocument, ProjectRun, ProjectStatus,
+  ExpertAssignment, ProjectBudget, ProjectPreview, ProjectRevision, ProjectStage, ResponseLanguage,
 } from '../src/cloudbite-contract';
+// 아래 넷은 공개 계약(ProjectRun)에 아직 없는 서버 필드의 잎 모듈 타입이다 (타입만 — 실행 import 없음)
+import type { DecisionMemo, MemoClaim, MemoReference, ProjectMemo } from '../src/cloudbite-contract';
+type MemoStatus = ProjectMemo['status'];
+import type { EvidenceSignals, ExpertEvidenceSignals } from '../src/cloudbite-evidence';
+import type { PmcArticle, PmcImport, PmcImportErrorCode, PmcSection } from '../src/cloudbite-pmc';
+import type { ProjectPreviousRound } from '../src/cloudbite-revision';
 import type { CloudbiteAccessRequest, CloudbiteAccessSession } from '../src/cloudbite-access-contract';
 import type { HistoryList, HistoryDetail, HistoryReport, HistoryIssue, HistoryFeedback } from '../src/cloudbite-history-contract';
 import type { CatalogueMaxRoles, ProjectMaxExperts } from '../src/cloudbite-catalogue-limits';
@@ -16,8 +23,22 @@ import type { CatalogueMaxRoles, ProjectMaxExperts } from '../src/cloudbite-cata
 type Mode = 'demo' | 'live';
 type View = 'home' | 'guide' | 'help' | 'settings' | 'history';
 type ConsoleExpert = ExpertRun & { invalidOpinion?: boolean };
+/** 서버가 저장한 결정 메모 (화면에 필요한 만큼만 정리). 원문 의견은 따로 그대로 남는다 */
+interface ConsoleMemo {
+  status: MemoStatus; attempts: number; execution: 'server-nosana' | 'none'; language?: ResponseLanguage;
+  startedAt?: number; completedAt?: number; reason?: string; error?: string; memo?: DecisionMemo; coverage?: MemoCoverageView;
+}
+interface MemoCoverageView {
+  teamSize: number; completed: number; statedDirections: Record<OpinionDirection, number>;
+  reviews: { included: number; total: number; truncated: number; omitted: number; reports: number };
+  packets: { included: number; total: number; truncated: number; omitted: number; invalid: number; metadataOnly: number };
+  documents: Array<{ id: string; truncated: boolean }>; expertsTruncated: number;
+}
 /** invalidCrossReview: 서버가 이 콘솔이 읽을 수 없는 교차 검토를 보냈다 (그리지 않고 그렇다고 밝힌다) */
-type ConsoleProject = Omit<ProjectRun, 'experts'> & { experts: ConsoleExpert[]; invalidCrossReview?: boolean };
+type ConsoleProject = Omit<ProjectRun, 'experts'> & {
+  experts: ConsoleExpert[]; invalidCrossReview?: boolean;
+  memo?: ConsoleMemo; invalidMemo?: boolean; evidenceSignals?: EvidenceSignals; previousRound?: ProjectPreviousRound;
+};
 interface Limits { min: number; max: number }
 interface FormInput { title: string; objective: string; context: string; expertIds: string[] }
 interface DemoStep {
@@ -88,7 +109,22 @@ type DecisionField = keyof DecisionFrame;
 const DECISION_FIELDS: DecisionField[] = ['options', 'constraints', 'successCriteria', 'knownFacts', 'assumptions', 'unknowns'];
 const DECISION = { items: 8, chars: 300 };
 /** 프로젝트 근거 파일(선택): 글자 파일만, 최대 6개·파일마다 8,000자·합계 24,000자. id 는 남은 순서대로 doc-1..doc-6 */
-const DOCS = { files: 6, chars: 8000, total: 24000 };
+const DOCS = { files: 6, chars: 8000, total: 24000, bytes: 48 * 1024 };
+// ── 워크플로 선택 필드 (src/cloudbite-workflow.ts 와 같은 값). 서버가 다시 검증하며 화면 값은 상한일 뿐 권한이 아니다
+const STAGES: ProjectStage[] = ['unspecified', 'discovery', 'design', 'validation', 'launch', 'operation'];
+const RESPONSE_LANGS: ResponseLanguage[] = ['ko', 'en'];
+type BudgetField = keyof ProjectBudget;
+const BUDGET_FIELDS: BudgetField[] = ['maxExperts', 'maxModelCalls', 'maxReviewCalls', 'maxMemoCalls'];
+const BUDGET_LIMITS: Record<BudgetField, [number, number]> = { maxExperts: [1, 100], maxModelCalls: [1, 804], maxReviewCalls: [0, 3], maxMemoCalls: [0, 1] };
+/** 서버 기본 예산: 역할마다 8회 + 교차 검토 3 + 메모 1 (cloudbite-budget.ts budgetCapsFor). 화면 안내·채우기용 */
+const BUDGET_DEFAULT = { perExpert: 8, review: 3, memo: 1 };
+const REVISION = { parentId: /^cb[0-9a-f]{32}$/, changeSummary: 2000 };
+const OPTION_ID = /^option-[1-8]$/;
+/** 서버 parsePmcIdentifier 와 같은 모양 (화면은 먼저 걸러 쓸데없는 요청을 막을 뿐, 판단은 서버가 한다) */
+const PMC_ID = /^(?:PMC[1-9]\d{0,9}|(?:doi:)?10\.\d{4,9}\/[\x21-\x7e]{1,200})$/i;
+const PMC_ID_BAD = /[<>"'\\{}|^`]/;
+const PMC_ERRORS: PmcImportErrorCode[] = ['invalid_identifier', 'not_found', 'identity_mismatch', 'source_unavailable', 'rate_limited', 'timeout', 'too_large', 'redirect_blocked', 'invalid_xml', 'upstream_error'];
+const MEMO_STATUSES: MemoStatus[] = ['idle', 'running', 'completed', 'failed', 'needs-options'];
 const DOC_EXT = /\.(?:txt|md|csv|json)$/i;
 /** 확장자가 맞아도 브라우저가 알려 준 형식이 글자가 아니면 받지 않는다 (Windows 는 .csv 를 vnd.ms-excel 로 알린다) */
 const DOC_TYPES = ['', 'application/json', 'application/vnd.ms-excel'];
@@ -317,6 +353,60 @@ const EN = {
   docsCopy: 'Each file\'s text is copied into every selected expert\'s sandbox and kept with the project and its history. Experts treat it as material you provided — not as instructions, and not as verified fact. PDFs, repositories and web links are not imported.',
   docsDemo: 'In the browser demo the text stays in this tab and appears in each simulated PROJECT.md.',
   docsPick: 'Add files',
+  // ── 계획 준비 (stage·응답 언어·예산 상한 → 서버 미리보기 → 확인 후 실행) 와 PMC 원문 가져오기
+  wfStage: 'Project stage (optional)', wfStageNone: 'Not stated',
+  wfStageName: { unspecified: 'Not stated', discovery: 'Discovery', design: 'Design', validation: 'Validation', launch: 'Launch', operation: 'Operation' } as Record<ProjectStage, string>,
+  wfLang: 'Response language (optional)', wfLangNone: 'Not stated (server default)',
+  wfLangName: { ko: 'Korean', en: 'English' } as Record<ResponseLanguage, string>,
+  wfLangHelp: 'The language experts write in. This is separate from the console language above.',
+  budgetTitle: 'Advanced: call caps (optional)',
+  budgetHint: (set: boolean): string => set ? 'custom caps' : 'server defaults',
+  budgetHelp: (per: number, review: number, memo: number) => `Upper bounds only. Leave all four blank for the server default (${per} model calls per role, up to ${review} review calls and ${memo} memo call). The server checks them again.`,
+  budgetField: { maxExperts: 'Max roles', maxModelCalls: 'Max model calls in total', maxReviewCalls: 'Max cross-review calls', maxMemoCalls: 'Max memo calls' } as Record<keyof ProjectBudget, string>,
+  budgetFill: 'Fill server defaults', budgetClear: 'Clear caps',
+  vBudget: (label: string, min: number, max: number) => `${label}: enter a whole number from ${min} to ${max}.`,
+  vBudgetPartial: 'Call caps: fill all four or leave all four blank.',
+  prepareLabel: 'Prepare plan', preparingLabel: 'Preparing plan…', runPlanLabel: 'Run this plan',
+  planTitle: 'Prepared plan',
+  planNote: 'A checked plan, not a reservation. Running it creates the project from exactly this brief, and the server checks it again.',
+  planDiscard: 'Discard plan', planCancelled: 'Plan preparation stopped. Nothing was started.',
+  planStale: 'The brief changed after the plan was prepared, so that plan was discarded. Prepare a new plan.',
+  planRoles: (n: number) => `${plural(n, 'role')} in the team`,
+  planStage: (s: string) => `Stage: ${s}`, planLang: (s: string) => `Response language: ${s}`,
+  planEnvelope: 'Call envelope (upper bounds, not a forecast)',
+  planSandboxes: (n: number) => `Sandboxes: up to ${n}`,
+  planNosana: (n: number, e: number, r: number, mm: number) => `Nosana model calls: up to ${n} (experts ${e} · cross-review ${r} · memo ${mm})`,
+  planJev: (n: number) => n ? `Jev routing calls: ${n}, separate from the Nosana budget` : 'Jev routing calls: none (team chosen by you)',
+  planCaps: (b: ProjectBudget) => `Caps after the server check: ${b.maxExperts} roles · ${b.maxModelCalls} model calls · ${b.maxReviewCalls} review · ${b.maxMemoCalls} memo`,
+  planNoCost: 'No price is estimated here: providers bill actual use, and these are only upper bounds.',
+  planAssignments: 'Team assignments', planWarnings: 'Server notes',
+  planQuestion: 'Question', planOptions: 'Options', planDeliverables: 'Deliverables', planEvidence: 'Required evidence', planBoundaries: 'Boundaries',
+  planSource: { 'jev-coverage': 'Jev coverage', 'manual-scope': 'Your selection' } as Record<ExpertAssignment['source'], string>,
+  planNetwork: 'Could not reach the server to prepare the plan. Nothing was started.',
+  planInvalid: 'The server sent a plan this console cannot read. Nothing was started.',
+  planMismatch: 'The plan does not match the routed team. Nothing was started; prepare a new plan.',
+  pmcTitle: 'Import from PubMed Central (optional)',
+  pmcHelp: 'Enter one PMCID (PMC1234567) or DOI. The server fetches licence-checked excerpts from the official PMC service. Nothing is added until you pick excerpts and press Add.',
+  pmcLabel: 'PMCID or DOI', pmcBtn: 'Look up', pmcBusy: 'Looking up…',
+  pmcBad: 'Enter a PMCID such as PMC1234567 or a DOI such as 10.1234/abcd.',
+  pmcError: { invalid_identifier: 'The server did not accept this identifier.', not_found: 'No PMC article was found for this identifier.',
+    identity_mismatch: 'The article PMC returned does not match this identifier.', source_unavailable: 'PMC has no reusable full text for this article.',
+    rate_limited: 'PMC is limiting requests right now.', timeout: 'PMC did not answer in time.', too_large: 'The article is too large to import.',
+    redirect_blocked: 'PMC answered with a redirect that is not allowed.', invalid_xml: 'PMC sent a record that could not be read.',
+    upstream_error: 'PMC returned an error.' } as Record<PmcImportErrorCode, string>,
+  pmcRetry: (s: number) => `Try again in ${s} s.`,
+  pmcNetwork: 'Could not reach the server for the PMC lookup.',
+  pmcInvalid: 'The server sent a PMC result this console cannot read. Nothing was added.',
+  pmcHttp: (s: number) => `The PMC lookup failed (HTTP ${s}).`,
+  pmcLicense: 'Licence', pmcRetrieved: 'Retrieved', pmcSourceLink: 'Source record',
+  pmcSections: (n: number) => `Sections found: ${n}`, pmcSectionChars: (n: string) => `${n} characters`,
+  pmcOmissions: 'Omissions and warnings', pmcNoOmissions: 'The server reported no omissions.',
+  pmcExcerpts: 'Excerpts', pmcExcerpt: (chars: string) => `Preview excerpt (${chars} characters)`,
+  pmcPick: (name: string) => `Select ${name}`,
+  pmcAdd: (n: number) => n ? `Add ${plural(n, 'selected excerpt')}` : 'Select excerpts to add',
+  pmcAdded: (n: number) => `${plural(n, 'excerpt')} added to the project evidence.`,
+  pmcDup: (name: string) => `${name}: already in the project evidence.`,
+  docBytes: (name: string, kib: number) => `${name}: adding it would make the evidence file larger than ${kib} KiB, so it was not added.`,
   docsReading: 'Reading files…',
   docsUsage: (n: number, max: number, chars: string, total: string) => `${n} of ${max} files · ${chars} of ${total} characters`,
   docsReview: (chars: string) => `Review text (${chars} characters)`,
@@ -477,7 +567,7 @@ const EN = {
   tipResults: 'Results are in. Read the synthesis, check any dissent, then export a report.',
   tipNoValid: 'No valid opinions to synthesise. Check the errors shown above the experts, then edit the project and run again.',
   tipExcluded: (n: number) => `${plural(n, 'expert')} did not produce a valid opinion and ${n === 1 ? 'is' : 'are'} excluded.`,
-  tipVisitorAgain: 'Your visitor session can run again. Nothing starts until you open Edit project and select Run again.',
+  tipVisitorAgain: 'Your visitor session can run again. Nothing starts until you open Edit project, prepare a plan and run it.',
   tipVisitorNo: 'Your visitor session cannot start another run.',
   simulated: 'Simulated',
   synthesis: 'Synthesis', confidenceDetails: 'Confidence details',
@@ -712,6 +802,59 @@ const KO: Messages = {
   docsCopy: '파일 내용은 고른 전문가 각자의 샌드박스에 복사되고 프로젝트·사용 기록과 함께 보관됩니다. 전문가는 이를 사용자가 준 자료로 다루며, 지시나 검증된 사실로 보지 않습니다. PDF·저장소·웹 링크는 가져오지 않습니다.',
   docsDemo: '브라우저 데모에서는 내용이 이 탭에만 남고, 시뮬레이션된 PROJECT.md 에 들어갑니다.',
   docsPick: '파일 추가',
+  wfStage: '프로젝트 단계 (선택)', wfStageNone: '밝히지 않음',
+  wfStageName: { unspecified: '밝히지 않음', discovery: '탐색', design: '설계', validation: '검증', launch: '출시', operation: '운영' },
+  wfLang: '응답 언어 (선택)', wfLangNone: '밝히지 않음 (서버 기본값)',
+  wfLangName: { ko: '한국어', en: '영어' },
+  wfLangHelp: '전문가가 답을 쓰는 언어입니다. 위의 화면 언어와는 따로 정합니다.',
+  budgetTitle: '고급: 호출 상한 (선택)',
+  budgetHint: (set) => set ? '직접 정한 상한' : '서버 기본값',
+  budgetHelp: (per, review, memo) => `상한일 뿐입니다. 넷 다 비우면 서버 기본값(역할마다 모델 호출 ${per}번, 교차 검토 최대 ${review}번, 메모 ${memo}번)을 씁니다. 서버가 다시 확인합니다.`,
+  budgetField: { maxExperts: '최대 역할 수', maxModelCalls: '전체 모델 호출 상한', maxReviewCalls: '교차 검토 호출 상한', maxMemoCalls: '메모 호출 상한' },
+  budgetFill: '서버 기본값 채우기', budgetClear: '상한 비우기',
+  vBudget: (label, min, max) => `${label}: ${min}–${max} 사이의 정수를 넣어 주세요.`,
+  vBudgetPartial: '호출 상한: 넷 다 채우거나 넷 다 비워 주세요.',
+  prepareLabel: '계획 준비', preparingLabel: '계획을 준비하는 중…', runPlanLabel: '이 계획으로 실행',
+  planTitle: '준비된 계획',
+  planNote: '확인된 계획일 뿐 예약이 아닙니다. 실행하면 정확히 이 브리프로 프로젝트를 만들고, 서버가 다시 확인합니다.',
+  planDiscard: '계획 버리기', planCancelled: '계획 준비를 멈췄습니다. 아무것도 시작하지 않았습니다.',
+  planStale: '계획을 준비한 뒤 브리프가 바뀌어 그 계획을 버렸습니다. 새 계획을 준비해 주세요.',
+  planRoles: (n) => `팀 역할 ${n}개`,
+  planStage: (s) => `단계: ${s}`, planLang: (s) => `응답 언어: ${s}`,
+  planEnvelope: '호출 범위 (상한이며 예측이 아님)',
+  planSandboxes: (n) => `샌드박스: 최대 ${n}개`,
+  planNosana: (n, e, r, mm) => `Nosana 모델 호출: 최대 ${n}번 (전문가 ${e} · 교차 검토 ${r} · 메모 ${mm})`,
+  planJev: (n) => n ? `Jev 경로 호출: ${n}번, Nosana 예산과 별도` : 'Jev 경로 호출: 없음 (직접 고른 팀)',
+  planCaps: (b) => `서버 확인 뒤 상한: 역할 ${b.maxExperts} · 모델 호출 ${b.maxModelCalls} · 검토 ${b.maxReviewCalls} · 메모 ${b.maxMemoCalls}`,
+  planNoCost: '여기서는 비용을 추정하지 않습니다. 공급자는 실제 사용량으로 청구하며, 위 숫자는 상한일 뿐입니다.',
+  planAssignments: '팀 배정', planWarnings: '서버 안내',
+  planQuestion: '질문', planOptions: '선택지', planDeliverables: '산출물', planEvidence: '필요한 근거', planBoundaries: '경계',
+  planSource: { 'jev-coverage': 'Jev 관점 배정', 'manual-scope': '직접 고른 역할' },
+  planNetwork: '계획을 준비하려고 서버에 연결하지 못했습니다. 아무것도 시작하지 않았습니다.',
+  planInvalid: '서버가 이 콘솔이 읽을 수 없는 계획을 보냈습니다. 아무것도 시작하지 않았습니다.',
+  planMismatch: '계획이 고른 팀과 맞지 않습니다. 아무것도 시작하지 않았습니다. 새 계획을 준비해 주세요.',
+  pmcTitle: 'PubMed Central 에서 가져오기 (선택)',
+  pmcHelp: 'PMCID(PMC1234567) 또는 DOI 하나를 넣으세요. 서버가 공식 PMC 서비스에서 이용 허락을 확인한 발췌를 가져옵니다. 발췌를 고르고 추가를 누르기 전에는 아무것도 넣지 않습니다.',
+  pmcLabel: 'PMCID 또는 DOI', pmcBtn: '찾기', pmcBusy: '찾는 중…',
+  pmcBad: 'PMC1234567 같은 PMCID 나 10.1234/abcd 같은 DOI 를 넣어 주세요.',
+  pmcError: { invalid_identifier: '서버가 이 식별자를 받지 않았습니다.', not_found: '이 식별자에 맞는 PMC 논문이 없습니다.',
+    identity_mismatch: 'PMC 가 돌려준 논문이 이 식별자와 맞지 않습니다.', source_unavailable: '이 논문은 PMC 에 재사용 가능한 본문이 없습니다.',
+    rate_limited: 'PMC 가 지금 요청을 제한하고 있습니다.', timeout: 'PMC 가 제때 답하지 않았습니다.', too_large: '논문이 너무 커서 가져올 수 없습니다.',
+    redirect_blocked: 'PMC 가 허용되지 않은 곳으로 넘기려 했습니다.', invalid_xml: 'PMC 가 보낸 기록을 읽을 수 없습니다.',
+    upstream_error: 'PMC 가 오류를 돌려주었습니다.' },
+  pmcRetry: (s) => `${s}초 뒤에 다시 시도해 주세요.`,
+  pmcNetwork: 'PMC 를 찾으려고 서버에 연결하지 못했습니다.',
+  pmcInvalid: '서버가 이 콘솔이 읽을 수 없는 PMC 결과를 보냈습니다. 아무것도 추가하지 않았습니다.',
+  pmcHttp: (s) => `PMC 찾기에 실패했습니다 (HTTP ${s}).`,
+  pmcLicense: '이용 허락', pmcRetrieved: '가져온 시각', pmcSourceLink: '원본 기록',
+  pmcSections: (n) => `찾은 절: ${n}개`, pmcSectionChars: (n) => `${n}자`,
+  pmcOmissions: '빠진 부분과 경고', pmcNoOmissions: '서버가 빠진 부분이 없다고 알렸습니다.',
+  pmcExcerpts: '발췌', pmcExcerpt: (chars) => `발췌 미리 보기 (${chars}자)`,
+  pmcPick: (name) => `${name} 고르기`,
+  pmcAdd: (n) => n ? `고른 발췌 ${n}개 추가` : '추가할 발췌를 고르세요',
+  pmcAdded: (n) => `발췌 ${n}개를 프로젝트 근거에 추가했습니다.`,
+  pmcDup: (name) => `${name}: 이미 프로젝트 근거에 있습니다.`,
+  docBytes: (name, kib) => `${name}: 추가하면 근거 파일이 ${kib} KiB 를 넘어 추가하지 않았습니다.`,
   docsReading: '파일을 읽는 중…',
   docsUsage: (n, max, chars, total) => `파일 ${max}개 중 ${n}개 · ${total}자 중 ${chars}자`,
   docsReview: (chars) => `내용 확인 (${chars}자)`,
@@ -865,7 +1008,7 @@ const KO: Messages = {
   tipResults: '결과가 나왔습니다. 종합을 읽고 이견을 확인한 뒤 보고서를 내보내세요.',
   tipNoValid: '종합할 유효한 의견이 없습니다. 전문가 위에 보이는 오류를 확인한 뒤 프로젝트를 고쳐 다시 실행하세요.',
   tipExcluded: (n) => `전문가 ${n}명이 유효한 의견을 내지 못해 제외되었습니다.`,
-  tipVisitorAgain: '방문자 세션으로 다시 실행할 수 있습니다. 프로젝트 편집을 열고 다시 실행을 누르기 전에는 아무것도 시작되지 않습니다.',
+  tipVisitorAgain: '방문자 세션으로 다시 실행할 수 있습니다. 프로젝트 편집을 열고 계획을 준비해 실행하기 전에는 아무것도 시작되지 않습니다.',
   tipVisitorNo: '방문자 세션으로 더 실행할 수 없습니다.',
   simulated: '시뮬레이션',
   synthesis: '종합', confidenceDetails: '확신도 세부 정보',
@@ -1351,7 +1494,8 @@ function parseDecision(texts: Partial<Record<DecisionField, string>>): { frame?:
 }
 
 /** 브라우저 메모리에만 있는 근거 파일. key 는 화면 안에서만 쓰고, 보내는 id 는 남은 순서대로 doc-1.. 이다 */
-interface DocDraft { key: number; name: string; content: string }
+/** origin: 가져온 출처 (PMC 발췌만). 사용자가 올린 파일에는 없고, 있으면 보낼 때 그대로 남긴다 */
+interface DocDraft { key: number; name: string; content: string; origin?: string }
 const docName = (name: string) => clip(name.trim() || 'file', 120);
 /** 읽기 전에 거른다: 이름의 확장자, 브라우저가 알려 준 형식, 대략적인 크기 (UTF-8 한 글자는 최대 4바이트) */
 function docProblem(f: { name: string; type: string; size: number }): Text | null {
@@ -1362,7 +1506,14 @@ function docProblem(f: { name: string; type: string; size: number }): Text | nul
   return null;
 }
 /** 읽은 글을 받아들일지 정한다. 제어 문자·깨진 UTF-8 이 있으면 바이너리로 보고, 한도는 이미 받은 파일과 합쳐서 잰다 */
-function docAccept(rawName: string, raw: string, docs: Array<{ content: string }>): { doc: { name: string; content: string } } | { error: Text } {
+/** 서버가 전문가 작업공간에 쓰는 evidence/documents.json 의 바이트 수를 넉넉히 어림한다 (안내문 자리 512바이트 포함) */
+function docsBytes(docs: Array<{ name: string; content: string; origin?: string }>): number {
+  const body = docsPayload(docs).map(d => ({ ...d, lines: d.content.split('\n').length }));
+  let n = 512;
+  for (const ch of JSON.stringify({ documents: body }, null, 2)) { const c = ch.codePointAt(0)!; n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4; }
+  return n;
+}
+function docAccept(rawName: string, raw: string, docs: Array<{ name?: string; content: string; origin?: string }>): { doc: { name: string; content: string } } | { error: Text } {
   const name = docName(rawName);
   const content = raw.replace(/^﻿/, '').replace(/\r\n?/g, '\n');
   if (/[\u0000-\u0008\u000E-\u001F\u007F�]/.test(content)) return { error: m => m.docBinary(name) };
@@ -1370,11 +1521,92 @@ function docAccept(rawName: string, raw: string, docs: Array<{ content: string }
   if (content.length > DOCS.chars) return { error: m => m.docLong(name, group(DOCS.chars)) };
   if (docs.length >= DOCS.files) return { error: m => m.docCount(name, DOCS.files) };
   if (docs.reduce((n, d) => n + d.content.length, 0) + content.length > DOCS.total) return { error: m => m.docTotal(name, group(DOCS.total)) };
+  if (docsBytes([...docs.map(d => ({ ...d, name: d.name ?? '' })), { name, content }]) > DOCS.bytes) return { error: m => m.docBytes(name, DOCS.bytes / 1024) };
   return { doc: { name, content } };
 }
-/** 보낼 문서 목록. 빼고 남은 순서대로 doc-1..doc-6 을 다시 매긴다 (출처 정보는 선택이라 보내지 않는다) */
-function docsPayload(docs: Array<{ name: string; content: string }>): ProjectDocument[] {
-  return docs.map((d, i) => ({ id: `doc-${i + 1}`, name: d.name, content: d.content }));
+/** 보낼 문서 목록. 빼고 남은 순서대로 doc-1..doc-6 을 다시 매긴다. 출처(origin)는 가져온 발췌에만 있고, 있으면 그대로 보낸다 */
+function docsPayload(docs: Array<{ name: string; content: string; origin?: string }>): ProjectDocument[] {
+  return docs.map((d, i) => ({ id: `doc-${i + 1}`, name: d.name, content: d.content, ...(d.origin ? { origin: d.origin } : {}) }));
+}
+
+/** 선택 워크플로 필드. 빈 칸은 보내지 않는다 (서버 기본값을 화면이 대신 채워 넣지 않는다). 예산은 넷 다 채우거나 넷 다 비운다 */
+function parseWorkflow(stage: string, language: string, budget: Record<BudgetField, string>): {
+  extras: { stage?: ProjectStage; responseLanguage?: ResponseLanguage; budget?: ProjectBudget }; issues: FormIssue[];
+} {
+  const extras: { stage?: ProjectStage; responseLanguage?: ResponseLanguage; budget?: ProjectBudget } = {};
+  const issues: FormIssue[] = [];
+  if (STAGES.includes(stage as ProjectStage)) extras.stage = stage as ProjectStage;
+  if (RESPONSE_LANGS.includes(language as ResponseLanguage)) extras.responseLanguage = language as ResponseLanguage;
+  const filled = BUDGET_FIELDS.filter(f => budget[f].trim() !== '');
+  if (filled.length && filled.length < BUDGET_FIELDS.length) issues.push({ field: 'budget', text: m => m.vBudgetPartial });
+  else if (filled.length) {
+    const out = {} as ProjectBudget;
+    for (const f of BUDGET_FIELDS) {
+      const [min, max] = BUDGET_LIMITS[f], t = budget[f].trim();
+      const n = /^\d{1,4}$/.test(t) ? Number(t) : NaN;
+      if (!(n >= min && n <= max)) issues.push({ field: 'budget', text: m => m.vBudget(m.budgetField[f], min, max) });
+      else out[f] = n;
+    }
+    if (!issues.length) extras.budget = out;
+  }
+  return { extras, issues };
+}
+
+const isInt = (v: unknown, min = 0, max = Number.MAX_SAFE_INTEGER): v is number => typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
+const strArr = (v: unknown, max: number, n: number): string[] | null =>
+  Array.isArray(v) && v.length <= max && v.every(x => typeof x === 'string') ? v.map(x => clip(x as string, n)) : null;
+/** 서버의 ProjectPreview 를 그대로 받아들일 수 있는지 본다. 모양이 하나라도 다르면 null (꾸며 채우지 않는다) */
+function normalizePreview(raw: unknown, expertIds: readonly string[]): ProjectPreview | null {
+  if (!isObj(raw) || !isObj(raw.envelope) || !isObj(raw.budget)) return null;
+  const ids = strArr(raw.expertIds, PROJECT_MAX, 120);
+  if (!ids || JSON.stringify(ids) !== JSON.stringify(expertIds)) return null;
+  const budget = {} as ProjectBudget;
+  for (const f of BUDGET_FIELDS) { const v = raw.budget[f]; if (!isInt(v, BUDGET_LIMITS[f][0], BUDGET_LIMITS[f][1])) return null; budget[f] = v; }
+  const e = raw.envelope;
+  const keys = ['sandboxMaximum', 'nosanaMaximum', 'expertMaximum', 'reviewMaximum', 'memoMaximum', 'jevCalls'] as const;
+  if (!keys.every(k => isInt(e[k]))) return null;
+  const envelope = Object.fromEntries(keys.map(k => [k, e[k] as number])) as ProjectPreview['envelope'];
+  if (!Array.isArray(raw.assignments) || raw.assignments.length > PROJECT_MAX) return null;
+  const assignments: ExpertAssignment[] = [];
+  for (const a of raw.assignments) {
+    if (!isObj(a) || typeof a.expertId !== 'string' || !ids.includes(a.expertId) || !STAGES.includes(a.stage as ProjectStage)) return null;
+    if (a.source !== 'jev-coverage' && a.source !== 'manual-scope' || typeof a.question !== 'string') return null;
+    const optionIds = strArr(a.optionIds, 8, 20), deliverables = strArr(a.deliverables, 8, 400), requiredEvidence = strArr(a.requiredEvidence, 8, 400);
+    const boundaries = strArr(a.boundaries, 8, 400), perspectiveIds = strArr(a.perspectiveIds, 14, 120);
+    if (!optionIds || !optionIds.every(x => OPTION_ID.test(x)) || !deliverables || !requiredEvidence || !boundaries || !perspectiveIds) return null;
+    assignments.push({ expertId: a.expertId, stage: a.stage as ProjectStage, question: clip(a.question, 800), optionIds, deliverables, requiredEvidence,
+      boundaries, perspectiveIds, source: a.source });
+  }
+  const warnings = strArr(raw.warnings, 50, 400);
+  if (!warnings) return null;
+  return { expertIds: ids, assignments, budget, envelope, warnings };
+}
+
+/** 서버의 PmcImport 를 그대로 받아들일 수 있는지 본다. 발췌 원문·출처는 고치지 않고, 한도를 넘는 결과는 받지 않는다 */
+function normalizePmc(raw: unknown): PmcImport | null {
+  if (!isObj(raw) || !isObj(raw.article)) return null;
+  const a = raw.article;
+  if (typeof a.pmcid !== 'string' || !/^PMC\d{1,10}$/.test(a.pmcid) || typeof a.title !== 'string' || typeof a.license !== 'string'
+    || typeof a.sourceUrl !== 'string' || !/^https:\/\/[^\s]+$/.test(a.sourceUrl) || typeof a.retrievedAt !== 'string') return null;
+  if (a.doi !== undefined && typeof a.doi !== 'string') return null;
+  const article: PmcArticle = { pmcid: a.pmcid, title: clip(a.title, 400), license: clip(a.license, 200), sourceUrl: clip(a.sourceUrl, 500),
+    retrievedAt: clip(a.retrievedAt, 40), ...(a.doi ? { doi: clip(a.doi, 220) } : {}) };
+  if (!Array.isArray(raw.documents) || !raw.documents.length || raw.documents.length > DOCS.files) return null;
+  const documents: ProjectDocument[] = [];
+  for (const d of raw.documents) {
+    if (!isObj(d) || typeof d.id !== 'string' || typeof d.name !== 'string' || typeof d.content !== 'string' || !d.content.trim()
+      || d.content.length > DOCS.chars || (d.origin !== undefined && typeof d.origin !== 'string')) return null;
+    documents.push({ id: clip(d.id, 20), name: docName(d.name), content: d.content, ...(d.origin ? { origin: clip(d.origin, 500) } : {}) });
+  }
+  if (!Array.isArray(raw.sections) || raw.sections.length > 200) return null;
+  const sections: PmcSection[] = [];
+  for (const x of raw.sections) {
+    if (!isObj(x) || typeof x.id !== 'string' || typeof x.title !== 'string' || typeof x.locator !== 'string' || !isInt(x.characters)) return null;
+    sections.push({ id: clip(x.id, 120), title: clip(x.title, 200), locator: clip(x.locator, 200), characters: x.characters });
+  }
+  const warnings = strArr(raw.warnings, 100, 400);
+  if (!warnings) return null;
+  return { article, documents, sections, warnings };
 }
 
 function normalizeDecision(raw: unknown): DecisionFrame | undefined {
@@ -1445,7 +1677,7 @@ function reviewEligible(p: ConsoleProject): boolean {
 }
 
 /** 폼 오류. field 로 접힌 Project details 를 펼칠지 정하고, text 는 그릴 때의 언어로 바꾼다 */
-interface FormIssue { field: 'title' | 'objective' | 'context' | 'decision' | 'docs' | 'experts' | 'run'; text: Text }
+interface FormIssue { field: 'title' | 'objective' | 'context' | 'decision' | 'docs' | 'experts' | 'budget' | 'run'; text: Text }
 function validateForm(f: FormInput, limits: Limits): FormIssue[] {
   const errors: FormIssue[] = [];
   if (!f.title.trim()) errors.push({ field: 'title', text: m => m.vTitle });
@@ -1965,11 +2197,20 @@ function boot(): void {
     evOpen: new Set<string>(),
     /** 이 화면에서 건 교차 검토 요청의 상태. 서버가 보낸 project.crossReview 와 따로 둔다 (실패를 완료로 꾸미지 않는다) */
     review: null as null | { projectId: string; phase: 'running' | 'failed'; error: Text | null; polls: number },
+    /** 실제 실행 전 준비한 계획. body 는 미리보기에 보낸 바로 그 JSON 문자열이며, 실행은 이 문자열을 그대로 보낸다 (기본값을 덧붙이지 않는다).
+     *  sig 는 준비한 순간의 의미 있는 입력 전체. 하나라도 바뀌면 계획을 버린다 */
+    plan: null as null | { sig: string; phase: 'preparing' | 'ready' | 'error'; routed: boolean; body: string; preview: ProjectPreview | null; error: Text | null },
+    planStale: false,
+    /** 같은 입력으로 다시 준비하면 같은 requestId 를 쓴다 (서버가 같은 요청으로 본다). 실행이 만들어지면 지운다 */
+    planReq: null as null | { sig: string; requestId: string },
+    /** PMC 가져오기: 서버 결과를 보여 주기만 하고, 사용자가 고른 발췌만 근거 파일에 더한다 */
+    pmc: { busy: false, result: null as PmcImport | null, error: null as Text | null, note: null as Text | null, picked: new Set<string>() },
   };
   let timers: number[] = [];
   let pollTimer = 0;
   let reviewTimer = 0;
   let docKey = 0, docRev = 0, docSig = '';
+  let planGen = 0, pmcSeq = 0, pmcRev = 0, pmcSig = '', planDrawn: unknown = undefined, planDrawnKey = '';
   /** 파일은 하나씩 차례로 읽는다: 늦게 끝난 읽기가 한도 계산을 앞지르지 않는다 */
   let docQueue: Promise<void> = Promise.resolve();
   let accessTimer = 0, accessTries = 0;
@@ -2164,25 +2405,64 @@ function boot(): void {
     accept: '.txt,.md,.markdown,.csv,.json,text/plain,text/markdown,text/csv,application/json' });
   docsInput.addEventListener('change', () => { const files = Array.from(docsInput.files ?? []); docsInput.value = ''; addFiles(files); });
   const docsPick = h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'docs-pick', 'aria-describedby': 'cb-docs-help',
-    onclick: () => { if (!active()) docsInput.click(); } }, tx('span', null, m => m.docsPick));
+    onclick: () => { if (!locked()) docsInput.click(); } }, tx('span', null, m => m.docsPick));
   const docsHint = h('span', { class: 'cb-summary-hint' });
   const docsCopyNote = h('p', { class: 'cb-help' });
   const docsUsage = h('p', { class: 'cb-help cb-docs-usage', 'aria-live': 'polite' });
   const docsErr = h('div', { class: 'cb-formmsg cb-docs-err', role: 'alert' });
   const docsList = h('ol', { class: 'cb-doc-list' });
+  // PMC 원문 발췌 (선택): 식별자 하나 → 서버가 가져온 결과를 보이고, 고른 발췌만 근거 파일에 더한다
+  const pmcIn = h('input', { id: 'cb-pmc-id', type: 'text', autocomplete: 'off', spellcheck: 'false', maxlength: 220, 'data-fk': 'pmc-id', 'aria-describedby': 'cb-pmc-help' });
+  pmcIn.addEventListener('keydown', ev => { if ((ev as KeyboardEvent).key === 'Enter') { ev.preventDefault(); void pmcLookup(); } });
+  const pmcBtn = h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'pmc-lookup', onclick: () => void pmcLookup() });
+  const pmcMsg = h('div', { class: 'cb-formmsg cb-pmc-err', role: 'alert' });
+  const pmcNote = h('p', { class: 'cb-help', 'aria-live': 'polite' });
+  const pmcBody = h('div', { class: 'cb-pmc-body' });
+  const pmcBox = h('div', { class: 'cb-pmc', role: 'group', 'aria-labelledby': 'cb-pmc-h' },
+    tx('h3', { id: 'cb-pmc-h', class: 'cb-label' }, m => m.pmcTitle), tx('p', { id: 'cb-pmc-help', class: 'cb-help' }, m => m.pmcHelp),
+    h('div', { class: 'cb-field' }, tx('label', { for: 'cb-pmc-id', class: 'cb-label' }, m => m.pmcLabel), h('div', { class: 'cb-docs-row' }, pmcIn, pmcBtn)),
+    pmcMsg, pmcNote, pmcBody);
   const docsDetails = h('details', { class: 'cb-disclosure cb-docs' },
     h('summary', null, icon('chevron'), tx('span', null, m => m.docsTitle), docsHint),
     h('div', { class: 'cb-disclosure-body' },
       bind(h('p', { id: 'cb-docs-help', class: 'cb-help' }), (n, m) => { n.textContent = m.docsHelp(DOCS.files, group(DOCS.chars), group(DOCS.total)); }),
-      docsCopyNote, h('div', { class: 'cb-docs-row' }, docsPick, docsUsage), docsInput, docsErr, docsList));
+      docsCopyNote, h('div', { class: 'cb-docs-row' }, docsPick, docsUsage), docsInput, docsErr, docsList, pmcBox));
+  // 워크플로 선택 필드: 단계, 응답 언어(화면 언어와 따로), 접힌 고급 호출 상한. 비워 두면 보내지 않는다
+  const stageSel = h('select', { id: 'cb-stage', 'data-fk': 'wf-stage' }, ...['', ...STAGES.filter(x => x !== 'unspecified')].map(v =>
+    bind(h('option', { value: v }), (n, m) => { n.textContent = v ? m.wfStageName[v as ProjectStage] : m.wfStageNone; })));
+  const respSel = h('select', { id: 'cb-resp-lang', 'data-fk': 'wf-lang', 'aria-describedby': 'cb-resp-help' }, ...['', ...RESPONSE_LANGS].map(v =>
+    bind(h('option', { value: v }), (n, m) => { n.textContent = v ? m.wfLangName[v as ResponseLanguage] : m.wfLangNone; })));
+  const wfFields = h('div', { class: 'cb-fields cb-workflow-fields' },
+    h('div', { class: 'cb-field' }, tx('label', { for: 'cb-stage', class: 'cb-label' }, m => m.wfStage), stageSel),
+    h('div', { class: 'cb-field' }, tx('label', { for: 'cb-resp-lang', class: 'cb-label' }, m => m.wfLang), respSel, tx('p', { id: 'cb-resp-help', class: 'cb-help' }, m => m.wfLangHelp)));
+  const budgetIns = {} as Record<BudgetField, HTMLInputElement>;
+  for (const f of BUDGET_FIELDS) budgetIns[f] = h('input', { id: `cb-budget-${f}`, type: 'number', inputmode: 'numeric', min: BUDGET_LIMITS[f][0], max: BUDGET_LIMITS[f][1], step: 1,
+    autocomplete: 'off', 'data-fk': `budget:${f}`, 'aria-describedby': 'cb-budget-help' });
+  const budgetTexts = () => Object.fromEntries(BUDGET_FIELDS.map(f => [f, budgetIns[f].value])) as Record<BudgetField, string>;
+  const budgetHint = h('span', { class: 'cb-summary-hint' });
+  const budgetFill = tx('button', { type: 'button', class: 'cb-ghost', 'data-fk': 'budget-fill', onclick: () => fillBudget(true) }, m => m.budgetFill);
+  const budgetClear = tx('button', { type: 'button', class: 'cb-ghost', 'data-fk': 'budget-clear', onclick: () => fillBudget(false) }, m => m.budgetClear);
+  const budgetDetails = h('details', { class: 'cb-disclosure cb-budget' },
+    h('summary', null, icon('chevron'), tx('span', null, m => m.budgetTitle), budgetHint),
+    h('div', { class: 'cb-disclosure-body' },
+      bind(h('p', { id: 'cb-budget-help', class: 'cb-help' }), (n, m) => { n.textContent = m.budgetHelp(BUDGET_DEFAULT.perExpert, BUDGET_DEFAULT.review, BUDGET_DEFAULT.memo); }),
+      h('div', { class: 'cb-fields cb-budget-fields' }, ...BUDGET_FIELDS.map(f =>
+        h('div', { class: 'cb-field' }, tx('label', { for: `cb-budget-${f}`, class: 'cb-label' }, m => m.budgetField[f]), budgetIns[f]))),
+      h('div', { class: 'cb-docs-row' }, budgetFill, budgetClear)));
+  // 준비된 계획 (실제 실행): 팀 배정·샌드박스/호출 범위·별도 Jev 호출. 실행은 시작 버튼 하나로 한다
+  const planBox = h('div', { class: 'cb-plan', 'aria-live': 'polite' });
+  // 의미 있는 입력이 바뀌면 준비한 계획을 버린다 (언어 전환·조회처럼 의미가 그대로인 다시 그리기는 계획을 지킨다)
+  for (const n of [titleIn, objectiveIn, contextIn, stageSel, respSel, ...DECISION_FIELDS.map(f => decisionIns[f]), ...BUDGET_FIELDS.map(f => budgetIns[f])]) {
+    n.addEventListener('input', () => semanticEdit()); n.addEventListener('change', () => semanticEdit());
+  }
   const modeLine = h('span');
   const startNote = h('div', { class: 'cb-startnote' });
   const historyNotice = tx('p', { class: 'cb-help cb-history-notice' }, () => HT().notice);
   const form = attr(h('form', { class: 'cb-form', novalidate: true },
     h('div', { class: 'cb-field cb-objective' }, tx('label', { for: 'cb-objective', class: 'cb-label' }, m => m.objectiveLabel), objectiveIn, counter(objectiveIn, LIMIT.objective)),
-    staExampleBtn, projDetails, decisionDetails, docsDetails,
+    staExampleBtn, projDetails, decisionDetails, docsDetails, wfFields, budgetDetails,
     h('div', { class: 'cb-team' }, jevBox, manualBox, poolDetails, catalogueNote),
-    h('div', { class: 'cb-form-foot' }, formMsg, startNote,
+    h('div', { class: 'cb-form-foot' }, formMsg, planBox, startNote,
       historyNotice,
       h('div', { class: 'cb-start-row' }, startBtn,
         h('p', { class: 'cb-mode-line' }, modeLine, ' ', tx('button', { type: 'button', class: 'cb-link', onclick: () => setView('settings') }, m => m.changeInSettings))))), 'aria-label', m => m.briefAria);
@@ -2354,7 +2634,7 @@ function boot(): void {
     const m = M;
     const demo = S.mode === 'demo';
     modeDemo.setAttribute('aria-pressed', String(demo)); modeLive.setAttribute('aria-pressed', String(!demo));
-    modeDemo.disabled = modeLive.disabled = active();
+    modeDemo.disabled = modeLive.disabled = locked();
     const runMode = S.run?.mode ?? S.mode;
     modeBadge.textContent = runMode === 'demo' ? m.modeDemo : m.modeLive;
     modeBadge.className = `cb-badge ${runMode === 'demo' ? 'is-demo' : 'is-live'}`;
@@ -2389,18 +2669,23 @@ function boot(): void {
     liveStatus.replaceChildren(...liveKids.filter((k): k is Node => !!k));
     clearTokenBtn.hidden = !S.adminToken;
 
-    const busy = active();
+    const busy = locked();
+    // 의미 있는 입력이 준비한 계획과 달라졌으면 계획을 버린다 (실행 중에는 계획이 없다)
+    if (S.plan && !preparing() && S.plan.sig !== semanticSig()) { S.plan = null; S.planStale = true; }
     staExampleBtn.hidden = !catalogue().some(e => e.id === 'probably-primetime-sta');
     staExampleBtn.disabled = busy;
-    for (const n of [titleIn, objectiveIn, contextIn, failIn, tokenIn, filterIn, ...DECISION_FIELDS.map(f => decisionIns[f])]) n.disabled = busy;
-    renderDecisionHint(); renderDocs(busy);
+    for (const n of [titleIn, objectiveIn, contextIn, failIn, tokenIn, filterIn, stageSel, respSel, budgetFill, budgetClear,
+      ...DECISION_FIELDS.map(f => decisionIns[f]), ...BUDGET_FIELDS.map(f => budgetIns[f])]) n.disabled = busy;
+    budgetHint.textContent = m.budgetHint(BUDGET_FIELDS.some(f => budgetIns[f].value.trim() !== ''));
+    renderDecisionHint(); renderDocs(busy); renderPmc(busy); renderPlan();
     const liveReady = S.boot.status === 'ready' && !!cfg?.liveReady && liveCredential();
     const auto = autoRoute(), rt = routing();
     const none = !auto && S.selected.size === 0;
     // 시작 버튼은 편집 영역 끝의 하나뿐이다. 전문가를 고르지 않았거나 Jev 를 쓸 수 없으면 이유를 보이고 잠근다
     startBtn.disabled = busy || S.docReading > 0 || (!demo && !liveReady) || none || (auto && (!rt!.ready || !routeCredential()));
-    startLabel.textContent = S.run?.phase === 'routing' ? m.routingLabel : S.run?.phase === 'starting' ? m.starting : busy ? m.running
-      : S.run ? (demo ? m.runAgainDemo : m.runAgain) : (demo ? m.runExpertsDemo : m.runExperts);
+    // 실제 실행은 두 걸음이다: 계획 준비 → 이 계획으로 실행. 데모는 예전처럼 바로 시작한다
+    startLabel.textContent = preparing() ? m.preparingLabel : S.run?.phase === 'routing' ? m.routingLabel : S.run?.phase === 'starting' ? m.starting : busy ? m.running
+      : !demo ? (S.plan?.phase === 'ready' ? m.runPlanLabel : m.prepareLabel) : S.run ? m.runAgainDemo : m.runExpertsDemo;
     if (auto && !busy) modeLine.textContent += m.nextJev(limits().max);
     renderJev();
     cancelBtn.hidden = !busy;
@@ -2409,7 +2694,7 @@ function boot(): void {
 
     // 편집 영역: 실행 전·검증 오류·만들기 실패 때는 열려 있다. 접기·펴기 버튼은 실행이 있을 때만
     const p = S.run?.project;
-    if (!S.run || S.formErrors.length || (S.run.phase === 'error' && !p)) S.setupOpen = true;
+    if (!S.run || S.formErrors.length || (S.run.phase === 'error' && !p) || (S.plan && !active())) S.setupOpen = true;
     setup.hidden = !S.setupOpen;
     setupBtn.hidden = !S.run;
     setupBtn.setAttribute('aria-expanded', String(S.setupOpen));
@@ -2417,6 +2702,7 @@ function boot(): void {
     detailsHint.textContent = clip(titleIn.value.trim() || m.nameRequired, 60);
 
     const formKids = S.formErrors.map(e => h('p', null, e.text(m)));
+    if (!demo && S.plan?.phase === 'error' && S.plan.error) formKids.push(h('p', null, S.plan.error(m)));
     if (S.run?.error && !p) formKids.push(h('p', null, S.run.error(m)));
     fill(formMsg, ...formKids);
     const runKids: Kid[] = [];
@@ -2502,7 +2788,7 @@ function boot(): void {
 
   /** Jev 상자: routing 이 있을 때만. 자동이면 직접 고르기를 숨기고 고른 팀은 읽기 전용으로, 쓸 수 없으면 이유만 보인다 (규칙 대체 없음) */
   function renderJev(): void {
-    const m = M, rt = routing(), auto = autoRoute(), busy = active();
+    const m = M, rt = routing(), auto = autoRoute(), busy = locked();
     jevBox.hidden = !rt;
     manualBox.hidden = auto;
     jevToggle.disabled = busy;
@@ -2515,7 +2801,7 @@ function boot(): void {
     if (!rt.ready) kids.push(h('p', { class: 'cb-warn' }, m.jevUnavailable));
     else if (!routeCredential()) kids.push(h('p', { class: 'cb-warn' }, m.jevNeedAccess, ' ', h('a', { href: href(REQUEST_PATH) }, m.requestAccess)));
     const r = S.route?.result;
-    if (S.run?.phase === 'routing') kids.push(h('p', { class: 'cb-jev-status' }, m.jevRouting));
+    if (S.run?.phase === 'routing' || (preparing() && S.plan!.routed && !r)) kids.push(h('p', { class: 'cb-jev-status' }, m.jevRouting));
     else if (r) {
       // 적합도는 0–1 이면 백분율로, 다른 척도면 숫자 그대로 (전문가 확신도·정확도로 적지 않는다)
       const fit = (v: number) => v >= 0 && v <= 1 ? `${Math.round(v * 100)}%` : String(Math.round(v * 100) / 100);
@@ -2568,7 +2854,7 @@ function boot(): void {
 
   /** 자동(Jev) ↔ 직접 고르기. 실행 중에는 바꾸지 않는다. 직접 고른 선택은 그대로 두고 Jev 팀을 선택에 넣지 않는다 */
   function toggleRouteMode(): void {
-    if (active() || !routing()) return;
+    if (locked() || !routing()) return;
     S.routeMode = S.routeMode === 'auto' ? 'manual' : 'auto';
     S.formErrors = [];
     pruneSelection();
@@ -2577,7 +2863,7 @@ function boot(): void {
 
   /** 역할 하나를 고르거나 뺀다. 한도를 넘는 선택은 받지 않는다 (상자도 잠겨 있다) */
   function toggleExpert(id: string, on: boolean): void {
-    if (active()) return;
+    if (locked()) return;
     if (on && !S.selected.has(id) && S.selected.size >= limits().max) { keepFocus(renderCatalogue); return; }
     if (on) S.selected.add(id); else S.selected.delete(id);
     S.formErrors = []; keepFocus(() => { renderCatalogue(); renderControls(); renderProgress(); });
@@ -2991,12 +3277,12 @@ function boot(): void {
       return h('li', { class: 'cb-doc' },
         h('div', { class: 'cb-doc-head' }, h('span', { class: 'cb-tag' }, id), h('strong', { class: 'cb-doc-name' }, d.name),
           h('button', { type: 'button', class: 'cb-ghost', 'data-fk': `doc-rm:${d.key}`, disabled: busy, 'aria-label': m.docsRemoveAria(id, d.name), onclick: () => removeDoc(d.key) }, m.docsRemove)),
-        text);
+        d.origin ? h('p', { class: 'cb-help cb-doc-origin' }, d.origin) : null, text);
     }));
   }
   /** 고른 파일을 거르고 차례로 읽는다. 읽는 동안 언어를 바꾸거나 다른 파일을 빼도 된다: 한도는 읽기가 끝난 순간의 목록으로 잰다 */
   function addFiles(files: File[]): void {
-    if (active() || !files.length) return;
+    if (locked() || !files.length) return;
     S.docErrors = []; docRev++;
     for (const file of files) {
       const problem = docProblem({ name: file.name, type: file.type || '', size: file.size });
@@ -3019,7 +3305,7 @@ function boot(): void {
   }
   /** 파일을 뺀다. 남은 파일은 보낼 때 doc-1.. 로 다시 매겨진다. 포커스는 다음 빼기 버튼, 없으면 파일 추가로 */
   function removeDoc(key: number): void {
-    if (active()) return;
+    if (locked()) return;
     const i = S.docs.findIndex(d => d.key === key);
     if (i < 0) return;
     S.docs.splice(i, 1); S.docOpen.delete(key); S.docErrors = []; docRev++;
@@ -3027,6 +3313,244 @@ function boot(): void {
     const next = S.docs[i] ?? S.docs[i - 1];
     const target = next ? root!.querySelector(`[data-fk="doc-rm:${next.key}"]`) as HTMLElement | null : null;
     (target ?? docsPick).focus();
+  }
+
+  // ── 계획 준비와 PMC 가져오기
+  const preparing = () => S.plan?.phase === 'preparing';
+  /** 실행 중이거나 계획을 준비하는 동안에는 입력을 잠근다 */
+  const locked = () => active() || preparing();
+  /** 계획에 들어가는 입력 전체. 화면 언어는 넣지 않는다 (응답 언어는 넣는다) */
+  const semanticSig = () => JSON.stringify([S.mode, autoRoute(), autoRoute() ? [] : [...S.selected], limits().max, titleIn.value, objectiveIn.value, contextIn.value,
+    decisionTexts(), docsPayload(S.docs), stageSel.value, respSel.value, budgetTexts()]);
+  function semanticEdit(): void {
+    budgetHint.textContent = M.budgetHint(BUDGET_FIELDS.some(f => budgetIns[f].value.trim() !== ''));
+    if (S.plan && !preparing() && S.plan.sig !== semanticSig()) keepFocus(renderControls);
+  }
+  /** 실제 실행과 같은 자격: 넣은 토큰이 있으면 그 헤더만, 없으면 same-origin 쿠키 (소유자 → 방문자) */
+  function cred(): { headers: Record<string, string>; operator: boolean; owner: boolean; v: CloudbiteAccessRequest | null } {
+    const adminToken = S.adminToken.trim(), owner = !adminToken && ownerAuthed();
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (adminToken) headers['x-admin-token'] = adminToken;
+    return { headers, operator: isOperatorToken(S.adminToken), owner, v: adminToken || owner ? null : visitor() };
+  }
+  /** 거부 응답의 안내. 소유자 로그인이 거부되면 로그인 상태를 내리고 다시 묻고, 방문자면 서버 접근 상태를 다시 읽는다 */
+  async function refusal(res: Response, c: ReturnType<typeof cred>, route = false, read?: { body: unknown }): Promise<Text> {
+    const denied = res.status === 401 || res.status === 403;
+    const msg: Text = c.operator && res.status === 401 ? m => m.operatorRejected : c.owner && denied ? m => m.ownerRejected
+      : c.v && denied ? m => m.visitorRejected(REQUEST_PATH) : await errorText(res, route, read);
+    if (c.owner && denied) { S.owner.authenticated = false; void loadOwner(); }
+    if (c.v && denied) void loadBootstrap();
+    return msg;
+  }
+  function fillBudget(on: boolean): void {
+    if (locked()) return;
+    const n = Math.max(1, Math.min(PROJECT_MAX, autoRoute() ? limits().max : S.selected.size || 1));
+    const v: ProjectBudget = { maxExperts: n, maxModelCalls: Math.min(BUDGET_LIMITS.maxModelCalls[1], n * BUDGET_DEFAULT.perExpert + BUDGET_DEFAULT.review + BUDGET_DEFAULT.memo),
+      maxReviewCalls: BUDGET_DEFAULT.review, maxMemoCalls: BUDGET_DEFAULT.memo };
+    for (const f of BUDGET_FIELDS) budgetIns[f].value = on ? String(v[f]) : '';
+    S.formErrors = S.formErrors.filter(e => e.field !== 'budget');
+    semanticEdit(); keepFocus(renderControls);
+  }
+  function discardPlan(): void {
+    planGen++; S.plan = null; S.planStale = false;
+    renderControls(); startBtn.focus();
+  }
+
+  /** 계획 준비: Jev 가 고르면 먼저 /route, 그다음 만들기와 똑같은 본문으로 /preview. 직접 고르면 Jev 를 부르지 않는다.
+   *  실패하면 잠금을 풀고 아무것도 만들지 않는다. 같은 입력으로 다시 준비하면 같은 requestId 를 쓴다 */
+  async function preparePlan(f: FormInput, decision: DecisionFrame | undefined, wf: ReturnType<typeof parseWorkflow>['extras'], auto: boolean): Promise<void> {
+    const sig = semanticSig();
+    const requestId = S.planReq?.sig === sig ? S.planReq.requestId : crypto.randomUUID();
+    S.planReq = { sig, requestId };
+    const gen = ++planGen;
+    S.plan = { sig, phase: 'preparing', routed: auto, body: '', preview: null, error: null }; S.planStale = false;
+    renderAll();
+    const extras = { ...briefExtras({ decision, documents: S.docs.length ? docsPayload(S.docs) : undefined }), ...wf };
+    const c = cred();
+    const fail = (msg: Text) => { if (gen !== planGen) return; S.plan = { sig, phase: 'error', routed: auto, body: '', preview: null, error: msg }; renderAll(); };
+    const post = async (path: string, body: string): Promise<Response | null> => {
+      try { return await fetch(path, { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: c.headers, body }); } catch { return null; }
+    };
+    let expertIds = f.expertIds;
+    if (auto) {
+      const key = routeKey({ ...f, ...extras }), max = limits().max, allowed = catalogue().map(e => e.id);
+      S.route = { key, result: null }; S.teamOpen = false;
+      const res = await post('/api/cloudbite/route', JSON.stringify({ title: f.title, objective: f.objective, context: f.context, requestId, ...extras }));
+      if (gen !== planGen) return;
+      if (!res) return fail(m => m.routeNetwork);
+      if (!res.ok) { const msg = await refusal(res, c, true); return fail(msg); }
+      let body: unknown = null;
+      try { body = await res.json(); } catch { /* 아래에서 형식 오류 */ }
+      if (gen !== planGen) return;
+      const route = normalizeRoute(body, allowed, max);
+      if (!route) return fail(m => m.routeInvalid);
+      S.route = { key, result: route };
+      expertIds = route.expertIds;
+    }
+    // 만들기 본문 그대로 (자리 순서도 예전 만들기와 같다). 실행은 이 문자열을 바꾸지 않고 보낸다
+    const payload = auto
+      ? { title: f.title, objective: f.objective, context: f.context, requestId, mode: 'live', expertIds, ...extras, routing: 'jev' }
+      : { ...f, mode: 'live', requestId, ...extras };
+    const frozen = JSON.stringify(payload);
+    const res = await post('/api/cloudbite/preview', frozen);
+    if (gen !== planGen) return;
+    if (!res) return fail(m => m.planNetwork);
+    if (!res.ok) { const msg = await refusal(res, c); return fail(msg); }
+    let body: unknown = null;
+    try { body = await res.json(); } catch { /* 아래에서 형식 오류 */ }
+    if (gen !== planGen) return;
+    if (isObj(body) && Array.isArray(body.expertIds) && JSON.stringify(body.expertIds) !== JSON.stringify(expertIds)) return fail(m => m.planMismatch);
+    const preview = normalizePreview(body, expertIds);
+    if (!preview) return fail(m => m.planInvalid);
+    if (semanticSig() !== sig) { S.plan = null; S.planStale = true; renderAll(); return; }
+    S.plan = { sig, phase: 'ready', routed: auto, body: frozen, preview, error: null };
+    renderAll();
+    live.textContent = M.planTitle;
+  }
+
+  /** 준비한 계획을 그대로 실행한다: 미리보기에 보낸 문자열을 같은 requestId 로 보낸다 (다시 눌러도 같은 요청) */
+  function executePlan(): void {
+    const plan = S.plan;
+    if (!plan || plan.phase !== 'ready' || !plan.body || plan.sig !== semanticSig() || locked()) return;
+    clearTimers();
+    const gen = ++S.gen;
+    S.review = null;
+    S.artifactCache.clear(); S.hiddenRows.clear(); S.focusExpert = ''; S.artifactPath = ''; S.artifactPicked = false; lastAnnounce = '';
+    S.run = { mode: 'live', phase: 'starting', project: null, accessToken: '', error: null, startedAt: Date.now(), pollErrors: 0,
+      routed: plan.routed, viaVisitor: viaVisitor(), viaOwner: viaOwner() };
+    void startLive(gen, JSON.parse(plan.body) as ProjectBrief, plan.routed, plan.body);
+    renderAll();
+    settleFocus();
+  }
+
+  function renderPlan(): void {
+    const p = S.plan, key = `${lang}|${S.mode}|${S.planStale}|${locked()}`;
+    if (p === planDrawn && key === planDrawnKey) return;
+    planDrawn = p; planDrawnKey = key;
+    const m = M, kids: Kid[] = [];
+    if (S.mode === 'live' && !p && S.planStale) kids.push(h('p', { class: 'cb-warn' }, m.planStale));
+    if (S.mode === 'live' && p?.phase === 'ready' && p.preview) {
+      const pv = p.preview, sent = JSON.parse(p.body) as Partial<ProjectBrief>, env = pv.envelope;
+      const options = sent.decision?.options ?? [];
+      const optText = (id: string) => { const i = Number(id.slice('option-'.length)) - 1; return options[i] ? `${id}: ${options[i]}` : id; };
+      const list = (label: string, items: string[]) => items.length ? h('div', { class: 'cb-plan-list' }, h('strong', null, label), h('ul', null, ...items.map(x => h('li', null, x)))) : null;
+      const byId = new Map(pv.assignments.map(a => [a.expertId, a]));
+      kids.push(h('h3', { id: 'cb-plan-h', class: 'cb-plan-title', tabindex: '-1' }, m.planTitle), h('p', { class: 'cb-help' }, m.planNote),
+        h('ul', { class: 'cb-plan-facts' },
+          h('li', null, m.planRoles(pv.expertIds.length)),
+          h('li', null, m.planStage(sent.stage ? m.wfStageName[sent.stage] : m.wfStageNone)),
+          h('li', null, m.planLang(sent.responseLanguage ? m.wfLangName[sent.responseLanguage] : m.wfLangNone)),
+          h('li', null, m.planCaps(pv.budget))),
+        h('h4', { class: 'cb-plan-sub' }, m.planEnvelope),
+        h('ul', { class: 'cb-plan-facts cb-plan-envelope' },
+          h('li', null, m.planSandboxes(pv.envelope.sandboxMaximum)),
+          h('li', null, m.planNosana(env.nosanaMaximum, env.expertMaximum, env.reviewMaximum, env.memoMaximum)),
+          h('li', { class: 'cb-plan-jev' }, m.planJev(env.jevCalls))),
+        h('p', { class: 'cb-help' }, m.planNoCost),
+        h('h4', { class: 'cb-plan-sub' }, m.planAssignments),
+        h('ol', { class: 'cb-plan-team' }, ...pv.expertIds.map(id => {
+          const a = byId.get(id), name = findDef(id)?.name ?? id;
+          if (!a) return h('li', { class: 'cb-plan-role' }, h('strong', null, name));
+          return h('li', { class: 'cb-plan-role' }, h('details', { class: 'cb-disclosure cb-quiet' },
+            h('summary', null, icon('chevron'), h('strong', null, name), ' ', h('span', { class: 'cb-tag' }, m.planSource[a.source]), ' ', h('span', { class: 'cb-tag' }, m.wfStageName[a.stage])),
+            h('div', { class: 'cb-disclosure-body' },
+              h('p', null, h('strong', null, `${m.planQuestion}: `), a.question),
+              list(m.planOptions, a.optionIds.map(optText)), list(m.planDeliverables, a.deliverables),
+              list(m.planEvidence, a.requiredEvidence), list(m.planBoundaries, a.boundaries))));
+        })),
+        pv.warnings.length ? h('div', { class: 'cb-plan-list' }, h('strong', null, m.planWarnings), h('ul', null, ...pv.warnings.map(w => h('li', null, w)))) : null,
+        h('button', { type: 'button', class: 'cb-ghost', 'data-fk': 'plan-discard', disabled: active(), onclick: () => discardPlan() }, m.planDiscard));
+    }
+    planBox.hidden = !kids.length;
+    fill(planBox, ...kids);
+  }
+
+  function renderPmc(busy: boolean): void {
+    const key = `${lang}|${busy}|${S.pmc.busy}|${pmcRev}|${S.docs.length}`;
+    if (key === pmcSig) return;
+    pmcSig = key;
+    const m = M, r = S.pmc.result;
+    pmcBtn.textContent = S.pmc.busy ? m.pmcBusy : m.pmcBtn;
+    pmcBtn.disabled = busy || S.pmc.busy; pmcIn.disabled = busy || S.pmc.busy;
+    pmcBox.setAttribute('aria-busy', String(S.pmc.busy));
+    fill(pmcMsg, S.pmc.error ? h('p', null, S.pmc.error(m)) : null);
+    pmcNote.textContent = S.pmc.note ? S.pmc.note(m) : '';
+    if (!r) { fill(pmcBody); return; }
+    const a = r.article, picked = r.documents.filter(d => S.pmc.picked.has(d.id)).length;
+    fill(pmcBody,
+      h('div', { class: 'cb-pmc-article' }, h('strong', null, a.title),
+        h('p', { class: 'cb-help' }, [a.pmcid, a.doi ? `doi:${a.doi}` : ''].filter(Boolean).join(' · ')),
+        h('p', { class: 'cb-help' }, `${m.pmcLicense}: ${a.license} · ${m.pmcRetrieved}: ${a.retrievedAt} · `,
+          h('a', { href: a.sourceUrl, target: '_blank', rel: 'noopener noreferrer' }, m.pmcSourceLink))),
+      h('details', { class: 'cb-disclosure cb-quiet' }, h('summary', null, icon('chevron'), m.pmcSections(r.sections.length)),
+        h('ol', { class: 'cb-pmc-sections' }, ...r.sections.map(x => h('li', null, `${x.title} — ${x.locator} · ${m.pmcSectionChars(group(x.characters))}`)))),
+      h('div', { class: 'cb-plan-list' }, h('strong', null, m.pmcOmissions),
+        r.warnings.length ? h('ul', null, ...r.warnings.map(w => h('li', null, w))) : h('p', { class: 'cb-help' }, m.pmcNoOmissions)),
+      h('strong', null, m.pmcExcerpts),
+      h('ol', { class: 'cb-doc-list cb-pmc-docs' }, ...r.documents.map((d, i) => {
+        const box = h('input', { type: 'checkbox', id: `cb-pmc-doc-${i}`, 'data-fk': `pmc-pick:${d.id}`, checked: S.pmc.picked.has(d.id), disabled: busy || S.pmc.busy });
+        box.addEventListener('change', () => { if (box.checked) S.pmc.picked.add(d.id); else S.pmc.picked.delete(d.id); pmcRev++; keepFocus(renderControls); });
+        return h('li', { class: 'cb-doc' },
+          h('div', { class: 'cb-doc-head' }, box, h('label', { for: `cb-pmc-doc-${i}`, class: 'cb-doc-name' }, d.name), h('span', { class: 'cb-tag' }, m.pmcSectionChars(group(d.content.length)))),
+          d.origin ? h('p', { class: 'cb-help cb-doc-origin' }, d.origin) : null,
+          h('details', { class: 'cb-disclosure cb-quiet' }, h('summary', null, icon('chevron'), m.pmcExcerpt(group(d.content.length))), h('pre', { class: 'cb-doc-text' }, d.content)));
+      })),
+      h('button', { type: 'button', class: 'cb-secondary', 'data-fk': 'pmc-add', disabled: busy || S.pmc.busy || !picked, onclick: () => pmcAdd() }, m.pmcAdd(picked)));
+  }
+
+  /** PMC 식별자 하나를 서버에 묻는다. 모양이 틀리면 묻지 않고, 늦은 응답은 버리며, 실패를 성공으로 꾸미지 않는다 */
+  async function pmcLookup(): Promise<void> {
+    if (locked() || S.pmc.busy) return;
+    const id = pmcIn.value.trim();
+    S.pmc.note = null;
+    if (!PMC_ID.test(id) || PMC_ID_BAD.test(id)) { S.pmc.error = m => m.pmcBad; pmcRev++; renderControls(); pmcIn.focus(); return; }
+    const seq = ++pmcSeq;
+    S.pmc = { busy: true, result: null, error: null, note: null, picked: new Set() }; pmcRev++;
+    keepFocus(renderControls);
+    const done = (error: Text | null, result: PmcImport | null = null) => {
+      if (seq !== pmcSeq) return;
+      S.pmc = { busy: false, result, error, note: null, picked: new Set() }; pmcRev++;
+      keepFocus(renderControls);
+      if (document.activeElement === null || document.activeElement === document.body) pmcBtn.focus();
+    };
+    const c = cred();
+    let res: Response;
+    try {
+      res = await fetch('/api/cloudbite/pmc/import', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers: c.headers, body: JSON.stringify({ identifier: id }) });
+    } catch { return done(m => m.pmcNetwork); }
+    if (seq !== pmcSeq) return;
+    let body: unknown = null;
+    try { body = await res.json(); } catch { /* 본문 없음 */ }
+    if (seq !== pmcSeq) return;
+    if (!res.ok) {
+      const code = isObj(body) && PMC_ERRORS.includes(body.error as PmcImportErrorCode) ? body.error as PmcImportErrorCode : null;
+      if (!code) return done(await refusal(res, c, false, { body }));
+      const server = isObj(body) ? str(body.message, 300) : '';
+      const retry = isObj(body) && isInt(body.retryAfterSeconds, 1, 86400) ? body.retryAfterSeconds : 0;
+      return done(m => [m.pmcError[code], server, retry ? m.pmcRetry(retry) : ''].filter(Boolean).join(' '));
+    }
+    const result = normalizePmc(body);
+    return result ? done(null, result) : done(m => m.pmcInvalid);
+  }
+
+  /** 고른 발췌만 근거 파일에 더한다. 출처(origin)를 지키고, 파일 수·길이·합계·바이트 한도는 지금 목록과 합쳐 잰다 */
+  function pmcAdd(): void {
+    const r = S.pmc.result;
+    if (locked() || !r || S.pmc.busy || S.docReading) return;
+    S.docErrors = [];
+    let added = 0;
+    for (const d of r.documents) {
+      if (!S.pmc.picked.has(d.id)) continue;
+      if (S.docs.some(x => x.name === d.name && x.content === d.content && x.origin === d.origin)) { S.docErrors.push(m => m.pmcDup(d.name)); continue; }
+      const ok = docAccept(d.name, d.content, S.docs);
+      if ('error' in ok) { S.docErrors.push(ok.error); continue; }
+      const draft: DocDraft = { key: ++docKey, ...ok.doc, ...(d.origin ? { origin: d.origin } : {}) };
+      if (docsBytes([...S.docs, draft]) > DOCS.bytes) { S.docErrors.push(m => m.docBytes(draft.name, DOCS.bytes / 1024)); continue; }
+      S.docs.push(draft); S.pmc.picked.delete(d.id); added++;
+    }
+    docRev++; pmcRev++;
+    S.pmc.note = added ? m => m.pmcAdded(added) : null;
+    keepFocus(renderControls);
   }
 
   // ── 주장과 근거 (결과): 지금 실행과 사용 기록 상세가 같은 그리기를 쓴다. 사용 기록은 읽기 전용(실행 버튼 없음)
@@ -3273,7 +3797,7 @@ function boot(): void {
     // 예시 브리프는 사용자가 고치지 않은 칸만 새 언어로 바꾼다. 사용자가 쓴 글은 건드리지 않는다
     const fresh = !!S.suggest && S.suggest.brief === briefText();
     // Jev 가 고르는 동안에는 바꾸지 않는다: 화면의 브리프가 지금 고르고 있는 질문과 같게 남는다
-    if (S.run?.phase !== 'routing') for (const [inp, k] of [[titleIn, 'sampleTitle'], [objectiveIn, 'sampleObjective'], [contextIn, 'sampleContext']] as const) if (inp.value === prev[k]) inp.value = M[k];
+    if (S.run?.phase !== 'routing' && !preparing()) for (const [inp, k] of [[titleIn, 'sampleTitle'], [objectiveIn, 'sampleObjective'], [contextIn, 'sampleContext']] as const) if (inp.value === prev[k]) inp.value = M[k];
     // 예시가 번역되어 바뀐 것은 사용자가 고친 것이 아니다: 그 전에 최신이던 제안은 그대로 최신으로 둔다
     if (fresh && S.suggest) S.suggest = { ...S.suggest, brief: briefText() };
     for (const f of recount) f();
@@ -3344,7 +3868,7 @@ function boot(): void {
   }
 
   function setMode(md: Mode): void {
-    if (active() || S.mode === md) return;
+    if (locked() || S.mode === md) return;
     S.mode = md; S.formErrors = []; S.modePicked = true;
     // 방문자의 실제 실행에는 데모 기본 선택을 넘기지 않는다 (숨은 유료 선택 없음)
     if (md === 'live' && viaVisitor()) S.selected.clear();
@@ -3381,7 +3905,7 @@ function boot(): void {
 
   /** 실행은 사용자가 시작 버튼을 눌렀을 때만 시작한다 (첫 화면 자동 데모 없음) */
   function startRun(): void {
-    if (active()) return;
+    if (locked()) return;
     const f: FormInput = { title: titleIn.value.trim(), objective: objectiveIn.value.trim(), context: contextIn.value.trim(), expertIds: [...S.selected] };
     // Jev 가 고를 때는 직접 고른 선택을 보지도 보내지도 않는다. Jev 를 쓸 수 없으면 직접 고르기로 몰래 바꾸지 않고 막는다
     const auto = autoRoute();
@@ -3389,6 +3913,8 @@ function boot(): void {
     const dec = parseDecision(decisionTexts());
     S.formErrors.push(...dec.issues);
     if (S.docReading) S.formErrors.push({ field: 'docs', text: m => m.vDocsBusy });
+    const wf = parseWorkflow(stageSel.value, respSel.value, budgetTexts());
+    S.formErrors.push(...wf.issues);
     if (auto) {
       if (!routing()!.ready) S.formErrors.push({ field: 'run', text: m => m.jevUnavailable });
       else if (!routeCredential()) S.formErrors.push({ field: 'run', text: m => m.jevNeedAccess });
@@ -3404,11 +3930,18 @@ function boot(): void {
       if (S.formErrors.some(e => e.field === 'title' || e.field === 'context')) projDetails.open = true;
       if (S.formErrors.some(e => e.field === 'decision')) decisionDetails.open = true;
       if (S.formErrors.some(e => e.field === 'docs')) docsDetails.open = true;
+      if (S.formErrors.some(e => e.field === 'budget')) budgetDetails.open = true;
       renderControls(); return;
+    }
+    // 실제 실행: 준비한 계획이 지금 입력과 같으면 그 계획을 실행하고, 아니면 새 계획을 준비한다 (바로 실행하지 않는다)
+    if (S.mode === 'live') {
+      if (S.plan?.phase === 'ready' && S.plan.sig === semanticSig()) executePlan();
+      else void preparePlan(f, dec.frame, wf.extras, auto);
+      return;
     }
     clearTimers();
     const gen = ++S.gen;
-    const brief: ProjectBrief = { ...f, mode: S.mode, requestId: crypto.randomUUID(), ...briefExtras({ decision: dec.frame, documents: S.docs.length ? docsPayload(S.docs) : undefined }) };
+    const brief: ProjectBrief = { ...f, mode: S.mode, requestId: crypto.randomUUID(), ...briefExtras({ decision: dec.frame, documents: S.docs.length ? docsPayload(S.docs) : undefined }), ...wf.extras };
     S.review = null;
     S.artifactCache.clear(); S.hiddenRows.clear(); S.focusExpert = ''; S.artifactPath = ''; S.artifactPicked = false; lastAnnounce = '';
     S.run = { mode: S.mode, phase: auto ? 'routing' : 'starting', project: null, accessToken: '', error: null, startedAt: Date.now(), pollErrors: 0,
@@ -3486,9 +4019,9 @@ function boot(): void {
   }
 
   /** 상태별 안내 + 서버가 보낸 {error} 원문. 그릴 때의 언어로 바뀐다 */
-  async function errorText(res: Response, route = false): Promise<Text> {
+  async function errorText(res: Response, route = false, read?: { body: unknown }): Promise<Text> {
     let server = '';
-    try { const j = await res.json(); if (isObj(j)) server = str(j.error, 200); } catch { /* 본문 없음 */ }
+    try { const j = read ? read.body : await res.json(); if (isObj(j)) server = str(j.error, 200); } catch { /* 본문 없음 */ }
     const s = res.status;
     // Jev 경로: 422 맞는 역할 없음 · 503 설정·공급자 실패 · 409 같은 requestId/브리프 충돌 또는 진행 중
     const base: Text = route && s === 422 ? m => m.routeNone : route && s === 503 ? m => m.routeUnavailable : route && s === 409 ? m => m.routeConflict
@@ -3498,7 +4031,8 @@ function boot(): void {
   }
 
   /** routed: Jev 가 고른 팀. 서버가 같은 requestId 의 경로 기록으로 행위자·브리프·한도를 확인하고 역할을 정하므로 routing:'jev' 만 더한다 */
-  async function startLive(gen: number, brief: ProjectBrief, routed = false): Promise<void> {
+  /** frozen: 준비한 계획의 본문 문자열. 주면 바꾸지 않고 그대로 보낸다 */
+  async function startLive(gen: number, brief: ProjectBrief, routed = false, frozen?: string): Promise<void> {
     const operator = isOperatorToken(S.adminToken);
     // 토큰을 넣었으면 그 헤더만 쓴다 (거부돼도 쿠키로 넘어가지 않는다). 없으면 헤더 없이 same-origin 쿠키(소유자 → 방문자)로 요청한다.
     // 빈 x-admin-token 도 서버는 명시한 토큰으로 보므로 아예 넣지 않는다. 권한 판단은 서버가 한다
@@ -3512,7 +4046,7 @@ function boot(): void {
       : brief;
     let res: Response;
     try {
-      res = await fetch('/api/cloudbite/projects', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers, body: JSON.stringify(payload) });
+      res = await fetch('/api/cloudbite/projects', { method: 'POST', credentials: 'same-origin', cache: 'no-store', headers, body: frozen ?? JSON.stringify(payload) });
     } catch {
       if (gen !== S.gen) return;
       S.run!.phase = 'error'; S.run!.error = m => m.networkCreate; renderAll(); return;
@@ -3539,6 +4073,7 @@ function boot(): void {
     const token = isObj(body) ? str(body.accessToken, 2000) : '';
     if (!project || !token) { S.run!.phase = 'error'; S.run!.error = m => m.invalidResponse; renderAll(); return; }
     S.run!.project = project; S.run!.accessToken = token; S.setupOpen = false; // 실제로 시작됐으니 편집 영역을 접는다
+    if (frozen) { S.plan = null; S.planReq = null; S.planStale = false; } // 계획을 썼다: 다음 실행은 새 계획·새 requestId
     if (v) v.usedProjects = Math.min(v.maxProjects, v.usedProjects + 1); // 서버가 센 사용량을 화면에도 반영한다
     S.run!.phase = TERMINAL_PROJECT.includes(project.status) ? 'done' : 'running';
     if (S.run!.phase === 'running') schedulePoll(gen, 1200);
@@ -3591,6 +4126,11 @@ function boot(): void {
   }
 
   async function cancelRun(): Promise<void> {
+    // 계획 준비 중이면 늦게 온 경로·미리보기를 버린다 (아무것도 만들지 않았다)
+    if (S.plan?.phase === 'preparing') {
+      planGen++; S.plan = { ...S.plan, phase: 'error', error: S.plan.routed && !S.route?.result ? m => m.routeCancelled : m => m.planCancelled };
+      renderAll(); return;
+    }
     const run = S.run;
     if (!run || !active() || run.phase === 'cancelling' || run.phase === 'starting') return;
     const gen = ++S.gen; // 진행 중이던 타이머·조회 응답은 이제 전부 무시된다
@@ -3763,7 +4303,7 @@ function boot(): void {
   void first.then(() => { if (!S.run && recheckable() && !accessTimer) accessTimer = setTimeout(() => refreshAccess(true), ACCESS_RECHECK_MS) as unknown as number; });
 }
 
-const CloudbiteCore = { parseDecision, docProblem, docAccept, docsPayload, normalizeCrossReview, reviewEligible, projectMarkdown, normalizeBootstrap, normalizePool, normalizeRouting, normalizeRoute, suggestTeam, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, artifactContent, domainLabel, DEMO_EXPERTS,
+const CloudbiteCore = { parseDecision, docProblem, docAccept, docsPayload, docsBytes, parseWorkflow, normalizePreview, normalizePmc, normalizeCrossReview, reviewEligible, projectMarkdown, normalizeBootstrap, normalizePool, normalizeRouting, normalizeRoute, suggestTeam, normalizeProject, normalizeOpinion, aggregate, validateForm, demoPlan, applyStep, cancelProject, statusFromExperts, markdownReport, archetypeOf, operatorFragment, artifactContent, domainLabel, DEMO_EXPERTS,
   pickLang, withLang, normalizeOwnerSession, DICT, ROLE_KO };
 const hook = (globalThis as { __cloudbiteTestHook?: (core: typeof CloudbiteCore) => void }).__cloudbiteTestHook;
 if (typeof hook === 'function') hook(CloudbiteCore);
