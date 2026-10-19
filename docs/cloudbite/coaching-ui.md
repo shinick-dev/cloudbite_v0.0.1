@@ -70,6 +70,16 @@ Fixed judgments ("move straight to…", "do not expand…") are replaced by neut
 lines that state counts describe what roles stated, not decision quality or consensus. The section title
 is "Stated directions". Counts, mean confidence, partial-basis note and details are unchanged.
 
+## Helper state fixes
+
+- Language switch: a helper preview that was fresh before the switch stays applicable when only untouched
+  sample fields are translated (`coachDraftFresh` captured before translation, basis re-pinned after). A
+  preview already stale from user edits stays stale. User text and answers are never translated.
+- `resetCoach` clears helper answers, preview and the applied/need notices when a follow-up loads a
+  different project (`startFollowUp`, so also the revised-project draft). Language switches keep them.
+- A manual edit of title/objective/context clears the "Added to Context" notice; Apply's own assignment
+  still shows it.
+
 ## Not verified
 
 No real browser, server or provider run. The coordinator does browser QA.

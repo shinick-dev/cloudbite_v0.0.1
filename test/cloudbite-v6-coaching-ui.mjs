@@ -292,4 +292,58 @@ await test('수정 제안 → 다음 라운드 초안: 목표·범위·이정표
   assert.equal(full.byId('cb-fu-summary').value, `${EN.p6.draftSummary} ${EN.p6.draftNoRoom}`);
 });
 
+await test('브리프 도우미 + 언어 전환: 고치지 않은 예시 맥락의 번역은 최신 미리 보기를 낡게 하지 않고, 이미 낡은 미리 보기는 되살리지 않는다', async () => {
+  const answer = async (env) => { await setValue(env, 'cb-coach-who', '창업자'); await setValue(env, 'cb-coach-decision', 'Pilot or not'); await setValue(env, 'cb-coach-constraint', '4주'); };
+  const env = fakeEnv(null, { lang: 'ko' });
+  await env.flush();
+  assert.equal(env.byId('cb-context').value, KO.sampleContext, 'default sample context untouched');
+  await setValue(env, 'cb-objective', '내가 쓴 목표');
+  await answer(env);
+  await click(env, 'coach-preview');
+  env.fk('lang:en').click(); await env.flush();
+  assert.equal(env.byId('cb-context').value, EN.sampleContext, 'untouched sample context translated');
+  assert.equal(env.byId('cb-objective').value, '내가 쓴 목표', 'user objective never translated');
+  assert.equal(env.byId('cb-coach-who').value, '창업자', 'answers kept');
+  assert.ok(!coachOut(env).textContent.includes(EN.p6.stale), 'fresh preview stays fresh');
+  assert.equal(env.fk('coach-apply').disabled, false);
+  await click(env, 'coach-apply');
+  assert.equal(env.byId('cb-context').value, `${EN.sampleContext}\n\n${EN.p6.blockHead}\n- ${EN.p6.qLabel.who}: 창업자\n- ${EN.p6.qLabel.decision}: Pilot or not\n- ${EN.p6.qLabel.constraint}: 4주`);
+  // 사용자가 고쳐 이미 낡은 미리 보기는 언어 전환으로 되살아나지 않는다
+  const st = fakeEnv(null, { lang: 'ko' });
+  await st.flush();
+  await setValue(st, 'cb-objective', '첫 목표');
+  await answer(st);
+  await click(st, 'coach-preview');
+  await setValue(st, 'cb-objective', '고친 목표');
+  assert.ok(coachOut(st).textContent.includes(KO.p6.stale));
+  st.fk('lang:en').click(); await st.flush();
+  assert.ok(coachOut(st).textContent.includes(EN.p6.stale), 'already-stale preview remains stale');
+  assert.equal(st.fk('coach-apply').disabled, true);
+  st.fk('coach-apply').disabled = false; await click(st, 'coach-apply');
+  assert.equal(st.byId('cb-context').value, EN.sampleContext, 'stale draft never writes');
+});
+
+await test('브리프 도우미: 적용 안내는 직접 고치면 사라지고, 다른 프로젝트 후속 초안은 이전 답·안내를 넘겨받지 않는다', async () => {
+  const env = fakeEnv(parentRaw(MEMO(DMEMO({ coaching: COACHING }))));
+  await env.flush();
+  await setValue(env, 'cb-context', 'Mine.');
+  await setValue(env, 'cb-coach-who', 'Old answer');
+  await click(env, 'coach-preview');
+  await click(env, 'coach-apply');
+  assert.ok(coachOut(env).textContent.includes(EN.p6.applied), 'apply\'s own assignment shows success');
+  await setValue(env, 'cb-context', 'Mine.');
+  assert.ok(!coachOut(env).textContent.includes(EN.p6.applied), 'manual edit removing the block clears the success message');
+  assert.equal(env.byId('cb-coach-who').value, 'Old answer', 'answers are kept on manual edits');
+  await click(env, 'coach-preview'); await click(env, 'coach-apply');
+  assert.ok(coachOut(env).textContent.includes(EN.p6.applied));
+  await openParent(env);
+  await click(env, `coach-draft:${PARENT}`);
+  for (const q of ['who', 'decision', 'constraint']) assert.equal(env.byId(`cb-coach-${q}`).value, '', `${q}: old helper answer cleared`);
+  assert.ok(!coachOut(env).textContent.includes(EN.p6.applied), 'no inherited applied message');
+  assert.equal(env.fk('coach-apply'), undefined, 'no inherited preview');
+  assert.ok(!env.byId('cb-context').value.includes('Old answer'), 'context is the parent\'s');
+  assert.equal(env.byId('cb-dec-knownFacts').value, 'We have 3 design partners', 'parent fields unchanged');
+  assert.equal(env.fk('x:x1').checked && env.fk('x:x2').checked, true, 'roles unchanged');
+});
+
 console.log(`cloudbite-v6-coaching-ui: ${pass} groups passed (fake DOM; no live provider, server or browser).`);

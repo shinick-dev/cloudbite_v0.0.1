@@ -1,6 +1,6 @@
 // 만든 파일 — 직접 고치지 말 것. 소스: client/cloudbite-console.ts · client/cloudbite-console.css
 // 다시 만들기: node tools/build-cloudbite-console.mjs (--check 로 최신인지 확인)
-// esbuild 0.28.1 transform (ES2022, 묶지 않음) · ts sha256 aa0a6fab34e73770bc404e1885846c11558ddb576f97a5d3d6fc687657c5e1a7 · css sha256 bd3a8412e525178240c214cf6334c7f969d2c300471f7a62e2eacd0cb70e4375
+// esbuild 0.28.1 transform (ES2022, 묶지 않음) · ts sha256 70e5034cd305a1079b54fed35c98afc1e37f16aec9c26cdc4f4b456de20cae03 · css sha256 bd3a8412e525178240c214cf6334c7f969d2c300471f7a62e2eacd0cb70e4375
 // 라우팅(런타임 담당): GET / 와 /cloudbite → CLOUDBITE_HTML, CLOUDBITE_JS_PATH → CLOUDBITE_JS (text/javascript),
 // CLOUDBITE_CSS_PATH → CLOUDBITE_CSS (text/css). CSP 는 script-src 'self'; style-src 'self' 면 충분하다 (인라인 없음).
 export const CLOUDBITE_JS_PATH = "/cloudbite/console.js";
@@ -4980,7 +4980,9 @@ export const CLOUDBITE_JS = [
   "  for (const inp of [titleIn, objectiveIn, contextIn]) inp.addEventListener(\"input\", () => {",
   "    if (S.suggest) renderSuggest();",
   "    if (S.route?.result) renderJev();",
-  "    if (S.coach.draft) renderCoach();",
+  "    const wasApplied = S.coach.applied;",
+  "    S.coach.applied = false;",
+  "    if (S.coach.draft || wasApplied) renderCoach();",
   "  });",
   "  const tokenIn = attr(h(\"input\", { id: \"cb-token\", type: \"password\", autocomplete: \"off\", spellcheck: \"false\" }), \"placeholder\", (m) => m.tokenPlaceholder);",
   "  tokenIn.value = S.adminToken;",
@@ -6685,6 +6687,7 @@ export const CLOUDBITE_JS = [
   "",
   "${block}` : block;",
   "  };",
+  "  const coachDraftFresh = () => !!S.coach.draft && S.coach.draft.basis === coachBasis();",
   "  function renderCoach() {",
   "    const m = M, t = m.p6, busy = locked(), d = S.coach.draft;",
   "    coachHint.textContent = t.helperHint(COACH_QS.filter((q) => coachIns[q].value.trim()).length);",
@@ -6721,6 +6724,12 @@ export const CLOUDBITE_JS = [
   "    S.coach.need = !COACH_QS.some((q) => answers[q]);",
   "    S.coach.draft = S.coach.need ? null : { basis: coachBasis(), answers };",
   "    keepFocus(renderCoach);",
+  "  }",
+  "  function resetCoach() {",
+  "    for (const q of COACH_QS) coachIns[q].value = \"\";",
+  "    S.coach.draft = null;",
+  "    S.coach.applied = false;",
+  "    S.coach.need = false;",
   "  }",
   "  function coachApply() {",
   "    const d = S.coach.draft;",
@@ -8462,6 +8471,7 @@ export const CLOUDBITE_JS = [
   "    stageSel.value = b.stage && b.stage !== \"unspecified\" ? b.stage : \"\";",
   "    respSel.value = b.responseLanguage ?? \"\";",
   "    for (const f of BUDGET_FIELDS) budgetIns[f].value = \"\";",
+  "    resetCoach();",
   "    S.selected.clear();",
   "    const allowed = new Set(catalogue().map((e) => e.id));",
   "    for (const id of b.expertIds) if (allowed.has(id) && S.selected.size < limits().max) S.selected.add(id);",
@@ -8540,10 +8550,12 @@ export const CLOUDBITE_JS = [
   "    lang = l;",
   "    M = DICT[l];",
   "    const fresh = !!S.suggest && S.suggest.brief === briefText();",
+  "    const coachFresh = coachDraftFresh();",
   "    if (S.run?.phase !== \"routing\" && !preparing()) {",
   "      for (const [inp, k] of [[titleIn, \"sampleTitle\"], [objectiveIn, \"sampleObjective\"], [contextIn, \"sampleContext\"]]) if (inp.value === prev[k]) inp.value = M[k];",
   "    }",
   "    if (fresh && S.suggest) S.suggest = { ...S.suggest, brief: briefText() };",
+  "    if (coachFresh && S.coach.draft) S.coach.draft = { ...S.coach.draft, basis: coachBasis() };",
   "    for (const f of recount) f();",
   "    applyLang();",
   "    renderAll();",

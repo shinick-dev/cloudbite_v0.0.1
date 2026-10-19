@@ -3738,7 +3738,8 @@ function boot(): void {
   };
   for (const inp of [titleIn, objectiveIn]) inp.addEventListener('input', () => { if (!active()) renderControls(); });
   // 제안 뒤에 브리프를 고치면 제안이 오래됐다고 알린다 (선택은 그대로)
-  for (const inp of [titleIn, objectiveIn, contextIn]) inp.addEventListener('input', () => { if (S.suggest) renderSuggest(); if (S.route?.result) renderJev(); if (S.coach.draft) renderCoach(); });
+  // 사용자가 브리프를 직접 고치면 '맥락에 더함' 안내는 더 이상 사실이 아닐 수 있다 (Apply 자신의 대입은 input 이벤트를 내지 않는다)
+  for (const inp of [titleIn, objectiveIn, contextIn]) inp.addEventListener('input', () => { if (S.suggest) renderSuggest(); if (S.route?.result) renderJev(); const wasApplied = S.coach.applied; S.coach.applied = false; if (S.coach.draft || wasApplied) renderCoach(); });
   const tokenIn = attr(h('input', { id: 'cb-token', type: 'password', autocomplete: 'off', spellcheck: 'false' }), 'placeholder', m => m.tokenPlaceholder);
   tokenIn.value = S.adminToken;
   tokenIn.addEventListener('input', () => { S.adminToken = tokenIn.value; clearHistoryAuthority(); renderControls(); renderProgress(); });
@@ -4835,6 +4836,7 @@ function boot(): void {
   const coachBlock = (a: Record<CoachQ, string>, m: Messages) =>
     [m.p6.blockHead, ...COACH_QS.filter(q => a[q]).map(q => `- ${m.p6.qLabel[q]}: ${a[q]}`)].join('\n');
   const coachJoined = (block: string) => { const base = contextIn.value.replace(/\s+$/, ''); return base ? `${base}\n\n${block}` : block; };
+  const coachDraftFresh = () => !!S.coach.draft && S.coach.draft.basis === coachBasis();
   function renderCoach(): void {
     const m = M, t = m.p6, busy = locked(), d = S.coach.draft;
     coachHint.textContent = t.helperHint(COACH_QS.filter(q => coachIns[q].value.trim()).length);
@@ -4857,6 +4859,11 @@ function boot(): void {
     S.coach.need = !COACH_QS.some(q => answers[q]);
     S.coach.draft = S.coach.need ? null : { basis: coachBasis(), answers };
     keepFocus(renderCoach);
+  }
+  /** 다른 프로젝트를 불러올 때: 이전 브리프에 대한 답·미리 보기·적용 안내는 새 브리프와 무관하므로 비운다 (언어 전환은 부르지 않는다) */
+  function resetCoach(): void {
+    for (const q of COACH_QS) coachIns[q].value = '';
+    S.coach.draft = null; S.coach.applied = false; S.coach.need = false;
   }
   /** 미리 본 그 입력일 때만 맥락 끝에 더한다. 이미 쓴 글은 그대로 두고, 계획·Jev 선택은 보통 입력처럼 낡게 한다 */
   function coachApply(): void {
@@ -6011,6 +6018,7 @@ function boot(): void {
     stageSel.value = b.stage && b.stage !== 'unspecified' ? b.stage : '';
     respSel.value = b.responseLanguage ?? '';
     for (const f of BUDGET_FIELDS) budgetIns[f].value = '';
+    resetCoach();
     // 역할: 이전 팀을 직접 고르기로 미리 채운다 (사용자가 바꾸거나 Jev 로 새로 고르게 할 수 있다). 숨은 선택은 없다
     S.selected.clear();
     const allowed = new Set(catalogue().map(e => e.id));
@@ -6084,10 +6092,13 @@ function boot(): void {
     lang = l; M = DICT[l];
     // 예시 브리프는 사용자가 고치지 않은 칸만 새 언어로 바꾼다. 사용자가 쓴 글은 건드리지 않는다
     const fresh = !!S.suggest && S.suggest.brief === briefText();
+    const coachFresh = coachDraftFresh();
     // Jev 가 고르는 동안에는 바꾸지 않는다: 화면의 브리프가 지금 고르고 있는 질문과 같게 남는다
     if (S.run?.phase !== 'routing' && !preparing()) for (const [inp, k] of [[titleIn, 'sampleTitle'], [objectiveIn, 'sampleObjective'], [contextIn, 'sampleContext']] as const) if (inp.value === prev[k]) inp.value = M[k];
     // 예시가 번역되어 바뀐 것은 사용자가 고친 것이 아니다: 그 전에 최신이던 제안은 그대로 최신으로 둔다
     if (fresh && S.suggest) S.suggest = { ...S.suggest, brief: briefText() };
+    // 브리프 도우미 미리 보기도 같다: 전환 전에 최신이던 것만 새 기준으로 옮긴다. 사용자가 고쳐 이미 낡은 미리 보기는 되살리지 않는다
+    if (coachFresh && S.coach.draft) S.coach.draft = { ...S.coach.draft, basis: coachBasis() };
     for (const f of recount) f();
     applyLang();
     renderAll();
