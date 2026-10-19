@@ -50,3 +50,5 @@ snapshot, so an item longer than the cap shows as removed + added. Documents com
 `ROUND_LIMITS`: 100 roles, summary 1500 B, 6 evidence items × 500 B, text 2000 B, list 8 × 400 B, change summary
 4000 B, total reference 64000 B (selected roles' opinions first). Cuts are on code point boundaries and every cut or
 dropped item is recorded in `omissions`.
+
+Per-role previous-round workspace projection is compact JSON bounded to32KiB including metadata. It retains the role's own prior opinion, removes other opinions first, and explicitly records workspace omissions. If necessary it replaces the detailed comparison with stage/language and an omission notice. The full previousRound API reference stays unchanged. The runner must include this file as untrusted project data.

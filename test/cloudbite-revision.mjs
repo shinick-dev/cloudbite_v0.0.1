@@ -122,6 +122,12 @@ ok(bigAuth.snapshot.omissions.some(o => o.path === 'roles[0].summary' && o.omitt
 const bigRound = await buildProjectRound(bigAuth, newBrief({ expertIds: Array.from({ length: 100 }, (_, i) => `role-${99 - i}`) }));
 ok(bigRound.reference.bytes <= ROUND_LIMITS.referenceBytes && Buffer.byteLength(JSON.stringify(bigRound.reference.opinions)) <= ROUND_LIMITS.referenceBytes + 200, 'reference stays within byte budget');
 ok(bigRound.reference.omissions.some(o => o.path === 'reference.opinions' && o.omittedItems + bigRound.reference.opinions.length === 100), 'dropped opinions are counted');
+const retainedRole = bigRound.reference.opinions[0].expertId;
+const bigFile = previousRoundWorkspaceFiles(bigRound, retainedRole)[0];
+ok(Buffer.byteLength(bigFile.content) <= ROUND_LIMITS.workspaceBytes, 'actual serialized 100-role workspace fits upload and prompt budgets');
+const bigData = JSON.parse(bigFile.content);
+ok(bigData.ownPreviousOpinion.expertId === retainedRole && bigData.omissions.some(o => o.path.startsWith('workspace.')), 'available own prior opinion retained and workspace omissions disclosed');
+ok(bigRound.reference.opinions.length > bigData.otherPreviousOpinions.length, 'bounded projection never mutates full reference');
 
 ok(fetched === 0, 'no network');
 console.log(`cloudbite-revision: ${checks} checks passed`);
