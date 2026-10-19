@@ -39,7 +39,7 @@ const STA: ExpertPlaybook = {
   minimumInputs: [
     { input: 'Worst path reports', question: 'Full worst setup and hold paths (clock edges, latency, CRPR, per-stage delays)?', changes: 'separates constraint artefacts or pessimism from real path problems.' },
     { input: 'Analysis settings', question: 'Which modes/corners, ideal or propagated clocks, GBA or PBA, which OCV/AOCV/POCV derates?', changes: 'pessimism removal can move slack with no design change.' },
-    { input: 'Constraint status', question: 'Generated clocks, I/O delays, clock groups, exceptions complete? Unconstrained endpoints?', changes: 'a wrong SDC makes every slack number meaningless.' },
+    { input: 'Constraint status', question: 'Generated clocks, I/O delays, clock groups, exceptions complete? Unconstrained endpoints?', changes: 'identifies which reported paths lack a justified constraint basis.' },
     { input: 'Flow stage', question: 'Pre-CTS, post-CTS, post-route with SPEF, or late ECO?', changes: 'which fixes are still cheap and which numbers are estimates.' },
   ],
   procedure: [
@@ -66,7 +66,7 @@ const STA: ExpertPlaybook = {
   remedies: [
     'Constraints in doubt: constraint review (unconstrained endpoints, exceptions) before any ECO.',
     'Pessimism-dominated: PBA recheck of top failing paths instead of design changes.',
-    'Post-CTS hold: targeted buffering judged on post-route fast corners.',
+    'Post-CTS hold: evaluate buffering on relevant fast corners, then recheck setup/hold across prescribed scenarios.',
     'Logic depth: pipeline or retime; a multicycle exception only with functional justification.',
   ],
 };

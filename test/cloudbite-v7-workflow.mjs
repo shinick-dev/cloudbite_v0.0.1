@@ -67,8 +67,10 @@ try {
     const coaching = coachingFixture(expertId);
     const reply = { summary: 'One of one selected experts completed. This is a synthetic conditional proposal.',
       recommendation: { status: 'no-recommendation', optionIds: [], rationale: 'A proposed measurement is still missing.', expertIds: [expertId], refs: ['brief:objective'] },
-      options: brief.decision.options.map((_, i) => ({ optionId: `option-${i + 1}`, benefits: [], risks: [], conditions: [] })),
-      dissent: [], criticalUnknowns: [], changeTriggers: [], nextActions: [], coaching };
+      options: brief.decision.options.map((_, i) => ({ optionId: `option-${i + 1}`, benefits: [{ text: 'Synthetic proposed benefit, still unverified.', expertIds: [expertId], refs: ['brief:objective'] }], risks: [], conditions: [] })),
+      dissent: [], criticalUnknowns: [{ text: 'A project measurement is missing.', expertIds: [expertId], refs: ['brief:objective'] }],
+      changeTriggers: [{ text: 'Revisit after a measurement is supplied.', expertIds: [expertId], refs: ['brief:objective'] }],
+      nextActions: [{ text: 'Propose a small measurement.', expertIds: [expertId], refs: ['brief:objective'] }], coaching };
     const parsed = M.parseMemoReply(JSON.stringify(reply), prompt); assert.ok(!('invalid' in parsed), parsed.invalid);
     const now = Date.now(), parentId = 'cb' + '1'.repeat(32);
     const parent = { project: { id: parentId, brief, status: 'completed', createdAt: now - 1000, updatedAt: now,
