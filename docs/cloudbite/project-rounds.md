@@ -47,7 +47,7 @@ snapshot, so an item longer than the cap shows as removed + added. Documents com
 
 ## Bounds
 
-`ROUND_LIMITS`: 100 roles, summary 1500 B, 6 evidence items × 500 B, text 2000 B, list 8 × 400 B, change summary
+`ROUND_LIMITS`: 100 roles, summary 1500 B, 6 evidence items × 500 B, text 2000 B, list 8 × 400 B (role names), decision-list items 8 × 1200 B (≥ 3 B × the 300-unit `DECISION_LIMITS.item`, so valid items are kept whole and the exact-text diff compares full text), change summary
 4000 B, total reference 64000 B (selected roles' opinions first). Cuts are on code point boundaries and every cut or
 dropped item is recorded in `omissions`.
 

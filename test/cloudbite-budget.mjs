@@ -195,4 +195,26 @@ await check('versioned, byte-bounded, browser-safe projection', () => {
   assert.equal(pub.total.used, 804); assert.equal(pub.caps.maxModelCalls, 804);
 });
 
+await check('review reservations never exceed the planned phases.review.max = min(cap, experts); run-id ledgers still work', () => {
+  const p = plan(ids(2));
+  assert.equal(p.phases.review.max, 2); assert.equal(p.maxNosanaCalls, 19);
+  for (const keys of [undefined, ['e0', 'e1']]) {
+    let u = B.createBudgetUsage(p, keys);
+    for (const key of Object.keys(u.experts)) for (let seq = 1; seq <= 8; seq++) u = B.reserveBudget(u, { phase: 'expert', key, seq }).usage;
+    // Review keys are expert ids even when the expert ledger is keyed by run id; membership is not required.
+    u = B.reserveBudget(u, { phase: 'review', key: 'expert-1' }).usage;
+    assert.equal(B.reserveBudget(u, { phase: 'review', key: 'expert-1' }).duplicate, true, 'idempotent replay');
+    u = B.reserveBudget(u, { phase: 'review', key: 'x' }).usage;
+    assert.equal(u.reviewers.length, 2);
+    assert.equal(B.reserveBudget(u, { phase: 'review', key: 'expert-2' }).reason, 'review-phase-cap', 'no third reviewer for two experts, even a foreign key');
+    assert.equal(B.reserveBudgetBatch(u, [{ phase: 'review', key: 'y' }]).ok, false);
+    assert.equal(B.reserveBudget(u, { phase: 'review', key: 'x' }).duplicate, true, 'replay still idempotent at the cap');
+    u = B.reserveBudget(u, { phase: 'memo', seq: 1 }).usage;
+    assert.ok(u.total <= p.maxNosanaCalls, `${u.total} <= ${p.maxNosanaCalls}`); assert.equal(u.total, 19);
+  }
+  // A single expert has no cross-review, as the plan says.
+  const one = B.createBudgetUsage(plan(ids(1)));
+  assert.equal(B.reserveBudget(one, { phase: 'review', key: 'expert-1' }).reason, 'review-phase-cap');
+});
+
 console.log(`${count} checks passed`);

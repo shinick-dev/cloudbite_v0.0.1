@@ -129,5 +129,20 @@ const bigData = JSON.parse(bigFile.content);
 ok(bigData.ownPreviousOpinion.expertId === retainedRole && bigData.omissions.some(o => o.path.startsWith('workspace.')), 'available own prior opinion retained and workspace omissions disclosed');
 ok(bigRound.reference.opinions.length > bigData.otherPreviousOpinions.length, 'bounded projection never mutates full reference');
 
+// Valid long multibyte decision items (300 UTF-16 units, ~900 bytes) are captured whole: unchanged stays unchanged.
+const LONG_KO = '제약'.repeat(100) + '😀'.repeat(50);
+ok(LONG_KO.length === 300 && Buffer.byteLength(LONG_KO) > 400 && Buffer.byteLength(LONG_KO) <= ROUND_LIMITS.decisionItem, 'fixture is a max-length valid item over the old 400-byte cap');
+const longDecision = { options: ['Plan A', 'Plan B'], constraints: [LONG_KO, '한'.repeat(250)], successCriteria: ['성공'.repeat(120)], knownFacts: [], assumptions: [], unknowns: ['미지'.repeat(110) + '🧪'] };
+store.get(PARENT).project = parentProject({ brief: { ...parentProject().brief, decision: longDecision } });
+const longAuth = await authorize(PARENT);
+ok(longAuth.snapshot.decision.constraints[0] === LONG_KO && !longAuth.snapshot.omissions.some(o => /constraints|successCriteria|unknowns/.test(o.path)), 'parent list items kept whole, no omission recorded');
+const longRound = await buildProjectRound(longAuth, newBrief({ decision: { ...longDecision, options: ['Plan A', 'Plan B'] } }));
+for (const k of ['constraints', 'successCriteria', 'unknowns'])
+  ok(longRound.comparison[k].added.length === 0 && longRound.comparison[k].removed.length === 0 && longRound.comparison[k].unchanged === longDecision[k].length, `${k}: unchanged long Korean/emoji items are not reported as removed+added`);
+const longFile = previousRoundWorkspaceFiles(longRound, 'role-a')[0];
+ok(Buffer.byteLength(longFile.content) <= ROUND_LIMITS.workspaceBytes, 'long-item workspace stays within its byte bound');
+const changedRound = await buildProjectRound(longAuth, newBrief({ decision: { ...longDecision, constraints: [LONG_KO.slice(0, 299)] } }));
+ok(changedRound.comparison.constraints.added.length === 1 && changedRound.comparison.constraints.removed.length === 2 && changedRound.comparison.constraints.unchanged === 0, 'a real edit is still reported');
+
 ok(fetched === 0, 'no network');
 console.log(`cloudbite-revision: ${checks} checks passed`);

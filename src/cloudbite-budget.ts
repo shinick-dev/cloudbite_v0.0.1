@@ -202,6 +202,7 @@ export function parseBudgetUsage(raw: unknown): BudgetUsage | undefined {
   experts, reviewers: [...r] as string[], memo: raw.memo, total: sum, rev: raw.rev, ...(raw.migrated ? { migrated: true as const } : {}) };
 }
 
+const reviewLimit = (u: BudgetUsage) => { const n = Object.keys(u.experts).length; return n >= 2 ? Math.min(u.caps.maxReviewCalls, n) : 0; };
 const expertUsed = (u: BudgetUsage) => Object.values(u.experts).reduce((a, b) => a + b, 0);
 
 function check(u: BudgetUsage, req: BudgetRequest): BudgetDenial | 'duplicate' | null {
@@ -217,7 +218,9 @@ function check(u: BudgetUsage, req: BudgetRequest): BudgetDenial | 'duplicate' |
     if (u.reviewers.includes(req.key)) return 'duplicate';
     if (!CB_BUDGET_KEY.test(req.key)) return 'unknown-expert';
     if (u.caps.maxReviewCalls === 0) return 'phase-disabled';
-    if (u.reviewers.length >= u.caps.maxReviewCalls) return 'review-phase-cap';
+    // Same bound the plan discloses (phases.review.max): one reviewer per budget expert, none for a single expert.
+    // Keys are not required to be expert keys (ledgers may be keyed by run id while reviews use expert ids).
+    if (u.reviewers.length >= reviewLimit(u)) return 'review-phase-cap';
   } else {
     if (!Number.isInteger(req.seq) || req.seq < 1) return 'out-of-order';
     if (req.seq <= u.memo) return 'duplicate';

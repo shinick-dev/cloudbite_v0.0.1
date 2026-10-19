@@ -12,7 +12,7 @@ module changes no contract, API, DO, client or package file.
 | phase | calls | where |
 |---|---|---|
 | expert | each runner `inference` turn, at most 8 per role (`CB_INFERENCE_MAX_CALLS`) | one Daytona sandbox per selected expert |
-| review | one call per cross-review reviewer, at most 3 | server-side, no sandbox |
+| review | one call per cross-review reviewer, at most `min(maxReviewCalls, ledger experts)` (0 for a single expert), the same bound as `phases.review.max`; reviewer keys need not be ledger keys (run-id ledgers, expert-id reviewers) | server-side, no sandbox |
 | memo | the decision memo call, at most 1 | server-side, no sandbox |
 
 Jev routing (typesafe) makes 2 separate typed calls per plan (assessment, team review). They are **not** Nosana calls and

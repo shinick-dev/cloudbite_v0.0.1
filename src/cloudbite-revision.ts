@@ -13,6 +13,8 @@ export const ROUND_VERSION = 'project-round/v1';
 export const ROUND_LIMITS = Object.freeze({
   referenceBytes: 64_000, workspaceBytes: 32 * 1024, roles: 100, summary: 1_500, evidenceItems: 6, evidenceItem: 500,
   text: 2_000, listItem: 400, listItems: 8, changeSummary: 4_000,
+  /** Decision-list items: >= 3 bytes x DECISION_LIMITS.item (300 UTF-16 units), so a valid item is never cut and exact-text diffs see full text. */
+  decisionItem: 1_200,
 });
 const TERMINAL: ReadonlySet<ProjectStatus> = new Set(['completed', 'partial', 'failed', 'cancelled']);
 const ACTOR = /^(owner|v_[0-9a-f]{64})$/;
@@ -121,11 +123,11 @@ export async function authorizeRoundParent(input: { parentId: unknown; actor: st
     stage: projectStage(p.brief), responseLanguage: defaultResponseLanguage(p.brief),
     options: options(d, 'options', omissions),
     ...(d ? { decision: {
-      constraints: capList(d.constraints, ROUND_LIMITS.listItems, ROUND_LIMITS.listItem, 'constraints', omissions),
-      successCriteria: capList(d.successCriteria, ROUND_LIMITS.listItems, ROUND_LIMITS.listItem, 'successCriteria', omissions),
-      knownFacts: capList(d.knownFacts, ROUND_LIMITS.listItems, ROUND_LIMITS.listItem, 'knownFacts', omissions),
-      assumptions: capList(d.assumptions, ROUND_LIMITS.listItems, ROUND_LIMITS.listItem, 'assumptions', omissions),
-      unknowns: capList(d.unknowns, ROUND_LIMITS.listItems, ROUND_LIMITS.listItem, 'unknowns', omissions),
+      constraints: capList(d.constraints, ROUND_LIMITS.listItems, ROUND_LIMITS.decisionItem, 'constraints', omissions),
+      successCriteria: capList(d.successCriteria, ROUND_LIMITS.listItems, ROUND_LIMITS.decisionItem, 'successCriteria', omissions),
+      knownFacts: capList(d.knownFacts, ROUND_LIMITS.listItems, ROUND_LIMITS.decisionItem, 'knownFacts', omissions),
+      assumptions: capList(d.assumptions, ROUND_LIMITS.listItems, ROUND_LIMITS.decisionItem, 'assumptions', omissions),
+      unknowns: capList(d.unknowns, ROUND_LIMITS.listItems, ROUND_LIMITS.decisionItem, 'unknowns', omissions),
     } } : {}),
     documents: await documentMeta(p.brief.documents),
     roles: p.experts.slice(0, ROUND_LIMITS.roles).map((e, i) => {

@@ -11,7 +11,7 @@ import type { CrossReviewReport, DecisionFrame, ExpertStatus, OpinionDirection, 
 import type { CompletedOpinion } from './cloudbite-cross-review';
 import type { ChatMessage } from './cloudbite-inference';
 import { decisionOptionIds, defaultResponseLanguage, projectStage } from './cloudbite-workflow';
-import { LANGUAGE_FAILURE_CATEGORY, languageIntegrity, languageMismatchMessage } from './cloudbite-language';
+import { LANGUAGE_FAILURE_CATEGORY, LANGUAGE_PATTERNS, languageIntegrity, languageMismatchMessage } from './cloudbite-language';
 
 export type { CompletedOpinion } from './cloudbite-cross-review';
 
@@ -372,21 +372,34 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 const exactKeys = (o: object, keys: readonly string[]) => { const k = Object.keys(o); return k.length === keys.length && keys.every((x) => k.includes(x)); };
 const text = (v: unknown, max: number): v is string => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
 // Narrow, disclosed regex heuristic (no semantic guarantee): a clause that positively asserts unanimity, a reached
-// consensus, a vote, or agreement of all/most experts is refused, unless the same clause negates it. Honest absence
-// statements ("No consensus can be inferred", "No vote was taken", "합의는 확인되지 않았다") stay allowed.
-const POSITIVE_AGREEMENT = new RegExp([
+// consensus, a vote, or agreement of all/most experts is refused, unless the same clause negates it or marks it as
+// uncertain/hypothetical. Honest absence and uncertainty statements ("No consensus can be inferred", "It is unclear
+// whether consensus was reached", "합의는 확인되지 않았다", "합의 여부는 불분명하다") stay allowed. Quoted spans are
+// removed first (an expert's own quoted words are not the memo's assertion). In changeTriggers/nextActions a vote that
+// is proposed rather than reported ("Hold a team vote after the pilot", "이사회 투표로 결정한다") is allowed; a past vote
+// ("exp-a voted for option-2", "투표로 결정했다") and every non-vote agreement claim are still refused there.
+const AGREEMENT = [
   '\\bunanimous(?:ly)?\\b', '\\b(?:reached|formed|achieved|built|forged) (?:a |an |broad |clear |strong |full )?consensus\\b',
   '\\bconsensus (?:is|was|has been|among|between|that|on|for|of|emerged|exists)\\b', '\\b(?:there (?:is|was) )(?:a |broad |clear |strong |full )?consensus\\b',
-  '\\bvot(?:e|ed|es|ing) (?:for|in favou?r|to)\\b', '\\b(?:experts?|panel|team|everyone|majority)\\b[^.;!?\\n]{0,40}\\bvot(?:e|ed|es|ing)\\b',
   '\\b(?:all|every|each)(?: of the| the)?(?: [a-z-]+)? experts? (?:agree|agreed|agrees|support|supported|supports|chose|endorse|endorsed|recommend|recommended|favou?r|favou?red)\\b',
   '\\b(?:the )?majority(?: of (?:the )?experts)? (?:agree|agreed|support|supported|favou?r|favou?red|chose|recommend|recommended)\\b',
-  '만장일치', '합의(?:했|하였|되었|된다|됐|함|에 도달|를 이루|를 이뤘|가 이루어|가 형성)', '투표(?:했|하였|결과|로 결정|에서)',
+  '만장일치', '합의(?:했|하였|되었|된다|됐|함|에 도달|를 이루|를 이뤘|가 이루어|가 형성)',
   '전원(?:이)? ?(?:동의|찬성|지지)', '모든 전문가(?:가|들이)? ?(?:동의|찬성|선택|지지|추천)', '다수(?:의 전문가)?(?:가|는) ?(?:동의|찬성|지지|선택)',
-].join('|'), 'i');
+];
+const VOTE = ['\\bvot(?:e|ed|es|ing) (?:for|in favou?r|to)\\b', '\\b(?:experts?|panel|team|everyone|majority)\\b[^.;!?\\n]{0,40}\\bvot(?:e|ed|es|ing)\\b','투표(?:했|하였|결과|로 결정|에서)'];
+const POSITIVE_AGREEMENT = new RegExp([...AGREEMENT, ...VOTE].join('|'), 'i');
+const POSITIVE_NON_VOTE = new RegExp(AGREEMENT.join('|'), 'i');
+const PAST_VOTE = /\bvoted\b|\bvotes? (?:was|were|has been|had been) (?:taken|held|cast)\b|\bvote (?:showed|went|favou?red|chose)\b|투표(?:했|하였|결과|에서|로 결정(?:했|하였|되었|됐|됨))/i;
 const NEGATED = /\b(?:no|not|never|none|nor|neither|without|cannot|unable|absence|absent|lack(?:s|ed|ing)?)\b|n't\b|없|않|아니|못|불가|부재/i;
+const UNCERTAIN = /\b(?:unclear|unknown|uncertain|unverified|unconfirmed|unestablished|undetermined|undecided|unsure|whether|if|hypothetical(?:ly)?|suppose|assuming)\b|\binsufficient (?:evidence|basis|information)\b|불분명|불확실|불명확|미확인|미정|알 수 없|모르|여부|근거가 부족|만약|라면|(?:는|은)지(?![만도])/i;
+const QUOTED = new RegExp(LANGUAGE_PATTERNS.strip[4], 'g');
 const CLAUSES = /[.;!?。\n]|,\s*(?:but|however|although)\b|그러나|하지만|반면/i;
-export function claimsUnsupportedAgreement(t: string): boolean {
-  return t.split(CLAUSES).some((c) => POSITIVE_AGREEMENT.test(c) && !NEGATED.test(c));
+/** `prospective`: the text is a proposed action/trigger (changeTriggers, nextActions), where a non-past vote is a proposal. */
+export function claimsUnsupportedAgreement(t: string, opts: { prospective?: boolean } = {}): boolean {
+  return t.replace(QUOTED, ' ').split(CLAUSES).some((c) => {
+    if (!POSITIVE_AGREEMENT.test(c) || NEGATED.test(c) || UNCERTAIN.test(c)) return false;
+    return !opts.prospective || POSITIVE_NON_VOTE.test(c) || PAST_VOTE.test(c);
+  });
 }
 
 export function parseMemoReference(ref: string): MemoReference | null {
@@ -487,7 +500,10 @@ export function parseMemoReply(reply: string, prompt: MemoPrompt, hooks: { langu
       rationale: clean(r.rationale), expertIds: recExperts, refs: recRefs },
     comparison, dissent, criticalUnknowns, changeTriggers, nextActions, basis: 'derived-interpretation', confidence: 'not-calibrated',
   };
-  if (memoNarrative(memo).some(claimsUnsupportedAgreement)) return { invalid: 'memo claims a vote or consensus the originals did not make' };
+  const asserted = [memo.summary, memo.recommendation.rationale,
+    ...[...comparison.flatMap((c) => [...c.benefits, ...c.risks, ...c.conditions]), ...dissent, ...criticalUnknowns].map((c) => c.text)];
+  const proposed = [...changeTriggers, ...nextActions].map((c) => c.text);
+  if (asserted.some((t) => claimsUnsupportedAgreement(t)) || proposed.some((t) => claimsUnsupportedAgreement(t, { prospective: true }))) return { invalid: 'memo claims a vote or consensus the originals did not make' };
   const lang = (hooks.languageCheck ?? defaultMemoLanguageCheck)(memo, prompt.language);
   if (lang) return { invalid: lang, category: LANGUAGE_FAILURE_CATEGORY };
   return { version: CB_MEMO_VERSION, language: prompt.language, memo, coverage: prompt.coverage };

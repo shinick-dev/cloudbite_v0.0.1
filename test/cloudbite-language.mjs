@@ -307,4 +307,28 @@ await check('memo: honest absence/negation of consensus or a vote is allowed (EN
   assert.ok(!/do not use the words/.test(en.messages[0].content), 'no broad word ban in the prompt');
 });
 
+await check('memo: uncertainty, quoted expert words and proposed future votes are not agreement claims; asserted ones still fail', () => {
+  const en = memoPrompt(memoBrief({ responseLanguage: 'en' })), ko = memoPrompt(memoBrief());
+  const okEn = (patch, d) => assert.ok(!('invalid' in MM.parseMemoReply(memoReply({ ...EN_MEMO, ...patch }), en)), d);
+  const okKo = (patch, d) => assert.ok(!('invalid' in MM.parseMemoReply(memoReply({ ...KO_MEMO, ...patch }), ko)), d);
+  const badEn = (patch, d) => assert.match(MM.parseMemoReply(memoReply({ ...EN_MEMO, ...patch }), en).invalid ?? '', /vote or consensus/, d);
+  const badKo = (patch, d) => assert.match(MM.parseMemoReply(memoReply({ ...KO_MEMO, ...patch }), ko).invalid ?? '', /vote or consensus/, d);
+  for (const d of ['It is unclear whether consensus was reached.', 'Consensus is unclear from the supplied opinions.', 'Whether consensus exists is unknown.',
+    'cb-pd wrote "the team reached consensus on the floorplan" in its own summary.'])
+    okEn({ dissent: d }, d);
+  for (const d of ['합의가 형성되었는지는 불분명하다.', '합의에 도달했는지 판단할 근거가 부족하다.']) okKo({ dissent: d }, d);
+  okEn({ c4: 'Hold a team vote on option-1 after the pilot.' }, 'proposed team vote');
+  okEn({ c3: 'If the pilot fails, put option-2 to a board vote.' }, 'proposed board vote trigger');
+  okKo({ c4: '이사회 투표로 결정한다.' }, '이사회 투표 제안');
+  // Still refused: positive assertions, outside quotes, and past votes even in action fields.
+  badEn({ dissent: 'cb-pd quoted "x"; all experts agree on option-2.' }, 'assertion beside a quote');
+  badEn({ c4: 'exp-a voted for option-2, so proceed.' }, 'past vote in nextActions');
+  badEn({ c4: 'All experts agree on option-2; start the pilot.' }, 'non-vote agreement in nextActions');
+  badEn({ summary: 'The experts reached consensus on option-2.' }, 'reached consensus');
+  badEn({ summary: 'Majority support goes to option-2 because the majority of experts support it.' }, 'majority support');
+  badKo({ c4: '이사회는 투표로 결정했다.' }, '과거 투표');
+  badKo({ dissent: '전문가들이 합의에 도달했다.' }, '합의 도달 단정');
+  assert.equal(MM.claimsUnsupportedAgreement('Hold a team vote on option-1 after the pilot.'), true, 'outside action fields the vote heuristic still applies');
+});
+
 console.log(`cloudbite language: ${count} checks passed (outputs left under ${tmp})`);
