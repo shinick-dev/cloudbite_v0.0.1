@@ -899,8 +899,6 @@ export class CloudbiteProject extends DurableObject<Env> {
       } else return fail(400, 'invalid CSV source');
     } else if (body.source !== undefined) return fail(400, 'arithmetic uses explicit inputs, not an artifact source');
     const id = 'qc_' + (await cbHash(JSON.stringify({ projectId: s.p.id, request, source: source ?? null }))).slice(0, 32);
-    const existing = s.quantitative?.find(x => x.id === id);
-    if (existing) return this.view(s);
     // Computation may await hashing. The transaction below rechecks authority/deletion after it returns.
     const result = await runQuantitativeCheck(request, csv);
     const record: C.QuantitativeCheckRecord = { id, projectId: s.p.id, createdAt: this.clock(), request, result, execution: 'app-deterministic', ...(source ? { source } : {}) };
@@ -919,7 +917,7 @@ export class CloudbiteProject extends DurableObject<Env> {
     if (written) return written;
     await this.publishHistory();
     const fresh = await this.load();
-    return fresh && !fresh.p.history?.deleted && fresh.p.purgeAt > this.clock() ? this.view(fresh) : fail(410, 'project was deleted or expired during the calculation');
+    return fresh && !fresh.p.history?.deleted && fresh.p.purgeAt > this.clock() && fresh.p.tokens.includes(tokenHash) ? this.view(fresh) : fail(410, 'project was deleted or expired during the calculation');
   }
 
   private completed(s: Pick<Loaded, 'experts'>): CompletedOpinion[] {

@@ -21,14 +21,14 @@ import type { HistoryList, HistoryDetail, HistoryReport, HistoryIssue, HistoryFe
 import type { CatalogueMaxRoles, ProjectMaxExperts } from '../src/cloudbite-catalogue-limits';
 import type { ClaimAdoption, ClaimStanding, LedgerClaim, ProvenanceLedger, ProvenanceState } from '../src/cloudbite-provenance';
 import type { AuthorResponseParsed, AuthorResponsePlan } from '../src/cloudbite-author-response';
-import type { QuantitativeCheckRecord } from '../src/cloudbite-contract';
+import type { ClaimSupportAssessment, QuantitativeCheckRecord } from '../src/cloudbite-contract';
 import type { QuantitativeRequest } from '../src/cloudbite-quantitative';
 
 type Mode = 'demo' | 'live';
 type View = 'home' | 'guide' | 'help' | 'settings' | 'history';
 /** invalidAuthorResponse: 서버가 보낸 작성자 응답을 읽을 수 없다 (서버가 거부한 응답 { invalid } 와는 다르다) */
 type ConsoleExpert = ExpertRun & { invalidOpinion?: boolean; invalidAuthorResponse?: boolean };
-type ConsoleReview = ProjectCrossReview & { invalidArtifactCoverage?: boolean };
+type ConsoleReview = ProjectCrossReview & { invalidArtifactCoverage?: boolean; invalidClaimSupport?: boolean };
 type Provenance = { ledger: ProvenanceLedger; state: ProvenanceState };
 /** 서버가 저장한 결정 메모. 모양을 검사해 그대로 받으며, 원문 의견은 따로 그대로 남는다 */
 type ConsoleMemo = ProjectMemo;
@@ -2098,6 +2098,7 @@ function normalizeCrossReview(raw: unknown): ConsoleReview | null {
   if (!isObj(raw) || raw.execution !== 'server-nosana' || !REVIEW_STATUSES.includes(raw.status as ProjectCrossReview['status'])) return null;
   if (raw.reports !== undefined && !Array.isArray(raw.reports)) return null;
   const reports: CrossReviewReport[] = [];
+  let invalidClaimSupport = false;
   for (const r of ((raw.reports as unknown[] | undefined) ?? []).slice(0, 8)) {
     if (!isObj(r) || !Array.isArray(r.findings)) return null;
     const reviewerExpertId = str(r.reviewerExpertId, 80);
@@ -2107,7 +2108,9 @@ function normalizeCrossReview(raw: unknown): ConsoleReview | null {
       if (!isObj(f) || !VERDICTS.includes(f.verdict as CrossReviewFinding['verdict'])) return null;
       const targetExpertId = str(f.targetExpertId, 80), evidenceIndex = num(f.evidenceIndex);
       if (!targetExpertId || evidenceIndex === null || evidenceIndex < 0 || !Number.isInteger(evidenceIndex)) return null;
-      findings.push({ targetExpertId, evidenceIndex, verdict: f.verdict as CrossReviewFinding['verdict'], rationale: str(f.rationale, 600) });
+      const support = f.claimSupport === undefined ? undefined : normalizeClaimSupport(f.claimSupport);
+      if (support === null) invalidClaimSupport = true;
+      findings.push({ targetExpertId, evidenceIndex, verdict: f.verdict as CrossReviewFinding['verdict'], rationale: str(f.rationale, 600), ...(support ? { claimSupport: support } : {}) });
     }
     reports.push({ reviewerExpertId, findings, summary: str(r.summary, 1000) });
   }
@@ -2131,7 +2134,23 @@ function normalizeCrossReview(raw: unknown): ConsoleReview | null {
     ...(completedAt !== null ? { completedAt } : {}), reports, ...(error ? { error } : {}), execution: 'server-nosana',
     ...(coverage ? { coverage } : {}), ...(disclosure ? { disclosure } : {}), ...(avail.length ? { textAvailability: avail } : {}),
     ...(art ? { artifactCoverage: art } : art === null ? { invalidArtifactCoverage: true } : {}),
+    ...(invalidClaimSupport ? { invalidClaimSupport: true } : {}),
   };
+}
+
+function normalizeClaimSupport(raw: unknown): ClaimSupportAssessment | null {
+  if (!isObj(raw) || raw.basis !== 'model-assessment' || raw.quoteCheck !== 'exact-substring' || typeof raw.packetSha256 !== 'string' || !SHA256.test(raw.packetSha256)
+    || !['supported', 'partial', 'contradicted', 'insufficient'].includes(String(raw.status))
+    || !['available', 'partial', 'unavailable', 'uncited', 'not-in-packet'].includes(String(raw.citedText))
+    || typeof raw.rationale !== 'string' || !raw.rationale.trim() || raw.rationale.length > 400 || !Array.isArray(raw.quotes) || raw.quotes.length > 3) return null;
+  if (raw.status !== 'insufficient' && !raw.quotes.length) return null;
+  for (const q of raw.quotes) {
+    if (!isObj(q) || typeof q.passageId !== 'string' || q.passageId.length > 128 || typeof q.ref !== 'string' || q.ref.length > 200
+      || !['user-document', 'imported-original-excerpt', 'workspace-field', 'curated-card'].includes(String(q.textOrigin))
+      || typeof q.quote !== 'string' || q.quote.trim().length < 8 || q.quote.length > 300 || typeof q.sourceSha256 !== 'string' || !SHA256.test(q.sourceSha256)
+      || !isInt(q.startOffset) || !isInt(q.endOffset) || q.endOffset - q.startOffset !== q.quote.length || !isInt(q.startLine, 1) || !isInt(q.endLine, q.startLine)) return null;
+  }
+  return raw as unknown as ClaimSupportAssessment;
 }
 type ArtifactCoverage = NonNullable<ProjectCrossReview['artifactCoverage']>;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -3011,7 +3030,17 @@ function phaseTwoMarkdown(p: ConsoleProject, m: Messages): string[] {
     for (const rep of cr.reports) for (const f of rep.findings) {
       const basis = cr.textAvailability?.find(x => x.reviewerExpertId === rep.reviewerExpertId && x.targetExpertId === f.targetExpertId && x.evidenceIndex === f.evidenceIndex);
       out.push(`- ${m.reviewBy(name(rep.reviewerExpertId))} · ${m.verdict[f.verdict]} · ${m.reviewFinding(name(f.targetExpertId), f.evidenceIndex + 1)}${basis ? ` (${t.revBasis[basis.textBasis]})` : ''}${f.rationale ? ` — ${f.rationale}` : ''}`);
+      if (f.claimSupport) {
+        const cs = f.claimSupport;
+        out.push(`  - ${m.p4.supportTitle}: ${m.p4.supportStatus[cs.status]} — ${cs.rationale}`, `  - ${m.p4.supportNote}`, `  - ${cs.packetSha256} (${cs.citedText})`);
+        for (const q of cs.quotes) out.push(`  - ${q.ref} · ${q.textOrigin} · L${q.startLine}–${q.endLine} · ${q.sourceSha256}`, `    > ${q.quote}`);
+      }
     }
+  }
+  if (p.quantitativeChecks?.length || p.invalidQuantitative) {
+    out.push('', `## ${m.p4.records}`, m.p4.note);
+    if (p.invalidQuantitative) out.push(m.p4.invalid);
+    for (const q of p.quantitativeChecks ?? []) out.push('', `### ${q.id}`, JSON.stringify(q, null, 2));
   }
   out.push('', `## ${t.memoTitle}`);
   const pm = p.memo;
@@ -4675,12 +4704,12 @@ function boot(): void {
         h('option', { value: 'arithmetic', selected: q.kind === 'arithmetic' }, t.arithmetic), h('option', { value: 'csv-summary', selected: q.kind === 'csv-summary' }, t.csv));
       content.push(mode);
       if (q.kind === 'arithmetic') content.push(
-        field(t.expression, h('input', { value: q.expression, maxlength: 1000, disabled: q.busy, oninput: (ev: Event) => { q.expression = (ev.target as HTMLInputElement).value; } })),
+        field(t.expression, h('input', { value: q.expression, maxlength: 512, disabled: q.busy, oninput: (ev: Event) => { q.expression = (ev.target as HTMLInputElement).value; } })),
         field(t.variables, h('textarea', { value: q.variables, rows: 4, maxlength: 6000, disabled: q.busy, oninput: (ev: Event) => { q.variables = (ev.target as HTMLTextAreaElement).value; } })),
         h('p', { class: 'cb-help' }, t.variablesHint));
       else if (sources.length) content.push(field(t.source, h('select', { disabled: q.busy, onchange: (ev: Event) => { q.source = (ev.target as HTMLSelectElement).value; } },
         ...sources.map((s, i) => h('option', { value: String(i), selected: q.source === String(i) }, s.label)))),
-        field(t.column, h('input', { value: q.column, maxlength: 200, disabled: q.busy, oninput: (ev: Event) => { q.column = (ev.target as HTMLInputElement).value; } })),
+        field(t.column, h('input', { value: q.column, maxlength: 128, disabled: q.busy, oninput: (ev: Event) => { q.column = (ev.target as HTMLInputElement).value; } })),
         h('p', { class: 'cb-help' }, t.sourceNote));
       else content.push(h('p', { class: 'cb-help' }, t.noCsv));
       if (q.error || q.inputError) content.push(h('p', { class: 'cb-warn', role: 'status' }, q.inputError ? t.inputError : t.failed));
@@ -4706,7 +4735,7 @@ function boot(): void {
       if (!q.expression.trim() || rows.length > 20) { q.inputError = true; renderEvidence(); return; }
       for (const row of rows) {
         const parts = row.split(',').map(x => x.trim()), [name, val, unit = ''] = parts;
-        if (parts.length < 2 || parts.length > 3 || !/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(name) || Object.hasOwn(variables, name) || !val || !Number.isFinite(Number(val))) {
+        if (parts.length < 2 || parts.length > 3 || !/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(name) || Object.hasOwn(variables, name) || !val || !Number.isFinite(Number(val))) {
           q.inputError = true; renderEvidence(); return;
         }
         variables[name] = { value: Number(val), unit };
@@ -4748,6 +4777,7 @@ function boot(): void {
     const canAsk = !!run && run.mode === 'live' && !!run.accessToken && run.project?.id === p.id && !active() && reviewEligible(p);
     if (!cr && !p.invalidCrossReview && !local && !(interactive && run?.mode === 'live' && TERMINAL_PROJECT.includes(p.status))) return [];
     const kids: Kid[] = [h('p', { class: 'cb-help' }, m.reviewExplain)];
+    if (cr?.invalidClaimSupport) kids.push(h('p', { class: 'cb-warn' }, m.p4.supportInvalid));
     if (!interactive && (cr || p.invalidCrossReview)) kids.push(h('p', { class: 'cb-help' }, m.reviewSaved));
     if (p.invalidCrossReview) kids.push(h('p', { class: 'cb-warn' }, m.reviewInvalid));
     const running = local?.phase === 'running' || cr?.status === 'running';
@@ -4781,7 +4811,12 @@ function boot(): void {
               h('strong', null, m.reviewFinding(expertName(p, f.targetExpertId), f.evidenceIndex + 1)),
               basis ? h('span', { class: 'cb-tag' }, m.p2.revBasis[basis.textBasis]) : null),
             quoted ? h('blockquote', { class: 'cb-finding-evidence' }, quoted) : null,
-            f.rationale ? h('p', null, f.rationale) : null);
+            f.rationale ? h('p', null, f.rationale) : null,
+            f.claimSupport ? evDisclosure(opened, `${prefix}support:${r.reviewerExpertId}:${f.targetExpertId}:${f.evidenceIndex}`, 'cb-quiet cb-support',
+              [h('span', null, `${m.p4.supportTitle} · ${m.p4.supportStatus[f.claimSupport.status]}`)],
+              h('p', { class: 'cb-help' }, m.p4.supportNote), h('p', null, f.claimSupport.rationale),
+              ...f.claimSupport.quotes.map(q => h('figure', null, h('blockquote', null, q.quote), h('figcaption', null, `${q.ref} · ${q.textOrigin} · L${q.startLine}–${q.endLine}`))),
+              h('p', { class: 'cb-help' }, `${f.claimSupport.citedText} · ${f.claimSupport.packetSha256}`)) : null);
         })) : h('p', { class: 'cb-help' }, m.reviewNoFindings)));
     }
     if (cr) kids.push(...artifactKids(p, cr, opened, prefix));

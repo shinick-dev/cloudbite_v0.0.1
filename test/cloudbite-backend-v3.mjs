@@ -43,8 +43,8 @@ const memoReply = (ids) => JSON.stringify({
   dissent: [], criticalUnknowns: [], changeTriggers: [claim('Costs double')], nextActions: [claim('Confirm the cost', [ids[0]])] });
 const reviewData = (req) => JSON.parse(req.messages[1].content.replace(/^[^\n]*\n/, ''));
 const challengeReply = (data) => JSON.stringify({ summary: `Review by ${data.reviewerExpertId}`, findings: data.peers.flatMap((p) => [
-  { targetExpertId: p.expertId, evidenceIndex: 0, verdict: 'challenged', rationale: 'The cited plan does not show the claimed effect.' },
-  { targetExpertId: p.expertId, evidenceIndex: 1, verdict: 'insufficient', rationale: 'No source supports this threshold.' }]) });
+  { targetExpertId: p.expertId, evidenceIndex: 0, verdict: 'challenged', rationale: 'The cited plan does not show the claimed effect.', claimSupport: { status: 'insufficient', quotes: [], rationale: 'The cited plan does not show the claimed effect.' } },
+  { targetExpertId: p.expertId, evidenceIndex: 1, verdict: 'insufficient', rationale: 'No source supports this threshold.', claimSupport: { status: 'insufficient', quotes: [], rationale: 'No source supports this threshold.' } }]) });
 globalThis.fetch = async (u, init = {}) => {
   const url = new URL(typeof u === 'string' ? u : u.url);
   if (url.host !== 'nosana.fake') throw new Error('network forbidden: ' + url.host);
