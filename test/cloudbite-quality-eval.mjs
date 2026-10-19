@@ -19,6 +19,19 @@ const NOW = new Date('2026-10-19T00:00:00Z');
 let n = 0;
 const test = async (name, fn) => { await fn(); n++; console.log('ok', name); };
 
+await test('canonical project workspace references are present without being uploaded docs; absent decision stays unknown', () => {
+  const project={brief:{title:'QA',objective:'Choose a path',context:''},evidenceClaims:[
+    {id:'a',expertId:'r1',text:'[source:PROJECT.md] states the objective',references:[{kind:'knowledge',id:'PROJECT.md',available:false}]},
+    {id:'b',expertId:'r1',text:'[doc:DECISION.md] states the options',references:[{kind:'document',id:'DECISION.md',available:false}]}]};
+  let l=Q.citationLedger({project});
+  assert.equal(l.claims[0].status,'ids-present-content-unverified');
+  assert.deepEqual(l.claims[0].references,[{kind:'workspace',id:'PROJECT.md',status:'id-present'}]);
+  assert.equal(l.claims[1].status,'invalid-citation');
+  project.brief.decision={options:['A','B'],constraints:[],successCriteria:[],knownFacts:[],assumptions:[],unknowns:[]};
+  l=Q.citationLedger({project});
+  assert.equal(l.claims[1].status,'ids-present-content-unverified');
+});
+
 const hex = (c, len) => c.repeat(len);
 /** Builds a schema-valid HistoryDetail for a case with the supplied per-role outputs. */
 function exportFor(caseId, roles, { model = 'test/model-a', mode = 'demo', stage, documents, promptChar = 'a' } = {}) {

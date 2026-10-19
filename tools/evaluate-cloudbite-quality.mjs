@@ -331,6 +331,9 @@ export function citationLedger(detail) {
   const claims = (p.evidenceClaims ?? []).map((c) => {
     const refs = c.references.map((r) => {
       let status;
+      if (r.id === 'PROJECT.md' || r.id === 'DECISION.md') {
+        return { kind: 'workspace', id: r.id, status: r.id === 'PROJECT.md' || p.brief.decision ? 'id-present' : 'unknown-workspace-id' };
+      }
       if (r.kind === 'document') status = docs.has(r.id) ? 'id-present' : 'unknown-document-id';
       else if (r.available) status = 'id-present';
       else status = [...(knowledgeByRole.get(r.id) ?? [])].some((e) => e !== c.expertId) ? 'cross-role-id' : 'unknown-knowledge-id';
