@@ -75,13 +75,14 @@ const GATEWAY = `http://127.0.0.1:${server.address().port}`;
 const CARD = { id: 'card-1', title: 'Timing closure basics', source_ids: ['src-known'], match: ['timing'] };
 const SOURCE = { id: 'src-known', title: 'Educational timing notes', tool_scope: 'education', aliases: [] };
 
-function workspace(project, { review = false } = {}) {
+function workspace(project, { review = false, previousRound } = {}) {
   const dir = mkdtempSync(join(tmp, 'sb-'));
   for (const d of ['out', 'work', '.cloudbite', 'knowledge']) mkdirSync(join(dir, d));
   const files = { 'INSTRUCTIONS.md': '# Instructions\nWrite in clear English.', 'PERSONA.md': '# Persona\nPhysical design engineer (AI role). Answers in English.', 'WORKORDER.md': 'Review the floorplan.',
     'PROJECT.md': '# Project', 'RESULT.schema.json': '{"type":"object"}', 'KNOWLEDGE.md': 'Use the knowledge action.' };
   for (const [p, t] of Object.entries(files)) writeFileSync(join(dir, p), t);
   if (project) writeFileSync(join(dir, 'project.json'), JSON.stringify(project, null, 2) + '\n');
+  if (previousRound) { mkdirSync(join(dir,'evidence')); writeFileSync(join(dir,'evidence','previous-round.json'),JSON.stringify(previousRound)); }
   const cards = JSON.stringify([CARD]), sources = JSON.stringify([SOURCE]);
   const sha = (t) => createHash('sha256').update(t).digest('hex');
   writeFileSync(join(dir, 'knowledge', 'cards.json'), cards);
@@ -120,6 +121,17 @@ const koOpinion = { direction: 'conditional', confidence: 58, summary: KO, evide
 const enReport = '# Timing review\nThe floorplan needs revision before signoff; the evidence is educational only.';
 const koReport = '# 타이밍 검토\n사인오프 전에 플로어플랜 수정이 필요하며, 근거는 교육용 자료뿐이다.';
 const KO_PROJECT = { title: '블록 타이밍', objective: '블록 타이밍을 닫을 방법을 검토한다.', context: '', expertIds: ['cb-pd'], mode: 'live', requestId: 'lang-1' };
+
+await check('runner: the actual initial context contains the bounded previous-round file as untrusted data', async () => {
+  const marker='PREVIOUS_ROUND_SOURCE_MARKER';
+  const r=await run(()=>final(enOpinion,enReport),{...KO_PROJECT,responseLanguage:'en'},
+    {previousRound:{kind:'cloudbite-previous-round',trust:'untrusted-data',ownPreviousOpinion:{summary:marker},otherPreviousOpinions:[],notice:'Reference only; not a new result.'}});
+  assert.equal(r.code,0); assert.equal(r.calls.length,1);
+  const initial=JSON.stringify(r.calls[0]);
+  assert.ok(initial.includes('=== UNTRUSTED PROJECT DATA: evidence/previous-round.json ===') && initial.includes(marker));
+  assert.ok(!r.calls[0][0].content.includes(marker),'prior output never becomes a system instruction');
+  assert.ok(r.bytes.every(n=>n<=M.CB_RUNNER_INFERENCE_MAX));
+});
 
 await check('runner: a Korean project rejects an English last-turn final and repairs it to Korean inside the 8-call cap; the repaired final is saved unchanged', async () => {
   const r = await run(busy((messages) => (repairTurn(messages) ? final(koOpinion, koReport) : final(enOpinion, enReport))), KO_PROJECT);

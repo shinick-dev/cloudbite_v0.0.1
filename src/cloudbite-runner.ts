@@ -322,7 +322,7 @@ def write_file(path, content):
 def decision_text():
     """Complete optional decision/evidence inputs, shared by every role; never tool instructions."""
     parts = []
-    for name in ('DECISION.md', 'evidence/documents.json'):
+    for name in ('DECISION.md', 'evidence/documents.json', 'evidence/previous-round.json'):
         path = os.path.join(ROOT, name)
         if not os.path.isfile(path): continue
         with open(path, encoding='utf-8') as f: body = f.read(128 * 1024 + 1)
@@ -354,7 +354,7 @@ def workspace_text():
             p = os.path.relpath(os.path.join(dirpath, name), ROOT).replace(os.sep, '/')
             if p == 'runner.py':
                 continue
-            if p in ('DECISION.md', 'evidence/documents.json'):
+            if p in ('DECISION.md', 'evidence/documents.json', 'evidence/previous-round.json'):
                 continue
             with open(os.path.join(dirpath, name), encoding='utf-8', errors='replace') as f:
                 body = f.read(12000)
