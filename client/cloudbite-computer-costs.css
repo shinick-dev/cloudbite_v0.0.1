@@ -1,0 +1,80 @@
+/* Cloudbite computer costs (/cloudbite/computer/costs). Same brand as the jobs page — navy header, blue actions, white cards —
+   mobile first: one column at phone width, 48px touch targets, two columns from 900px.
+   No external fonts or resources. tools/build-cloudbite-computer-costs.mjs pins this file into CLOUDBITE_COMPUTER_COSTS_CSS. */
+:root{color-scheme:light;--navy:#142440;--blue:#2563eb;--blue-hover:#1d4ed8;--text:#293c55;--muted:#5e718b;--line:#dbe6f5;--pale:#edf4ff;--bg:#f4f7fc;--ok:#147a50;--ok-soft:#e3f6ee;--warn:#b93547;--warn-soft:#fde8eb;--wait:#9c6508;--wait-soft:#fdf2dc}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 'Segoe UI','Malgun Gothic','Apple SD Gothic Neo','Noto Sans KR',system-ui,Arial,sans-serif}
+:lang(ko){word-break:keep-all;overflow-wrap:anywhere}
+[hidden]{display:none!important}
+a{color:var(--blue);text-underline-offset:4px}
+a:focus-visible,button:focus-visible{outline:3px solid #3b82f6;outline-offset:3px}
+h1{font-size:26px;line-height:1.25;letter-spacing:-.02em;color:var(--navy);margin:0 0 8px}
+h2{font-size:19px;line-height:1.35;color:var(--navy);margin:0 0 8px}
+h3{font-size:16px;line-height:1.35;color:var(--navy);margin:0}
+h4{font-size:14px;color:var(--navy);margin:12px 0 4px}
+p{margin:0 0 12px}
+.cc-loading{padding:24px 16px;color:var(--muted)}
+
+.cc-header{background:var(--navy);color:#fff;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 16px;padding:10px 16px;padding-top:max(10px,env(safe-area-inset-top))}
+.cc-brand-row{display:flex;align-items:baseline;gap:10px;min-width:0}
+.cc-brand{font-size:20px;font-weight:700;letter-spacing:-.03em}
+.cc-sub{font-size:13px;color:#c9d8ed}
+.cc-header-side{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.cc-nav-link{color:#fff;font-size:14px;font-weight:600;min-height:48px;display:inline-flex;align-items:center}
+.cc-lang{display:inline-flex;border:1px solid #3c5378;border-radius:8px;overflow:hidden}
+.cc-lang-btn{min-width:48px;min-height:48px;border:0;background:transparent;color:#c9d8ed;font-family:inherit;font-weight:600;font-size:12px;line-height:1;letter-spacing:.04em;cursor:pointer}
+.cc-lang-btn+.cc-lang-btn{border-left:1px solid #3c5378}
+.cc-lang-btn[aria-pressed=true]{background:#fff;color:var(--navy)}
+
+.cc-main{max-width:1120px;margin:0 auto;padding:20px 16px 32px;padding-bottom:max(32px,env(safe-area-inset-bottom))}
+.cc-lead{color:var(--muted);max-width:68ch}
+.cc-muted{color:var(--muted)}
+.cc-fine{font-size:13px;color:var(--muted);margin:0 0 8px;overflow-wrap:anywhere}
+.cc-bad{color:var(--warn)}
+.cc-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;margin-top:16px}
+.cc-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px 16px;min-width:0}
+.cc-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+
+.cc-actions{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin:0 0 8px}
+.cc-btn{min-height:48px;display:inline-flex;align-items:center;justify-content:center;text-align:center;padding:10px 16px;border-radius:10px;border:1px solid #b9c9df;background:#fff;color:var(--navy);font-family:inherit;font-weight:600;font-size:15px;line-height:1.3;text-decoration:none;cursor:pointer;touch-action:manipulation}
+.cc-btn:hover{border-color:var(--blue);color:var(--blue)}
+.cc-btn:disabled{opacity:.5;cursor:not-allowed}
+.cc-primary{background:var(--blue);border-color:var(--blue);color:#fff}
+.cc-primary:hover{background:var(--blue-hover);border-color:var(--blue-hover);color:#fff}
+.cc-text-link{font-weight:600;display:inline-flex;min-height:48px;align-items:center;overflow-wrap:anywhere}
+
+.cc-msg{font-size:14px;border-radius:10px;padding:10px 12px;margin:8px 0;background:var(--pale);color:var(--navy);overflow-wrap:anywhere}
+.cc-info{background:var(--pale);color:var(--navy)}
+.cc-warn{background:var(--warn-soft);color:var(--warn)}
+
+/* estimates: big hourly figures, then one block per account */
+.cc-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin:8px 0 12px}
+.cc-stat{border:1px solid var(--line);border-radius:12px;padding:10px 12px;display:grid;gap:2px;min-width:0}
+.cc-stat-label{font-size:13px;color:var(--muted)}
+.cc-stat-value{font-size:20px;color:var(--navy);overflow-wrap:anywhere}
+.cc-account{border-top:1px solid var(--line);padding-top:12px;margin-top:12px;min-width:0}
+.cc-list{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.cc-sb{border:1px solid var(--line);border-radius:12px;padding:10px 12px;min-width:0}
+.cc-sb-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px}
+.cc-sb-head strong{color:var(--navy);min-width:0;overflow-wrap:anywhere}
+.cc-sb .cc-fine{margin:4px 0 0}
+.cc-rate{margin:4px 0 0;font-weight:700;color:var(--navy)}
+.cc-facts{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;margin:4px 0 12px;font-size:14px}
+.cc-facts dt{color:var(--muted)}
+.cc-facts dd{margin:0;color:var(--navy);font-weight:600;overflow-wrap:anywhere;min-width:0}
+.cc-pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:4px 12px;font-size:13px;font-weight:700;background:var(--pale);color:var(--navy);max-width:100%}
+.cc-pill::before{content:'';width:8px;height:8px;border-radius:50%;background:currentColor;flex:none}
+.cc-p-running,.cc-a-ok{background:var(--ok-soft);color:var(--ok)}
+.cc-p-stopped,.cc-a-partial{background:var(--wait-soft);color:var(--wait)}
+.cc-a-unavailable{background:var(--warn-soft);color:var(--warn)}
+.cc-p-archived,.cc-p-other{background:var(--pale);color:var(--muted)}
+.cc-nosana{border-top:1px solid var(--line);padding-top:12px;margin-top:8px}
+.cc-links{list-style:none;margin:0;padding:0}
+
+@media (min-width:600px){h1{font-size:32px}}
+@media (min-width:900px){
+  .cc-main{padding:36px 24px 48px}
+  .cc-grid{grid-template-columns:minmax(0,3fr) minmax(0,2fr);align-items:start}
+}
+@media (prefers-reduced-motion:no-preference){.cc-btn{transition:background-color .15s,border-color .15s,color .15s}}
