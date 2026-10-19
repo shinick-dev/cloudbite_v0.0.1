@@ -37,3 +37,7 @@
 - 계정당 2쪽 × 100개, 요청당 10초, 계정은 병렬(최대 3). 더 있으면 `truncated`·`partial`.
 - 캐시 60초, 설정(키·계정·소유자)의 SHA-256 다이제스트별로 분리. `refresh=1` 도 10초 안의 캐시는 재사용한다. 동시 요청은 한 번의 관측을 공유한다.
 - 실제 키로 한 실측은 아직 없다 — 루트가 배포 전 실제 GET 으로 확인한다.
+
+## Verified Nosana unit discrepancy
+
+On 2026-10-19 the live balance endpoint returned assignedCredits=20 and settledCredits=1.254. Transactions use amountUsd, and the same 50-minute reservation appears as a $0.303 job_debit (with a $0.293 refund), matching raw credit amounts. The OpenAPI field descriptions say cents, but that does not match the active API. This integration therefore uses the returned values directly as USD, without dividing by 100. Recheck against amountUsd if the provider changes this contract. This display does not authorize spending.
