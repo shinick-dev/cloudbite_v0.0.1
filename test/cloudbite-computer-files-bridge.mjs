@@ -3,6 +3,7 @@
 // Nothing here is live install, persistence or latency evidence.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,6 +22,9 @@ const REQ = '0f8fad5b-d9cb-469f-a165-70867728950e';
 const MACHINE = { id: 'sb-1111', name: 'cloudbite-computer-abc', account: 'primary' };
 const LABELS = { 'cloudbite-computer': 'owner123', 'cloudbite-account': 'primary' };
 const NOW = 1_800_000_000_000;
+const GATEWAY = 'https://gw.cloudbite.example';
+const ENDPOINT = GATEWAY + '/p/_cloudbite/computer/files/agent/v1';
+const GRANT = { token: TOKEN, machineId: MACHINE.id, writerEpoch: 3, workspaceId: 'w_owner', expiresAt: NOW + 3600_000, endpoint: ENDPOINT };
 const PY = process.platform === 'win32' ? 'python' : 'python3';
 const skips = [];
 
@@ -30,7 +34,7 @@ function harness(over = {}) {
   const sandbox = { id: MACHINE.id, name: MACHINE.name, state: 'started', labels: { ...LABELS }, ...over.sandbox };
   const execResults = [...(over.exec ?? [])];
   const deps = {
-    origin: 'https://cloudbite.example',
+    gateway: GATEWAY,
     now: () => NOW,
     agentSource: AGENT,
     machine: async () => { calls.push(['machine']); return 'machine' in over ? over.machine : MACHINE; },
@@ -47,9 +51,9 @@ function harness(over = {}) {
       calls.push(['upload', path, content]);
       if (over.uploadThrows) throw new Error('upload lost');
     },
-    capability: async (req) => {
-      calls.push(['capability', req]);
-      return over.grant ?? { ok: true, capability: { token: TOKEN, expiresAt: NOW + 3600_000, machineId: MACHINE.id, workspaceId: 'w_owner', writerEpoch: 3 } };
+    grant: async (req) => {
+      calls.push(['grant', req]);
+      return 'grant' in over ? over.grant : { ok: true, body: { ...GRANT } };
     },
     ...over.deps,
   };
@@ -62,15 +66,16 @@ function harness(over = {}) {
     } };
 }
 
-const providerWrites = (h) => h.calls.filter(c => c[0] === 'exec' || c[0] === 'upload' || c[0] === 'capability');
+const providerWrites = (h) => h.calls.filter(c => c[0] === 'exec' || c[0] === 'upload' || c[0] === 'grant');
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
 test('fails closed before any provider call when not configured or not running', async () => {
   for (const [over, code] of [
-    [{ deps: { origin: 'http://cloudbite.example' } }, 'not_configured'],
-    [{ deps: { origin: 'https://cloudbite.example/app' } }, 'not_configured'],
-    [{ deps: { origin: '' } }, 'not_configured'],
+    [{ deps: { gateway: 'http://gw.cloudbite.example' } }, 'not_configured'],
+    [{ deps: { gateway: 'https://gw.cloudbite.example/app' } }, 'not_configured'],
+    [{ deps: { gateway: '' } }, 'not_configured'],
+    [{ deps: { gateway: undefined } }, 'not_configured'],
     [{ machine: null }, 'not_running'],
     [{ noAccount: true }, 'not_configured'],
     [{ sandbox: { state: 'stopped' } }, 'not_running'],
@@ -103,12 +108,16 @@ test('install: private placeholders, secret only in upload body, atomic activate
   const r = await h.run(() => B.filesBridgeInstall(h.deps, { requestId: REQ }));
   assert.equal(r.status, 200, JSON.stringify(r));
   assert.deepEqual(r.body, { ok: true, installed: true, machineId: MACHINE.id, writerEpoch: 3, expiresAt: NOW + 3600_000 });
-  assert.deepEqual(h.kinds(), ['machine', 'account', 'getSandbox', 'capability', 'exec', 'upload', 'upload', 'exec', 'exec', 'exec']);
+  assert.deepEqual(h.kinds(), ['machine', 'account', 'getSandbox', 'grant', 'exec', 'upload', 'upload', 'exec', 'exec', 'exec']);
   const [prep, activate, init, status] = h.calls.filter(c => c[0] === 'exec').map(c => c[1]);
   assert.match(prep, /umask 077/);
   assert.match(prep, /install -m 600 \/dev\/null "\$B\/capability\.json\.next"/);
   assert.match(prep, /if \[ -L "\$p" \]; then exit 41/);
-  assert.match(prep, /\[ ! -f "\$B\/root-owned" \]; then exit 42/);
+  assert.match(prep, /M="cloudbite-files-bridge v1 machine=sb-1111 workspace=w_owner"/);
+  assert.match(prep, /then exit 44/);
+  assert.match(prep, /\[ ! -f "\$B\/root-owned" \]; \}; then exit 42/);
+  assert.ok(prep.indexOf("exit 42") < prep.indexOf("mkdir"), "every refusal precedes the first write");
+  assert.match(activate, /if \[ -L "\$f" \] \|\| \[ ! -f "\$f" \]; then exit 45/);
   assert.match(activate, /chmod 600 .*mv -f "\$B\/capability\.json\.next" "\$B\/capability\.json"/);
   assert.match(init, /init --root \/home\/daytona\/CloudFiles --workspace-id=w_owner --machine-id=sb-1111 --writer-epoch=3$/);
   assert.match(status, /--capability \/home\/daytona\/\.local\/share\/cloudbite-files\/capability\.json status$/);
@@ -116,8 +125,9 @@ test('install: private placeholders, secret only in upload body, atomic activate
   assert.deepEqual(uploads.map(u => u[1]), [B.FILES_BRIDGE_PATHS.agent + '.next', B.FILES_BRIDGE_PATHS.capability + '.next']);
   assert.equal(uploads[0][2], AGENT);
   const cap = JSON.parse(uploads[1][2]);
-  assert.deepEqual(Object.keys(cap).sort(), ['expiresAt', 'machineId', 'origin', 'schema', 'token', 'workspaceId', 'writerEpoch']);
-  assert.equal(cap.origin, 'https://cloudbite.example');
+  assert.deepEqual(Object.keys(cap).sort(), ['endpoint', 'expiresAt', 'machineId', 'schema', 'token', 'workspaceId', 'writerEpoch']);
+  assert.equal(cap.endpoint, ENDPOINT);
+  assert.deepEqual(h.calls.find(c => c[0] === 'grant')[1], { machine: MACHINE, requestId: REQ });
   // secret placement: only the capability upload body carries the token; never argv, results or logs
   for (const c of h.calls) if (!(c[0] === 'upload' && c[1].endsWith('capability.json.next'))) assert.ok(!JSON.stringify(c).includes(TOKEN), c[0]);
   assert.ok(!JSON.stringify(r).includes(TOKEN) && !h.logs.join('\n').includes(TOKEN));
@@ -132,20 +142,37 @@ test('install: private placeholders, secret only in upload body, atomic activate
 });
 
 test('install refuses bad capability grants and unowned workspace, without uploading secrets', async () => {
-  const good = { token: TOKEN, expiresAt: NOW + 3600_000, machineId: MACHINE.id, workspaceId: 'w_owner', writerEpoch: 3 };
+  const good = GRANT;
   for (const capability of [{ ...good, machineId: 'sb-other' }, { ...good, expiresAt: NOW + 1000 }, { ...good, token: 'short' },
-    { ...good, workspaceId: '-x' }, { ...good, writerEpoch: 0 }, { ...good, token: 'a b'.repeat(20) }]) {
-    const h = harness({ grant: { ok: true, capability } });
+    { ...good, workspaceId: '-x' }, { ...good, writerEpoch: 0 }, { ...good, token: 'a b'.repeat(20) },
+    // endpoint must be exactly the configured gateway + agent prefix
+    { ...good, endpoint: undefined }, { ...good, endpoint: 'https://evil.example/p/_cloudbite/computer/files/agent/v1' },
+    { ...good, endpoint: GATEWAY + '/api/cloudbite/computer/files/agent/v1' }, { ...good, endpoint: ENDPOINT + '/' },
+    { ...good, endpoint: 'http://gw.cloudbite.example/p/_cloudbite/computer/files/agent/v1' }, { ...good, endpoint: GATEWAY }]) {
+    const h = harness({ grant: { ok: true, body: capability } });
     const r = await h.run(() => B.filesBridgeInstall(h.deps, { requestId: REQ }));
     assert.equal(r.body.error.code, 'install_failed', JSON.stringify(capability));
     assert.ok(!h.kinds().includes('upload') && !h.kinds().includes('exec'));
   }
-  const refused = harness({ grant: { ok: false, code: 'storage_not_configured', status: 503 } });
-  assert.deepEqual((await B.filesBridgeInstall(refused.deps, { requestId: REQ })).body.error.code, 'storage_not_configured');
+  const refused = harness({ grant: { error: { code: 'writer_conflict', message: 'writer_conflict', retryable: false }, status: 409 } });
+  const rf = await B.filesBridgeInstall(refused.deps, { requestId: REQ });
+  assert.equal(rf.status, 409); assert.equal(rf.body.error.code, 'writer_conflict');
   assert.ok(!refused.kinds().includes('exec'));
-  const weird = harness({ grant: { ok: false, code: '<script>', status: 200 } });
-  const w = await B.filesBridgeInstall(weird.deps, { requestId: REQ });
-  assert.equal(w.status, 503); assert.equal(w.body.error.code, 'not_configured');
+  for (const grant of [{ error: { code: '<script>' }, status: 200 }, { ok: true }, { ok: 'yes', body: GRANT }, null, { ok: false, code: 'x', status: 503 }]) {
+    const weird = harness({ grant });
+    const w = await B.filesBridgeInstall(weird.deps, { requestId: REQ });
+    assert.equal(w.body.error.code, 'install_failed', JSON.stringify(grant)); assert.ok(w.status >= 400);
+    assert.ok(!weird.kinds().includes('upload') && !weird.kinds().includes('exec'));
+  }
+  const base = harness({ exec: [{ exitCode: 44, result: '' }] });
+  const bo = await B.filesBridgeInstall(base.deps, { requestId: REQ });
+  assert.equal(bo.status, 409); assert.equal(bo.body.error.code, 'base_exists_unowned');
+  assert.ok(!base.kinds().includes('upload'), 'pre-existing unowned private base untouched');
+  const swapped = harness({ exec: [{ exitCode: 0, result: '' }, { exitCode: 45, result: '' }] });
+  assert.equal((await B.filesBridgeInstall(swapped.deps, { requestId: REQ })).body.error.code, 'install_failed');
+  assert.equal(swapped.calls.filter(c => c[0] === 'exec').length, 2, 'no init after a refused activate');
+  assert.throws(() => B.filesBridgePrepareScript('-x', 'w'), /bad identifier/);
+  assert.throws(() => B.filesBridgePrepareScript('sb', 'w o'), /bad identifier/);
   const unowned = harness({ exec: [{ exitCode: 42, result: '' }] });
   assert.equal((await B.filesBridgeInstall(unowned.deps, { requestId: REQ })).body.error.code, 'workspace_exists_unowned');
   assert.ok(!unowned.kinds().includes('upload'), 'existing user folder untouched, nothing uploaded');
@@ -189,7 +216,7 @@ test('materialize: explicit open on the running owned machine only', async () =>
   const r = await B.filesBridgeMaterialize(h.deps, { requestId: REQ, manifest: [DIR, FILE], fileId: 'f_abc', versionId: 'v_1' });
   assert.equal(r.status, 200);
   assert.deepEqual(r.body.open, { leaseId: 'l1', path: 'docs/a.txt', state: 'clean', versionId: 'v_1', fetchedBytes: 3 });
-  assert.ok(!h.kinds().includes('capability'), 'materialize never mints a capability');
+  assert.ok(!h.kinds().includes('grant'), 'materialize never mints a capability');
   const [prep, run] = h.calls.filter(c => c[0] === 'exec').map(c => c[1]);
   assert.match(prep, /install -m 600 \/dev\/null .*manifests\/0f8fad5b-d9cb-469f-a165-70867728950e\.json\.next/);
   assert.match(run, /register --manifest .* open --file-id=f_abc --version=v_1; rc=\$\?; rm -f /);
@@ -216,6 +243,48 @@ test('status reads agent counts only', async () => {
   assert.deepEqual(h.kinds(), ['machine', 'account', 'getSandbox', 'exec']);
   const n = harness({ exec: [{ exitCode: 43, result: '' }] });
   assert.equal((await B.filesBridgeStatus(n.deps)).body.error.code, 'agent_not_installed');
+});
+
+test('prepare-end helper: fixed agent command on the running owned machine, report passed through', async () => {
+  const report = { ok: true, dirty: [], uploading: [], conflict: [], unconfirmedOps: [], open: ['a.txt'], ready: false,
+    remoteSaved: false, safeToDelete: false, errors: [] };
+  const h = harness({ exec: [{ exitCode: 0, result: JSON.stringify(report) }] });
+  const r = await B.filesBridgePrepareEnd(h.deps, { flush: true });
+  assert.equal(r.status, 200); assert.deepEqual(r.body.end, report);
+  assert.deepEqual(h.kinds(), ['machine', 'account', 'getSandbox', 'exec']);
+  const [, cmd, timeout] = h.calls.find(c => c[0] === 'exec');
+  assert.match(cmd, /--capability \/home\/daytona\/\.local\/share\/cloudbite-files\/capability\.json prepare-end --flush'$/);
+  assert.equal(timeout, B.FILES_BRIDGE_LIMITS.prepareEndTimeoutS);
+  const plain = harness({ exec: [{ exitCode: 0, result: JSON.stringify(report) }] });
+  await B.filesBridgePrepareEnd(plain.deps);
+  assert.match(plain.calls.find(c => c[0] === 'exec')[1], / prepare-end'$/);
+  const bad = harness();
+  assert.equal((await B.filesBridgePrepareEnd(bad.deps, { flush: 'yes' })).body.error.code, 'bad_request');
+  assert.deepEqual(bad.calls, []);
+  for (const over of [{ machine: null }, { sandbox: { state: 'stopped' } }]) {
+    const n = harness(over);
+    assert.equal((await B.filesBridgePrepareEnd(n.deps, { flush: true })).body.error.code, 'not_running');
+    assert.deepEqual(providerWrites(n), [], 'never starts a machine to drain it');
+  }
+  assert.equal((await B.filesBridgePrepareEnd(harness({ exec: [{ exitCode: 43, result: '' }] }).deps)).body.error.code, 'agent_not_installed');
+  assert.equal((await B.filesBridgePrepareEnd(harness({ exec: [new Error('timeout')] }).deps)).body.error.code, 'unknown_outcome');
+  const busy = await B.filesBridgePrepareEnd(harness({ exec: [{ exitCode: 2, result: '{"ok": false, "code": "io_error"}' }] }).deps);
+  assert.equal(busy.status, 409); assert.equal(busy.body.error.code, 'io_error');
+});
+
+test('generated agent source bundle is the exact Python agent and passes --check', async () => {
+  const gen = await build({ entryPoints: ['src/cloudbite-computer-files-agent-source.ts'], bundle: true, write: false, platform: 'node', format: 'esm' });
+  writeFileSync(join(tmp, 's.mjs'), gen.outputFiles[0].text);
+  const S = await import(pathToFileURL(join(tmp, 's.mjs')));
+  assert.equal(S.FILES_AGENT_SOURCE, AGENT.replace(/\r\n/g, '\n'));
+  assert.equal(S.FILES_AGENT_SOURCE_SHA256, createHash('sha256').update(S.FILES_AGENT_SOURCE).digest('hex'));
+  assert.ok(S.FILES_AGENT_SOURCE_BYTES <= B.FILES_BRIDGE_LIMITS.agentSourceBytes);
+  assert.ok(S.FILES_AGENT_SOURCE.includes(`AGENT_PREFIX = "${B.FILES_AGENT_PREFIX}"`), 'agent and bridge share the frozen prefix');
+  const check = spawnSync(process.execPath, ['tools/build-cloudbite-files-agent.mjs', '--check'], { encoding: 'utf8' });
+  assert.equal(check.status, 0, check.stderr);
+  const h = harness({ deps: { agentSource: S.FILES_AGENT_SOURCE } });
+  assert.equal((await h.run(() => B.filesBridgeInstall(h.deps, { requestId: REQ }))).status, 200);
+  assert.equal(h.calls.find(c => c[0] === 'upload')[2], S.FILES_AGENT_SOURCE);
 });
 
 test('uploaded capability and manifest are accepted by the real Python agent', async () => {
@@ -252,23 +321,38 @@ test('install shell scripts on a throwaway POSIX home: private modes, idempotent
     : spawnSync('wsl', ['-d', 'Ubuntu', '--', 'true']).status === 0 ? ['wsl', ['-d', 'Ubuntu', '--', 'bash', '-s']] : null;
   if (!shell) { skips.push('POSIX install scripts (no bash/WSL on this host)'); return; }
   const S = B.FILES_BRIDGE_SCRIPTS, sub = (s) => s.replaceAll('/home/daytona', '$T');
+  const prep = sub(S.prepare('sb-1111', 'w_owner')), other = sub(S.prepare('sb-1111', 'w_other'));
+  const D = '$T/.local/share/cloudbite-files';
+  // `tree` fingerprints everything under $T so refusals can be shown to have changed nothing.
+  const fresh = (setup) => `rm -rf "$T"; T=$(mktemp -d); ${setup}; before=$(tree)`;
+  const same = (label) => `echo ${label}=$? same_${label}=$([ "$before" = "$(tree)" ] && echo y || echo n)`;
   const script = [
-    'set -u; export T; mode() { stat -c %a "$1"; }',
-    'T=$(mktemp -d)', sub(S.prepare), 'echo prep1=$?',
-    'echo "mode_root=$(mode $T/CloudFiles) mode_cap=$(mode $T/.local/share/cloudbite-files/capability.json.next) owned=$(test -f $T/.local/share/cloudbite-files/root-owned && echo y)"',
-    'echo SECRET > $T/.local/share/cloudbite-files/capability.json.next; echo code > $T/.local/share/cloudbite-files/agent/files-agent.py.next',
+    'set -u; export T; mode() { stat -c %a "$1"; }; tree() { (cd "$T" && find . -printf "%p %y %m %s\\n" | sort | md5sum); }',
+    'T=$(mktemp -d)', prep, 'echo prep1=$?',
+    `echo "mode_root=$(mode $T/CloudFiles) mode_base=$(mode ${D}) mode_cap=$(mode ${D}/capability.json.next) owned=$(test -f ${D}/root-owned && echo y) mark=$([ \"$(cat ${D}/owner)\" = \"cloudbite-files-bridge v1 machine=sb-1111 workspace=w_owner\" ] && echo y)"`,
+    `echo SECRET > ${D}/capability.json.next; echo code > ${D}/agent/files-agent.py.next`,
     sub(S.activate), 'echo act=$?',
-    'echo "final=$(mode $T/.local/share/cloudbite-files/capability.json) next=$(ls $T/.local/share/cloudbite-files/*.next 2>/dev/null | wc -l)"',
-    sub(S.prepare), 'echo prep2=$? kept=$(cat $T/.local/share/cloudbite-files/capability.json)',
-    'rm -rf "$T"; T=$(mktemp -d); mkdir $T/CloudFiles; echo mine > $T/CloudFiles/user.txt', sub(S.prepare),
-    'echo unowned=$? user=$(cat $T/CloudFiles/user.txt) marker=$(test -f $T/.local/share/cloudbite-files/root-owned && echo y || echo n)',
-    'rm -rf "$T"; T=$(mktemp -d); mkdir $T/elsewhere; ln -s $T/elsewhere $T/CloudFiles', sub(S.prepare), 'echo symlink=$?',
+    `echo "final=$(mode ${D}/capability.json) next=$(ls ${D}/*.next 2>/dev/null | wc -l)"`,
+    prep, `echo prep2=$? kept=$(cat ${D}/capability.json)`,
+    'before=$(tree)', other, same('otherws'),
+    // activate refuses a placeholder swapped for a symlink and leaves the target alone
+    `${prep} >/dev/null; echo outside > $T/target; rm -f ${D}/capability.json.next; ln -s $T/target ${D}/capability.json.next`,
+    sub(S.activate), `echo swapped=$? target=$(cat $T/target)`,
+    fresh('mkdir $T/CloudFiles; echo mine > $T/CloudFiles/user.txt'), prep, same('unowned'),
+    fresh('mkdir $T/elsewhere; ln -s $T/elsewhere $T/CloudFiles'), prep, same('symlink'),
+    fresh(`mkdir -p ${D}; echo theirs > ${D}/notes`), prep, same('base'),
+    fresh('mkdir -p $T/.local $T/real; ln -s $T/real $T/.local/share'), prep, same('share'),
+    fresh(`mkdir -p ${D} $T/real; printf %s "cloudbite-files-bridge v1 machine=sb-1111 workspace=w_owner" > ${D}/owner; ln -s $T/real ${D}/state`), prep, same('sub'),
+    fresh(`mkdir -p ${D}; ln -s $T/real ${D}/owner`), prep, same('markerlink'),
     'rm -rf "$T"',
   ].join('\n') + '\n';
   const p = spawnSync(shell[0], shell[1], { input: script, encoding: 'utf8' });
   const out = Object.fromEntries(p.stdout.split(/\s+/).filter(t => t.includes('=')).map(t => t.split('=')));
-  assert.deepEqual(out, { prep1: '0', mode_root: '700', mode_cap: '600', owned: 'y', act: '0', final: '600', next: '0',
-    prep2: '0', kept: 'SECRET', unowned: '42', user: 'mine', marker: 'n', symlink: '41' }, p.stdout + p.stderr);
+  assert.deepEqual(out, { prep1: '0', mode_root: '700', mode_base: '700', mode_cap: '600', owned: 'y',
+    mark: 'y', act: '0', final: '600', next: '0', prep2: '0', kept: 'SECRET',
+    otherws: '44', same_otherws: 'y', swapped: '45', target: 'outside',
+    unowned: '42', same_unowned: 'y', symlink: '41', same_symlink: 'y', base: '44', same_base: 'y',
+    share: '41', same_share: 'y', sub: '41', same_sub: 'y', markerlink: '41', same_markerlink: 'y' }, p.stdout + p.stderr);
 });
 
 let passed = 0;

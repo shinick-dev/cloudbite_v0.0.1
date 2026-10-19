@@ -495,6 +495,7 @@ class CoreFake:
         self.local = {}
         self.epoch, self.machine = 1, "m_test"
         self.seen = []
+        self.legacy = []
         self.faults = {}
         self.n = 0
 
@@ -517,7 +518,7 @@ class CoreFake:
         return {k: u[k] for k in ("uploadId", "fileId", "baseVersion", "writerEpoch", "size", "sha256", "phase",
                                   "expiresAt", "result")}
 
-    def handle(self, method, route, headers, read_body):
+    def handle(self, method, route, headers, read_body, query=None):
         if headers.get("authorization") != "Bearer " + TOKEN:
             return 401, {"error": {"code": "capability_invalid"}}
         parts = route.split("/")
@@ -580,8 +581,17 @@ class CoreFake:
         if method == "GET" and len(parts) == 2 and parts[0] == "uploads":
             u = self.uploads.get(parts[1])
             return (200, {"upload": self.uview(u)}) if u else (404, {"error": {"code": "not_found"}})
-        if method == "GET" and len(parts) == 4 and parts[0] == "versions" and parts[3] == "content":
-            v = self.versions.get(parts[2])
+        if method == "POST" and route == "open":
+            req = json.loads(read_body())
+            e = self.entries.get(req["fileId"])
+            version = req.get("versionId") or (e or {}).get("current")
+            v = self.versions.get(version)
+            if not e or not v or v["fileId"] != req["fileId"]:
+                return 404, {"error": {"code": "not_found"}}
+            return 200, {"descriptor": {"fileId": req["fileId"], "versionId": version, "versionSeq": 1, "name": e["name"],
+                                        "size": len(v["data"]), "sha256": sha(v["data"]), "committedAt": 1}}
+        if method == "GET" and len(parts) == 2 and parts[0] == "content":
+            v = self.versions.get((query or {}).get("versionId", [""])[0])
             if not v or v["fileId"] != parts[1]:
                 return 404, {"error": {"code": "not_found"}}
             return 200, v["data"]
@@ -606,7 +616,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _go(self):
         core = self.server.core
-        route = urllib.parse.unquote(self.path[len(HTTP_PREFIX):]) if self.path.startswith(HTTP_PREFIX) else "?"
+        url = urllib.parse.urlsplit(self.path)
+        route = urllib.parse.unquote(url.path[len(HTTP_PREFIX):]) if url.path.startswith(HTTP_PREFIX) else "?"
+        query = urllib.parse.parse_qs(url.query)
         headers = {k.lower(): v for k, v in self.headers.items()}
         cached = []
 
@@ -616,6 +628,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return cached[0]
         with core.lock:
             core.seen.append((self.command, route, headers))
+            if route.startswith("versions/"):
+                core.legacy.append(route)
             kind = "uploads" if route.startswith("uploads/") and route != "uploads/begin" else route
             fault = core.faults.pop((self.command, kind), None)
             if fault == "drop_before":
@@ -627,7 +641,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_header("location", "http://198.51.100.7/steal")
                 self.end_headers()
                 return
-            status, body = core.handle(self.command, route, headers, read_body)
+            status, body = core.handle(self.command, route, headers, read_body, query)
             if callable(fault):
                 status, body = fault(status, body)
             if fault == "drop_after":
@@ -638,6 +652,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("content-length", str(len(raw)))
         if isinstance(body, bytes):
             self.send_header("x-cloudbite-sha256", sha(body))
+            self.send_header("x-cloudbite-version", query.get("versionId", [""])[0])
         self.end_headers()
         self.wfile.write(raw)
 
@@ -656,7 +671,8 @@ def http_env(**cap):
         root, state = Path(base) / "workspace", Path(base) / "state"
         root.mkdir()
         fa.FilesAgent.init(str(state), str(root), "w_test", "m_test", reserve_bytes=0).close()
-        config = {"schema": fa.CAPABILITY_SCHEMA, "origin": "http://127.0.0.1:%d" % server.server_address[1],
+        config = {"schema": fa.CAPABILITY_SCHEMA,
+                  "endpoint": "http://127.0.0.1:%d%s" % (server.server_address[1], fa.AGENT_PREFIX),
                   "token": TOKEN, "machineId": "m_test", "workspaceId": "w_test", "writerEpoch": 1,
                   "expiresAt": int(time.time() * 1000) + 3600_000}
         config.update(cap)
@@ -810,8 +826,13 @@ def test_http_stale_epoch_expiry_and_scope_fail_closed():
     for bad in ({"writerEpoch": 2}, {"machineId": "m_other"}, {"workspaceId": "w_other"}):
         with http_env(**bad) as h:
             expect("scope_mismatch", h.open_agent)
-    for bad in ({"origin": "http://198.51.100.7"}, {"origin": "https://u:p@x.example"},
-                {"origin": "https://x.example/api"}, {"origin": "ftp://x.example"}, {"token": "short"},
+    pre = fa.AGENT_PREFIX
+    for bad in ({"endpoint": "http://198.51.100.7" + pre}, {"endpoint": "https://u:p@x.example" + pre},
+                {"endpoint": "https://x.example"}, {"endpoint": "https://x.example/"},
+                {"endpoint": "https://x.example/api/cloudbite/computer/files/agent/v1"},
+                {"endpoint": "https://x.example" + pre + "/"}, {"endpoint": "https://x.example" + pre + "?a=1"},
+                {"endpoint": "https://x.example" + pre + "#f"}, {"endpoint": "https://x.example" + pre + "?"},
+                {"endpoint": "ftp://x.example" + pre}, {"endpoint": None}, {"token": "short"},
                 {"schema": "other"}, {"expiresAt": "soon"}):
         with http_env(**bad) as h:
             expect("capability_invalid", fa.HttpBackend.load, str(h.cap))
@@ -866,6 +887,69 @@ def test_http_cli_never_prints_capability():
         assert cli("status")[1]["transportConfigured"] is True
         h.cap.write_text("{not json")
         assert cli("status") == (2, {"ok": False, "code": "capability_invalid"})
+
+
+def test_growing_file_snapshot_is_bounded_per_chunk():
+    # Limit: the first stat says 50 bytes, the writer keeps appending while the snapshot is copied.
+    with env(max_transfer_bytes=100, reserve_bytes=0) as e:
+        (e.root / "log.txt").write_bytes(b"a" * 50)
+        e.agent.mark_dirty("log.txt")
+
+        def grow(_):
+            with open(e.root / "log.txt", "ab") as handle:
+                handle.write(b"b" * 200)
+            return 10 << 30
+        e.agent.disk_free = grow
+        assert e.agent.sync()["results"] == [{"path": "log.txt", "code": "transfer_too_large"}]
+        assert e.staging() == [] and e.entry("log.txt")["state"] == "dirty"
+        assert e.agent.prepare_end()["unconfirmedOps"] == [] and e.fake._load()["ops"] == {}
+    # Reserve: free space shrinks while staging; copying stops before crossing the reserve.
+    old_chunk = fa.CHUNK
+    fa.CHUNK = 16
+    try:
+        with env(reserve_bytes=100) as e:
+            (e.root / "big.bin").write_bytes(b"z" * 64)
+            e.agent.mark_dirty("big.bin")
+            with open(e.root / "big.bin", "ab") as handle:
+                handle.write(b"z" * 1000)  # grew after the dirty mark, before the snapshot
+            free = [200]
+
+            def shrinking(_):
+                free[0] -= 16
+                return free[0]
+            e.agent.disk_free = shrinking
+            assert e.agent.sync()["results"] == [{"path": "big.bin", "code": "insufficient_space"}]
+            assert e.staging() == [] and e.entry("big.bin")["state"] == "dirty"
+            assert (e.root / "big.bin").stat().st_size == 1064, "local bytes untouched"
+            e.agent.disk_free = lambda _: 10 << 30
+            assert e.agent.sync()["results"][0]["state"] == "clean"
+            assert e.fake.body(e.entry("big.bin")["fileId"]) == b"z" * 1064
+    finally:
+        fa.CHUNK = old_chunk
+
+
+def test_http_open_descriptor_gates_content_fetch():
+    with http_env() as h:
+        h.agent = a = h.open_agent()
+        seeded = h.core.seed("a.txt", b"remote one")
+        a.register([seeded])
+        a.open(path="a.txt")
+        routes = [(m, r) for m, r, _ in h.core.seen]
+        assert routes == [("POST", "open"), ("GET", "content/" + seeded["fileId"])], routes
+        assert h.core.legacy == [], "no versions/<f>/<v>/content route"
+        b = h.core.seed("b.txt", b"bee")
+        a.register([b])
+        for tamper in ({"sha256": "0" * 64}, {"size": 4}, {"versionId": "v_9999"}):
+            h.core.faults[("POST", "open")] = lambda s, body, t=tamper: (s, {"descriptor": dict(body["descriptor"], **t)})
+            before = len(h.core.seen)
+            expect("version_mismatch", a.open, path="b.txt")
+            assert len(h.core.seen) == before + 1, "no content request after a descriptor mismatch"
+            assert not (h.root / "b.txt").exists() and os.listdir(h.state / "staging") == []
+        h.core.faults[("GET", "content/" + b["fileId"])] = lambda s, body: (s, b"bez")
+        expect("checksum_mismatch", a.open, path="b.txt")
+        assert not (h.root / "b.txt").exists()
+        a.open(path="b.txt")
+        assert (h.root / "b.txt").read_bytes() == b"bee"
 
 
 if __name__ == "__main__":

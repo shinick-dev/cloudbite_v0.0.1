@@ -51,13 +51,13 @@ BACKEND_CODES = {"transport_not_configured", "store_not_configured", "base_versi
                  "commit_unknown", "invalid_upload_state", "name_conflict", "catalog_unavailable",
                  "blob_unavailable", "capability_invalid", "capability_expired", "invalid_request",
                  "invalid_name", "is_a_directory", "not_a_directory", "not_verified", "too_many_children",
-                 "depth_exceeded"}
+                 "depth_exceeded", "not_running", "version_mismatch"}
 CONFLICT_CODES = {"base_version_conflict", "stale_writer_epoch", "stale_writer", "stale_revision", "name_conflict"}
 UNKNOWN_CODES = {"commit_unknown", "invalid_upload_state"}
 UNRESOLVED = ("prepared", "sending", "unknown")
 REPARSE_POINT = 0x400
 CAPABILITY_SCHEMA = "cloudbite.files.agent-capability.v1"
-AGENT_PREFIX = "/api/cloudbite/computer/files/agent/v1"
+AGENT_PREFIX = "/p/_cloudbite/computer/files/agent/v1"
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 MAX_JSON_BYTES = 1 << 20
 MAX_CAPABILITY_BYTES = 16 << 10
@@ -119,18 +119,21 @@ def _nfc(value):
 class HttpBackend:
     """Scoped HTTPS transport to the CloudBite files agent routes (docs/cloudbite/files-bridge.md).
 
-    The capability file is private (0600, owned by this user) and names exactly one origin, machine,
-    workspace and writer epoch.  The token goes only into the Authorization header of requests to that
-    origin; redirects are never followed and nothing here logs or returns it."""
+    The capability file is private (0600, owned by this user) and names exactly one endpoint (gateway
+    origin + ``AGENT_PREFIX``), machine, workspace and writer epoch.  The token goes only into the
+    Authorization header of requests to that endpoint; redirects are never followed and nothing here
+    logs or returns it."""
     configured = True
 
     def __init__(self, config, clock=time.time, timeout=30, connect=None):
-        if not isinstance(config, dict) or config.get("schema") != CAPABILITY_SCHEMA:
+        if not isinstance(config, dict) or config.get("schema") != CAPABILITY_SCHEMA \
+                or not isinstance(config.get("endpoint"), str):
             raise AgentError("capability_invalid")
-        parts = urllib.parse.urlsplit(config.get("origin") or "")
+        parts = urllib.parse.urlsplit(config["endpoint"])
         loopback = parts.hostname in LOOPBACK
         if not (parts.scheme == "https" or (parts.scheme == "http" and loopback)) or not parts.hostname \
-                or parts.username or parts.password or parts.path not in ("", "/") or parts.query or parts.fragment:
+                or parts.username or parts.password or parts.path != AGENT_PREFIX or parts.query or parts.fragment \
+                or "?" in config["endpoint"] or "#" in config["endpoint"]:
             raise AgentError("capability_invalid")
         token = config.get("token")
         if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._~+/=-]{32,512}", token):
@@ -258,15 +261,25 @@ class HttpBackend:
                 "writerEpoch": req["writerEpoch"], "canonical": True}
 
     def fetch_version(self, req):
-        route = "versions/%s/%s/content" % (self._q(req["fileId"]), self._q(req["versionId"]))
+        # The server's descriptor must name exactly the registered version before any byte is requested.
+        desc = self._json("POST", "open", {"fileId": req["fileId"], "versionId": req["versionId"]}).get("descriptor")
+        if not isinstance(desc, dict) or desc.get("fileId") != req["fileId"] or isinstance(desc.get("size"), bool):
+            raise TransportUnknown("malformed")
+        if desc.get("versionId") != req["versionId"] or desc.get("size") != req["maxBytes"] \
+                or desc.get("sha256") != req.get("sha256"):
+            raise AgentError("version_mismatch")
+        route = "content/%s?versionId=%s" % (self._q(req["fileId"]), self._q(req["versionId"]))
         conn, resp = self._open("GET", route)
         try:
             length = resp.getheader("content-length")
             declared = resp.getheader("x-cloudbite-sha256")
+            version = resp.getheader("x-cloudbite-version")
             if length is not None and (not length.isdigit() or int(length) != req["maxBytes"]):
                 raise AgentError("size_mismatch")
             if declared is not None and req.get("sha256") and declared.lower() != req["sha256"]:
                 raise AgentError("checksum_mismatch")
+            if version is not None and version != req["versionId"]:
+                raise AgentError("version_mismatch")
             remaining = req["maxBytes"] + 1  # read one byte past the bound so overlong bodies are seen
             while remaining > 0:
                 chunk = resp.read(min(CHUNK, remaining))
@@ -895,7 +908,8 @@ class FilesAgent:
         parent_id, name = (None, None) if row["file_id"] else self._parent(row["path"])
         source = self._resolve(row["path"])
         st = os.stat(source)
-        if st.st_size > self.cfg["maxTransferBytes"]:
+        limit = self.cfg["maxTransferBytes"]
+        if st.st_size > limit:
             raise AgentError("transfer_too_large")
         self._ensure_space(st.st_size)
         request_id = uuid.uuid4().hex
@@ -904,9 +918,14 @@ class FilesAgent:
         try:
             fd = os.open(source, _open_flags(os.O_RDONLY))
             with os.fdopen(fd, "rb") as src, open(part, "xb") as out:
-                for chunk in iter(lambda: src.read(CHUNK), b""):
-                    digest.update(chunk)
+                # The file may still be growing: bound the snapshot and the reserve per chunk, not by the first stat.
+                for chunk in iter(lambda: src.read(min(CHUNK, limit + 1 - size)), b""):
                     size += len(chunk)
+                    if size > limit:
+                        raise AgentError("transfer_too_large")
+                    if self.disk_free(self.root) - len(chunk) < self.cfg["reserveBytes"]:
+                        raise AgentError("insufficient_space")
+                    digest.update(chunk)
                     out.write(chunk)
                 out.flush()
                 os.fsync(out.fileno())

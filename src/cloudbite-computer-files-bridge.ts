@@ -6,7 +6,8 @@
 import type { Dt } from './lab';
 import type { CbSandbox } from './cloudbite-daytona';
 
-export const FILES_AGENT_PREFIX = '/api/cloudbite/computer/files/agent/v1';
+// Must equal FILES_AGENT_PATH in cloudbite-computer-files-runtime.ts and AGENT_PREFIX in files-agent.py.
+export const FILES_AGENT_PREFIX = '/p/_cloudbite/computer/files/agent/v1';
 export const FILES_CAPABILITY_SCHEMA = 'cloudbite.files.agent-capability.v1';
 
 const BASE = '/home/daytona/.local/share/cloudbite-files';
@@ -16,7 +17,8 @@ export const FILES_BRIDGE_PATHS = {
   capability: `${BASE}/capability.json`,
   state: `${BASE}/state`,
   manifests: `${BASE}/manifests`,
-  ownedMarker: `${BASE}/root-owned`,
+  ownerMarker: `${BASE}/owner`,
+  rootMarker: `${BASE}/root-owned`,
   root: '/home/daytona/CloudFiles',
 } as const;
 
@@ -28,16 +30,20 @@ export const FILES_BRIDGE_LIMITS = {
   capabilityMinTtlMs: 60_000,
   installTimeoutS: 30,
   materializeTimeoutS: 180,
+  prepareEndTimeoutS: 300,
 } as const;
 
-export interface FilesAgentCapability { token: string; expiresAt: number; machineId: string; workspaceId: string; writerEpoch: number }
+/** Runtime `filesAgentGrant` body (cloudbite-computer-files-runtime.ts). */
+export interface FilesAgentGrant { token: string; machineId: string; writerEpoch: number; workspaceId: string; expiresAt: number; endpoint: string }
+export type FilesGrantResult = { ok: true; body: FilesAgentGrant } | { error: { code?: unknown; message?: unknown; retryable?: unknown }; status: number };
 export interface FilesBridgeMachine { id: string; name: string; account: string }
 export type FilesManifestEntry =
   | { kind: 'dir'; fileId: string; path: string }
   | { kind: 'file'; fileId: string; path: string; versionId: string; size: number; sha256: string };
 
 export interface FilesBridgeDeps {
-  origin: string;
+  /** Configured CLOUDBITE_GATEWAY_URL: the only origin a capability endpoint may name. */
+  gateway: string;
   /** Current RUNNING machine of this owner, or null. Must never start one. */
   machine(): Promise<FilesBridgeMachine | null>;
   account(accountId: string): Dt | null;
@@ -46,17 +52,17 @@ export interface FilesBridgeDeps {
   exec(c: Dt, sb: CbSandbox, command: string, timeoutS: number): Promise<{ exitCode: number; result: string }>;
   upload(c: Dt, sb: CbSandbox, path: string, content: string): Promise<void>;
   agentSource: string;
-  capability(req: { ownerMachineId: string; requestId: string }):
-    Promise<{ ok: true; capability: FilesAgentCapability } | { ok: false; code: string; status: number }>;
+  /** Mints the scoped machine capability (root wires filesAgentGrant for this exact machine). */
+  grant(req: { machine: FilesBridgeMachine; requestId: string }): Promise<FilesGrantResult>;
   now?: () => number;
 }
 
 export type FilesBridgeError = 'not_configured' | 'bad_request' | 'not_running' | 'ownership_mismatch'
-  | 'workspace_exists_unowned' | 'install_failed' | 'agent_not_installed' | 'agent_failed' | 'unknown_outcome';
+  | 'workspace_exists_unowned' | 'base_exists_unowned' | 'install_failed' | 'agent_not_installed' | 'agent_failed' | 'unknown_outcome';
 export interface FilesBridgeResult { status: number; body: Record<string, unknown> }
 
 const STATUS: Record<FilesBridgeError, number> = {
-  not_configured: 503, bad_request: 400, not_running: 409, ownership_mismatch: 409, workspace_exists_unowned: 409,
+  not_configured: 503, bad_request: 400, not_running: 409, ownership_mismatch: 409, workspace_exists_unowned: 409, base_exists_unowned: 409,
   install_failed: 502, agent_not_installed: 409, agent_failed: 409, unknown_outcome: 503,
 };
 const fail = (code: FilesBridgeError, status = STATUS[code]): FilesBridgeResult => ({ status, body: { error: { code, message: code } } });
@@ -78,9 +84,15 @@ export function filesBridgeOrigin(origin: unknown): string | null {
   return u.origin === origin.replace(/\/$/, '') ? u.origin : null;
 }
 
-function validCapability(cap: unknown, machineId: string, now: number): cap is FilesAgentCapability {
-  const c = cap as FilesAgentCapability;
-  return !!c && typeof c === 'object' && typeof c.token === 'string' && TOKEN.test(c.token)
+/** Exact agent endpoint for a configured gateway, or null. */
+export function filesBridgeEndpoint(gateway: unknown): string | null {
+  const origin = filesBridgeOrigin(gateway);
+  return origin && origin + FILES_AGENT_PREFIX;
+}
+
+function validGrant(cap: unknown, machineId: string, endpoint: string, now: number): cap is FilesAgentGrant {
+  const c = cap as FilesAgentGrant;
+  return !!c && typeof c === 'object' && typeof c.token === 'string' && TOKEN.test(c.token) && c.endpoint === endpoint
     && c.machineId === machineId && typeof c.workspaceId === 'string' && IDENT.test(c.workspaceId) && !c.workspaceId.startsWith('-')
     && Number.isSafeInteger(c.writerEpoch) && c.writerEpoch >= 1
     && Number.isSafeInteger(c.expiresAt) && c.expiresAt > now + FILES_BRIDGE_LIMITS.capabilityMinTtlMs;
@@ -121,7 +133,7 @@ interface Owned { c: Dt; sb: CbSandbox; machine: FilesBridgeMachine }
 
 /** Current running machine, proven owned by exact name and every label. No provider write happens before this. */
 async function owned(deps: FilesBridgeDeps): Promise<Owned | FilesBridgeResult> {
-  if (!filesBridgeOrigin(deps.origin)) return fail('not_configured');
+  if (!filesBridgeEndpoint(deps.gateway)) return fail('not_configured');
   const machine = await deps.machine();
   if (!machine || typeof machine.id !== 'string' || !MACHINE.test(machine.id)) return fail('not_running');
   const c = deps.account(machine.account);
@@ -139,18 +151,32 @@ const isResult = (v: Owned | FilesBridgeResult): v is FilesBridgeResult => 'stat
 const P = FILES_BRIDGE_PATHS;
 const agentCmd = (args: string) => `python3 ${P.agent} --state ${P.state} --capability ${P.capability} ${args}`;
 
-// Fixed script, no interpolated user data. Creates only missing paths; refuses a symlinked base/root and an existing
-// workspace root this bridge did not create. Placeholders are created 0600 before any secret byte is written.
-const PREPARE = `bash -c 'set -eu; umask 077; B=${P.base}; R=${P.root}; `
-  + `for p in "$B" "$R"; do if [ -L "$p" ]; then exit 41; fi; done; `
-  + `mkdir -p "$B/agent" "$B/state" "$B/manifests"; `
-  + `if [ -e "$R" ]; then if [ ! -d "$R" ] || [ ! -f "$B/root-owned" ]; then exit 42; fi; `
-  + `else mkdir -m 700 "$R"; : > "$B/root-owned"; fi; `
-  + `rm -f "$B/agent/files-agent.py.next" "$B/capability.json.next"; `
-  + `install -m 600 /dev/null "$B/agent/files-agent.py.next"; install -m 600 /dev/null "$B/capability.json.next"'`;
-const ACTIVATE = `bash -c 'set -eu; B=${P.base}; chmod 600 "$B/agent/files-agent.py.next" "$B/capability.json.next"; `
+// Fixed script; the only interpolated values are the validated machine/workspace identifiers of the owner marker.
+// Every check runs before the first write: no fixed path component (.local, .local/share, base, its subdirs, the
+// marker, the workspace root) may be a symlink or a non-directory; an existing base must carry this exact owner marker
+// (machine + workspace), and an existing workspace root must have been created by this bridge. Otherwise nothing is
+// touched (41 symlink/type, 44 unowned base, 42 unowned root). Placeholders are created 0600 before any secret byte.
+const ownerMark = (machineId: string, workspaceId: string) => `cloudbite-files-bridge v1 machine=${machineId} workspace=${workspaceId}`;
+export function filesBridgePrepareScript(machineId: string, workspaceId: string): string {
+  if (!MACHINE.test(machineId) || !IDENT.test(workspaceId) || workspaceId.startsWith('-')) throw new Error('bad identifier');
+  const home = P.root.slice(0, P.root.lastIndexOf('/'));
+  return `bash -c 'set -eu; umask 077; H=${home}; L=$H/.local; S=$L/share; B=${P.base}; R=${P.root}; `
+    + `M="${ownerMark(machineId, workspaceId)}"; `
+    + `for p in "$L" "$S" "$B" "$B/agent" "$B/state" "$B/manifests" "$B/owner" "$B/root-owned" "$R"; do if [ -L "$p" ]; then exit 41; fi; done; `
+    + `for p in "$L" "$S" "$B" "$B/agent" "$B/state" "$B/manifests" "$R"; do if [ -e "$p" ] && [ ! -d "$p" ]; then exit 41; fi; done; `
+    + `fresh=1; if [ -e "$B" ]; then fresh=0; if [ ! -f "$B/owner" ] || [ "$(head -c 512 "$B/owner")" != "$M" ]; then exit 44; fi; fi; `
+    + `if [ -e "$R" ] && { [ "$fresh" = 1 ] || [ ! -f "$B/root-owned" ]; }; then exit 42; fi; `
+    + `mkdir -p "$S"; if [ "$fresh" = 1 ]; then mkdir -m 700 "$B"; printf "%s" "$M" > "$B/owner"; fi; `
+    + `mkdir -p "$B/agent" "$B/state" "$B/manifests"; `
+    + `if [ ! -e "$R" ]; then mkdir -m 700 "$R"; : > "$B/root-owned"; fi; `
+    + `rm -f "$B/agent/files-agent.py.next" "$B/capability.json.next"; `
+    + `install -m 600 /dev/null "$B/agent/files-agent.py.next"; install -m 600 /dev/null "$B/capability.json.next"'`;
+}
+// Uploaded placeholders must still be regular files (not swapped for symlinks) before they become live.
+const ACTIVATE = `bash -c 'set -eu; B=${P.base}; for f in "$B/agent/files-agent.py.next" "$B/capability.json.next"; do `
+  + `if [ -L "$f" ] || [ ! -f "$f" ]; then exit 45; fi; done; chmod 600 "$B/agent/files-agent.py.next" "$B/capability.json.next"; `
   + `mv -f "$B/agent/files-agent.py.next" "$B/agent/files-agent.py"; mv -f "$B/capability.json.next" "$B/capability.json"'`;
-export const FILES_BRIDGE_SCRIPTS = { prepare: PREPARE, activate: ACTIVATE } as const;
+export const FILES_BRIDGE_SCRIPTS = { prepare: filesBridgePrepareScript, activate: ACTIVATE } as const;
 
 /** Explicit install/refresh on the current running owned machine. Paid-free: no start, no snapshot. */
 export async function filesBridgeInstall(deps: FilesBridgeDeps, req: { requestId?: unknown }): Promise<FilesBridgeResult> {
@@ -160,21 +186,24 @@ export async function filesBridgeInstall(deps: FilesBridgeDeps, req: { requestId
   const o = await owned(deps);
   if (isResult(o)) return o;
   const now = (deps.now ?? Date.now)();
-  let grant: Awaited<ReturnType<FilesBridgeDeps['capability']>>;
-  try { grant = await deps.capability({ ownerMachineId: o.machine.id, requestId: req.requestId }); }
+  const endpoint = filesBridgeEndpoint(deps.gateway)!;
+  let grant: FilesGrantResult;
+  try { grant = await deps.grant({ machine: o.machine, requestId: req.requestId }); }
   catch { return fail('unknown_outcome'); }
-  if (!grant.ok) {
-    const code = typeof grant.code === 'string' && AGENT_CODE.test(grant.code) ? grant.code : 'not_configured';
-    const status = Number.isInteger(grant.status) && grant.status >= 400 && grant.status < 600 ? grant.status : 503;
+  if (!grant || !('ok' in grant) || grant.ok !== true) {
+    const e = grant && 'error' in grant ? grant : null;
+    const code = typeof e?.error?.code === 'string' && AGENT_CODE.test(e.error.code) ? e.error.code : 'install_failed';
+    const status = Number.isInteger(e?.status) && e!.status >= 400 && e!.status < 600 ? e!.status : 502;
     return { status, body: { error: { code, message: code } } };
   }
-  const cap = grant.capability;
-  if (!validCapability(cap, o.machine.id, now)) return fail('install_failed');
-  const config = JSON.stringify({ schema: FILES_CAPABILITY_SCHEMA, origin: filesBridgeOrigin(deps.origin), token: cap.token,
+  const cap = grant.body;
+  if (!validGrant(cap, o.machine.id, endpoint, now)) return fail('install_failed');
+  const config = JSON.stringify({ schema: FILES_CAPABILITY_SCHEMA, endpoint, token: cap.token,
     machineId: cap.machineId, workspaceId: cap.workspaceId, writerEpoch: cap.writerEpoch, expiresAt: cap.expiresAt });
   try {
-    const prep = await deps.exec(o.c, o.sb, PREPARE, FILES_BRIDGE_LIMITS.installTimeoutS);
+    const prep = await deps.exec(o.c, o.sb, filesBridgePrepareScript(cap.machineId, cap.workspaceId), FILES_BRIDGE_LIMITS.installTimeoutS);
     if (prep.exitCode === 42) return fail('workspace_exists_unowned');
+    if (prep.exitCode === 44) return fail('base_exists_unowned');
     if (prep.exitCode !== 0) return fail('install_failed');
     await deps.upload(o.c, o.sb, `${P.agent}.next`, deps.agentSource);
     await deps.upload(o.c, o.sb, `${P.capability}.next`, config);
@@ -202,7 +231,7 @@ export async function filesBridgeMaterialize(deps: FilesBridgeDeps,
   if (isResult(o)) return o;
   const m = `${P.manifests}/${req.requestId.toLowerCase()}.json`;
   try {
-    const prep = await deps.exec(o.c, o.sb, `bash -c 'set -eu; umask 077; test -f ${P.agent} && test -f ${P.capability} || exit 43; `
+    const prep = await deps.exec(o.c, o.sb, `bash -c 'set -eu; umask 077; test -f ${P.agent} && test -f ${P.capability} || exit 43; test ! -L ${P.manifests} || exit 41; `
       + `rm -f ${m}.next; install -m 600 /dev/null ${m}.next'`, FILES_BRIDGE_LIMITS.installTimeoutS);
     if (prep.exitCode === 43) return fail('agent_not_installed');
     if (prep.exitCode !== 0) return fail('install_failed');
@@ -217,16 +246,31 @@ export async function filesBridgeMaterialize(deps: FilesBridgeDeps,
   } catch { return fail('unknown_outcome'); }
 }
 
-/** Agent counts/readiness on the running machine. Reads no file bodies and sends nothing remote. */
-export async function filesBridgeStatus(deps: FilesBridgeDeps): Promise<FilesBridgeResult> {
+/** Runs one fixed agent command on the current running owned machine; never installs or starts anything. */
+async function installedAgent(deps: FilesBridgeDeps, args: string, timeoutS: number, label: string,
+  key: string): Promise<FilesBridgeResult> {
   const o = await owned(deps);
   if (isResult(o)) return o;
   try {
-    const run = await deps.exec(o.c, o.sb, `bash -c 'test -f ${P.agent} && test -f ${P.capability} || exit 43; ${agentCmd('status')}'`,
-      FILES_BRIDGE_LIMITS.installTimeoutS);
+    const run = await deps.exec(o.c, o.sb, `bash -c 'test -f ${P.agent} && test -f ${P.capability} || exit 43; ${agentCmd(args)}'`,
+      timeoutS);
     if (run.exitCode === 43) return fail('agent_not_installed');
     const out = agentJson(run.result);
-    if (run.exitCode !== 0 || out?.ok !== true) return { status: 409, body: { error: { code: agentCode(out), message: 'agent_status' } } };
-    return { status: 200, body: { ok: true, agent: out } };
+    if (run.exitCode !== 0 || out?.ok !== true) return { status: 409, body: { error: { code: agentCode(out), message: label } } };
+    return { status: 200, body: { ok: true, [key]: out } };
   } catch { return fail('unknown_outcome'); }
+}
+
+/** Agent counts/readiness on the running machine. Reads no file bodies and sends nothing remote. */
+export function filesBridgeStatus(deps: FilesBridgeDeps): Promise<FilesBridgeResult> {
+  return installedAgent(deps, 'status', FILES_BRIDGE_LIMITS.installTimeoutS, 'agent_status', 'agent');
+}
+
+/** End-of-session readiness for a future lifecycle step: enters draining (new fetches refused) and, with `flush`,
+ *  reconciles and uploads pending work first. `end.ready` (== remoteSaved == safeToDelete) is true only when nothing is
+ *  dirty, uploading, conflicted, unconfirmed or open. Never stops or deletes anything; `resume` is the agent's undo. */
+export function filesBridgePrepareEnd(deps: FilesBridgeDeps, req: { flush?: unknown } = {}): Promise<FilesBridgeResult> {
+  if (req.flush !== undefined && typeof req.flush !== 'boolean') return Promise.resolve(fail('bad_request'));
+  return installedAgent(deps, req.flush ? 'prepare-end --flush' : 'prepare-end', FILES_BRIDGE_LIMITS.prepareEndTimeoutS,
+    'agent_prepare_end', 'end');
 }

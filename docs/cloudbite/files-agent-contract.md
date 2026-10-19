@@ -75,7 +75,7 @@ stale_writer_epoch, stale_writer, name_conflict, request_conflict, quota_exceede
 
 | 에이전트 메서드 | 요청 | 응답 | core 매핑 (HttpBackend) |
 |---|---|---|---|
-| `fetch_version` | `{fileId, versionId, maxBytes, sha256}` | 바이트 청크 iterator | `GET versions/{f}/{v}/content` (readVersion stream) |
+| `fetch_version` | `{fileId, versionId, maxBytes, sha256}` | 바이트 청크 iterator | `POST open {fileId,versionId}` → descriptor의 `fileId/versionId/size/sha256`이 등록값과 다르면 `version_mismatch`(아무 바이트도 요청·기록 안 함), 같으면 `GET content/{f}?versionId={v}` (stream; `x-cloudbite-version`·`x-cloudbite-sha256`·`content-length`가 있으면 일치 필수) |
 | `begin_upload` | `{requestId, fileId\|null, path, parentId, name, baseVersion\|null, writerEpoch, size, sha256}` | `{requestId, uploadId, fileId, phase}` | `fileId=null`이면 `create`(requestId `<rid>:create`) 후 `uploads/begin` |
 | `put_body` | `{uploadId, size, sha256}` + staged 파일 핸들 | 무시 | `PUT uploads/{id}/body` 한 번, content-length=size 스트리밍 (commit 아님) |
 | `commit_upload` | op 전체 `{requestId, uploadId, fileId, baseVersion, writerEpoch, size, sha256}` | receipt | `uploads/{id}/commit` → `CommitResult` |
@@ -94,7 +94,7 @@ receipt: `{requestId, fileId, versionId, baseVersion, size, sha256, writerEpoch,
 op의 불변 필드로 receipt를 만든다. `status:"conflict"`(형제 파일에 보존됨)는 `BackendError("base_version_conflict")`,
 그 밖의 불일치·`durable` 누락·형식 오류는 결과 미확정(`unknown` → reconcile)이다.
 
-전송 규칙: origin은 https(시험용 loopback http만 예외), 고정 host, redirect 미추적(3xx = 미확정), 응답 JSON ≤ 1 MiB,
+전송 규칙: capability의 `endpoint`는 정확히 `<gateway origin>/p/_cloudbite/computer/files/agent/v1`이어야 한다(https, 시험용 loopback http만 예외; userinfo·query·fragment·다른 경로 = `capability_invalid`). 고정 host, redirect 미추적(3xx = 미확정), 응답 JSON ≤ 1 MiB,
 연결 끊김·시간 초과·envelope 없는 5xx = 미확정. 오류 envelope `{error:{code}}`의 알려진 code만 확정 거절로 본다.
 capability 파일은 0600·본인 소유(POSIX)여야 하고(`capability_insecure`), 만료면 아무 요청도 보내지 않는다(`capability_expired`).
 capability의 machineId/workspaceId/writerEpoch가 저널 설정과 다르면 에이전트가 시작하지 않는다(`scope_mismatch`).
@@ -131,6 +131,7 @@ ETag·HEAD·로컬 쓰기 완료를 원격 저장 확인으로 취급하지 않�
   회수 가능한 clean `agent` 캐시를 LRU로 회수하고, 그래도 부족하면 `insufficient_space`로 거절한다. 계획 §9에 따라
   원격 저장 확인이 실측되기 전까지 자동 회수 기본값은 꺼져 있다(명시적 `evict`는 가능). dirty·pinned·open·`user` 파일은 회수하지 않는다.
 - 파일당 전송 상한 `maxTransferBytes`(기본 1 GiB). 기대 크기를 넘는 바이트가 오면 즉시 중단(`size_mismatch`).
+- 업로드 스냅샷 복사는 최초 stat이 아니라 **복사하는 청크마다** 한도를 검사한다: 누적이 `maxTransferBytes`를 넘으면 `transfer_too_large`, 다음 청크를 쓰면 `free < reserveBytes`가 되면 `insufficient_space`. 커지는 중인 파일도 한도 안에서 멈추고, 부분 staging은 지우며 파일은 `dirty`로 남는다(op 미생성).
 - 다운로드는 staging 임시 파일 → 크기·SHA-256 검증 → fsync → 원자적 rename 순서. 실패 시 기존 파일을 건드리지 않는다.
 - 회수 직전 파일의 크기·mtime·해시를 다시 확인한다. 기록과 다르면 삭제하지 않고 `dirty`로 기록한다.
 
