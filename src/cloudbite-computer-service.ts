@@ -6,14 +6,19 @@
 // observes the new allocation, and an unanswered request is reconciled by GET, never re-sent.
 // Own captures are kept in a bounded history; one verified active capture may be selected as the template of a FUTURE new
 // machine (same account, machine absent, re-checked active right before create). Selection never touches the current machine.
+// Safe end (opt-in): POST end stores phase `draining` and returns; the alarm drains managed files (files_verified) or flushes the
+// disk (disk_backup), stops with the disk kept, then hands a private cold capture to the injected backups manager. A session
+// deadline never extends paid compute: it stops with the disk kept and records files as pending. Nothing is ever deleted here.
 import { DurableObject } from 'cloudflare:workers';
 import { COMPUTER_PROBE_COMMAND, computerToolCatalog, parseComputerProbe, type ComputerProbe } from './cloudbite-computer-tools';
 import type { Dt } from './lab';
 import {
   COMPUTER_ACCOUNTS, COMPUTER_AUTO_STOP_MINUTES, COMPUTER_SNAPSHOT_HISTORY_MAX, COMPUTER_DESKTOP_HEALTH, COMPUTER_DESKTOP_PATH, COMPUTER_DESKTOP_PORT,
   COMPUTER_OWNER_TAG, COMPUTER_POLL_MS, COMPUTER_REQUEST_ID, COMPUTER_SESSION_MS, COMPUTER_SNAPSHOT_NAME, COMPUTER_START_SCRIPT,
-  COMPUTER_TICKET_MS, COMPUTER_TICKET_PARAM, ComputerError, computerAccounts, computerErrorBody, computerLabels, computerName,
-  computerProxySuffixes, isAccount,
+  COMPUTER_TICKET_MS, COMPUTER_TICKET_PARAM, ComputerError, computerAccounts, computerDrainVerified, computerErrorBody, computerLabels, computerName,
+  computerProxySuffixes, isAccount, isEndMode,
+  type ComputerBackupStatus, type ComputerDrainReport, type ComputerDrainResult, type ComputerEndBackup, type ComputerEndFiles, type ComputerEndMode,
+  type ComputerEndPhase, type ComputerEndState, type ComputerEndTrigger, type ComputerEndView,
   type ComputerAccount, type ComputerAccountConfig, type ComputerEnv, type ComputerErrorCode, type ComputerMachineRef, type ComputerSnapshotView,
   type ComputerPerformance, type ComputerSnapshotHistoryState, type ComputerSnapshots, type ComputerState, type ComputerStatus, type DesktopStatus,
 } from './cloudbite-computer-contract';
@@ -29,9 +34,26 @@ export interface ComputerStore {
   setAlarm(at: number): Promise<void>;
   deleteAlarm(): Promise<void>;
 }
+/** Backups manager seen from the end flow. begin is idempotent per requestId; tick runs from the alarm only; status reads storage only. */
+export interface ComputerBackupHook {
+  begin(ownerTag: string, req: { requestId: string; machine: { id: string; account: ComputerAccount; status: ComputerStatus }; environmentRevision: string | null }): Promise<ComputerBackupStatus>;
+  tick(ownerTag: string): Promise<ComputerBackupStatus>;
+  status(ownerTag: string): Promise<ComputerBackupStatus | null>;
+}
+/**
+ * Injected by root. They run inside this DO's serial queue, so they must never call back into ComputerService/DO methods.
+ * drain: combined agent prepare-end --flush + watcher report on the running owned machine (no start/stop).
+ * resume: best effort, leaves draining when an end is blocked or cancelled and the machine keeps running.
+ */
+export interface ComputerEndHooks {
+  drain?(machine: ComputerMachineRef, requestId: string): Promise<ComputerDrainResult>;
+  resume?(machine: ComputerMachineRef, requestId: string): Promise<void>;
+  backup?: ComputerBackupHook;
+}
 export interface ComputerDeps {
   store: ComputerStore; env: ComputerEnv; daytona: ComputerDaytona;
   now: () => number; random: (n: number) => Uint8Array; sha256: (s: string) => Promise<string>;
+  end?: ComputerEndHooks;
 }
 
 export type ComputerResult<T = Record<never, never>> = ({ ok: true } & T) | { error: { code: ComputerErrorCode; message: string }; status: number };
@@ -59,6 +81,16 @@ interface Template { account: ComputerAccount; name: string; requestedAt: number
 interface ResizeRec { cpu: number; memoryGiB: number; state: 'requesting' | 'unknown' | 'pending' | 'done' | 'failed'; error: ComputerErrorCode | null; polls: number }
 /** Last cgroup sample of one machine run; a null sample is cached too, so a failing sample is not retried in a burst. */
 interface PerfRec { at: number; machineId: string; epoch: number; metrics: ComputerMetrics | null }
+/**
+ * One safe end. stopAt: a deadline-triggered end stops then at the latest, verified or not. drains/stops/polls bound every
+ * outbound step; report is the last drain answer (sanitised). backup mirrors the manager; it never claims files saved.
+ */
+interface EndRec {
+  requestId: string; mode: ComputerEndMode; trigger: ComputerEndTrigger; phase: ComputerEndPhase;
+  files: ComputerEndFiles; filesVerifiedAt: number | null; report: ComputerDrainReport | null; drains: number; drainAt: number | null;
+  stopAt: number | null; flushed: boolean | null; stops: number; polls: number; machineStopped: boolean;
+  backup: ComputerEndBackup; backupName: string | null; error: ComputerErrorCode | null; startedAt: number; updatedAt: number;
+}
 interface Rec {
   ownerTag: string | null;
   machine: Machine | null;
@@ -74,6 +106,9 @@ interface Rec {
   reconcilePolls: number;
   resize?: ResizeRec | null;
   perf?: PerfRec | null;
+  end?: EndRec | null;
+  /** Owner opt-in: start this kind of safe end shortly before the session deadline. Absent = the plain deadline stop. */
+  autoEnd?: ComputerEndMode | null;
   ops: Op[];
   tickets: Array<{ h: string; exp: number }>;
   sessions: Array<{ h: string; exp: number }>;
@@ -89,6 +124,13 @@ const RESIZE_PENDING = ['requesting', 'unknown', 'pending'];
 const RESIZE_MAX_POLLS = 60; // answered increase: about 10 minutes of alarms before it is reported unconfirmed
 const RESIZE_KEYS = new Set(['requestId', 'cpu', 'memoryGiB', 'acknowledgeCost']);
 const SELECT_KEYS = new Set(['requestId', 'account', 'name']);
+const END_KEYS = new Set(['requestId', 'mode']), END_SETTINGS_KEYS = new Set(['requestId', 'autoEnd']);
+const END_ACTIVE: ComputerEndPhase[] = ['draining', 'stopping', 'backing_up'];
+const BACKUP_DONE: ComputerEndBackup[] = ['active', 'coalesced', 'failed', 'blocked'];
+// User end: up to 12 drains 10 s apart (~2 min) before it is blocked. Stop: 2 sends at most, ~10 min to observe it.
+// Backup: ~1 h of alarms. Opted-in owners get the deadline end 5 min before the session ends; it stops at the deadline.
+const END_DRAIN_TRIES = 12, END_STOP_TRIES = 2, END_STOP_MAX_POLLS = 60, END_BACKUP_MAX_POLLS = 360, END_PREEXPIRY_MS = 5 * 60_000, END_FLUSH_TIMEOUT_S = 30;
+const DRAIN_COUNTS = ['dirty', 'uploading', 'conflict', 'unconfirmedOps', 'open', 'pendingDeletions', 'errors'] as const;
 const RECHECK_MS = 60_000, RECHECK_MAX = 3; // explicit GET: at most 3 active captures re-read, each at most once a minute
 const LABELS: Record<ComputerAccount, string> = { primary: 'Primary', secondary: 'Secondary', tertiary: 'Tertiary' };
 const WAKING = new Set(['creating', 'starting', 'restoring', 'pulling_snapshot', 'pending_build', 'building_snapshot', 'resuming']);
@@ -140,6 +182,26 @@ export class ComputerService {
       ready: r.status === 'running' && r.desktop === 'ready',
       tools: computerToolCatalog(r.probe ?? null),
       template: r.template ? { account: r.template.account, name: r.template.name } : null,
+      end: r.end ? this.endView(r.end) : null,
+    };
+  }
+
+  private endView(e: EndRec): ComputerEndView {
+    const iso = (t: number) => new Date(t).toISOString();
+    return {
+      requestId: e.requestId, mode: e.mode, trigger: e.trigger, phase: e.phase, files: e.files,
+      filesVerifiedAt: e.filesVerifiedAt === null ? null : iso(e.filesVerifiedAt), filesDetail: e.report, diskFlushed: e.flushed,
+      machineStopped: e.machineStopped, environmentBackup: e.backup, backupName: e.backupName, error: e.error,
+      startedAt: iso(e.startedAt), updatedAt: iso(e.updatedAt),
+    };
+  }
+
+  private endState(r: Rec): ComputerEndState {
+    const h = this.d.end;
+    return {
+      end: r.end ? this.endView(r.end) : null, autoEnd: r.autoEnd ?? null,
+      modes: { disk_backup: true, files_verified: !!h?.drain }, backupConfigured: !!h?.backup,
+      uploadsFrozen: !!r.end && (r.end.phase === 'draining' || r.end.phase === 'stopping'),
     };
   }
 
@@ -190,7 +252,7 @@ export class ComputerService {
     try { info = await this.d.daytona.getSnapshot(this.dt(a), h.name); } catch { return undefined; }
     h.checkedAt = this.d.now();
     if (!info) { h.state = 'missing'; h.error = 'snapshot_missing'; return false; }
-    const src = (info as ComputerSnapshotInfo & { sourceSandboxId?: string | null }).sourceSandboxId;
+    const src = info.sourceSandboxId;
     if (typeof src === 'string' && src && src !== h.sourceId) {
       const s = r.snapshot;
       if (s && s.name === h.name && s.requestedAt === h.requestedAt) { s.state = 'error'; s.error = 'snapshot_exists'; }
@@ -253,7 +315,12 @@ export class ComputerService {
     let sb: ComputerSandbox | null;
     try { sb = await this.d.daytona.get(this.dt(a), m.id ?? m.name); }
     catch { if (m.created !== 'owned') r.status = 'unknown'; return false; }
-    if (sb && this.owned(r, sb)) { this.adopt(r, sb); r.reconcilePolls = 0; this.settleResize(r, sb); return true; }
+    if (sb && this.owned(r, sb)) {
+      const before = r.status;
+      this.adopt(r, sb); r.reconcilePolls = 0; this.settleResize(r, sb);
+      if (before === 'running' && (r.status === 'stopped' || r.status === 'stopping')) this.stoppedOutside(r);
+      return true;
+    }
     if (sb) { r.status = 'error'; r.error = 'provider_error'; return false; } // a same-named sandbox without our labels: never touch it
     if (m.created === 'owned') {
       r.machine = null; r.status = 'absent'; r.error = 'provider_error'; r.sessionEndsAt = null; r.desktop = 'not_running'; this.down(r);
@@ -295,11 +362,12 @@ export class ComputerService {
     const now = this.d.now();
     const pending = r.status === 'starting' || r.status === 'stopping' || r.status === 'unknown' || r.status === 'snapshotting'
       || (r.status === 'running' && r.desktop === 'starting')
-      || (!!r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state)) || this.probeDue(r) || this.resizing(r);
+      || (!!r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state)) || this.probeDue(r) || this.resizing(r) || this.ending(r);
     const fast = r.status === 'starting' || (r.status === 'running' && r.desktop === 'starting');
     // The alarm defers the session stop while a resize is pending; the deadline must not become a 1 s poll meanwhile.
     const deadline = r.status === 'running' && r.sessionEndsAt ? (this.resizing(r) ? Math.max(r.sessionEndsAt, now + COMPUTER_POLL_MS) : r.sessionEndsAt) : null;
-    const times = [pending ? now + (fast ? 1000 : COMPUTER_POLL_MS) : null, deadline].filter((x): x is number => x !== null);
+    const preEnd = deadline !== null && r.autoEnd && !this.ending(r) ? deadline - END_PREEXPIRY_MS : null;
+    const times = [pending ? now + (fast ? 1000 : COMPUTER_POLL_MS) : null, deadline, preEnd].filter((x): x is number => x !== null);
     if (times.length) await this.d.store.setAlarm(Math.max(now + 1000, Math.min(...times)));
     else await this.d.store.deleteAlarm();
   }
@@ -341,7 +409,7 @@ export class ComputerService {
           const m = r.machine as Machine | null;
           if (m && m.created !== 'owned') throw new ComputerError('unknown_outcome');
         } else if (r.machine) await this.refresh(r);
-        if ((r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state)) || this.resizing(r)) throw new ComputerError('busy');
+        if ((r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state)) || this.resizing(r) || this.ending(r)) throw new ComputerError('busy');
         if (!r.machine) return this.create(r, a);
         if (r.status === 'running') { this.extendSessions(r); return this.view(r); }
         if (r.status === 'starting') return this.view(r);
@@ -415,6 +483,11 @@ export class ComputerService {
         if (this.resizing(r)) throw new ComputerError('busy');
         if (r.status === 'stopped' || r.status === 'stopping') return this.view(r);
         if (r.status !== 'running' && r.status !== 'starting') throw new ComputerError('busy');
+        const e = r.end;
+        if (e && this.ending(r)) { // the plain stop overrides a running drain: disk kept, files no longer provable
+          if (e.files === 'verifying') e.files = 'unverified';
+          e.phase = 'stopping'; e.stops++; e.updatedAt = this.d.now();
+        }
         await this.stopMachine(r);
         return this.view(r);
       });
@@ -426,6 +499,14 @@ export class ComputerService {
       this.bind(r, ownerTag);
       return this.once(r, body.requestId, 'extend', '', async () => {
         if (r.status !== 'running' && r.status !== 'starting') throw new ComputerError('not_running');
+        if (this.ending(r)) {
+          // Extending keeps working: only a deadline end that has not stopped anything yet can be called off.
+          const e = r.end!;
+          if (e.trigger !== 'deadline' || e.phase !== 'draining') throw new ComputerError('busy');
+          e.phase = 'cancelled'; e.updatedAt = this.d.now();
+          if (e.files === 'verifying') e.files = 'unverified';
+          await this.resumeAgent(r);
+        }
         if (r.machine?.id && this.d.daytona.activity) {
           const a=this.account(r.machine.account); if(!a)throw new ComputerError('not_configured');
           try { await this.d.daytona.activity(this.dt(a),r.machine.id); } catch { throw new ComputerError('provider_error',502); }
@@ -452,7 +533,7 @@ export class ComputerService {
         if (!r.machine) throw new ComputerError('absent');
         await this.refresh(r);
         if (r.machine?.created !== 'owned') throw new ComputerError('unknown_outcome');
-        if ((r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state)) || this.resizing(r)) throw new ComputerError('busy');
+        if ((r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state)) || this.resizing(r) || this.ending(r)) throw new ComputerError('busy');
         // A taken name is a definite refusal: a prepared base image or an earlier capture is never reported as this capture.
         if (computerAccounts(this.d.env).some((a) => a.snapshot === name)) throw new ComputerError('snapshot_exists');
         const a = this.account(r.machine.account); if (!a) throw new ComputerError('not_configured');
@@ -485,9 +566,8 @@ export class ComputerService {
 
   /** SnapshotDto (daytona_api_client 0.214) carries sourceSandboxId and createdAt; without either proof it is unproven. */
   private snapshotOwner(s: SnapshotRec, info: ComputerSnapshotInfo): 'ours' | 'foreign' | 'unproven' {
-    const x = info as ComputerSnapshotInfo & { sourceSandboxId?: string | null; createdAt?: string };
-    if (typeof x.sourceSandboxId === 'string' && x.sourceSandboxId) return s.sourceId && x.sourceSandboxId === s.sourceId ? 'ours' : 'foreign';
-    const created = Date.parse(x.createdAt ?? '');
+    if (typeof info.sourceSandboxId === 'string' && info.sourceSandboxId) return s.sourceId && info.sourceSandboxId === s.sourceId ? 'ours' : 'foreign';
+    const created = Date.parse(info.createdAt ?? '');
     return s.preflightAbsent && s.requestedAt && Number.isFinite(created) && created >= s.requestedAt - SNAPSHOT_SKEW_MS ? 'ours' : 'unproven';
   }
 
@@ -569,7 +649,9 @@ export class ComputerService {
           if (z.state === 'requesting') z.state = 'unknown'; // persisted mid-request (eviction/deploy): reconcile, never resend
           if (++z.polls >= (z.state === 'pending' ? RESIZE_MAX_POLLS : RECONCILE_MAX)) { z.state = 'failed'; z.error = 'unknown_outcome'; }
         }
-        if (r.machine?.created === 'owned' && r.status === 'running' && r.sessionEndsAt && r.sessionEndsAt <= now && !this.resizing(r)) {
+        if (!this.ending(r) && this.autoEndDue(r, now)) this.beginEnd(r, this.uuid(), r.autoEnd!, 'deadline');
+        if (this.ending(r)) await this.stepEnd(r);
+        else if (r.machine?.created === 'owned' && r.status === 'running' && r.sessionEndsAt && r.sessionEndsAt <= now && !this.resizing(r)) {
           try { await this.stopMachine(r); } catch { /* recorded on r */ }
         }
         if (r.status !== 'running') { r.desktopLaunches = 0; r.desktopLaunchAt = null; }
@@ -617,6 +699,187 @@ export class ComputerService {
         r.template = { account, name, requestedAt: h.requestedAt };
         return this.snapshotsView(r);
       }, () => this.snapshotsView(r));
+    });
+  }
+
+  private ending(r: Rec) { return !!r.end && END_ACTIVE.includes(r.end.phase); }
+
+  private autoEndDue(r: Rec, now: number) {
+    return !!r.autoEnd && r.machine?.created === 'owned' && r.status === 'running' && !!r.sessionEndsAt && r.sessionEndsAt - now <= END_PREEXPIRY_MS
+      && !this.resizing(r) && !(r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state));
+  }
+
+  private uuid() {
+    const b = this.d.random(16); b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+    const h = [...b].map((v) => v.toString(16).padStart(2, '0')).join('');
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+  }
+
+  /** files: verifying only when a drain can prove it; otherwise honestly unverified (drain wired) or not_configured. */
+  private beginEnd(r: Rec, requestId: string, mode: ComputerEndMode, trigger: ComputerEndTrigger) {
+    const now = this.d.now(), h = this.d.end;
+    r.end = {
+      requestId, mode, trigger, phase: 'draining',
+      files: mode === 'files_verified' && h?.drain ? 'verifying' : h?.drain ? 'unverified' : 'not_configured',
+      filesVerifiedAt: null, report: null, drains: 0, drainAt: null, stopAt: trigger === 'deadline' ? r.sessionEndsAt : null,
+      flushed: null, stops: 0, polls: 0, machineStopped: false, backup: h?.backup ? 'not_requested' : 'not_configured', backupName: null,
+      error: null, startedAt: now, updatedAt: now,
+    };
+  }
+
+  /**
+   * A refresh saw the running machine stop without us (provider auto-stop, quota, outage). Opted-in owners get an end record
+   * that says files are unverified and still gets the environment backup; nothing is restarted. Others keep the plain record.
+   */
+  private stoppedOutside(r: Rec) {
+    if (this.ending(r) || !r.autoEnd) return;
+    this.beginEnd(r, this.uuid(), r.autoEnd, 'provider_stop');
+    const e = r.end!;
+    e.phase = 'stopping';
+    if (e.files === 'verifying') e.files = 'unverified';
+  }
+
+  private machineRef(r: Rec): ComputerMachineRef {
+    const m = r.machine!;
+    return { id: m.id!, account: m.account, name: m.name, labels: computerLabels(r.ownerTag!, m.account), status: r.status, region: m.region };
+  }
+
+  private async resumeAgent(r: Rec) {
+    const h = this.d.end;
+    if (!h?.resume || r.status !== 'running' || !r.machine?.id || !r.end) return;
+    try { await h.resume(this.machineRef(r), r.end.requestId); } catch { /* best effort; the agent also leaves draining on restart */ }
+  }
+
+  /** Best-effort `sync` before the stop. The provider stop is what keeps the disk; a failed flush is reported, never hidden. */
+  private async flush(r: Rec): Promise<boolean> {
+    const m = r.machine!, a = this.account(m.account); if (!a || !m.id) return false;
+    try { return (await this.d.daytona.exec(this.dt(a), { id: m.id, toolboxProxyUrl: m.sandbox?.toolboxProxyUrl }, 'sync', END_FLUSH_TIMEOUT_S)).exitCode === 0; }
+    catch { return false; }
+  }
+
+  /** One drain request, recorded before it is sent. Only known numeric/boolean fields are kept; anything else fails verification. */
+  private async drainOnce(r: Rec): Promise<ComputerDrainResult | null> {
+    const e = r.end!;
+    e.drains++; e.drainAt = this.d.now();
+    await this.save(r); // phase and attempt persisted before the outbound call
+    let res: ComputerDrainResult;
+    try { res = await this.d.end!.drain!(this.machineRef(r), e.requestId); } catch { return null; }
+    if (!res || typeof res !== 'object') return null;
+    if (res.ok) {
+      const x = (res.report ?? {}) as unknown as Record<string, unknown>;
+      const report = { agentReady: x.agentReady === true, managedScanComplete: x.managedScanComplete === true, scanLimited: x.scanLimited !== false } as ComputerDrainReport;
+      for (const k of DRAIN_COUNTS) report[k] = Number.isSafeInteger(x[k]) && (x[k] as number) >= 0 ? x[k] as number : -1;
+      e.report = report;
+    }
+    return res;
+  }
+
+  /**
+   * Advance the stored end by one alarm. draining: files_verified drains until proven (then stop), until the attempts run out
+   * (blocked, machine keeps running) or until the deadline (stop anyway, files pending). disk_backup flushes and stops.
+   * stopping: one stop request, observed by GET. backing_up: the injected manager decides; its answer is mirrored, bounded.
+   */
+  private async stepEnd(r: Rec) {
+    const e = r.end!, now = this.d.now(), h = this.d.end;
+    e.updatedAt = now;
+    if (r.machine?.created !== 'owned' || !r.machine.id) { e.phase = 'failed'; e.error = r.error ?? 'absent'; return; }
+    if (e.phase === 'draining') {
+      const deadline = e.stopAt ?? r.sessionEndsAt, due = deadline !== null && now >= deadline;
+      if (r.status !== 'running') {
+        if (e.files === 'verifying') e.files = 'unverified'; // stopped meanwhile: nothing more can be proven
+        e.phase = 'stopping';
+      } else if (e.mode === 'files_verified' && h?.drain) {
+        if (!due && (e.drains >= END_DRAIN_TRIES || (e.drainAt !== null && now - e.drainAt < COMPUTER_POLL_MS))) return;
+        const res = await this.drainOnce(r);
+        const verified = !!res?.ok && computerDrainVerified(e.report);
+        if (verified && (e.trigger === 'user' || due)) { e.files = 'verified'; e.filesVerifiedAt = now; e.phase = 'stopping'; }
+        else if (due) { e.files = verified ? 'verified' : 'pending'; e.phase = 'stopping'; } // never extend paid compute
+        else if (e.trigger === 'user' && ((res && !res.ok && !res.retryable) || e.drains >= END_DRAIN_TRIES)) {
+          e.phase = 'blocked'; e.files = 'blocked';
+          await this.resumeAgent(r);
+          return;
+        }
+        else return;
+      } else {
+        if (e.trigger === 'deadline' && !due) return; // disk_backup at the deadline: keep the paid session the owner has
+        if (e.files === 'verifying') e.files = e.trigger === 'deadline' ? 'pending' : 'unverified';
+        if (e.flushed === null) e.flushed = await this.flush(r);
+        e.phase = 'stopping';
+      }
+    }
+    if (e.phase === 'stopping') {
+      if (r.status === 'stopped') { e.machineStopped = true; e.polls = 0; e.phase = h?.backup ? 'backing_up' : 'done'; }
+      else if (r.status === 'running' || r.status === 'starting') {
+        if (e.stops >= END_STOP_TRIES) { e.phase = 'failed'; e.error = 'unknown_outcome'; return; }
+        e.stops++;
+        try { await this.stopMachine(r); } catch (x) { e.phase = 'failed'; e.error = x instanceof ComputerError ? x.code : 'provider_error'; }
+        return;
+      } else if (++e.polls >= END_STOP_MAX_POLLS) { e.phase = 'failed'; e.error = 'unknown_outcome'; return; }
+      else return;
+    }
+    if (e.phase === 'backing_up') {
+      const b = h?.backup; if (!b) { e.phase = 'done'; return; }
+      let st: ComputerBackupStatus | null = null;
+      try {
+        st = e.backup === 'not_requested'
+          ? await b.begin(r.ownerTag!, { requestId: e.requestId, machine: { id: r.machine.id, account: r.machine.account, status: r.status }, environmentRevision: null })
+          : await b.tick(r.ownerTag!);
+      } catch { st = null; } // begin is idempotent per requestId: the next alarm asks the same request again
+      if (st && ['pending', 'active', 'coalesced', 'failed', 'blocked', 'unknown'].includes(st.state)) {
+        e.backup = st.state; if (typeof st.name === 'string') e.backupName = st.name;
+      }
+      if (BACKUP_DONE.includes(e.backup)) e.phase = 'done';
+      else if (++e.polls >= END_BACKUP_MAX_POLLS) { e.phase = 'done'; e.backup = 'unknown'; }
+    }
+  }
+
+  /**
+   * One-action safe end. Stores the end and returns; the alarm does the work. Same requestId replays; another requestId joins
+   * an active end of the same mode and is busy for the other mode. files_verified needs a wired drain and a running machine.
+   */
+  end(ownerTag: string, body: Record<string, unknown>) {
+    return this.run(async (r) => {
+      this.bind(r, ownerTag);
+      const input: Record<string, unknown> = body && typeof body === 'object' ? body : {};
+      if (Object.keys(input).some((k) => !END_KEYS.has(k)) || !isEndMode(input.mode)) throw new ComputerError('bad_request', 400);
+      const mode = input.mode;
+      return this.once(r, input.requestId, 'end', mode, async () => {
+        if (mode === 'files_verified' && !this.d.end?.drain) throw new ComputerError('files_not_configured');
+        if (!r.machine) throw new ComputerError('absent');
+        await this.refresh(r);
+        if (r.machine?.created !== 'owned') throw new ComputerError('unknown_outcome');
+        if (this.ending(r)) { if (r.end!.mode !== mode) throw new ComputerError('busy'); return this.endState(r); }
+        if ((r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state)) || this.resizing(r)) throw new ComputerError('busy');
+        if (mode === 'files_verified' && r.status !== 'running') throw new ComputerError('not_running');
+        if (!['running', 'starting', 'stopped'].includes(r.status)) throw new ComputerError(r.status === 'unknown' ? 'unknown_outcome' : 'busy');
+        this.beginEnd(r, String(input.requestId).toLowerCase(), mode, 'user');
+        return this.endState(r);
+      }, () => this.endState(r));
+    });
+  }
+
+  /** Storage reads only (plus the manager's storage-only status); never a provider call. */
+  async endStatus(ownerTag: string): Promise<ComputerResult<ComputerEndState>> {
+    if (typeof ownerTag !== 'string' || !COMPUTER_OWNER_TAG.test(ownerTag)) return fail('bad_request', 400);
+    const r = await this.load();
+    if (r.ownerTag && r.ownerTag !== ownerTag) return fail('bad_request', 403);
+    let backup: ComputerBackupStatus | null = null;
+    if (this.d.end?.backup) { try { backup = await this.d.end.backup.status(ownerTag); } catch { backup = null; } }
+    return { ok: true, ...this.endState(r), backup };
+  }
+
+  /** Opt in (or out with null) to the automatic safe end before the session deadline. No provider call. */
+  endSettings(ownerTag: string, body: Record<string, unknown>) {
+    return this.run(async (r) => {
+      this.bind(r, ownerTag);
+      const input: Record<string, unknown> = body && typeof body === 'object' ? body : {};
+      if (Object.keys(input).some((k) => !END_SETTINGS_KEYS.has(k)) || (input.autoEnd !== null && !isEndMode(input.autoEnd))) throw new ComputerError('bad_request', 400);
+      const autoEnd = input.autoEnd as ComputerEndMode | null;
+      return this.once(r, input.requestId, 'end-settings', autoEnd ?? '', async () => {
+        if (autoEnd === 'files_verified' && !this.d.end?.drain) throw new ComputerError('files_not_configured');
+        r.autoEnd = autoEnd;
+        return this.endState(r);
+      }, () => this.endState(r));
     });
   }
 
@@ -786,7 +1049,7 @@ export class ComputerService {
         const m = r.machine as Machine | null;
         if (!m) throw new ComputerError('absent');
         if (m.created !== 'owned' || !m.id) throw new ComputerError('unknown_outcome');
-        if (this.resizing(r) || (r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state))) throw new ComputerError('busy');
+        if (this.resizing(r) || this.ending(r) || (r.snapshot && SNAPSHOT_BUSY.includes(r.snapshot.state))) throw new ComputerError('busy');
         if (r.status !== 'running') throw new ComputerError(r.status === 'unknown' ? 'unknown_outcome' : 'not_running');
         if (!seen) throw new ComputerError('unknown_outcome', 503); // no fresh owner-checked read: nothing is sent, the id stays usable
         if (m.cpu === null || m.memoryGiB === null) throw new ComputerError('unknown_outcome');
@@ -811,6 +1074,11 @@ export class ComputerService {
   }
 }
 
+type EndHooksFactory = (env: ComputerEnv, storage: DurableObjectStorage) => ComputerEndHooks;
+let endHooks: EndHooksFactory | null = null;
+/** Root wires the files drain and the backups manager once at module load; without it files_verified stays unavailable. */
+export function setComputerEndHooks(f: EndHooksFactory | null) { endHooks = f; }
+
 const sha256 = async (s: string) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)))].map((b) => b.toString(16).padStart(2, '0')).join('');
 
 export class CloudbiteComputer extends DurableObject<ComputerEnv> {
@@ -822,6 +1090,7 @@ export class CloudbiteComputer extends DurableObject<ComputerEnv> {
       env, daytona: restDaytona, now: Date.now, sha256,
       random: (n) => crypto.getRandomValues(new Uint8Array(n)),
       store: { get: (k) => s.get(k), put: (k, v) => s.put(k, v), setAlarm: (at) => s.setAlarm(at), deleteAlarm: () => s.deleteAlarm() },
+      end: endHooks?.(env, s),
     });
   }
   computerState(ownerTag: string) { return this.svc.state(ownerTag); }
@@ -838,5 +1107,8 @@ export class CloudbiteComputer extends DurableObject<ComputerEnv> {
   computerMachine(ownerTag: string) { return this.svc.machine(ownerTag); }
   computerPerformance(ownerTag: string) { return this.svc.performance(ownerTag); }
   computerResize(ownerTag: string, input: Record<string, unknown>) { return this.svc.resize(ownerTag, input); }
+  computerEnd(ownerTag: string, input: Record<string, unknown>) { return this.svc.end(ownerTag, input); }
+  computerEndStatus(ownerTag: string) { return this.svc.endStatus(ownerTag); }
+  computerEndSettings(ownerTag: string, input: Record<string, unknown>) { return this.svc.endSettings(ownerTag, input); }
   async alarm() { await this.svc.alarm(); }
 }
