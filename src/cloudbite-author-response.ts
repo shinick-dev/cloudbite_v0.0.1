@@ -184,14 +184,19 @@ export function authorResponseAffectedAuthors(auth: AuthorResponseParentAuthoriz
 }
 
 /**
- * Plans the child round for a validated new brief: brief.revision.parentId must name the authorized parent and
- * brief.expertIds must be distinct affected authors. Findings are capped at AUTHOR_RESPONSE_LIMITS.findings by a
+ * Plans the child round for a validated new brief: brief.revision.parentId must name the authorized parent,
+ * brief.revision.reviewSnapshotHash must equal the completed cross-review's snapshotHash exactly (missing → 400,
+ * different → 409), and brief.expertIds must be distinct affected authors. Findings are capped at AUTHOR_RESPONSE_LIMITS.findings by a
  * deterministic round-robin over the selected authors (per author: challenged first, then reviewer order, evidence
  * index). The plan is deep-frozen and hash-bound (planSha256); it schedules nothing.
  */
 export async function buildAuthorResponsePlan(auth: AuthorResponseParentAuthorization, brief: ProjectBrief): Promise<AuthorResponsePlan | RoundFail> {
   if (!issued.has(auth)) return fail(404, 'parent project not found');
   if (!brief.revision || brief.revision.parentId !== auth.parentId) return fail(400, 'revision.parentId does not match the authorized parent');
+  // The request names the exact completed review it answers; a newer or older review is a different input, not a retry.
+  const claimed = (brief.revision as { reviewSnapshotHash?: unknown }).reviewSnapshotHash;
+  if (typeof claimed !== 'string' || !HEX64.test(claimed)) return fail(400, 'revision.reviewSnapshotHash must name the completed parent cross-review');
+  if (claimed !== auth.snapshotHash) return fail(409, 'the parent cross-review changed; reload it before answering');
   const affected = authorResponseAffectedAuthors(auth);
   if (!affected.length) return fail(409, 'the parent cross-review has no challenged or insufficient findings for a completed author');
   const roles = brief.expertIds;

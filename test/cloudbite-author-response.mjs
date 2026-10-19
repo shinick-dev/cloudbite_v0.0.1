@@ -47,7 +47,7 @@ const historyRead = (id, actor, owner) => {
 const authorize = (parentId = PARENT, actor = ME, owner = false, read = historyRead(parentId, actor, owner)) => authorizeAuthorResponseParent({ parentId, actor, owner, read, now: NOW });
 const withProject = (over) => { const read = historyRead(PARENT, ME, false); read.project = { ...read.project, ...over }; return read; };
 const brief = (expertIds, over = {}) => ({ title: 'Answer the review', objective: 'Respond to cross-review findings.', context: '', expertIds, mode: 'live', requestId: 'req-2',
-  revision: { parentId: PARENT, changeSummary: 'Answer challenged findings.' }, ...over });
+  revision: { parentId: PARENT, changeSummary: 'Answer challenged findings.', reviewSnapshotHash: SNAP }, ...over });
 
 // ── Authorization: same parent rules as a normal follow-up, plus a completed cross-review ──
 const auth = await authorize();
@@ -106,6 +106,8 @@ ok(!('error' in round) && round.parentId === PARENT, 'normal follow-up round sti
 ok((await buildAuthorResponsePlan({ ...auth }, brief(['role-a']))).status === 404, 'structural copy of an authorization is refused');
 ok((await buildAuthorResponsePlan(auth, brief(['role-a'], { revision: { parentId: OTHER, changeSummary: 'x' } }))).status === 400, 'revision for another parent fails');
 ok((await buildAuthorResponsePlan(auth, brief(['role-a'], { revision: undefined }))).status === 400, 'brief without revision fails');
+ok((await buildAuthorResponsePlan(auth, brief(['role-a'], { revision: { parentId: PARENT, changeSummary: 'x' } }))).status === 400, 'missing reviewSnapshotHash fails');
+ok((await buildAuthorResponsePlan(auth, brief(['role-a'], { revision: { parentId: PARENT, changeSummary: 'x', reviewSnapshotHash: 'd'.repeat(64) } }))).status === 409, 'stale reviewSnapshotHash fails');
 ok((await buildAuthorResponsePlan(auth, brief(['role-c']))).status === 400, 'author with only supported/stale findings cannot be selected');
 ok((await buildAuthorResponsePlan(auth, brief(['role-e']))).status === 400, 'failed author cannot be selected');
 ok((await buildAuthorResponsePlan(auth, brief(['role-a', 'role-a']))).status === 400, 'duplicate roles fail');

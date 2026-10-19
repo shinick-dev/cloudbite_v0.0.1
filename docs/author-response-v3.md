@@ -36,6 +36,8 @@ new child project, with that child's own normal budget, and answer each finding 
    the same IDs. A different snapshot or an edited rationale gives new IDs.
 4. **Plan.** `buildAuthorResponsePlan(auth, childBrief)` checks the child brief:
    - `childBrief.revision.parentId` must name the authorized parent;
+   - `childBrief.revision.reviewSnapshotHash` must equal the completed review's `snapshotHash` exactly. A missing
+     hash is rejected with 400 and a different (stale) one with 409;
    - `childBrief.expertIds` must be 1–100 distinct roles, all of them affected authors
      (`authorResponseAffectedAuthors(auth)`).
 
