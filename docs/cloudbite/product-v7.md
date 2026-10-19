@@ -50,4 +50,3 @@ For iteration acceptance, add a newly supplied runtime measurement to the EDA ch
 - Tool permissions remain the actual runner actions; this release does not grant access to licensed EDA tools or arbitrary third-party services.
 - Automatic multi-stage planning, resumable individual expert execution, and targeted dependent reviews need their own state/budget contracts and execution evidence.
 - A source-supported professional quality claim requires independent domain review; runtime acceptance alone is insufficient.
-
