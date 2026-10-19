@@ -1,0 +1,111 @@
+/* Cloudbite computer files (/cloudbite/computer/files). Same brand as the cloud computer and snapshots pages — navy header, blue actions,
+   white cards — mobile first: one column at phone width (390px), 48px touch targets, 16px inputs (no zoom on focus), list beside the
+   side cards from 900px. File names are hostile input: they wrap anywhere and never widen the page.
+   No external fonts or resources. tools/build-cloudbite-computer-files.mjs pins this file into CLOUDBITE_COMPUTER_FILES_CSS. */
+:root{color-scheme:light;--navy:#142440;--blue:#2563eb;--blue-hover:#1d4ed8;--text:#293c55;--muted:#5e718b;--line:#dbe6f5;--pale:#edf4ff;--bg:#f4f7fc;--ok:#147a50;--ok-soft:#e3f6ee;--warn:#b93547;--warn-soft:#fde8eb;--wait:#9c6508;--wait-soft:#fdf2dc}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 'Segoe UI','Malgun Gothic','Apple SD Gothic Neo','Noto Sans KR',system-ui,Arial,sans-serif}
+::selection{background:#cfe0ff;color:var(--navy)}
+:lang(ko){word-break:keep-all;overflow-wrap:anywhere}
+[hidden]{display:none!important}
+a{color:var(--blue);text-underline-offset:4px}
+a:focus-visible,button:focus-visible,input:focus-visible,h2:focus-visible{outline:3px solid #3b82f6;outline-offset:3px}
+h2:focus{outline:none}
+h1{font-size:26px;line-height:1.25;letter-spacing:-.02em;color:var(--navy);margin:0 0 8px}
+h2{font-size:19px;line-height:1.35;color:var(--navy);margin:0 0 8px}
+h3{font-size:16px;line-height:1.4;color:var(--navy);margin:0 0 4px}
+p{margin:0 0 12px}
+.cf-loading{padding:24px 16px;color:var(--muted)}
+
+.cf-header{background:var(--navy);color:#fff;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 16px;padding:10px 16px;padding-top:max(10px,env(safe-area-inset-top))}
+.cf-brand-row{display:flex;align-items:baseline;gap:10px;min-width:0}
+.cf-brand{font-size:20px;font-weight:700;letter-spacing:-.03em}
+.cf-sub{font-size:13px;color:#c9d8ed}
+.cf-header-side{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.cf-nav-link{color:#fff;font-size:14px;font-weight:600;min-height:48px;display:inline-flex;align-items:center}
+.cf-lang{display:inline-flex;border:1px solid #3c5378;border-radius:8px;overflow:hidden}
+.cf-lang-btn{min-width:48px;min-height:48px;border:0;background:transparent;color:#c9d8ed;font-family:inherit;font-weight:600;font-size:12px;line-height:1;letter-spacing:.04em;cursor:pointer}
+.cf-lang-btn+.cf-lang-btn{border-left:1px solid #3c5378}
+.cf-lang-btn[aria-pressed=true]{background:#fff;color:var(--navy)}
+
+.cf-main{max-width:1120px;margin:0 auto;padding:20px 16px 32px;padding-bottom:max(32px,env(safe-area-inset-bottom))}
+.cf-lead{color:var(--muted);max-width:68ch}
+.cf-fine{font-size:13px;color:var(--muted);margin:0 0 8px}
+.cf-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:16px;margin-top:16px}
+.cf-stack{display:grid;gap:16px;min-width:0;align-content:start}
+.cf-card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px 16px;min-width:0}
+.cf-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:4px}
+.cf-head h2{margin:0}
+
+.cf-toolbar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;margin:4px 0 8px}
+.cf-path{margin:0;font-size:14px;color:var(--navy);font-weight:600;min-width:0;overflow-wrap:anywhere}
+.cf-path-label{color:var(--muted);font-weight:400}
+.cf-toolbar-btns{display:flex;flex-wrap:wrap;gap:8px}
+
+/* label | value: a long label wraps instead of squeezing the value; the value column never drops under 7rem (no one-letter
+   vertical stacks at 320–390px) and numbers/sizes stay on one line where they fit */
+.cf-facts{display:grid;grid-template-columns:minmax(0,max-content) minmax(7rem,1fr);gap:4px 12px;margin:8px 0 12px;font-size:14px}
+.cf-facts dt{color:var(--muted);min-width:0;overflow-wrap:anywhere}
+.cf-facts dd{margin:0;color:var(--navy);font-weight:600;overflow-wrap:break-word;min-width:0;font-variant-numeric:tabular-nums}
+
+.cf-field{display:grid;gap:6px;margin:12px 0;min-width:0}
+.cf-field-label{font-size:14px;font-weight:600;color:var(--navy);margin:0}
+.cf-input{width:100%;min-height:48px;border:1px solid #b9c9df;border-radius:10px;padding:10px 12px;font:inherit;font-size:16px;color:var(--text);background:#fff;caret-color:var(--blue)}
+.cf-input:disabled{background:var(--bg);color:var(--muted)}
+.cf-file{width:100%;min-height:48px;font:inherit;font-size:16px;color:var(--text);padding:8px 0}
+.cf-file::file-selector-button{min-height:44px;margin-right:12px;padding:8px 14px;border-radius:10px;border:1px solid #b9c9df;background:#fff;color:var(--navy);font:inherit;font-weight:600;font-size:15px;cursor:pointer}
+.cf-file:disabled{color:var(--muted)}
+.cf-upload{border-top:1px solid var(--line);margin-top:16px;padding-top:16px}
+
+.cf-actions{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin:12px 0 0}
+.cf-btn{min-height:48px;display:inline-flex;align-items:center;justify-content:center;text-align:center;padding:10px 16px;border-radius:10px;border:1px solid #b9c9df;background:#fff;color:var(--navy);font-family:inherit;font-weight:600;font-size:15px;line-height:1.3;text-decoration:none;cursor:pointer;touch-action:manipulation}
+.cf-btn:hover{border-color:var(--blue);color:var(--blue)}
+.cf-primary{background:var(--blue);border-color:var(--blue);color:#fff}
+.cf-primary:hover{background:var(--blue-hover);border-color:var(--blue-hover);color:#fff}
+.cf-quiet{background:transparent}
+.cf-btn:disabled{opacity:.5;cursor:not-allowed}
+.cf-more{width:100%;margin-top:12px}
+.cf-text-link{font-weight:600;display:inline-flex;min-height:48px;align-items:center;overflow-wrap:anywhere}
+
+.cf-msg{font-size:14px;border-radius:10px;padding:10px 12px;margin:8px 0;background:var(--pale);color:var(--navy);overflow-wrap:anywhere}
+.cf-ok{background:var(--ok-soft);color:var(--ok)}
+.cf-warn{background:var(--warn-soft);color:var(--warn)}
+.cf-info{background:var(--pale);color:var(--navy)}
+.cf-pending{border:1px solid var(--wait);background:var(--wait-soft);border-radius:12px;padding:4px 12px 12px;margin:8px 0}
+.cf-pending .cf-msg{background:transparent;color:#5c3b04;padding:6px 0}
+
+/* rows: the whole row is one 56px button; a selected file opens its details under it */
+.cf-rows{list-style:none;margin:8px 0 0;padding:0;display:grid;grid-template-columns:minmax(0,1fr);gap:6px}
+.cf-row{border:1px solid var(--line);border-radius:12px;min-width:0;background:#fff}
+.cf-sel{border:2px solid var(--blue);background:var(--pale)}
+.cf-row-btn{width:100%;min-height:56px;display:grid;grid-template-columns:minmax(0,1fr);gap:2px;text-align:left;text-align:start;padding:10px 12px;border:0;border-radius:11px;background:transparent;color:var(--navy);font:inherit;cursor:pointer;touch-action:manipulation}
+.cf-row-btn:hover{background:var(--pale)}
+.cf-name{font-weight:600;min-width:0;overflow-wrap:anywhere;word-break:break-word;unicode-bidi:isolate}
+.cf-k-dir .cf-name::after{content:' /';color:var(--muted);font-weight:400}
+.cf-meta{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.cf-tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.cf-empty{color:var(--muted);padding:12px 4px}
+.cf-panel{padding:0 12px 12px;min-width:0}
+.cf-panel .cf-facts{margin-top:0}
+.cf-rename{margin-top:4px}
+.cf-cloud{border-top:1px solid var(--line);margin-top:16px;padding-top:12px;min-width:0}
+.cf-cloud .cf-fine{overflow-wrap:anywhere}
+
+.cf-pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:700;background:var(--pale);color:var(--navy);max-width:100%}
+.cf-pill::before{content:'';width:8px;height:8px;border-radius:50%;background:currentColor;flex:none}
+.cf-s-remote{background:var(--pale);color:var(--navy)}
+.cf-s-local,.cf-s-pinned{background:var(--ok-soft);color:var(--ok)}
+.cf-s-dirty{background:var(--wait-soft);color:var(--wait)}
+
+.cf-note{background:var(--pale)}
+.cf-about{margin:0;padding:0 0 0 20px;display:grid;gap:8px;font-size:15px}
+
+@media (min-width:600px){
+  h1{font-size:32px}
+}
+@media (min-width:900px){
+  .cf-main{padding:36px 24px 48px}
+  .cf-grid{grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);align-items:start}
+}
+@media (prefers-reduced-motion:no-preference){.cf-btn,.cf-row-btn{transition:background-color .15s,border-color .15s,color .15s}}

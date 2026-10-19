@@ -83,6 +83,20 @@ async function withMachine(w = world()) { await w.svc.start(OWNER, { requestId: 
 /** The owned machine disappears at Daytona; the next read records the computer as absent. */
 async function lose(w) { w.fake.sandboxes.clear(); assert.equal((await w.svc.state(OWNER)).status, 'absent'); }
 
+await test('inactive provider snapshot stops being selectable and is rechecked after backoff', async () => {
+  const w = await withMachine(); await capture(w, 'recheck-env');
+  w.fake.snapshots.get('recheck-env').state = 'removing'; w.tick(60_000);
+  const before = mutations(w.fake).length;
+  let doc = await w.svc.snapshots(OWNER);
+  assert.equal(doc.items[0].state, 'unknown'); assert.equal(doc.items[0].selectable, false);
+  const n = calls(w.fake, 'getSnapshot').length;
+  await w.svc.snapshots(OWNER); assert.equal(calls(w.fake, 'getSnapshot').length, n);
+  w.fake.snapshots.get('recheck-env').state = 'active'; w.tick(60_000);
+  doc = await w.svc.snapshots(OWNER);
+  assert.equal(doc.items[0].state, 'active'); assert.equal(doc.items[0].selectable, true);
+  assert.equal(mutations(w.fake).length, before, 'read checks never mutate provider');
+});
+
 await test('history keeps every own capture across captures and DO restarts, newest first', async () => {
   const w = await withMachine();
   await capture(w, 'first-env', { acknowledgeStop: true }); // the page's extra key is accepted

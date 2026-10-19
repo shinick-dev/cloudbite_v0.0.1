@@ -25,6 +25,10 @@ import { cloudbiteRoute } from './cloudbite-api';
 import { computerRoute } from './cloudbite-computer-api';
 import { cloudbiteAliasPath, cloudbiteIdentity, retiredCloudbiteOrigin } from './cloudbite-origin';
 import { isFail, sha, type Env, type State } from './state';
+import { DurableObject } from 'cloudflare:workers';
+import { filesObjectClass } from './cloudbite-computer-files-runtime';
+// Registers the safe-end hooks (automatic backup) on the computer DO at module load.
+import './cloudbite-computer-end-wiring';
 
 export { State } from './state';
 export { CloudbiteProject } from './cloudbite-project';
@@ -34,6 +38,7 @@ export { CloudbiteComputer } from './cloudbite-computer-service';
 export { CloudbiteComputerNested } from './cloudbite-computer-nested';
 export { CloudbiteComputerAccess } from './cloudbite-computer-access';
 export { CloudbiteComputerInput } from './cloudbite-computer-input';
+export const CloudbiteComputerFiles = filesObjectClass(DurableObject);
 
 const SECURITY_HEADERS = {
   'cache-control': 'no-store',

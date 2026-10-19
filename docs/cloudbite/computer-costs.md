@@ -23,7 +23,7 @@
   - `GET /organizations/{organizationId}/usage` → `regionUsage[]` 의 `current*`/`total*`, `max*PerSandbox`. 조직 ID 는 조회된 샌드박스의 `organizationId` 에서만 얻는다. 샌드박스가 없으면 한도는 "알 수 없음".
 - Daytona 청구 문서 `https://www.daytona.io/docs/en/billing`: 실행 중 = 예약 자원 전부, 정지 = 예약 디스크만, 보관 = 과금 없음. **잔액·지갑 API 는 없다** — 화면은 대시보드 지갑 링크만 보여 준다.
 - 가격은 `COMPUTER_PRICING` (`https://www.daytona.io/pricing`) 을 그대로 재사용한다. 실행 중 `computerHourlyCost({cpu, memoryGiB, diskGiB})`, 정지 `computerHourlyCost({cpu:0, memoryGiB:0, diskGiB})`.
-- Nosana OpenAPI `https://api.nosana.com/api/openapi.json`: `GET /credits/balance` (Bearer 키) → `assignedCredits`·`reservedCredits`·`settledCredits`, 단위 **USD 센트**. 사용 가능 = assigned − reserved − settled. 호출 주소는 `https://api.nosana.com/api/credits/balance`, 키는 `CLOUDBITE_COMPUTER_NOSANA_API_KEY` 만 쓴다 (추론용 `CLOUDBITE_NOSANA_API_KEY` 는 쓰지 않는다).
+- Nosana OpenAPI `https://api.nosana.com/api/openapi.json`: `GET /credits/balance` (Bearer 키) → `assignedCredits`·`reservedCredits`·`settledCredits`, OpenAPI 설명은 USD 센트라고 적혀 있으나 실 API와 대시보드 대조 결과 반환값 자체가 **USD**다 (아래 검증 기록 참조). 사용 가능 = assigned − reserved − settled. 호출 주소는 `https://api.nosana.com/api/credits/balance`, 키는 `CLOUDBITE_COMPUTER_NOSANA_API_KEY` 만 쓴다 (추론용 `CLOUDBITE_NOSANA_API_KEY` 는 쓰지 않는다).
 
 ## 정직성 규칙
 

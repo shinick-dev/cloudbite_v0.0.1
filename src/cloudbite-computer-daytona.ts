@@ -4,6 +4,8 @@
 //   POST /sandbox/{sandboxIdOrName}/start|stop
 //   POST /sandbox/{sandboxIdOrName}/snapshot       CreateSandboxSnapshot {name, includeMemory:false} -> Sandbox
 //   GET  /snapshots/{id}                           "Snapshot ID or name"
+//   DELETE /snapshots/{id}                         id only; irreversible (also removes warm pools); 200 is not completion —
+//        removal is confirmed only by a later GET 404 (state 'removing' meanwhile). https://www.daytona.io/docs/openapi.json
 //   GET  /sandbox/{sandboxIdOrName}/ports/{port}/preview-url -> {sandboxId,url,token}
 //   POST <toolboxProxyUrl>/{id}/computeruse/start  (daytona_toolbox_api_client 0.214 ComputerUseApi.start, no body)
 //   POST /sandbox/{sandboxIdOrName}/resize         ResizeSandbox {cpu,memory} -> Sandbox (state 'resizing' until applied).
@@ -16,7 +18,11 @@ export interface ComputerSandbox {
   id: string; name?: string; state?: string; labels?: Record<string, string>; target?: string;
   cpu?: number; memory?: number; disk?: number; toolboxProxyUrl?: string; errorReason?: string;
 }
-export interface ComputerSnapshotInfo { id?: string; name?: string; state?: string; errorReason?: string | null }
+/** SnapshotDto subset. size/diskAllocation are not read: their unit is undocumented and they are not physical bytes. */
+export interface ComputerSnapshotInfo {
+  id?: string; name?: string; state?: string; errorReason?: string | null;
+  sourceSandboxId?: string | null; general?: boolean; organizationId?: string; createdAt?: string;
+}
 export interface ComputerPreview { url: string; token: string }
 
 export class ComputerDaytonaError extends Error {
@@ -41,6 +47,8 @@ export interface ComputerDaytona {
   spawn(c: Dt, sb: ComputerSandbox, sessionId: string, command: string): Promise<void>;
   /** Base image X/VNC stack (Xvfb, xfce, …) that the Selkies launcher attaches to. */
   computerUseStart(c: Dt, sb: ComputerSandbox): Promise<void>;
+  /** DELETE /snapshots/{id}: 'accepted' is not completion; 'absent' = 404. Only the backups manager calls it, for owned captures. */
+  removeSnapshot?(c: Dt, id: string): Promise<'accepted' | 'absent'>;
   /** Hot CPU/RAM increase of a running sandbox. Optional so fakes without it stay valid; absent = resize_unavailable. */
   resize?(c: Dt, id: string, body: { cpu: number; memory: number }): Promise<ComputerSandbox | null>;
 }
@@ -66,6 +74,10 @@ export const restDaytona: ComputerDaytona = {
     await call('snapshot', () => dt(c, 'POST', `/sandbox/${enc(id)}/snapshot`, { name, includeMemory: false }, signal(60_000)));
   },
   getSnapshot: (c, name) => call('snapshot-get', () => dt<ComputerSnapshotInfo>(c, 'GET', `/snapshots/${enc(name)}`, undefined, signal(20_000)), true),
+  async removeSnapshot(c, id) {
+    const r = await call('snapshot-delete', () => dt(c, 'DELETE', `/snapshots/${enc(id)}`, undefined, signal(20_000)).then(() => 'accepted' as const), true);
+    return r ?? 'absent';
+  },
   async preview(c, id, port) {
     const p = await call('preview', () => dt<ComputerPreview>(c, 'GET', `/sandbox/${enc(id)}/ports/${port}/preview-url`, undefined, signal(20_000)));
     if (!p || typeof p.url !== 'string' || typeof p.token !== 'string') throw new ComputerDaytonaError(502, 'preview');

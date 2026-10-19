@@ -48,11 +48,12 @@ function env({ route, language = 'en-US', search = '', hash = '', webauthn = tru
     addEventListener(t, f) { (this.listeners[t] ||= []).push(f); } };
   const root = new El(doc, 'div');
   doc.body = new El(doc, 'body'); doc.body.append(root);
-  const requests = [], gets = [], creates = [], replaced = [];
+  const requests = [], gets = [], creates = [], replaced = [], windowListeners = {};
   const location = { pathname: CLOUDBITE_COMPUTER_PATH, search, hash };
   const history = { state: null, replaceState(st, t, url) { replaced.push({ url, requests: requests.length, rendered: root.children.length, hashAtCall: location.hash }); location.hash = ''; } };
   const ctx = vm.createContext({
-    document: doc, location, history, URLSearchParams, URL, atob, btoa, Date: FakeDate, Uint8Array, ArrayBuffer,
+    document: doc, location, history, URLSearchParams, URL, atob, btoa, Date: FakeDate, Uint8Array, ArrayBuffer, AbortController,
+    addEventListener(t, f) { (windowListeners[t] ||= []).push(f); },
     crypto: webcrypto,
     navigator: { language, credentials: { get: async (o) => { gets.push(o); return assertion(); }, create: async (o) => { creates.push(o); return create(o); } } },
     ...(webauthn ? { PublicKeyCredential: function PublicKeyCredential() {} } : {}),
@@ -76,7 +77,8 @@ function env({ route, language = 'en-US', search = '', hash = '', webauthn = tru
   const btn = (text) => visible().find(e => e.tagName === 'BUTTON' && e.textContent === text);
   const links = () => visible().filter(e => e.tagName === 'A');
   const setVisibility = (v) => { doc.visibilityState = v; for (const f of doc.listeners.visibilitychange || []) f(); };
-  return { doc, root, requests, gets, creates, replaced, location, timers, flush, advance, all, visible, btn, links, setVisibility, now: () => T0 + now,
+  const network = (online) => { for (const f of windowListeners[online ? 'online' : 'offline'] || []) f(); };
+  return { doc, root, requests, gets, creates, replaced, location, timers, flush, advance, all, visible, btn, links, setVisibility, network, now: () => T0 + now,
     text: () => visible().map(e => e._text + e.children.filter(c => typeof c === 'string').join('')).filter(Boolean).join(' | '),
     posts: (p) => requests.filter(r => r.method === 'POST' && r.url === p) };
 }
@@ -973,6 +975,78 @@ await test('KO countdown and warning; language switch keeps them; a wrong phone 
   await f.flush();
   assert.match(f.text(), /\(2:00 left\)/, 'not shown as expired');
   assert.equal(f.btn('Open desktop').disabled, false);
+});
+
+await test('failed session check retries GET only, without invoking passkeys', async () => {
+  let n=0;
+  const e=env({route:()=>++n===1 ? Promise.reject(new Error('offline')) : json(200,{authenticated:false,hasCredentials:true})});
+  await e.flush(); assert.match(e.text(),/Network error/);
+  e.btn('Check connection again').click(); await e.flush();
+  assert.ok(e.btn('Sign in with passkey')); assert.equal(e.requests.length,2);
+  assert.ok(e.requests.every(r=>r.method==='GET')); assert.equal(e.gets.length,0);
+});
+
+await test('offline clears tickets; online only reads state, retaining drafts and uncertain mutations', async () => {
+  const {route}=owned(state({status:'running',machine:MACHINE,ready:true}),{launch:()=>json(200,{url:`${GW}/p/_cloudbite/computer/desktop?ticket=old`}),extend:()=>json(503,{})});
+  const e=env({route}); await e.flush();
+  const input=e.all().find(x=>x.id==='cc-snap-name'); input.value='keep-draft'; input.dispatch('input');
+  e.btn('Open desktop').click(); await e.flush(); e.btn('Extend session').click(); await e.flush();
+  const posts=e.requests.filter(r=>r.method==='POST').length;
+  e.network(false); await e.flush(); assert.equal(e.btn('Open desktop').disabled,true); assert.match(e.text(),/You are offline/);
+  assert.ok(!e.links().some(a=>(a.getAttribute('href')||'').includes('ticket=old')));
+  const before=e.requests.length; e.network(true); await e.flush();
+  assert.equal(e.requests.length,before+1); assert.equal(e.requests.at(-1).method,'GET');
+  assert.equal(e.requests.filter(r=>r.method==='POST').length,posts); assert.equal(input.value,'keep-draft');
+  assert.ok(e.btn('Retry same request'));
+});
+
+await test('failed refresh blocks launching from stale state until a successful read', async () => {
+  const w=owned(state({status:'running',machine:MACHINE,ready:true})); let fail=false;
+  const e=env({route:r=>r.url.endsWith('/state')&&fail ? json(502,{}) : w.route(r)}); await e.flush();
+  fail=true; e.btn('Refresh').click(); await e.flush();
+  assert.equal(e.btn('Open desktop').disabled,true); assert.match(e.text(),/Machine state could not be confirmed/);
+  fail=false; e.btn('Refresh').click(); await e.flush(); assert.equal(e.btn('Open desktop').disabled,false);
+});
+
+await test('late state and launch replies after logout cannot restore private UI or ticket', async () => {
+  let stateReply,launchReply,slow=false;
+  const w=owned(state({status:'running',machine:MACHINE,ready:true}),{launch:()=>new Promise(r=>{launchReply=r;}),'auth/logout':()=>json(200,{authenticated:false})});
+  const e=env({route:r=>r.url.endsWith('/state')&&slow ? new Promise(r=>{stateReply=r;}) : w.route(r)}); await e.flush();
+  e.btn('Open desktop').click(); await e.flush(); slow=true; e.btn('Refresh').click(); await e.flush();
+  e.btn('Sign out').click(); await e.flush();
+  stateReply(await json(200,state({status:'running',machine:MACHINE,ready:true})));
+  launchReply(await json(200,{url:`${GW}/p/_cloudbite/computer/desktop?ticket=late`})); await e.flush();
+  assert.ok(e.btn('Sign in with passkey')); assert.equal(e.btn('Open desktop'),undefined);
+  assert.ok(!e.links().some(a=>(a.getAttribute('href')||'').includes('ticket=late')));
+});
+
+await test('logout clears a pending nested-job list so its late answer cannot leak or leave the list locked', async () => {
+  let reply;
+  const {route}=owned(state({status:'running',machine:MACHINE,ready:true}),{'nested/jobs':()=>new Promise(r=>{reply=r;}),'auth/logout':()=>json(200,{authenticated:false})});
+  const e=env({route}); await e.flush(); e.btn('Show nested jobs').click(); await e.flush();
+  e.btn('Sign out').click(); await e.flush();
+  reply(await json(200,{jobs:[{id:'private-old-job',provider:'nosana',status:'running'}]})); await e.flush();
+  e.btn('Check connection again').click(); await e.flush();
+  assert.doesNotMatch(e.text(),/private-old-job/);
+  assert.equal(e.btn('Show nested jobs').disabled,false);
+});
+
+await test('a desktop ticket from before an offline interval is discarded even after network recovery', async () => {
+  let reply;
+  const {route}=owned(state({status:'running',machine:MACHINE,ready:true}),{launch:()=>new Promise(r=>{reply=r;})});
+  const e=env({route}); await e.flush(); e.btn('Open desktop').click(); await e.flush();
+  e.network(false); e.network(true); await e.flush();
+  reply(await json(200,{url:`${GW}/p/_cloudbite/computer/desktop?ticket=obsolete`})); await e.flush();
+  assert.ok(!e.links().some(a=>(a.getAttribute('href')||'').includes('ticket=obsolete')));
+  assert.equal(e.btn('Open desktop').disabled,false);
+});
+
+await test('read-only session timeout releases UI for a manual retry', async () => {
+  let n=0;
+  const e=env({route:r=>++n===1 ? new Promise((_,reject)=>r.init.signal.addEventListener('abort',()=>reject(new Error('abort')))) : json(200,{authenticated:false,hasCredentials:true})});
+  await e.flush(); await e.advance(30_000); assert.match(e.text(),/Network error/);
+  assert.equal(e.btn('Check connection again').disabled,false);
+  e.btn('Check connection again').click(); await e.flush(); assert.ok(e.btn('Sign in with passkey'));
 });
 
 console.log(`cloudbite-computer-ui: ${pass} passed`);

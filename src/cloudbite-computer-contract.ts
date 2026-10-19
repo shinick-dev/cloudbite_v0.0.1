@@ -10,6 +10,9 @@
 //   POST snapshots/select {requestId,account,name|null} -> ComputerSnapshots (template for a FUTURE new machine; no provider mutation)
 //   GET  performance                   -> ComputerPerformance      (cgroup sample cached >=10 s, estimated costs, hot-increase plans)
 //   POST resize   {requestId,cpu,memoryGiB,acknowledgeCost:true} -> ComputerState (running CPU/RAM increase; pending until observed)
+//   POST end      {requestId,mode}     -> ComputerEndState         (one-action safe end; the phase is stored, the alarm advances it)
+//   GET  end                           -> ComputerEndState         (storage reads only; no provider call)
+//   POST end/settings {requestId,autoEnd:mode|null} -> ComputerEndState (opt-in automatic safe end at the session deadline)
 // requestId replays: same id + same arguments -> current state, or the original definite error; same id + other arguments
 // -> request_conflict. Root-only RPCs: redeemTicket, desktopUpstream (cookie -> {origin,token,maxAge}; read-only fast path),
 // desktopPreviewRejected (upstream 401/403 drops the cached preview) and machine(ownerTag) -> {id,account,name,labels,status,region}.
@@ -40,6 +43,7 @@ export const COMPUTER_ERRORS = {
   snapshot_not_selectable: 'Only a finished snapshot captured by this computer can be chosen. Nothing was changed.',
   snapshot_missing: 'That snapshot no longer exists in Daytona.',
   template_unavailable: 'The chosen snapshot is not available as a finished capture of this computer. Choose another one or clear the choice; nothing was created.',
+  files_not_configured: 'Checked file saving is not set up for this computer. Use "End and keep environment" instead; nothing was changed.',
 } as const;
 export type ComputerErrorCode = keyof typeof COMPUTER_ERRORS;
 
@@ -62,6 +66,60 @@ export interface ComputerState {
   tools?: readonly { id: string; status: string; version: string | null }[];
   /** Selected template for a future new machine (never applied to the current one). */
   template?: { account: ComputerAccount; name: string } | null;
+  /** Current or last safe end; null when none was requested. */
+  end?: ComputerEndView | null;
+}
+
+// Safe end. disk_backup: flush the filesystem, stop with the disk kept, then an optional private cold capture of the whole disk
+// (local files included; no exclusion is claimed). files_verified: additionally requires the managed files drain to prove every
+// managed file remotely saved before the stop; otherwise the end is blocked and the machine keeps running. Neither mode deletes
+// the machine or its disk, and neither saves RAM or unsaved application buffers. Files and environment backup are separate states.
+export const COMPUTER_END_MODES = ['disk_backup', 'files_verified'] as const;
+export type ComputerEndMode = typeof COMPUTER_END_MODES[number];
+export const isEndMode = (v: unknown): v is ComputerEndMode => typeof v === 'string' && (COMPUTER_END_MODES as readonly string[]).includes(v);
+/** draining → stopping → backing_up → done; blocked/failed/cancelled are terminal with the disk kept. */
+export type ComputerEndPhase = 'draining' | 'stopping' | 'backing_up' | 'done' | 'blocked' | 'failed' | 'cancelled';
+export type ComputerEndTrigger = 'user' | 'deadline' | 'provider_stop';
+/** External managed files only. pending = the deadline stopped the machine before the drain proved anything (disk kept). */
+export type ComputerEndFiles = 'not_configured' | 'unverified' | 'verifying' | 'verified' | 'blocked' | 'pending';
+/** Environment backup as reported by the injected backup manager; coalesced = no new capture, the previous one is kept. */
+export type ComputerEndBackup = 'not_configured' | 'not_requested' | 'pending' | 'active' | 'coalesced' | 'failed' | 'blocked' | 'unknown';
+/** Combined agent + watcher prepare-end report. A bare agent journal with zero entries is not proof by itself. */
+export interface ComputerDrainReport {
+  agentReady: boolean; managedScanComplete: boolean; scanLimited: boolean;
+  dirty: number; uploading: number; conflict: number; unconfirmedOps: number; open: number; pendingDeletions: number; errors: number;
+}
+export type ComputerDrainResult = { ok: true; report: ComputerDrainReport } | { ok: false; code: string; retryable: boolean };
+/** Verified only when every flag proves it; anything missing, non-numeric or non-zero is not verified. */
+export function computerDrainVerified(r: ComputerDrainReport | null | undefined): boolean {
+  if (!r || r.agentReady !== true || r.managedScanComplete !== true || r.scanLimited !== false) return false;
+  return (['dirty', 'uploading', 'conflict', 'unconfirmedOps', 'open', 'pendingDeletions', 'errors'] as const).every((k) => r[k] === 0);
+}
+export interface ComputerEndView {
+  requestId: string; mode: ComputerEndMode; trigger: ComputerEndTrigger; phase: ComputerEndPhase;
+  files: ComputerEndFiles; filesVerifiedAt: string | null; filesDetail: ComputerDrainReport | null;
+  /** Result of the best-effort filesystem flush before the stop (null = not attempted). */
+  diskFlushed: boolean | null;
+  machineStopped: boolean; environmentBackup: ComputerEndBackup; backupName: string | null;
+  error: ComputerErrorCode | null; startedAt: string; updatedAt: string;
+}
+/**
+ * Backups manager answer (src/cloudbite-computer-backups.ts). active/coalesced/failed/blocked end the backing_up phase;
+ * work = retention/capture still needs tick() after that (the alarm keeps ticking, bounded). coalesced = the previous
+ * recovery point is reused: newer changes are only on the kept disk, not in a fresh backup.
+ */
+export interface ComputerBackupStatus {
+  state: 'pending' | 'active' | 'coalesced' | 'failed' | 'blocked' | 'unknown'; name?: string | null; reason?: string | null; work?: boolean;
+}
+export interface ComputerEndState {
+  end: ComputerEndView | null;
+  /** Latest backups manager status (storage read); null when no manager is wired or it did not answer. */
+  backup?: ComputerBackupStatus | null;
+  autoEnd: ComputerEndMode | null;
+  modes: Record<ComputerEndMode, boolean>;
+  backupConfigured: boolean;
+  /** True while an end is draining or stopping: the files runtime refuses new managed uploads. */
+  uploadsFrozen: boolean;
 }
 export const COMPUTER_SNAPSHOT_HISTORY_MAX = 20;
 export type ComputerSnapshotHistoryState = Exclude<ComputerSnapshotView['state'], 'waiting_stop'> | 'missing';

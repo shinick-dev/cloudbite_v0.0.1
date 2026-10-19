@@ -74,6 +74,9 @@ p{margin:0 0 12px}
 .cc-callout{font-size:14px;border-left:4px solid var(--wait);background:var(--wait-soft);color:#5c3b04;padding:10px 12px;border-radius:0 10px 10px 0}
 .cc-keep{border-top:1px solid var(--line);margin-top:12px;padding-top:12px}
 .cc-keep p{font-size:14px;margin:0}
+.cc-end{border-top:1px solid var(--line);margin-top:12px;padding-top:12px}
+.cc-end h3{margin:0 0 6px}
+.cc-end p{margin:4px 0;overflow-wrap:anywhere}
 .cc-steps{margin:12px 0 0;padding-left:20px;font-size:14px;display:grid;gap:8px}
 .cc-text-link{font-weight:600;display:inline-flex;min-height:44px;align-items:center}
 
