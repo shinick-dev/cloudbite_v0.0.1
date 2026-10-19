@@ -328,6 +328,15 @@ await check('memo: uncertainty, quoted expert words and proposed future votes ar
   badEn({ summary: 'Majority support goes to option-2 because the majority of experts support it.' }, 'majority support');
   badKo({ c4: '이사회는 투표로 결정했다.' }, '과거 투표');
   badKo({ dissent: '전문가들이 합의에 도달했다.' }, '합의 도달 단정');
+  // R1: uncertainty about something other than the agreement (cost, budget) no longer waives the assertion.
+  for (const d of ['All experts recommend option-1 if the budget allows.', 'Majority of experts supported option-2 even though cost is uncertain.',
+    'The team reached consensus, though cost is unknown.', 'All experts agreed, even if costs rise.']) {
+    badEn({ dissent: d }, d); badEn({ summary: d }, d); badEn({ c4: d }, d); assert.equal(MM.claimsUnsupportedAgreement(d), true, d);
+  }
+  badKo({ dissent: '전원이 동의했지만 비용은 불확실하다.' }, '전원 동의 + 무관한 불확실성');
+  badKo({ summary: '전원이 동의했지만 비용은 불확실하다.' }, '전원 동의 + 무관한 불확실성(summary)');
+  okEn({ c3: 'If all experts agree, proceed with option-1.' }, 'leading hypothetical trigger');
+  okEn({ c4: 'Proceed with option-1 if all experts agree.' }, 'trailing conditional governing the agreement');
   assert.equal(MM.claimsUnsupportedAgreement('Hold a team vote on option-1 after the pilot.'), true, 'outside action fields the vote heuristic still applies');
 });
 

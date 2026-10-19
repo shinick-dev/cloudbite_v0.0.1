@@ -372,7 +372,7 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 const exactKeys = (o: object, keys: readonly string[]) => { const k = Object.keys(o); return k.length === keys.length && keys.every((x) => k.includes(x)); };
 const text = (v: unknown, max: number): v is string => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
 // Narrow, disclosed regex heuristic (no semantic guarantee): a clause that positively asserts unanimity, a reached
-// consensus, a vote, or agreement of all/most experts is refused, unless the same clause negates it or marks it as
+// consensus, a vote, or agreement of all/most experts is refused, unless the same (sub)clause negates it or marks it as
 // uncertain/hypothetical. Honest absence and uncertainty statements ("No consensus can be inferred", "It is unclear
 // whether consensus was reached", "합의는 확인되지 않았다", "합의 여부는 불분명하다") stay allowed. Quoted spans are
 // removed first (an expert's own quoted words are not the memo's assertion). In changeTriggers/nextActions a vote that
@@ -394,9 +394,13 @@ const NEGATED = /\b(?:no|not|never|none|nor|neither|without|cannot|unable|absenc
 const UNCERTAIN = /\b(?:unclear|unknown|uncertain|unverified|unconfirmed|unestablished|undetermined|undecided|unsure|whether|if|hypothetical(?:ly)?|suppose|assuming)\b|\binsufficient (?:evidence|basis|information)\b|불분명|불확실|불명확|미확인|미정|알 수 없|모르|여부|근거가 부족|만약|라면|(?:는|은)지(?![만도])/i;
 const QUOTED = new RegExp(LANGUAGE_PATTERNS.strip[4], 'g');
 const CLAUSES = /[.;!?。\n]|,\s*(?:but|however|although)\b|그러나|하지만|반면/i;
+// Uncertainty only exempts the agreement predicate it governs: a conditional/concessive tail ("..., even though cost is
+// uncertain", "... if the budget allows", "동의했지만 비용은 불확실하다") is split off so its words cannot waive the main
+// assertion, while a leading hypothetical ("If all experts agree, proceed") keeps its "if" with the predicate.
+const SUBCLAUSES = /(?=\b(?:even (?:if|though)|if|though|although|unless|whether or not)\b)|(?<=지만|는데|더라도)/i;
 /** `prospective`: the text is a proposed action/trigger (changeTriggers, nextActions), where a non-past vote is a proposal. */
 export function claimsUnsupportedAgreement(t: string, opts: { prospective?: boolean } = {}): boolean {
-  return t.replace(QUOTED, ' ').split(CLAUSES).some((c) => {
+  return t.replace(QUOTED, ' ').split(CLAUSES).flatMap((c) => c.split(SUBCLAUSES)).some((c) => {
     if (!POSITIVE_AGREEMENT.test(c) || NEGATED.test(c) || UNCERTAIN.test(c)) return false;
     return !opts.prospective || POSITIVE_NON_VOTE.test(c) || PAST_VOTE.test(c);
   });
