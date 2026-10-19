@@ -20,7 +20,7 @@ import type { CloudbiteAccessRequest, CloudbiteAccessSession } from '../src/clou
 import type { HistoryList, HistoryDetail, HistoryReport, HistoryIssue, HistoryFeedback } from '../src/cloudbite-history-contract';
 import type { CatalogueMaxRoles, ProjectMaxExperts } from '../src/cloudbite-catalogue-limits';
 import type { ClaimAdoption, ClaimStanding, LedgerClaim, ProvenanceLedger, ProvenanceState } from '../src/cloudbite-provenance';
-import type { AuthorResponseParsed, AuthorResponsePlan } from '../src/cloudbite-author-response';
+import type { AuthorResponseFinding, AuthorResponseParsed, AuthorResponsePlan } from '../src/cloudbite-author-response';
 import type { ClaimSupportAssessment, QuantitativeCheckRecord } from '../src/cloudbite-contract';
 import type { QuantitativeRequest } from '../src/cloudbite-quantitative';
 import type { HumanDimension, HumanReviewDetail, HumanReviewIssue, HumanReviewPublic } from '../src/cloudbite-human-review';
@@ -432,6 +432,13 @@ const P3_EN = {
   arPlanInvalid: 'The server sent an author-response plan this console cannot read, so it is not shown.',
   arReviewer: 'Reviewer’s rationale',
   arEvidence: 'Author’s original evidence',
+  arCoreFinding: (reviewer: string, verdict: string, author: string, target: string) => `${reviewer} · ${verdict} · ${author}, ${target}`,
+  arCoreText: 'Author’s original text (the quote above is exact)',
+  arSource: (status: string, cited: string) => `Claim-to-text assessment: ${status} (cited text: ${cited})`,
+  arEligibleBy: { verdict: 'eligible by the verdict', 'source-assessment': 'eligible by the source reading', 'verdict-and-source-assessment': 'eligible by the verdict and the source reading' } as Record<string, string>,
+  arConflict: 'The ordinary verdict and the source reading disagree; both are shown as given.',
+  arSourceNote: 'The ordinary verdict is kept as given. The source reading is one reviewer model’s reading with exact-substring quotes, not verification.',
+  arSourceDropped: 'A stored claim-to-text assessment could not be read and is not shown; this finding is eligible by its verdict only.',
   arAsk: 'Ask authors to respond',
   arAskHelp: 'Opens a new follow-up project for the authors whose evidence was challenged or found insufficient. You choose which of them run, prepare a plan and confirm the run; nothing runs or is paid for automatically, and this project stays unchanged.',
   arNone: 'No completed author has a challenged or insufficient finding, so there is nothing to answer.',
@@ -505,6 +512,13 @@ const P3_KO: typeof P3_EN = {
   arPlanInvalid: '서버가 보낸 작성자 응답 계획을 이 화면이 읽을 수 없어 표시하지 않습니다.',
   arReviewer: '검토자의 근거',
   arEvidence: '작성자의 원래 근거',
+  arCoreFinding: (reviewer: string, verdict: string, author: string, target: string) => `${reviewer} · ${verdict} · ${author}, ${target}`,
+  arCoreText: '작성자의 원래 글 (위 인용은 정확히 그대로입니다)',
+  arSource: (status: string, cited: string) => `주장과 인용문 대조: ${status} (인용 글: ${cited})`,
+  arEligibleBy: { verdict: '판정으로 대상', 'source-assessment': '인용문 대조로 대상', 'verdict-and-source-assessment': '판정과 인용문 대조로 대상' },
+  arConflict: '일반 판정과 인용문 대조 결과가 서로 다릅니다. 둘 다 받은 그대로 보여 줍니다.',
+  arSourceNote: '일반 판정은 받은 그대로 둡니다. 인용문 대조는 검토 모델 하나의 판단(인용은 정확한 부분 문자열인지만 확인)이며 검증이 아닙니다.',
+  arSourceDropped: '저장된 주장과 인용문 대조 결과를 읽을 수 없어 보여 주지 않습니다. 이 지적은 판정으로만 대상입니다.',
   arAsk: '작성자에게 응답 요청',
   arAskHelp: '근거가 반박되었거나 부족하다고 지적된 작성자들을 위한 새 후속 프로젝트를 엽니다. 어떤 작성자를 실행할지 고르고 계획을 준비해 실행을 확인합니다. 자동으로 실행되거나 비용이 드는 것은 없으며 이 프로젝트는 바뀌지 않습니다.',
   arNone: '반박되었거나 부족하다고 지적된 완료 작성자가 없어 응답할 것이 없습니다.',
@@ -2118,22 +2132,26 @@ function normalizeClaims(raw: unknown): EvidenceClaim[] | undefined {
 const REVIEW_STATUSES: ProjectCrossReview['status'][] = ['running', 'completed', 'failed'];
 const CORE_TARGET_KINDS: ConsoleClaimFinding['target']['kind'][] = ['summary', 'assumption', 'nextAction'];
 const CLAIM_ISSUES: ConsoleClaimFinding['issue'][] = ['unsupported-premise', 'causal-overreach', 'missing-assumption', 'other'];
-/** 보고서마다 최대 6개. 하나라도 모르는 모양이면 null (그 보고서의 핵심 주장 판정 전체를 그리지 않는다) */
+/** 서버(cloudbite-core-claims) 상한: 보고서마다 핵심 주장 3개, 근거 판정과 합쳐 6개 */
+const CORE_PER_REPORT = 3, CORE_TOTAL_PER_REPORT = 6;
+/** 보고서마다 최대 3개. 하나라도 모르는 모양이면 null (그 보고서의 핵심 주장 판정 전체를 그리지 않는다). 인용은 정확해야 하므로 자르지 않는다 */
 function normalizeClaimFindings(raw: unknown): ConsoleClaimFinding[] | null {
-  if (!Array.isArray(raw) || raw.length > 6) return null;
+  if (!Array.isArray(raw) || raw.length > CORE_PER_REPORT) return null;
   const out: ConsoleClaimFinding[] = [];
   for (const f of raw) {
     if (!isObj(f) || !isObj(f.target) || !VERDICTS.includes(f.verdict as CrossReviewFinding['verdict']) || !CLAIM_ISSUES.includes(f.issue as ConsoleClaimFinding['issue'])
-      || !CORE_TARGET_KINDS.includes(f.target.kind as ConsoleClaimFinding['target']['kind']) || !isInt(f.target.index, 0, 40) || typeof f.target.quote !== 'string'
+      || !CORE_TARGET_KINDS.includes(f.target.kind as ConsoleClaimFinding['target']['kind']) || !isInt(f.target.index, 0, 40) || (f.target.kind === 'summary' && f.target.index !== 0)
+      || typeof f.target.quote !== 'string' || !f.target.quote.trim() || f.target.quote.length > 300
       || typeof f.rationale !== 'string' || typeof f.targetExpertId !== 'string' || !f.targetExpertId) return null;
-    out.push({ targetExpertId: clip(f.targetExpertId, 80), target: { kind: f.target.kind as ConsoleClaimFinding['target']['kind'], index: f.target.index, quote: clip(f.target.quote, 600) },
+    out.push({ targetExpertId: clip(f.targetExpertId, 80), target: { kind: f.target.kind as ConsoleClaimFinding['target']['kind'], index: f.target.index, quote: f.target.quote },
       verdict: f.verdict as CrossReviewFinding['verdict'], issue: f.issue as ConsoleClaimFinding['issue'], rationale: clip(f.rationale, 600) });
   }
   return out;
 }
-/** 대상 의견에 그 주장 칸이 실제로 있는가 (요약은 0번 하나) */
+/** 대상 의견의 그 주장 칸이 실제로 있고 인용이 그 글 안에 정확히 있는가 (요약은 0번 하나). 서버가 다시 확인한다 */
 function claimTargetExists(o: ExpertOpinion, t: ConsoleClaimFinding['target']): boolean {
-  return t.kind === 'summary' ? t.index === 0 && !!o.summary : t.index < (t.kind === 'assumption' ? o.assumptions : o.nextActions).length;
+  const text = t.kind === 'summary' ? (t.index === 0 ? o.summary : undefined) : (t.kind === 'assumption' ? o.assumptions : o.nextActions)[t.index];
+  return typeof text === 'string' && !!t.quote && text.includes(t.quote);
 }
 /** 교차 검토. 실행 위치·상태·판정 중 하나라도 모르는 값이면 전체를 null 로 돌려 그리지 않는다 (짐작해 그리지 않는다) */
 function normalizeCrossReview(raw: unknown): ConsoleReview | null {
@@ -2155,7 +2173,8 @@ function normalizeCrossReview(raw: unknown): ConsoleReview | null {
       findings.push({ targetExpertId, evidenceIndex, verdict: f.verdict as CrossReviewFinding['verdict'], rationale: str(f.rationale, 600), ...(support ? { claimSupport: support } : {}) });
     }
     // 핵심 주장 판정은 선택 필드다: 모양이 틀리면 그 보고서의 핵심 주장 판정만 그리지 않는다 (근거 판정은 그대로)
-    const claimFindings = r.claimFindings === undefined ? undefined : normalizeClaimFindings(r.claimFindings);
+    const claimFindings = r.claimFindings === undefined ? undefined
+      : findings.length + (Array.isArray(r.claimFindings) ? r.claimFindings.length : 0) > CORE_TOTAL_PER_REPORT ? null : normalizeClaimFindings(r.claimFindings);
     if (claimFindings === null) invalidClaimFindings = true;
     reports.push({ reviewerExpertId, findings, summary: str(r.summary, 1000), ...(claimFindings ? { claimFindings } : {}) });
   }
@@ -2314,6 +2333,37 @@ function normalizeAuthorResponse(raw: unknown, expertId: string): AuthorResponse
   return { expertId, responses, coverage: { expected: cv.expected, answered: cv.answered, missing, status: cv.status as AuthorResponseParsed['coverage']['status'] },
     language: { language: lg.language as ResponseLanguage, status: lg.status as AuthorResponseParsed['language']['status'] } };
 }
+const ELIGIBLE_BY = ['verdict', 'source-assessment', 'verdict-and-source-assessment'] as const;
+/**
+ * 계획의 지적 하나 (서버 AuthorResponseFinding 과 같은 모양). 근거 지적은 원래 판정을 그대로 두고, '지지' 판정은 지지가 아닌 인용문 대조와만 온다.
+ * 핵심 주장 지적은 칸·번호·정확한 인용·전체 글 해시를 가진다. 모양이 하나라도 틀리면 null → 계획 전체를 "읽을 수 없음"으로 (글·번호를 지어내지 않는다)
+ */
+function normalizeAuthorFinding(f: unknown): AuthorResponseFinding | null {
+  if (!isObj(f) || typeof f.findingId !== 'string' || !AR_FINDING.test(f.findingId) || typeof f.reviewerExpertId !== 'string' || typeof f.targetExpertId !== 'string'
+    || f.reviewerExpertId === f.targetExpertId || typeof f.reviewerRationale !== 'string') return null;
+  const base = { findingId: f.findingId, reviewerExpertId: clip(f.reviewerExpertId, 80), targetExpertId: clip(f.targetExpertId, 80) };
+  if (f.kind === 'core-claim') {
+    const t = f.target;
+    if (!isObj(t) || !CORE_TARGET_KINDS.includes(t.kind as ConsoleClaimFinding['target']['kind']) || !isInt(t.index, 0, 40) || (t.kind === 'summary' && t.index !== 0)
+      || typeof t.quote !== 'string' || !t.quote.trim() || t.quote.length > 300 || typeof t.textSha256 !== 'string' || !SHA256.test(t.textSha256)
+      || typeof f.targetText !== 'string' || (f.verdict !== 'challenged' && f.verdict !== 'insufficient') || !CLAIM_ISSUES.includes(f.issue as ConsoleClaimFinding['issue'])) return null;
+    return { kind: 'core-claim', ...base, target: { kind: t.kind as ConsoleClaimFinding['target']['kind'], index: t.index, quote: t.quote, textSha256: t.textSha256 },
+      targetText: clip(f.targetText, 1000), verdict: f.verdict, issue: f.issue as ConsoleClaimFinding['issue'], reviewerRationale: clip(f.reviewerRationale, 1500) };
+  }
+  if (f.kind !== undefined || !isInt(f.evidenceIndex) || !VERDICTS.includes(f.verdict as CrossReviewFinding['verdict']) || typeof f.evidenceText !== 'string') return null;
+  const verdict = f.verdict as CrossReviewFinding['verdict'];
+  const sa = f.sourceAssessment === undefined ? undefined : normalizeClaimSupport(f.sourceAssessment);
+  if (sa === null || (f.sourceAssessmentDropped !== undefined && (f.sourceAssessmentDropped !== 'malformed' || sa))) return null;
+  // 서버 규칙 그대로: 대상이 된 이유·충돌 여부는 판정과 인용문 대조에서 정해진다. 맞지 않으면 지어낸 값으로 보고 읽지 않는다
+  if (sa) {
+    const by = verdict === 'supported' ? 'source-assessment' : sa.status === 'supported' ? 'verdict' : 'verdict-and-source-assessment';
+    if (f.eligibleBy !== by || f.sourceConflict !== ((verdict === 'supported') !== (sa.status === 'supported'))) return null;
+  } else if (f.eligibleBy !== undefined || f.sourceConflict !== undefined) return null;
+  if (verdict === 'supported' && (!sa || sa.status === 'supported')) return null;
+  return { ...base, evidenceIndex: f.evidenceIndex, verdict, reviewerRationale: clip(f.reviewerRationale, 1500), evidenceText: clip(f.evidenceText, 1000),
+    ...(sa ? { sourceAssessment: sa, eligibleBy: f.eligibleBy as typeof ELIGIBLE_BY[number], sourceConflict: f.sourceConflict as boolean } : {}),
+    ...(f.sourceAssessmentDropped === 'malformed' ? { sourceAssessmentDropped: 'malformed' as const } : {}) };
+}
 const EXECUTION_KEYS = { kind: 'new-child-project', automaticCalls: 0, budget: 'child-normal', parentMutation: 'none', parentMemo: 'unchanged', childMemo: 'own-optional' } as const;
 function normalizeAuthorPlan(raw: unknown, parentId: string): AuthorResponsePlan | null {
   if (!isObj(raw) || raw.version !== 'cloudbite-author-response/v1' || raw.kind !== 'author-response-follow-up' || raw.trust !== 'untrusted-data' || raw.parentId !== parentId
@@ -2324,6 +2374,12 @@ function normalizeAuthorPlan(raw: unknown, parentId: string): AuthorResponsePlan
   const reviewers = isObj(cr) ? strArr(cr.reviewers, 8, 80) : null;
   if (!isObj(cr) || typeof cr.snapshotHash !== 'string' || !SHA256.test(cr.snapshotHash) || !(cr.completedAt === null || isInt(cr.completedAt)) || !reviewers
     || !isInt(cr.findings) || !isInt(cr.supported) || !isInt(cr.eligible)) return null;
+  // v5 선택 집계: 있으면 모든 칸이 정수여야 한다 (없으면 v1 계획)
+  const counts = <K extends string>(v: unknown, keys: readonly K[]): Record<K, number> | null | undefined =>
+    v === undefined ? undefined : isObj(v) && keys.every(k => isInt(v[k])) ? Object.fromEntries(keys.map(k => [k, v[k] as number])) as Record<K, number> : null;
+  const srcCounts = counts(cr.sourceAssessments, ['assessed', 'malformed', 'conflicts', 'supportedWithSourceGap'] as const);
+  const coreCounts = counts(cr.coreClaims, ['findings', 'supported', 'eligible'] as const);
+  if (srcCounts === null || coreCounts === null) return null;
   const roles = strArr(raw.roles, PROJECT_MAX, 80), unselected = strArr(raw.unselectedAuthors, PROJECT_MAX, 80);
   const authors = every(raw.authors, PROJECT_MAX, a => {
     const o = isObj(a) ? a.original : null, fids = isObj(a) ? strArr(a.findingIds, 9, 40) : null;
@@ -2332,22 +2388,21 @@ function normalizeAuthorPlan(raw: unknown, parentId: string): AuthorResponsePlan
       ? { expertId: clip(a.expertId, 80), name: clip(a.name, 120), opinionSha256: a.opinionSha256, findingIds: fids,
         original: { direction: o.direction as OpinionDirection, confidence: o.confidence, summary: clip(o.summary, 1500), evidenceCount: o.evidenceCount } } : null;
   });
-  const findings = every(raw.findings, 9, f => isObj(f) && typeof f.findingId === 'string' && AR_FINDING.test(f.findingId) && typeof f.reviewerExpertId === 'string'
-    && typeof f.targetExpertId === 'string' && isInt(f.evidenceIndex) && (f.verdict === 'challenged' || f.verdict === 'insufficient')
-    && typeof f.reviewerRationale === 'string' && typeof f.evidenceText === 'string'
-    ? { findingId: f.findingId, reviewerExpertId: clip(f.reviewerExpertId, 80), targetExpertId: clip(f.targetExpertId, 80), evidenceIndex: f.evidenceIndex,
-      verdict: f.verdict as 'challenged' | 'insufficient', reviewerRationale: clip(f.reviewerRationale, 1000), evidenceText: clip(f.evidenceText, 1000) } : null);
+  const findings = every(raw.findings, 9, normalizeAuthorFinding);
   const omittedIds = isObj(cap) ? strArr(cap.omittedFindingIds, 18, 40) : null;
-  const excluded = every(raw.excluded, 64, x => isObj(x) && isInt(x.reportIndex) && typeof x.reason === 'string'
+  const excluded = every(raw.excluded, 256, x => isObj(x) && isInt(x.reportIndex) && typeof x.reason === 'string'
     ? { reportIndex: x.reportIndex, reason: x.reason as AuthorResponsePlan['excluded'][number]['reason'], ...(isInt(x.findingIndex) ? { findingIndex: x.findingIndex } : {}),
+      ...(isInt(x.coreIndex) ? { coreIndex: x.coreIndex } : {}),
       ...(typeof x.reviewerExpertId === 'string' ? { reviewerExpertId: clip(x.reviewerExpertId, 80) } : {}), ...(typeof x.targetExpertId === 'string' ? { targetExpertId: clip(x.targetExpertId, 80) } : {}) } : null);
   const omissions = every(raw.omissions, 200, o => isObj(o) && typeof o.path === 'string' && (o.omittedBytes === undefined || isInt(o.omittedBytes)) && (o.omittedItems === undefined || isInt(o.omittedItems))
     ? { path: clip(o.path, 120), ...(o.omittedBytes !== undefined ? { omittedBytes: o.omittedBytes as number } : {}), ...(o.omittedItems !== undefined ? { omittedItems: o.omittedItems as number } : {}) } : null);
   if (!roles || !unselected || !authors || !findings || !omittedIds || !excluded || !omissions || !isObj(cap) || !isInt(cap.limit) || !isInt(cap.eligibleSelected) || !isInt(cap.included)) return null;
   // 지적은 그 작성자 것이어야 한다: 계획의 묶음이 서로 맞지 않으면 읽지 않는다
-  if (findings.some(f => !authors.some(a => a.expertId === f.targetExpertId && a.findingIds.includes(f.findingId)))) return null;
+  if (findings.some(f => !authors.some(a => a.expertId === f.targetExpertId && a.findingIds.includes(f.findingId)
+    && (f.kind === 'core-claim' || f.evidenceIndex < a.original.evidenceCount)))) return null;
   return { version: 'cloudbite-author-response/v1', kind: 'author-response-follow-up', trust: 'untrusted-data', parentId, parentStatus: raw.parentStatus as ProjectStatus,
-    crossReview: { snapshotHash: cr.snapshotHash, completedAt: cr.completedAt as number | null, reviewers, findings: cr.findings, supported: cr.supported, eligible: cr.eligible },
+    crossReview: { snapshotHash: cr.snapshotHash, completedAt: cr.completedAt as number | null, reviewers, findings: cr.findings, supported: cr.supported, eligible: cr.eligible,
+      ...(srcCounts ? { sourceAssessments: srcCounts } : {}), ...(coreCounts ? { coreClaims: coreCounts } : {}) },
     responseLanguage: raw.responseLanguage as ResponseLanguage, execution: { ...EXECUTION_KEYS }, roles, authors, findings,
     capped: { limit: cap.limit, eligibleSelected: cap.eligibleSelected, included: cap.included, omittedFindingIds: omittedIds },
     unselectedAuthors: unselected, excluded, omissions, disclosure: clip(raw.disclosure, 2000), planSha256: raw.planSha256 };
@@ -2376,6 +2431,18 @@ function authorResponseAffected(p: ConsoleProject): string[] {
 function authorResponseEligible(p: ConsoleProject): boolean {
   return followUpEligible(p) && p.status !== 'cancelled' && p.crossReview?.status === 'completed' && authorResponseAffected(p).length > 0;
 }
+/** 지적 머리글: 근거 지적은 근거 번호, 핵심 주장 지적은 칸(요약·가정·다음 행동)과 번호·문제 종류. 판정은 받은 그대로 */
+function authorFindingHead(f: AuthorResponseFinding, m: Messages, name: NameOf): string {
+  const t = m.p3;
+  if (f.kind !== 'core-claim') return t.arFinding(name(f.reviewerExpertId), m.verdict[f.verdict], name(f.targetExpertId), f.evidenceIndex + 1);
+  const slot = `${m.p4.coreTarget[f.target.kind]}${f.target.kind === 'summary' ? '' : ` ${f.target.index + 1}`}`;
+  return t.arCoreFinding(name(f.reviewerExpertId), m.verdict[f.verdict], name(f.targetExpertId), `${slot} · ${m.p4.coreIssue[f.issue]}`);
+}
+/** 인용문 대조 한 줄: 상태·인용 글 상태·대상이 된 이유 (검증이 아니다) */
+function authorSourceLine(f: Extract<AuthorResponseFinding, { evidenceIndex: number }>, m: Messages): string {
+  const a = f.sourceAssessment!;
+  return `${m.p3.arSource(m.p4.supportStatus[a.status], a.citedText)}${f.eligibleBy ? ` · ${m.p3.arEligibleBy[f.eligibleBy]}` : ''}`;
+}
 /** 작성자 응답 줄 (화면·보고서 공용). 지적마다 응답·없음, 역할마다 거부·읽을 수 없음·아직 없음을 의견 상태와 따로 적는다 */
 function authorResponseLines(plan: AuthorResponsePlan, experts: ConsoleExpert[], m: Messages, name: NameOf): Array<{ author: string; head: string; original: string; lines: string[] }> {
   const t = m.p3;
@@ -2386,10 +2453,17 @@ function authorResponseLines(plan: AuthorResponsePlan, experts: ConsoleExpert[],
     else if (ar && 'invalid' in ar) head.push(t.arInvalid(ar.invalid));
     else if (ar) head.push(`${t.arStatus[ar.coverage.status]} · ${t.arAnswered(ar.coverage.answered, ar.coverage.expected)}`);
     else head.push(t.arPending);
-    const lines = plan.findings.filter(f => a.findingIds.includes(f.findingId)).map(f => {
+    // 지적 한 줄 뒤에 두 칸 들여 쓴 세부 줄 (원래 글·인용·검토자 근거·인용문 대조). 아무것도 빼지 않는다
+    const lines = plan.findings.filter(f => a.findingIds.includes(f.findingId)).flatMap(f => {
       const r = ar && !('invalid' in ar) ? ar.responses.find(x => x.findingId === f.findingId) : undefined;
       const answer = r ? `${t.arDisposition[r.disposition]} — ${r.rationale}` : ar && !('invalid' in ar) ? t.arMissing : '';
-      return `${t.arFinding(name(f.reviewerExpertId), m.verdict[f.verdict], name(f.targetExpertId), f.evidenceIndex + 1)}${answer ? ` → ${answer}` : ''}`;
+      const src = f.kind === 'core-claim' ? [] : f.sourceAssessment
+        ? [authorSourceLine(f, m), ...(f.sourceConflict ? [t.arConflict] : []), t.arSourceNote, f.sourceAssessment.rationale,
+          ...f.sourceAssessment.quotes.map(q => `${q.ref} · ${m.p4.textOrigin[q.textOrigin] ?? q.textOrigin} · L${q.startLine}–${q.endLine}: “${q.quote}”`)]
+        : f.sourceAssessmentDropped ? [t.arSourceDropped] : [];
+      const text = f.kind === 'core-claim' ? [`“${f.target.quote}”`, `${t.arCoreText}: ${f.targetText}`] : [`${t.arEvidence}: ${f.evidenceText}`];
+      return [`${authorFindingHead(f, m, name)}${answer ? ` → ${answer}` : ''}`,
+        ...[...text, ...(f.reviewerRationale ? [`${t.arReviewer}: ${f.reviewerRationale}`] : []), ...src].map(x => `  ${x}`)];
     });
     return { author: a.name, head: head.join(''), original: t.arOriginal(m.direction[a.original.direction], a.original.confidence), lines };
   });
@@ -3049,7 +3123,8 @@ function phaseTwoMarkdown(p: ConsoleProject, m: Messages): string[] {
     else {
       out.push(`> ${t3.arNote}`, '', `- ${t3.arCapped(plan.capped.included, plan.capped.eligibleSelected)}`,
         ...(plan.unselectedAuthors.length ? [`- ${t3.arUnselected(plan.unselectedAuthors.map(name).join(', '))}`] : []), `- ${plan.disclosure}`);
-      for (const a of authorResponseLines(plan, p.experts, m, name)) out.push('', `### ${a.author}`, `- ${a.original}`, `- ${a.head} (${t3.arSeparate})`, ...a.lines.map(x => `- ${x}`));
+      for (const a of authorResponseLines(plan, p.experts, m, name)) out.push('', `### ${a.author}`, `- ${a.original}`, `- ${a.head} (${t3.arSeparate})`,
+        ...a.lines.map(x => x.startsWith('  ') ? `  - ${x.slice(2)}` : `- ${x}`));
     }
   }
   if (p.provenance || p.invalidProvenance) {
@@ -5526,11 +5601,23 @@ function boot(): void {
         state, h('p', { class: 'cb-help' }, t.arSeparate),
         h('ol', { class: 'cb-findings' }, ...plan.findings.filter(f => a.findingIds.includes(f.findingId)).map(f => {
           const r = parsed?.responses.find(x => x.findingId === f.findingId);
-          return h('li', { class: 'cb-finding' },
+          const core = f.kind === 'core-claim' ? f : null, ev = f.kind === 'core-claim' ? null : f;
+          const sa = ev?.sourceAssessment;
+          return h('li', { class: 'cb-finding', ...(core ? { 'data-core': `${core.target.kind}:${core.target.index}` } : {}) },
             h('div', { class: 'cb-finding-head' }, h('span', { class: `cb-chip ${VERDICT_CHIP[f.verdict]}` }, m.verdict[f.verdict]),
-              h('strong', null, m.reviewFinding(name(f.targetExpertId), f.evidenceIndex + 1)), h('span', { class: 'cb-tag' }, m.reviewBy(name(f.reviewerExpertId)))),
-            evDisclosure(opened, `${prefix}ar:${f.findingId}`, 'cb-quiet', [h('span', null, `${t.arEvidence} · ${t.arReviewer}`)],
-              h('blockquote', { class: 'cb-finding-evidence' }, f.evidenceText), f.reviewerRationale ? h('p', null, f.reviewerRationale) : null),
+              h('strong', null, core ? `${name(core.targetExpertId)} · ${m.p4.coreTarget[core.target.kind]}${core.target.kind === 'summary' ? '' : ` ${core.target.index + 1}`}`
+                : m.reviewFinding(name(f.targetExpertId), ev!.evidenceIndex + 1)),
+              core ? h('span', { class: 'cb-tag' }, m.p4.coreIssue[core.issue]) : null,
+              sa ? h('span', { class: 'cb-tag' }, `${m.p4.supportTitle} · ${m.p4.supportStatus[sa.status]}`) : null,
+              h('span', { class: 'cb-tag' }, m.reviewBy(name(f.reviewerExpertId)))),
+            core ? h('blockquote', { class: 'cb-finding-evidence' }, core.target.quote) : null,
+            evDisclosure(opened, `${prefix}ar:${f.findingId}`, 'cb-quiet', [h('span', null, `${core ? t.arCoreText : t.arEvidence} · ${t.arReviewer}`)],
+              h('blockquote', { class: 'cb-finding-evidence' }, core ? core.targetText : ev!.evidenceText), f.reviewerRationale ? h('p', null, f.reviewerRationale) : null),
+            ev && sa ? evDisclosure(opened, `${prefix}ar-src:${f.findingId}`, 'cb-quiet cb-support', [h('span', null, authorSourceLine(ev, m))],
+              ev.sourceConflict ? h('p', { class: 'cb-warn' }, t.arConflict) : null, h('p', { class: 'cb-help' }, t.arSourceNote), h('p', null, sa.rationale),
+              ...sa.quotes.map(q => h('figure', null, h('blockquote', null, q.quote), h('figcaption', null, `${q.ref} · ${m.p4.textOrigin[q.textOrigin] ?? q.textOrigin} · L${q.startLine}–${q.endLine}`))),
+              h('p', { class: 'cb-help' }, `${sa.citedText} · ${sa.packetSha256}`)) : null,
+            ev?.sourceAssessmentDropped ? h('p', { class: 'cb-help' }, t.arSourceDropped) : null,
             r ? h('div', { class: 'cb-ar-answer' }, h('span', { class: `cb-chip is-${r.disposition}` }, t.arDisposition[r.disposition]), ' ', h('span', null, r.rationale))
               : parsed ? h('p', { class: 'cb-help' }, t.arMissing) : null);
         }))));

@@ -86,3 +86,13 @@ section; prompts without annotations are byte-identical to the pre-repair builde
   (still mutually assignable); the UI does not render them yet.
 - Stored readings are shape-checked, not re-verified against the packet; a well-formed forged reading inside the
   caller's own history is accepted as a reading (never as truth).
+
+**Console (client repair).** `normalizeAuthorPlan` now reads the server's exact leaf shapes: an evidence finding keeps
+its ordinary verdict (`supported` only beside a non-supported, well-formed `sourceAssessment`, with `eligibleBy` /
+`sourceConflict` re-derived and required to match) and `kind: 'core-claim'` findings keep target kind/index/quote/
+`textSha256`, `targetText` and issue; any fabricated, foreign or stale finding makes the whole plan "unreadable" (no
+text or index is invented). The child view and the Markdown report show both readings (EN/KO), the exact quotes and
+the "model reading, not verification" note. Core-claim checks are read only within the server bounds (≤3 per report,
+≤6 with evidence findings; otherwise only the core part is disclosed as unreadable), and the "ask authors" button
+requires the quote to occur in the named summary/assumption/next-action slot (the server re-checks).
+Test: `node test/cloudbite-v5-author-plan-ui.mjs` (server-built plans, fake DOM).
