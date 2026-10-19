@@ -9,7 +9,16 @@
 //   artifact:<run>:<path>       collected text artifact (≤ 64 KiB)
 //   crossreview                 CrossReviewRecord — opt-in second pass (src/cloudbite-cross-review.ts); never part of
 //                               the project/expert records, so original opinions, statuses and confidence stay untouched
+//   budget                      BudgetUsage (src/cloudbite-budget.ts) — the model-call ledger of every expert, reviewer
+//                               and memo call; its own key, so a stale project/expert save can never erase a reservation.
+//                               ProjectRecord.ledger marks projects created with one (missing/corrupt then fails closed);
+//                               only genuinely pre-budget projects are reconstructed conservatively (migrateBudgetUsage)
+//   memo                        MemoRecord — opt-in decision memo (src/cloudbite-memo.ts): one paid attempt per project
+//   round                       ProjectPreviousRound — bounded, labelled reference to an authorized parent (revisions)
+//   audit:<run>                 AuditRecord — the runner's raw out/knowledge.json as collected (≤ 64 KiB), or its absence
+//   packets                     EvidencePacket[] — bounded packets of completed experts, sealed when the project finishes
 // Registry instance: reg → { [projectId]: expiresAt }
+// 'pmc-import' instance: pmc → PmcState (global NCBI pacing, one import at a time, per-actor hourly limit)
 //
 // Execution state machine per expert (alarm-driven, every external call bracketed by a claim):
 //   queued → creating → booting → uploading → starting → running → collecting → final
@@ -20,18 +29,31 @@
 // call and cleanup for it uses that account only. Records without an account are legacy and resolve to primary.
 import { DurableObject } from 'cloudflare:workers';
 import type { Env } from './state';
-import type { CrossReviewReport, ExpertActivity, ExpertArtifact, ExpertDefinition, ExpertRun, ProjectBrief, ProjectCrossReview, ProjectRun, ProjectStatus } from './cloudbite-contract';
+import type { CrossReviewReport, ExpertActivity, ExpertArtifact, ExpertAssignment, ExpertDefinition, ExpertRun, ProjectBrief, ProjectCrossReview, ProjectPreview, ProjectRun, ProjectStatus, ProjectUsage } from './cloudbite-contract';
+import type * as C from './cloudbite-contract';
 import { CLOUDBITE_EXPERTS, buildExpertWorkspace } from './cloudbite-personas';
 import {
   CB_ACTIVITY_MAX, CB_ACTIVITY_POSTS, CB_ARTIFACT_FILES, CB_ARTIFACT_MAX, CB_CAPABILITY_TTL, CB_CLAIM_STALE, CB_CLEANUP_MAX_TRIES,
-  CB_EXPERT_DEADLINE, CB_INFERENCE_MAX_CALLS, CB_INFERENCE_TIMEOUT, CB_MAX_ACTIVE_PROJECTS, cbMaxConcurrent, CB_MAX_TOKENS, CB_POLL,
+  CB_EXPERT_DEADLINE, CB_INFERENCE_MAX_CALLS, CB_INFERENCE_TIMEOUT, CB_MAX_ACTIVE_PROJECTS, CB_MAX_EXPERTS, cbMaxConcurrent, CB_MAX_TOKENS, CB_POLL,
   CB_PROVISION_DEADLINE, CB_RETENTION, CB_WORKDIR, cbAccountBinding, cloudbiteConfig, type CbAccountId, type CbDaytonaAccount, type CloudbiteConfig,
 } from './cloudbite-config';
 import { artifactPath, extraArtifactPath, isInvalid, PROJECT_ID, validateBrief, validateResult, validateWorkspace } from './cloudbite-validate';
 import { CbDaytonaError, CB_LABEL_CLAIM, CB_LABEL_PROJECT, CB_LABEL_RUN, cbCreateSandbox, cbDeleteSandbox, cbDownload, cbExec, cbFindByLabels, cbGetSandbox, cbStartRunner, cbUpload, type CbSandbox } from './cloudbite-daytona';
 import { chatMessages, nosanaChat, type ChatMessage, type InferenceResult } from './cloudbite-inference';
-import { evidenceClaims } from './cloudbite-evidence';
-import { CB_CROSS_REVIEW_STALE, parseReviewReply, peersFor, reviewMessages, reviewSnapshot, selectReviewers, type CompletedOpinion } from './cloudbite-cross-review';
+import { buildEvidenceSignals, evidenceClaims } from './cloudbite-evidence';
+import { CB_CROSS_REVIEW_MAX_PEERS, CB_CROSS_REVIEW_STALE, findingTextAvailability, parseReviewReply, reviewMessages, reviewPlan, reviewSnapshot, type CompletedOpinion, type FindingTextAvailability, type ReviewPlan } from './cloudbite-cross-review';
+import { buildEvidencePackets, EVIDENCE_PACKET_LIMITS, type EvidencePacket, type EvidencePacketInput } from './cloudbite-evidence-packet';
+import {
+  affordableReviewers, budgetDenialMessage, CB_BUDGET_ROUTING_CALLS, createBudgetUsage, expertCanContinue, migrateBudgetUsage, parseBudgetUsage,
+  planProjectBudget, publicBudget, reserveBudget, reserveBudgetBatch, type BudgetPlanOk, type BudgetPublic, type BudgetUsage,
+} from './cloudbite-budget';
+import {
+  CB_MEMO_PACKET_LIMITS, completedMemo, failedMemo, isMemoSnapshotCurrent, memoMessages, memoSnapshotHash, needsOptionsMemo, parseMemoReply, runningMemo, settleStaleMemo,
+  validateMemoPacket, type DecisionMemo, type MemoCoverage, type MemoEvidencePacket, type MemoInputOptions, type ProjectMemo,
+} from './cloudbite-memo';
+import { buildExpertAssignments } from './cloudbite-workorders';
+import { previousRoundWorkOrderRules, previousRoundWorkspaceFiles, ROUND_VERSION, type ProjectPreviousRound } from './cloudbite-revision';
+import { importPmc, isPmcImportError, parsePmcIdentifier, PMC_LIMITS, type PmcImport } from './cloudbite-pmc';
 import { CB_RUNNER_PY, RUNNER_DIAGNOSTIC_MAX, runnerCapability, runnerFailureMessage } from './cloudbite-runner';
 import { historyIndex, historyRow } from './cloudbite-history';
 import { HISTORY_TTL, HISTORY_ISSUES, type HistoryIdentity, type HistoryFeedback, type HistoryDetail } from './cloudbite-history-contract';
@@ -40,6 +62,14 @@ import type { CloudbiteRoutingQuery, CloudbiteRoutingDecision } from './cloudbit
 
 export type CbFail = { error: string; status: number };
 const fail = (status: number, error: string): CbFail => ({ error, status });
+/** PMC import failure: a stable code and, when known, how long to wait. */
+export type PmcFail = CbFail & { code: string; retryAfterSeconds?: number };
+
+// The browser-safe mirrors in cloudbite-contract must stay mutually assignable with the leaf types they mirror.
+type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+const same = <T extends true>() => {};
+same<Same<C.ProjectMemo, ProjectMemo>>(); same<Same<C.DecisionMemo, DecisionMemo>>(); same<Same<C.MemoCoverage, MemoCoverage>>();
+same<Same<C.BudgetView, BudgetPublic>>(); same<Same<C.CrossReviewCoverage, ReviewPlan['coverage']>>(); same<Same<C.CrossReviewTextAvailability, FindingTextAvailability>>();
 export const isCbFail = (x: unknown): x is CbFail => typeof x === 'object' && x !== null && 'error' in x && 'status' in x;
 
 type Phase = 'queued' | 'creating' | 'booting' | 'uploading' | 'starting' | 'running' | 'collecting' | 'final';
@@ -63,10 +93,38 @@ interface ProjectRecord {
   tokens: string[]; runs: string[]; released?: boolean;
   history?: HistoryIdentity; feedback?: HistoryFeedback[];
   routing?: CloudbiteRoutingDecision;
+  /** Server-owned marker: this project was created with a budget ledger (absent = pre-budget project). */
+  ledger?: 'v1';
+  assignments?: ExpertAssignment[];
+  /** Typed Jev routing calls behind this project's selection (0 = manual); outside the Nosana budget. */
+  jevCalls?: number;
+  /** One sandbox per selected expert at most (live), an upper bound and never actual spend. */
+  sandboxMaximum?: number;
 }
 /** claim = the attempt that may write results; reviewers = the calls it reserved (never retried). */
 interface CrossReviewRecord { review: ProjectCrossReview; claim: string; reviewers: string[] }
 const CROSS_REVIEW = 'crossreview';
+/** claim = the one attempt that may write the memo (absent for the deterministic needs-options outcome). */
+interface MemoRecord { memo: ProjectMemo; claim?: string }
+/** content = raw out/knowledge.json; neither = the runner wrote none; oversize = larger than the audit bound. */
+interface AuditRecord { content?: string; oversize?: true }
+interface PmcState { lastCallAt: number; calls: Record<string, number[]>; busy?: { claim: string; until: number } }
+interface Loaded { p: ProjectRecord; experts: ExpertRecord[]; cr?: CrossReviewRecord; memo?: MemoRecord; budget?: unknown; round?: ProjectPreviousRound; packets?: EvidencePacket[] }
+export interface CreateOptions {
+  /** Effective team cap the API derived (operator, visitor session and stated budget); the plan takes the minimum. */
+  maxExperts?: number;
+  /** Validated follow-up round built by the API from its own history read of the parent. */
+  round?: ProjectPreviousRound;
+  /** Only return an existing project for this requestId; never create one. */
+  replayOnly?: boolean;
+}
+const PMC_HOURLY = 10;
+const PMC_BUSY = 120_000; // longer than one import's request timeouts and waits; a lost import frees itself
+const PMC_ACTOR = /^(owner|v_[0-9a-f]{64})$/;
+const PMC_ERROR_STATUS: Record<string, number> = { invalid_identifier: 400, not_found: 404, identity_mismatch: 422, source_unavailable: 422,
+  rate_limited: 429, timeout: 504, too_large: 413, redirect_blocked: 502, invalid_xml: 502, upstream_error: 502 };
+const PMC_HOST = 'pmc.ncbi.nlm.nih.gov';
+const ROUND_MAX_BYTES = 120 * 1024;
 interface CleanupEntry { run: string; sandboxId?: string; label?: string; tries: number; nextAt: number; done?: boolean; stuck?: boolean; account?: CbAccountId; binding?: string }
 type Account = CbDaytonaAccount & { binding: string };
 type Owner = { account: CbAccountId; binding: string };
@@ -103,11 +161,23 @@ export class CloudbiteProject extends DurableObject<Env> {
   }
   // ── overridable seams (tests inject a catalogue/clock; production uses the persona module) ──
   protected catalogue(): readonly ExpertDefinition[] { return CLOUDBITE_EXPERTS; }
-  protected workspace(expert: ExpertDefinition, brief: ProjectBrief) { return buildExpertWorkspace(expert, brief); }
+  /** The expert's workspace: persona pack with its actual assignment, plus the untrusted previous-round file for a follow-up. */
+  protected workspace(expert: ExpertDefinition, brief: ProjectBrief, assignment?: ExpertAssignment, round?: ProjectPreviousRound) {
+    const files = buildExpertWorkspace(expert, brief, assignment);
+    const extra = round ? previousRoundWorkspaceFiles(round, expert.id) : [];
+    if (!round || !extra.length) return files;
+    const rules = '\n\n## Previous round\n\n' + previousRoundWorkOrderRules(round).map((r) => `- ${r}`).join('\n') + '\n';
+    return [...files.map((f) => (f.path === 'WORKORDER.md' ? { ...f, content: f.content + rules } : f)), ...extra];
+  }
   protected clock() { return Date.now(); }
   protected config(): CloudbiteConfig | null { return cloudbiteConfig(this.env); }
   /** The one provider call of a cross-review reviewer (tests replace it to observe or fail calls). */
   protected reviewInference(cfg: CloudbiteConfig, messages: ChatMessage[]): Promise<InferenceResult> { return nosanaChat(cfg.nosana, messages); }
+  /** The one provider call of a decision memo; maxTokens is the fixed memo output budget (nosanaChat allows no other). */
+  protected memoInference(cfg: CloudbiteConfig, messages: ChatMessage[], maxTokens: number): Promise<InferenceResult> { return nosanaChat(cfg.nosana, messages, { maxTokens }); }
+  /** Network seams of the PMC import (fixed NCBI endpoints only; see pmcFetcher). */
+  protected pmcFetch(url: string, init: RequestInit): Promise<Response> { return fetch(url, init); }
+  protected pmcSleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }
   private async accounts(cfg: CloudbiteConfig | null): Promise<Account[]> {
     return cfg ? Promise.all(cfg.daytonaAccounts.map(async (a) => ({ ...a, binding: await cbAccountBinding(a) }))) : [];
   }
@@ -129,17 +199,46 @@ export class CloudbiteProject extends DurableObject<Env> {
   }
 
   // ── storage helpers ──
-  private async load(): Promise<{ p: ProjectRecord; experts: ExpertRecord[]; cr?: CrossReviewRecord } | null> {
+  private async load(): Promise<Loaded | null> {
     const p = await this.ctx.storage.get<ProjectRecord>('project');
     if (!p) return null;
-    const m = await this.ctx.storage.get<ExpertRecord | CrossReviewRecord>([...p.runs.map((r) => `expert:${r}`), CROSS_REVIEW]);
-    return { p, experts: p.runs.map((r) => m.get(`expert:${r}`) as ExpertRecord).filter(Boolean), cr: m.get(CROSS_REVIEW) as CrossReviewRecord | undefined };
+    // At most 100 runs + 5 keys: inside the 128-key multi-get limit.
+    const m = await this.ctx.storage.get<unknown>([...p.runs.map((r) => `expert:${r}`), CROSS_REVIEW, 'memo', 'budget', 'round', 'packets']);
+    return { p, experts: p.runs.map((r) => m.get(`expert:${r}`) as ExpertRecord).filter(Boolean), cr: m.get(CROSS_REVIEW) as CrossReviewRecord | undefined,
+      memo: m.get('memo') as MemoRecord | undefined, budget: m.get('budget'), round: m.get('round') as ProjectPreviousRound | undefined, packets: m.get('packets') as EvidencePacket[] | undefined };
   }
-  /** Public projection. Optional views (routing, crossReview, …) are appended here and only when present. */
-  private view(p: ProjectRecord, experts: ExpertRecord[], cr?: CrossReviewRecord): ProjectRun {
-    return { id: p.id, brief: p.brief, status: p.status, experts: experts.map((e) => e.run), createdAt: p.createdAt, updatedAt: p.updatedAt, ...(p.routing ? { routing: p.routing } : {}),
-      ...(p.brief.mode === 'live' ? { evidenceClaims: evidenceClaims(p.brief, experts.map(e => e.run)) } : {}),
-      ...(cr ? { crossReview: cr.review } : {}) };
+  /** Public projection. Optional views (routing, crossReview, memo, usage, …) are appended here and only when present. */
+  private view(s: Loaded): ProjectRun {
+    const { p, experts, cr } = s, runs = experts.map((e) => e.run), usage = this.usage(s);
+    return { id: p.id, brief: p.brief, status: p.status, experts: runs, createdAt: p.createdAt, updatedAt: p.updatedAt, ...(p.routing ? { routing: p.routing } : {}),
+      ...(p.brief.mode === 'live' ? { evidenceClaims: evidenceClaims(p.brief, runs) } : {}),
+      ...(cr ? { crossReview: cr.review } : {}),
+      ...(p.assignments ? { assignments: p.assignments } : {}),
+      ...(s.memo ? { memo: s.memo.memo } : {}),
+      ...(usage ? { usage } : {}),
+      ...(s.round ? { previousRound: s.round } : {}),
+      // Pre-packet projects carry no packets: observedRetrieval stays null and packetCoverage.supplied false (unobserved, not absent).
+      ...(p.brief.mode === 'live' && !p.history?.deleted ? { evidenceSignals: buildEvidenceSignals(p.brief, runs, { ...(s.packets ? { packets: s.packets } : {}), ...(cr ? { crossReview: cr.review } : {}) }) } : {}),
+      ...(s.packets ? { evidencePackets: s.packets } : {}) };
+  }
+  /** Public usage: the stored ledger, or for a pre-budget project its conservative reconstruction (never zeroed). */
+  private usage(s: Loaded): ProjectUsage | undefined {
+    const u = s.p.ledger || s.budget !== undefined ? parseBudgetUsage(s.budget) : this.migrated(s);
+    if (!u) return undefined;
+    return { ...publicBudget(u), jevCalls: s.p.jevCalls ?? (s.p.routing ? CB_BUDGET_ROUTING_CALLS : 0),
+      sandboxMaximum: s.p.sandboxMaximum ?? (s.p.brief.mode === 'live' ? s.p.runs.length : 0) };
+  }
+  private migrated(s: Pick<Loaded, 'p' | 'experts' | 'cr' | 'memo'>): BudgetUsage {
+    return migrateBudgetUsage({ brief: s.p.brief, experts: s.p.runs.map((run) => ({ key: run, calls: s.experts.find((e) => e.run.id === run)?.int.calls })),
+      ...(s.cr ? { crossReview: { reviewers: s.cr.reviewers } } : {}), memoClaimed: (s.memo?.memo.attempts ?? 0) > 0 });
+  }
+  /** The ledger inside a transaction: stored (fail closed when missing/corrupt on a ledger project) or migrated. */
+  private async ledgerIn(tx: DurableObjectTransaction, p: ProjectRecord): Promise<BudgetUsage | undefined> {
+    const raw = await tx.get('budget');
+    if (p.ledger || raw !== undefined) return parseBudgetUsage(raw);
+    const m = await tx.get<unknown>([...p.runs.map((r) => `expert:${r}`), CROSS_REVIEW, 'memo']);
+    return this.migrated({ p, experts: p.runs.map((r) => m.get(`expert:${r}`) as ExpertRecord).filter(Boolean),
+      cr: m.get(CROSS_REVIEW) as CrossReviewRecord | undefined, memo: m.get('memo') as MemoRecord | undefined });
   }
   private log(e: ExpertRecord, kind: ExpertActivity['kind'], message: string) {
     const at = this.clock();
@@ -179,19 +278,67 @@ export class CloudbiteProject extends DurableObject<Env> {
   }
 
   // ── create / read / cancel / artifact (Worker has already checked admin, Origin and body size) ──
-  async create(projectId: string, rawBrief: unknown, historyActor?: string, routing?: CloudbiteRoutingDecision): Promise<{ project: ProjectRun; accessToken: string } | CbFail> {
+  /**
+   * Preflight plan shared by preview and create: the actual assignments (computed once from the validated brief and the
+   * server-bound routing decision) and the budget envelope. Fails, never trims; no storage, sandbox or model call.
+   */
+  private plan(brief: ProjectBrief, routing: CloudbiteRoutingDecision | undefined, maxExperts: number | undefined, round?: ProjectPreviousRound):
+    { assignments: ExpertAssignment[]; budget: BudgetPlanOk } | CbFail {
+    const catalogue = this.catalogue();
+    let assignments: ExpertAssignment[];
+    try { assignments = buildExpertAssignments(brief, catalogue, routing); } catch { return fail(400, 'a selected expert is not in the catalogue'); }
+    const budget = planProjectBudget({ brief, catalogue, assignments, maxExperts: maxExperts ?? CB_MAX_EXPERTS });
+    if (!budget.ok) return fail(400, budget.message);
+    if (brief.mode === 'live') {
+      if (!this.config()) return fail(503, 'live execution is not configured');
+      for (const [i, id] of brief.expertIds.entries()) {
+        let w: ReturnType<typeof validateWorkspace>;
+        try { w = validateWorkspace(this.workspace(catalogue.find((x) => x.id === id)!, brief, assignments[i], round)); }
+        catch (err) { w = { invalid: err instanceof Error ? clean(err.message, 120) : 'workspace build failed' }; }
+        if (isInvalid(w)) return fail(503, `expert workspace pack unavailable for ${id}: ${w.invalid}`);
+      }
+    }
+    return { assignments, budget };
+  }
+
+  /**
+   * POST /api/cloudbite/preview (after the Worker's create-equivalent auth, Origin and body checks): the validated
+   * plan, without any reservation, storage write, sandbox or model call. Create revalidates everything.
+   */
+  async preview(rawBrief: unknown, routing?: CloudbiteRoutingDecision, opts: Pick<CreateOptions, 'maxExperts' | 'round'> = {}): Promise<ProjectPreview | CbFail> {
+    const catalogue = this.catalogue();
+    if (!catalogue.length) return fail(503, 'expert catalogue is not integrated yet');
+    const brief = validateBrief(rawBrief, catalogue);
+    if (isInvalid(brief)) return fail(400, brief.invalid);
+    const plan = this.plan(brief, routing, opts.maxExperts, opts.round);
+    if (isCbFail(plan)) return plan;
+    const b = plan.budget, live = brief.mode === 'live';
+    const warnings = [...b.notes];
+    if (!live) warnings.push('Demo mode: a simulated run; no sandbox or model call is made, so every live maximum is 0.');
+    if (routing) warnings.push(`The cached Jev routing decision expires at ${new Date(routing.expiresAt).toISOString()}; create before then or route again.`);
+    if (opts.round) warnings.push(`Follow-up of ${opts.round.parentId}: earlier opinions are untrusted reference data for the new roles, never fresh results.`);
+    return {
+      expertIds: [...brief.expertIds], assignments: plan.assignments,
+      budget: { maxExperts: b.caps.maxExperts, maxModelCalls: b.caps.maxModelCalls, maxReviewCalls: b.caps.maxReviewCalls, maxMemoCalls: b.caps.maxMemoCalls },
+      envelope: { sandboxMaximum: live ? b.maxSandboxes : 0, nosanaMaximum: live ? b.maxNosanaCalls : 0, expertMaximum: live ? b.phases.expert.max : 0,
+        reviewMaximum: live ? b.phases.review.max : 0, memoMaximum: live ? b.phases.memo.max : 0, jevCalls: routing ? CB_BUDGET_ROUTING_CALLS : 0 },
+      warnings,
+    };
+  }
+
+  async create(projectId: string, rawBrief: unknown, historyActor?: string, routing?: CloudbiteRoutingDecision, opts: CreateOptions = {}): Promise<{ project: ProjectRun; accessToken: string } | CbFail> {
     if (!PROJECT_ID.test(projectId)) return fail(400, 'invalid project id');
     const catalogue = this.catalogue();
     if (!catalogue.length) return fail(503, 'expert catalogue is not integrated yet');
     const brief = validateBrief(rawBrief, catalogue);
     if (isInvalid(brief)) return fail(400, brief.invalid);
     if (projectId !== await cbProjectId(brief.requestId)) return fail(400, 'project id does not match requestId');
-    if (brief.mode === 'live') {
-      if (!this.config()) return fail(503, 'live execution is not configured');
-      for (const id of brief.expertIds) {
-        const w = validateWorkspace(this.workspace(catalogue.find((x) => x.id === id)!, brief));
-        if (isInvalid(w)) return fail(503, `expert workspace pack unavailable for ${id}: ${w.invalid}`);
-      }
+    const round = opts.round;
+    if (!opts.replayOnly && (brief.revision || round)) {
+      // The API built round from its own history read of the parent; the body's parentId alone is never authority.
+      if (!round || !brief.revision || round.version !== ROUND_VERSION || round.parentId !== brief.revision.parentId
+        || JSON.stringify(round.newRoles) !== JSON.stringify(brief.expertIds)) return fail(400, 'the revision parent was not authorized for this brief');
+      if (new TextEncoder().encode(JSON.stringify(round)).byteLength > ROUND_MAX_BYTES) return fail(400, 'previous-round reference exceeds its bound');
     }
     const token = `cbt_${rand(32)}`;
     const [tokenHash, briefHash] = await Promise.all([cbHash(token), cbHash(JSON.stringify(brief))]);
@@ -205,29 +352,36 @@ export class CloudbiteProject extends DurableObject<Env> {
       })),
     } : undefined;
     // From here: storage only, no other awaits — concurrent duplicate creates serialize on the input gate.
+    // (plan() is synchronous: it builds and validates the workspaces without I/O.)
     const existing = await this.ctx.storage.get<ProjectRecord>('project');
     if (existing) {
+      // A replay keeps the project's own copied round and ledger; nothing is re-planned or re-reserved.
       if (existing.briefHash !== briefHash) return fail(409, 'requestId was already used for a different brief');
       if (existing.tokens.length >= CB_MAX_TOKENS) return fail(409, 'this project has issued its maximum number of access tokens');
       existing.tokens.push(tokenHash);
       await this.ctx.storage.put('project', existing);
       const s = (await this.load())!;
-      return { project: this.view(s.p, s.experts, s.cr), accessToken: token };
+      return { project: this.view(s), accessToken: token };
     }
+    if (opts.replayOnly) return fail(404, 'project not found');
+    const plan = this.plan(brief, routing, opts.maxExperts, round);
+    if (isCbFail(plan)) return plan;
     const runs = brief.expertIds.map((_, i) => `e${i}`);
+    const budget = createBudgetUsage(plan.budget, runs);
     const experts: ExpertRecord[] = brief.expertIds.map((id, i) => {
       const def = catalogue.find((x) => x.id === id)!;
       const rec: ExpertRecord = {
-        run: { id: runs[i], expertId: id, name: def.name, status: 'queued', activity: [], artifacts: [], updatedAt: now },
+        run: { id: runs[i], expertId: id, name: def.name, status: 'queued', activity: [], artifacts: [], updatedAt: now, assignment: plan.assignments[i] },
         int: { phase: 'queued', label: rand(18).replace(/[-_]/g, 'x'), lookups: 0, calls: 0, posts: 0, nextAt: 0, seq: 0, failures: 0 },
       };
       this.log(rec, 'status', brief.mode === 'demo' ? '[demo] queued — simulated run, no sandbox or model is contacted' : 'queued for an independent Daytona sandbox');
       return rec;
     });
-    const p: ProjectRecord = { id: projectId, brief, briefHash, status: 'running', createdAt: now, updatedAt: now, purgeAt: now + (history ? HISTORY_TTL : CB_RETENTION), tokens: [tokenHash], runs, ...(history ? { history } : {}), ...(routing ? { routing } : {}) };
-    await this.ctx.storage.put({ project: p, ...Object.fromEntries(experts.map((e) => [`expert:${e.run.id}`, e])) });
+    const p: ProjectRecord = { id: projectId, brief, briefHash, status: 'running', createdAt: now, updatedAt: now, purgeAt: now + (history ? HISTORY_TTL : CB_RETENTION), tokens: [tokenHash], runs, ...(history ? { history } : {}), ...(routing ? { routing } : {}),
+      ledger: 'v1', assignments: plan.assignments, jevCalls: routing ? CB_BUDGET_ROUTING_CALLS : 0, sandboxMaximum: brief.mode === 'live' ? plan.budget.maxSandboxes : 0 };
+    await this.ctx.storage.put({ project: p, budget, ...(round ? { round } : {}), ...Object.fromEntries(experts.map((e) => [`expert:${e.run.id}`, e])) });
     await this.ctx.storage.setAlarm(now);
-    return { project: this.view(p, experts), accessToken: token };
+    return { project: this.view({ p, experts, budget, ...(round ? { round } : {}) }), accessToken: token };
   }
 
   private async authorize(token: unknown) {
@@ -244,7 +398,8 @@ export class CloudbiteProject extends DurableObject<Env> {
     if (s.cr?.review.status === 'running' && s.cr.review.startedAt + CB_CROSS_REVIEW_STALE <= this.clock()) {
       return this.existingReview(s.cr, await cbHash(token as string));
     }
-    return this.view(s.p, s.experts, s.cr);
+    if (s.memo && settleStaleMemo(s.memo.memo, this.clock()) !== s.memo.memo) return this.existingMemo(s.memo, await cbHash(token as string));
+    return this.view(s);
   }
 
   /** Internal history reads: the HTTP adapter derives actor from an HttpOnly cookie, never a query parameter. */
@@ -252,7 +407,7 @@ export class CloudbiteProject extends DurableObject<Env> {
     const s = await this.load();
     if (!s?.p.history || s.p.history.deleted || s.p.purgeAt <= this.clock() || (!owner && s.p.history.actor !== actor)) return fail(404, 'history record not found');
     const reports = await this.ctx.storage.get<string>(s.experts.map(e => `artifact:${e.run.id}:out/report.md`));
-    return { project: this.view(s.p, s.experts, s.cr), model: s.p.history.model, roles: s.p.history.roles,
+    return { project: this.view(s), model: s.p.history.model, roles: s.p.history.roles,
       reports: Object.fromEntries(s.experts.flatMap(e => { const content = reports.get(`artifact:${e.run.id}:out/report.md`); return content === undefined ? [] : [[e.run.expertId, content]]; })),
       feedback: s.p.feedback ?? [], expiresAt: s.p.purgeAt, canFeedback: s.p.history.actor === actor && TERMINAL_PROJECT.has(s.p.status) };
   }
@@ -284,24 +439,25 @@ export class CloudbiteProject extends DurableObject<Env> {
       const p = await tx.get<ProjectRecord>('project');
       if (!p?.history || (!owner && p.history.actor !== actor) || p.purgeAt <= this.clock()) return fail(404, 'history record not found');
       if (!TERMINAL_PROJECT.has(p.status)) return fail(409, 'stop the running project before deleting its history');
-      const hadRouting = !!p.routing;
-      delete p.routing;
-      // Review inputs/results quote original opinions: remove them, and the claim with them (an in-flight attempt cannot write back).
-      await tx.delete(CROSS_REVIEW);
+      const hadPrivate = !!p.routing || !!p.assignments || !!p.brief.revision;
+      delete p.routing; delete p.assignments; delete p.brief.revision;
+      // Review, memo, packet and previous-round data quote original opinions or briefs: remove them, and their claims
+      // with them (an in-flight attempt cannot write back). The budget ledger is operational bookkeeping and stays.
+      await tx.delete([CROSS_REVIEW, 'memo', 'round', 'packets']);
       if (!p.history.deleted) {
         p.history.deleted = true; p.history.revision++; p.history.nextAt = 0;
         p.brief.title = '[deleted]'; p.brief.objective = '[deleted]'; p.brief.context = ''; p.feedback = [];
         delete p.brief.decision; delete p.brief.documents;
         const records = await tx.get<ExpertRecord>(p.runs.map(run => 'expert:' + run));
         const experts = [...records.values()];
-        for (const e of experts) { delete e.run.opinion; if (e.run.error) e.run.error = '[deleted]'; e.run.activity = []; e.run.artifacts = []; }
+        for (const e of experts) { delete e.run.opinion; delete e.run.assignment; if (e.run.error) e.run.error = '[deleted]'; e.run.activity = []; e.run.artifacts = []; }
         await tx.put({ project: p, ...Object.fromEntries(experts.map(e => [`expert:${e.run.id}`, e])) });
-      } else if (hadRouting) await tx.put('project', p);
+      } else if (hadPrivate) await tx.put('project', p);
       return null;
     });
     if (bad) return bad;
-    // Delete the source artifact copies too; cleanup claims/owned sandbox IDs stay until provider cleanup settles.
-    const keys = [...(await this.ctx.storage.list({ prefix: 'artifact:' })).keys()];
+    // Delete the source artifact and retrieval-audit copies too; cleanup claims/owned sandbox IDs stay until provider cleanup settles.
+    const keys = [...(await this.ctx.storage.list({ prefix: 'artifact:' })).keys(), ...(await this.ctx.storage.list({ prefix: 'audit:' })).keys()];
     for (let i = 0; i < keys.length; i += 128) await this.ctx.storage.delete(keys.slice(i, i + 128));
     await this.publishHistory();
     await this.wake(this.clock() + 1000);
@@ -317,7 +473,7 @@ export class CloudbiteProject extends DurableObject<Env> {
     const h = s?.p.history;
     if (!s || !h || !this.env.CLOUDBITE_HISTORY || h.published >= h.revision || h.nextAt > now) return;
     let ok = false;
-    try { await historyIndex(this.env, s.p.createdAt).upsert(historyRow(this.view(s.p, s.experts), h, s.p.feedback ?? [])); ok = true; }
+    try { await historyIndex(this.env, s.p.createdAt).upsert(historyRow(this.view(s), h, s.p.feedback ?? [])); ok = true; }
     catch { /* content remains durable in this project; retry metadata without interrupting cleanup/execution */ }
     await this.ctx.storage.transaction(async tx => {
       const p = await tx.get<ProjectRecord>('project');
@@ -331,7 +487,7 @@ export class CloudbiteProject extends DurableObject<Env> {
   async cancel(token: unknown): Promise<ProjectRun | CbFail> {
     const s = await this.authorize(token);
     if (isCbFail(s)) return s;
-    if (TERMINAL_PROJECT.has(s.p.status)) return this.view(s.p, s.experts, s.cr);
+    if (TERMINAL_PROJECT.has(s.p.status)) return this.view(s);
     const now = this.clock();
     s.p.status = 'cancelled'; s.p.finishedAt = now; s.p.updatedAt = now;
     if (s.p.history) { s.p.history.revision++; s.p.history.nextAt = 0; }
@@ -343,7 +499,7 @@ export class CloudbiteProject extends DurableObject<Env> {
     // One atomic write: status, revocation and claims. Cleanup entries are written by whoever learned the ids.
     await this.ctx.storage.put(writes);
     await this.ctx.storage.setAlarm(now);
-    return this.view(s.p, s.experts);
+    return this.view(s);
   }
 
   async artifact(token: unknown, expert: unknown, path: unknown): Promise<ExpertArtifact | CbFail> {
@@ -378,29 +534,46 @@ export class CloudbiteProject extends DurableObject<Env> {
     if (completed.length < 2) return fail(409, 'cross-review needs at least two completed expert opinions');
     const cfg = this.config();
     if (!cfg) return fail(503, 'cross-review inference is not configured');
-    const snapshotHash = await cbHash(reviewSnapshot(s.p.brief, completed));
-    const reviewers = selectReviewers(completed, this.catalogue());
+    const catalogue = this.catalogue();
+    // Peer choice reads the sealed packets; prompts get real peer packets rebuilt with the reviewed peers first.
+    const planned = reviewPlan(completed, catalogue, { brief: s.p.brief, ...(s.packets ? { packets: s.packets } : {}) });
+    const union = [...new Set(planned.assignments.flatMap((a) => a.peers.map((x) => x.expertId)))];
+    const packets = await this.packetsFor(s, [...union, ...completed.map((c) => c.expertId).filter((id) => !union.includes(id))]);
+    const snapshotHash = await cbHash(reviewSnapshot(s.p.brief, completed, packets));
     const claim = crypto.randomUUID();
     const now = this.clock();
     const live = (p: ProjectRecord | undefined, at: number): p is ProjectRecord => !!p && p.purgeAt > at && p.tokens.includes(tokenHash) && !p.history?.deleted;
-    const claimed = await this.ctx.storage.transaction(async (tx) => {
+    const claimed = await this.ctx.storage.transaction(async (tx): Promise<CbFail | CrossReviewRecord | { reserved: string[] }> => {
       const [p, cur] = await Promise.all([tx.get<ProjectRecord>('project'), tx.get<CrossReviewRecord>(CROSS_REVIEW)]);
       if (!live(p, now)) return fail(404, 'project not found');
       if (cur) return cur;
-      await tx.put(CROSS_REVIEW, { review: { status: 'running', snapshotHash, startedAt: now, reports: [], execution: 'server-nosana' }, claim, reviewers: reviewers.map((r) => r.expertId) } satisfies CrossReviewRecord);
-      return null;
+      // Reserve every reviewer call with the claim, before any provider call; the budget may trim the planned reviewers.
+      const usage = await this.ledgerIn(tx, p);
+      if (!usage) return fail(409, budgetDenialMessage('invalid-usage'));
+      const keys = affordableReviewers(usage, planned.reviewers);
+      const r = keys.length ? reserveBudgetBatch(usage, keys.map((key) => ({ phase: 'review' as const, key }))) : null;
+      if (!r?.ok) {
+        const left = reserveBudget(usage, { phase: 'review', key: planned.reviewers[0] ?? 'review' });
+        return fail(429, left.ok ? 'the project budget cannot afford a cross-review' : left.message);
+      }
+      const coverage = this.trimmedCoverage(planned, keys.length, completed);
+      await tx.put({ [CROSS_REVIEW]: { review: { status: 'running', snapshotHash, startedAt: now, reports: [], execution: 'server-nosana', ...coverage }, claim, reviewers: keys } satisfies CrossReviewRecord,
+        budget: r.usage });
+      return { reserved: keys };
     });
-    if (claimed) return isCbFail(claimed) ? claimed : this.existingReview(claimed, tokenHash);
+    if (isCbFail(claimed)) return claimed;
+    if (!('reserved' in claimed)) return this.existingReview(claimed, tokenHash);
+    const reviewers = planned.assignments.slice(0, claimed.reserved.length).map((a) => ({ reviewer: completed.find((c) => c.expertId === a.reviewerExpertId)!, ids: new Set(a.peers.map((x) => x.expertId)) }));
 
     const reports: CrossReviewReport[] = [], failures: string[] = [];
-    await Promise.all(reviewers.map(async (r) => {
-      const peers = peersFor(r, completed);
-      const reply = await this.reviewInference(cfg, reviewMessages(r, peers, s.p.brief, this.catalogue().find(e => e.id === r.expertId))).catch((): InferenceResult => ({ error: 'inference upstream unavailable', status: 504 }));
+    await Promise.all(reviewers.map(async ({ reviewer: r, ids }) => {
+      const peers = completed.filter((c) => ids.has(c.expertId));
+      const reply = await this.reviewInference(cfg, reviewMessages(r, peers, s.p.brief, catalogue.find(e => e.id === r.expertId), packets)).catch((): InferenceResult => ({ error: 'inference upstream unavailable', status: 504 }));
       const report = 'error' in reply ? { invalid: reply.error } : parseReviewReply(reply.content, r, peers);
       if ('invalid' in report) failures.push(`${r.expertId}: ${report.invalid}`);
       else reports.push(report);
     }));
-    const order = reviewers.map((r) => r.expertId);
+    const order = reviewers.map((r) => r.reviewer.expertId);
     reports.sort((a, b) => order.indexOf(a.reviewerExpertId) - order.indexOf(b.reviewerExpertId));
     failures.sort();
 
@@ -411,6 +584,7 @@ export class CloudbiteProject extends DurableObject<Env> {
       if (!live(p, after)) return fail(410, 'the project was deleted or expired during cross-review; results were discarded');
       if (!cur || cur.claim !== claim || cur.review.status !== 'running') return fail(409, 'this cross-review attempt is no longer current; results were discarded');
       cur.review = { ...cur.review, status: failures.length ? 'failed' : 'completed', completedAt: after, reports,
+        textAvailability: reports.flatMap((x) => findingTextAvailability(x, completed, s.p.brief, packets)),
         ...(failures.length ? { error: clean(`${failures.length} of ${reviewers.length} reviewers failed — ${failures.join('; ')}`, 600) } : {}) };
       p.updatedAt = after;
       if (p.history) { p.history.revision++; p.history.nextAt = 0; }
@@ -421,7 +595,37 @@ export class CloudbiteProject extends DurableObject<Env> {
     await this.publishHistory();
     await this.wake(this.clock() + 1000);
     const fresh = await this.load();
-    return fresh ? this.view(fresh.p, fresh.experts, fresh.cr) : fail(410, 'the project was deleted or expired during cross-review');
+    return fresh ? this.view(fresh) : fail(410, 'the project was deleted or expired during cross-review');
+  }
+
+  /** Coverage of the reviewers the budget actually reserved (a prefix of the plan), with its plain-language limits. */
+  private trimmedCoverage(plan: ReviewPlan, kept: number, completed: CompletedOpinion[]): Pick<ProjectCrossReview, 'coverage' | 'disclosure'> {
+    if (kept >= plan.reviewers.length) return { coverage: plan.coverage, disclosure: plan.disclosure };
+    const assigned = new Set(plan.assignments.slice(0, kept).flatMap((a) => a.peers.map((p) => p.expertId)));
+    const unassigned = completed.filter((c) => !assigned.has(c.expertId)).map((c) => c.expertId);
+    return {
+      coverage: { ...plan.coverage, assignedOpinions: assigned.size, unassigned, reviewers: kept },
+      disclosure: `Selective cross-review: ${kept} reviewer(s), at most ${CB_CROSS_REVIEW_MAX_PEERS} peers each; the project budget allowed ${kept} of ${plan.reviewers.length} planned reviewer(s). `
+        + `${assigned.size} of ${completed.length} completed opinions were assigned to a reviewer` + (unassigned.length ? `; ${unassigned.length} were not reviewed.` : '.')
+        + ' A reviewer judges only the evidence items it names; this is not a review of every opinion or claim, and not a verification.',
+    };
+  }
+
+  /**
+   * Evidence packets from the collected audits of completed experts, in the given order, under the total byte bound
+   * (whole packets that do not fit are omitted, not faked). undefined when no expert has a collected audit record:
+   * such projects predate packet collection and their retrieval is unobserved.
+   */
+  private async packetsFor(s: Pick<Loaded, 'p' | 'experts'>, order: string[]): Promise<EvidencePacket[] | undefined> {
+    const done = s.experts.filter((e) => e.run.status === 'completed' && e.run.opinion);
+    const audits = done.length ? await this.ctx.storage.get<AuditRecord>(done.map((e) => `audit:${e.run.id}`)) : new Map<string, AuditRecord>();
+    const inputs: EvidencePacketInput[] = [];
+    for (const id of order) {
+      const e = done.find((x) => x.run.expertId === id), a = e && audits.get(`audit:${e.run.id}`);
+      if (!e || !a) continue;
+      inputs.push({ brief: s.p.brief, expertId: id, opinion: e.run.opinion!, audit: a.content ?? (a.oversize ? '' : undefined) });
+    }
+    return inputs.length ? buildEvidencePackets(inputs) : undefined;
   }
 
   /** A stored attempt: completed/failed are returned as-is, running answers 409, a stale running claim is closed as failed. */
@@ -440,7 +644,183 @@ export class CloudbiteProject extends DurableObject<Env> {
     }
     const s = await this.load();
     if (!s || s.p.purgeAt <= now || !s.p.tokens.includes(tokenHash)) return fail(401, 'project access token is not valid');
-    return this.view(s.p, s.experts, s.cr);
+    return this.view(s);
+  }
+
+  /**
+   * POST /api/cloudbite/projects/<id>/memo (Worker has already checked Origin, content-type and the empty JSON body).
+   * Final decision memo on a finished live project with at least one completed opinion. Without decision options the
+   * outcome is a deterministic needs-options record and no call. Otherwise one paid attempt: the claim and its budget
+   * reservation are written in one transaction before inference; the strictly parsed result is written only if the same
+   * claim is still current, the token is still authorized, the project is live and undeleted and the inputs unchanged.
+   */
+  async memo(token: unknown): Promise<ProjectRun | CbFail> {
+    const s = await this.authorize(token);
+    if (isCbFail(s)) return s;
+    const tokenHash = await cbHash(token as string);
+    if (s.p.brief.mode === 'demo') return fail(409, 'the decision memo runs only on live projects; demo opinions are simulated');
+    if (!TERMINAL_PROJECT.has(s.p.status) || s.p.status === 'cancelled') return fail(409, 'the decision memo needs a finished, non-cancelled project');
+    if (s.p.history?.deleted) return fail(409, 'this project\'s content was deleted');
+    if (s.memo) return this.existingMemo(s.memo, tokenHash);
+    const completed = this.completed(s);
+    if (!completed.length) return fail(409, 'the decision memo needs at least one completed expert opinion');
+    const opts = this.memoOptions(s);
+    let prompt: ReturnType<typeof memoMessages>;
+    try { prompt = memoMessages(s.p.brief, completed, opts); } catch { return fail(409, 'the decision memo needs at least one completed expert opinion'); }
+    const snapshotHash = await memoSnapshotHash(prompt.snapshot);
+    const now = this.clock();
+    const live = (p: ProjectRecord | undefined, at: number): p is ProjectRecord => !!p && p.purgeAt > at && p.tokens.includes(tokenHash) && !p.history?.deleted;
+    if (prompt.kind === 'needs-options') {
+      const r = prompt;
+      const written = await this.ctx.storage.transaction(async (tx) => {
+        const [p, cur] = await Promise.all([tx.get<ProjectRecord>('project'), tx.get<MemoRecord>('memo')]);
+        if (!live(p, now)) return fail(404, 'project not found');
+        if (cur) return cur;
+        p.updatedAt = now;
+        if (p.history) { p.history.revision++; p.history.nextAt = 0; }
+        await tx.put({ project: p, memo: { memo: needsOptionsMemo(r, snapshotHash, now) } satisfies MemoRecord });
+        return null;
+      });
+      if (isCbFail(written)) return written;
+      if (written) return this.existingMemo(written, tokenHash);
+      return this.afterMemo();
+    }
+    const cfg = this.config();
+    if (!cfg) return fail(503, 'memo inference is not configured');
+    const memoPrompt = prompt, claim = crypto.randomUUID();
+    const claimed = await this.ctx.storage.transaction(async (tx): Promise<CbFail | MemoRecord | null> => {
+      const [p, cur] = await Promise.all([tx.get<ProjectRecord>('project'), tx.get<MemoRecord>('memo')]);
+      if (!live(p, now)) return fail(404, 'project not found');
+      if (cur) return cur;
+      const usage = await this.ledgerIn(tx, p);
+      const r = usage ? reserveBudget(usage, { phase: 'memo', seq: usage.memo + 1 }) : null;
+      if (!r?.ok) return fail(429, r ? r.message : budgetDenialMessage('invalid-usage'));
+      await tx.put({ memo: { memo: runningMemo(memoPrompt, snapshotHash, now), claim } satisfies MemoRecord, budget: r.usage });
+      return null;
+    });
+    if (isCbFail(claimed)) return claimed;
+    if (claimed) return this.existingMemo(claimed, tokenHash);
+
+    const reply = await this.memoInference(cfg, memoPrompt.messages, memoPrompt.maxTokens).catch((): InferenceResult => ({ error: 'inference upstream unavailable', status: 504 }));
+    const parsed = 'error' in reply ? { invalid: `memo inference failed: ${reply.error}` } : parseMemoReply(reply.content, memoPrompt);
+    const after = this.clock();
+    const written = await this.ctx.storage.transaction(async (tx) => {
+      const [p, cur, cr] = await Promise.all([tx.get<ProjectRecord>('project'), tx.get<MemoRecord>('memo'), tx.get<CrossReviewRecord>(CROSS_REVIEW)]);
+      if (!live(p, after)) return fail(410, 'the project was deleted or expired during the memo; the result was discarded');
+      if (!cur || cur.claim !== claim || cur.memo.status !== 'running') return fail(409, 'this memo attempt is no longer current; the result was discarded');
+      // Inputs changed meanwhile (e.g. a cross-review finished): this attempt answered a different question.
+      const experts = await tx.get<ExpertRecord>(p.runs.map((r) => `expert:${r}`));
+      const fresh = { p, experts: p.runs.map((r) => experts.get(`expert:${r}`)!).filter(Boolean), cr, packets: s.packets };
+      const stable = isMemoSnapshotCurrent(memoPrompt.snapshot, p.brief, this.completed(fresh), this.memoOptions(fresh));
+      cur.memo = !stable ? failedMemo(cur.memo, 'memo inputs changed during the attempt; it is not retried (one paid attempt per project)', after)
+        : 'invalid' in parsed ? failedMemo(cur.memo, clean(parsed.invalid, 300), after) : completedMemo(cur.memo, parsed, after);
+      p.updatedAt = after;
+      if (p.history) { p.history.revision++; p.history.nextAt = 0; }
+      await tx.put({ project: p, memo: cur });
+      return null;
+    });
+    if (written) return written;
+    return this.afterMemo();
+  }
+
+  private async afterMemo(): Promise<ProjectRun | CbFail> {
+    await this.publishHistory();
+    await this.wake(this.clock() + 1000);
+    const fresh = await this.load();
+    return fresh ? this.view(fresh) : fail(410, 'the project was deleted or expired during the memo');
+  }
+
+  /** A stored memo is returned as-is; a running one answers 409; a stale running claim is closed as failed (never rerun). */
+  private async existingMemo(m: MemoRecord, tokenHash: string): Promise<ProjectRun | CbFail> {
+    const now = this.clock();
+    if (m.memo.status === 'running') {
+      if (settleStaleMemo(m.memo, now) === m.memo) return fail(409, 'a decision memo is already running for this project');
+      await this.ctx.storage.transaction(async (tx) => {
+        const [p, cur] = await Promise.all([tx.get<ProjectRecord>('project'), tx.get<MemoRecord>('memo')]);
+        if (!p || p.history?.deleted || !cur || cur.claim !== m.claim || cur.memo.status !== 'running') return;
+        cur.memo = settleStaleMemo(cur.memo, now);
+        p.updatedAt = now;
+        if (p.history) { p.history.revision++; p.history.nextAt = 0; }
+        await tx.put({ project: p, memo: cur });
+      });
+    }
+    const s = await this.load();
+    if (!s || s.p.purgeAt <= now || !s.p.tokens.includes(tokenHash)) return fail(401, 'project access token is not valid');
+    return this.view(s);
+  }
+
+  private completed(s: Pick<Loaded, 'experts'>): CompletedOpinion[] {
+    return s.experts.filter((e) => e.run.status === 'completed' && e.run.opinion).map((e) => ({ expertId: e.run.expertId, name: e.run.name, opinion: e.run.opinion! }));
+  }
+  /** Memo inputs: the whole team (honest denominator), finished cross-review reports, and source metadata of the sealed packets. */
+  private memoOptions(s: Pick<Loaded, 'experts' | 'cr' | 'packets'>): MemoInputOptions {
+    const packets: MemoEvidencePacket[] = [], seen = new Set<string>();
+    for (const p of s.packets ?? []) for (const src of p.sources) {
+      const id = `src-${src.id.toLowerCase().replace(/[^a-z0-9-]+/g, '-')}`.slice(0, 64).replace(/-+$/, '');
+      const packet = validateMemoPacket({ id, kind: 'source-metadata', label: src.title || src.id, expertId: p.expertId,
+        origin: `${src.url} (${src.license}; original text not fetched)` });
+      if (!packet || seen.has(packet.id) || packets.length >= CB_MEMO_PACKET_LIMITS.packets) continue;
+      seen.add(packet.id); packets.push(packet);
+    }
+    const reviews = s.cr && s.cr.review.status !== 'running' ? s.cr.review.reports : [];
+    return { team: s.experts.map((e) => ({ expertId: e.run.expertId, name: e.run.name, status: e.run.status })),
+      ...(reviews.length ? { reviews } : {}), ...(packets.length ? { packets } : {}) };
+  }
+
+  // ── 'pmc-import' instance: POST /api/cloudbite/pmc/import (Worker has checked Origin, JSON body and actor authority) ──
+  /**
+   * One PMC original-evidence import via the fixed importPmc service. Serial (one import at a time, with a lease that
+   * frees itself), globally paced between NCBI calls, and limited per actor per hour in storage. Nothing is stored
+   * except pacing and counters; no credential or cookie is ever sent upstream.
+   */
+  async pmcImport(actor: string, identifier: unknown): Promise<PmcImport | PmcFail> {
+    if (!PMC_ACTOR.test(actor)) return { ...fail(401, 'import authority required'), code: 'unauthorized' };
+    if (typeof identifier !== 'string' || identifier.length > 200 || !parsePmcIdentifier(identifier))
+      return { ...fail(400, 'Provide a PMCID (PMC123456) or a DOI (10.xxxx/...); URLs are not accepted'), code: 'invalid_identifier' };
+    const now = this.clock(), claim = crypto.randomUUID();
+    const admitted = await this.ctx.storage.transaction(async (tx): Promise<PmcFail | null> => {
+      const st = (await tx.get<PmcState>('pmc')) ?? { lastCallAt: 0, calls: {} };
+      st.calls = Object.fromEntries(Object.entries(st.calls).map(([k, v]) => [k, v.filter((t) => t > now - 3600_000)]).filter(([, v]) => v.length));
+      if (st.busy && st.busy.until > now) return { ...fail(429, 'another PMC import is running; retry shortly'), code: 'busy', retryAfterSeconds: Math.max(1, Math.ceil((st.busy.until - now) / 1000)) };
+      const mine = st.calls[actor] ?? [];
+      if (mine.length >= PMC_HOURLY) return { ...fail(429, `at most ${PMC_HOURLY} PMC imports per hour`), code: 'hourly_limit', retryAfterSeconds: Math.max(1, Math.ceil((mine[0] + 3600_000 - now) / 1000)) };
+      st.calls[actor] = [...mine, now];
+      st.busy = { claim, until: now + PMC_BUSY };
+      await tx.put('pmc', st);
+      return null;
+    });
+    if (admitted) return admitted;
+    let r: Awaited<ReturnType<typeof importPmc>>;
+    try { r = await importPmc(identifier, { fetcher: this.pmcFetcher(), now: () => this.clock(), sleep: (ms) => this.pmcSleep(ms) }); }
+    catch { r = { error: 'upstream_error', message: 'PMC import failed' }; }
+    finally {
+      await this.ctx.storage.transaction(async (tx) => {
+        const st = await tx.get<PmcState>('pmc');
+        if (st?.busy?.claim === claim) { delete st.busy; await tx.put('pmc', st); }
+      });
+    }
+    if (!isPmcImportError(r)) return r;
+    return { ...fail(PMC_ERROR_STATUS[r.error] ?? 502, clean(r.message, 300)), code: r.error, ...(r.retryAfterSeconds !== undefined ? { retryAfterSeconds: r.retryAfterSeconds } : {}) };
+  }
+
+  /** Allowlisted, credential-free fetch with global spacing between every NCBI request of every import. */
+  private pmcFetcher(): typeof fetch {
+    return (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+      if (url.protocol !== 'https:' || url.host !== PMC_HOST || url.username || url.password) throw new Error('PMC request outside the fixed NCBI endpoints');
+      const headers = new Headers(init?.headers);
+      headers.delete('cookie'); headers.delete('authorization');
+      const at = await this.ctx.storage.transaction(async (tx) => {
+        const st = (await tx.get<PmcState>('pmc')) ?? { lastCallAt: 0, calls: {} };
+        const slot = Math.max(this.clock(), st.lastCallAt + PMC_LIMITS.minIntervalMs);
+        st.lastCallAt = slot;
+        await tx.put('pmc', st);
+        return slot;
+      });
+      const wait = at - this.clock();
+      if (wait > 0) await this.pmcSleep(wait);
+      return this.pmcFetch(url.href, { ...init, headers });
+    }) as typeof fetch;
   }
 
   /**
@@ -469,22 +849,31 @@ export class CloudbiteProject extends DurableObject<Env> {
     const e = s?.experts.find((x) => x.run.id === run);
     if (!s || !e || !e.int.capHash || e.int.capHash !== h || (e.int.capExp ?? 0) <= now) return fail(401, 'worker capability is not valid');
     if (s.p.status !== 'running' || e.int.phase === 'final') return fail(410, 'this expert run has ended');
-    const save = () => this.ctx.storage.put({ project: { ...s.p, updatedAt: now }, [`expert:${run}`]: e });
+    // Every write re-reads the current records (commit), so a stale copy never overwrites another callback's update.
+    const ended = () => fail(410, 'this expert run has ended');
 
     if (action === 'activity') {
       const b = body as { kind?: unknown; message?: unknown } | null;
       const kinds = ['status', 'thought', 'tool', 'artifact', 'error'];
       if (!b || !kinds.includes(b.kind as string) || typeof b.message !== 'string') return fail(400, 'activity must be {kind, message}');
-      if (e.int.posts >= CB_ACTIVITY_POSTS) return fail(429, 'activity limit reached');
-      e.int.posts++;
-      this.log(e, b.kind as ExpertActivity['kind'], `sandbox: ${b.message}`);
-      await save();
-      return { ok: true };
+      let limited = false, valid = true;
+      const ok = await this.commit(run, null, (x) => {
+        if (x.int.capHash !== h) { valid = false; return; }
+        if (x.int.posts >= CB_ACTIVITY_POSTS) { limited = true; return; }
+        x.int.posts++;
+        this.log(x, b.kind as ExpertActivity['kind'], `sandbox: ${b.message}`);
+      });
+      if (!ok || !valid) return ended();
+      return limited ? fail(429, 'activity limit reached') : { ok: true };
     }
     if (action === 'complete') {
-      e.int.doneSignal = true; e.int.nextAt = now;
-      this.log(e, 'status', 'runner reported completion; collecting outputs from the sandbox');
-      await save();
+      let valid = true;
+      const ok = await this.commit(run, null, (x) => {
+        if (x.int.capHash !== h) { valid = false; return; }
+        x.int.doneSignal = true; x.int.nextAt = now;
+        this.log(x, 'status', 'runner reported completion; collecting outputs from the sandbox');
+      });
+      if (!ok || !valid) return ended();
       await this.wake(now);
       return { ok: true };
     }
@@ -492,24 +881,42 @@ export class CloudbiteProject extends DurableObject<Env> {
 
     const messages = chatMessages(body);
     if (isInvalid(messages)) return fail(400, messages.invalid);
-    if ((e.int.inflightUntil ?? 0) > now) return fail(429, 'one inference call at a time');
-    if (e.int.calls >= CB_INFERENCE_MAX_CALLS) return fail(429, 'inference call budget exhausted');
     const cfg = this.config();
     if (!cfg) return fail(503, 'inference is not configured');
-    // Reserve before the upstream call: a lost response still counts against the budget.
-    e.int.calls++; e.int.inflightUntil = now + CB_INFERENCE_TIMEOUT + 5000;
-    const n = e.int.calls;
-    this.log(e, 'thought', `model call ${n}/${CB_INFERENCE_MAX_CALLS} via server-side Nosana endpoint`);
-    await save();
+    // Reserve before the upstream call, in one transaction with the per-role cap and the project ledger: a lost
+    // response still counts, two concurrent requests can never both take the last call, and nothing is refunded.
+    const reserved = await this.ctx.storage.transaction(async (tx): Promise<CbFail | number> => {
+      const [p, x] = await Promise.all([tx.get<ProjectRecord>('project'), tx.get<ExpertRecord>(`expert:${run}`)]);
+      if (!p || !x || p.status !== 'running' || x.int.phase === 'final' || x.int.capHash !== h || (x.int.capExp ?? 0) <= now) return ended();
+      if ((x.int.inflightUntil ?? 0) > now) return fail(429, 'one inference call at a time');
+      const usage = await this.ledgerIn(tx, p);
+      // The ledger count is authoritative even if an older expert copy was saved over int.calls.
+      const used = Math.max(x.int.calls, usage?.experts[run] ?? 0);
+      if (used >= CB_INFERENCE_MAX_CALLS) return fail(429, 'inference call budget exhausted');
+      const r = usage ? reserveBudget(usage, { phase: 'expert', key: run, seq: used + 1 }) : null;
+      if (!r?.ok || r.duplicate) {
+        const message = r && !r.ok ? r.message : budgetDenialMessage('invalid-usage');
+        this.log(x, 'error', `model call refused: ${message}`);
+        await tx.put(`expert:${run}`, x);
+        return fail(429, message);
+      }
+      x.int.calls = used + 1; x.int.inflightUntil = now + CB_INFERENCE_TIMEOUT + 5000;
+      this.log(x, 'thought', `model call ${x.int.calls}/${CB_INFERENCE_MAX_CALLS} via server-side Nosana endpoint`);
+      p.updatedAt = now;
+      await tx.put({ project: p, [`expert:${run}`]: x, budget: r.usage });
+      return x.int.calls;
+    });
+    if (isCbFail(reserved)) return reserved;
+    const n = reserved;
     const r = await nosanaChat(cfg.nosana, messages);
     const after = this.clock();
-    let ended = false;
+    let gone = false;
     await this.commit(run, null, (x) => {
-      if (x.int.capHash !== h) { ended = true; return; }
+      if (x.int.capHash !== h) { gone = true; return; }
       x.int.inflightUntil = undefined;
       if ('error' in r) this.log(x, 'error', `model call ${n} failed: ${r.error}`);
-    }).then((ok) => { if (!ok) ended = true; });
-    if (ended || after > (e.int.capExp ?? 0)) return fail(410, 'this expert run has ended');
+    }).then((ok) => { if (!ok) gone = true; });
+    if (gone || after > (e.int.capExp ?? 0)) return ended();
     return 'error' in r ? fail(r.status, r.error) : { content: r.content };
   }
 
@@ -544,12 +951,16 @@ export class CloudbiteProject extends DurableObject<Env> {
       else if (e.int.phase !== 'queued' && !pinned(accounts, e.int)) await this.commit(e.run.id, null, (x) => this.finish(x, 'failed', UNPINNED));
     }
     if (!cfg) return;
-    const { p: proj, experts: fresh } = (await this.load())!;
+    const loaded = (await this.load())!, { p: proj, experts: fresh } = loaded;
     // Deterministic balanced placement: run index plus a per-project offset, persisted at admission (before any create).
     const offset = parseInt(proj.id.slice(2, 10), 16) || 0;
     let active = fresh.filter((x) => x.int.phase !== 'queued' && x.int.phase !== 'final').length;
+    const usage = proj.ledger || loaded.budget !== undefined ? parseBudgetUsage(loaded.budget) : this.migrated(loaded);
     for (const e of fresh.filter((x) => x.int.phase === 'queued')) {
       if (active >= cbMaxConcurrent(this.env)) break;
+      // A role that cannot reserve even one call is reported, never given a sandbox.
+      const afford = usage ? expertCanContinue(usage, e.run.id) : { ok: false as const, message: budgetDenialMessage('invalid-usage') };
+      if (!afford.ok) { await this.commit(e.run.id, null, (x) => this.finish(x, 'failed', `not started: ${afford.message}`)); continue; }
       active++;
       const a = accounts[(offset + Math.max(0, proj.runs.indexOf(e.run.id))) % accounts.length];
       await this.commit(e.run.id, null, (x) => {
@@ -648,9 +1059,10 @@ export class CloudbiteProject extends DurableObject<Env> {
         return;
       }
       case 'uploading': {
-        const p = (await this.ctx.storage.get<ProjectRecord>('project'))!;
+        const [p, round] = await Promise.all([this.ctx.storage.get<ProjectRecord>('project'), this.ctx.storage.get<ProjectPreviousRound>('round')]);
         const def = this.catalogue().find((x) => x.id === e.run.expertId);
-        const files = def && validateWorkspace(this.workspace(def, p.brief));
+        let files: ReturnType<typeof validateWorkspace> | undefined;
+        try { files = def && validateWorkspace(this.workspace(def, p!.brief, e.run.assignment, round)); } catch { files = undefined; }
         if (!files || isInvalid(files)) { await release((x) => this.finish(x, 'failed', 'expert workspace pack unavailable')); return; }
         const token = `cbw_${rand(32)}`;
         const capHash = await cbHash(token);
@@ -697,6 +1109,10 @@ export class CloudbiteProject extends DurableObject<Env> {
         extra = [...new Set(extra)].slice(0, CB_ARTIFACT_FILES - 2);
         const contents: Array<[string, string]> = [['out/result.json', result!], ['out/report.md', report]];
         for (const path of extra) { const t = await read(path, 32 * 1024).catch(() => null); if (t !== null) contents.push([path, t]); }
+        // The runner's retrieval audit (reserved path, not in the manifest). Missing and oversize are recorded as such.
+        let audit: AuditRecord;
+        try { const k = await read('out/knowledge.json', EVIDENCE_PACKET_LIMITS.auditBytes); audit = k === null ? {} : { content: k }; }
+        catch (err) { if (err instanceof CbDaytonaError && err.status === 413) audit = { oversize: true }; else throw err; }
         const bytes = (t: string) => new TextEncoder().encode(t).byteLength;
         const p = (await this.ctx.storage.get<ProjectRecord>('project'))!;
         const x = (await this.ctx.storage.get<ExpertRecord>(`expert:${run}`))!;
@@ -706,7 +1122,7 @@ export class CloudbiteProject extends DurableObject<Env> {
         x.run.artifacts = contents.map(([path, t]) => ({ path, label: path === 'out/result.json' ? 'Structured opinion' : path === 'out/report.md' ? 'Expert report' : path.slice(4), bytes: bytes(t) }));
         this.finish(x, 'completed', `completed: ${opinion.direction}, self-assessed confidence ${opinion.confidence}`);
         p.updatedAt = this.clock();
-        await this.ctx.storage.put({ project: p, [`expert:${run}`]: x, ...Object.fromEntries(contents.map(([path, t]) => [`artifact:${run}:${path}`, t])) });
+        await this.ctx.storage.put({ project: p, [`expert:${run}`]: x, [`audit:${run}`]: audit, ...Object.fromEntries(contents.map(([path, t]) => [`artifact:${run}:${path}`, t])) });
         return;
       }
       default:
@@ -786,7 +1202,9 @@ export class CloudbiteProject extends DurableObject<Env> {
       p.status = done === experts.length ? 'completed' : done > 0 ? 'partial' : 'failed';
       p.finishedAt = now; p.updatedAt = now;
       if (p.history) { p.history.revision++; p.history.nextAt = 0; }
-      await this.ctx.storage.put('project', p);
+      // Packets of completed experts in run order, under the total bound; none for projects without collected audits.
+      const packets = p.brief.mode === 'live' ? await this.packetsFor(s, experts.map((e) => e.run.expertId)) : undefined;
+      await this.ctx.storage.put({ project: p, ...(packets ? { packets } : {}) });
     }
     const cleanup = [...(await this.ctx.storage.list<CleanupEntry>({ prefix: 'cleanup:' })).values()];
     const pending = cleanup.filter((x) => !x.done && !x.stuck);

@@ -1,12 +1,15 @@
 // Cloudbite HTTP surface (docs/cloudbite/api-contract.md). index.ts calls cloudbiteRoute after its host checks;
 // public-get.ts calls cloudbitePage for the console. Errors are {error} only — never upstream bodies or secrets.
-import type { CloudbiteBootstrap } from './cloudbite-contract';
+import type { CloudbiteBootstrap, CloudbiteRoutingDecision, ProjectBrief, ProjectBudget } from './cloudbite-contract';
 import { CLOUDBITE_EXPERTS } from './cloudbite-personas';
 import { CLOUDBITE_POOL } from './cloudbite-pool';
 import { CLOUDBITE_CSS, CLOUDBITE_CSS_PATH, CLOUDBITE_HTML, CLOUDBITE_JS, CLOUDBITE_JS_PATH } from './cloudbite-page';
 import { CLOUDBITE_ACCESS_HTML, CLOUDBITE_ACCESS_CSS, CLOUDBITE_ACCESS_QR, CLOUDBITE_REQUEST_HTML, CLOUDBITE_REQUESTS_HTML, CLOUDBITE_ACCESS_JS } from './cloudbite-access-page';
 import { CB_ACTIVITY_BODY_MAX, CB_COMPLETE_BODY_MAX, CB_CREATE_BODY_MAX, CB_INFERENCE_BODY_MAX, CB_MAX_EXPERTS, cbMaxConcurrent, cloudbiteMissing } from './cloudbite-config';
-import { cbHash, cbProjectId, isCbFail } from './cloudbite-project';
+import { cbHash, cbProjectId, isCbFail, type CbFail } from './cloudbite-project';
+import { authorizeRoundParent, buildProjectRound, isRoundFail, type ProjectPreviousRound } from './cloudbite-revision';
+import type { CloudbiteAccessSession } from './cloudbite-access-contract';
+import type { HistoryDetail } from './cloudbite-history-contract';
 import { JEV_MODEL, routingReady, routingQuery, isRoutingFailure } from './cloudbite-routing';
 import { CB_OPERATOR_PREFIX, verifyCloudbiteOperator } from './cloudbite-operator';
 import { boundedText } from './cloudbite-inference';
@@ -54,6 +57,70 @@ async function readJson(req: Request, max: number): Promise<{ ok: unknown } | { 
 }
 
 const result = (json: Json, r: unknown) => (isCbFail(r) ? json({ error: r.error }, r.status) : json(r));
+const isJsonObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+const PMC_BODY_MAX = 1024;
+/** Optional workflow fields an automatic (Jev) create forwards into the routing query exactly as sent. */
+const ROUTED_FIELDS = ['decision', 'documents', 'stage', 'responseLanguage', 'budget', 'revision'] as const;
+
+/**
+ * The one effective team cap, used identically by /route, /preview and /projects (and part of the routing hash):
+ * min(CB_MAX_EXPERTS, the visitor session's maxExperts, the stated budget's maxExperts).
+ */
+export function effectiveMaxExperts(session: CloudbiteAccessSession | null, budget?: Pick<ProjectBudget, 'maxExperts'>) {
+  return Math.max(1, Math.min(CB_MAX_EXPERTS, session?.request?.maxExperts ?? CB_MAX_EXPERTS, budget?.maxExperts ?? CB_MAX_EXPERTS));
+}
+
+type Visitor = { cred: string; id: string };
+type Prepared = { brief: ProjectBrief; routing?: CloudbiteRoutingDecision; maxExperts: number; session: CloudbiteAccessSession | null };
+/**
+ * Shared by preview and create (no divergent paths): visitor session binding, the cached Jev selection for automatic
+ * mode (read only, never a new routing call), brief validation, live configuration and the effective team cap.
+ */
+async function prepareProject(req: Request, env: Env, input: unknown, visitor: Visitor | null, json: Json): Promise<Prepared | Response> {
+  const ns = env.CLOUDBITE;
+  const session = visitor ? await accessSession(req, env) : null;
+  if (visitor && session?.request?.id !== visitor.id) return json({ error: 'approved access required' }, 401);
+  let routing: CloudbiteRoutingDecision | undefined;
+  if (isJsonObject(input) && 'routing' in input) {
+    const { routing: kind, ...raw } = input;
+    if (kind !== 'jev') return json({ error: 'unknown routing mode' }, 400);
+    const query = routingQuery({ title: raw.title, objective: raw.objective, context: raw.context, requestId: raw.requestId,
+      ...Object.fromEntries(ROUTED_FIELDS.filter((k) => k in raw).map((k) => [k, raw[k]])) });
+    if (isRoutingFailure(query)) return json({ error: query.error }, query.status);
+    if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);
+    const router = ns.getByName('routing:' + await cbHash(visitor ? 'visitor:' + visitor.id : 'owner'));
+    const chosen = await router.routingRead(query, effectiveMaxExperts(session, query.budget));
+    if (isCbFail(chosen)) return json({ error: chosen.error }, chosen.status);
+    if (raw.expertIds !== undefined && JSON.stringify(raw.expertIds) !== JSON.stringify(chosen.expertIds)) return json({ error: 'expert selection differs from the Jev routing decision' }, 409);
+    routing = chosen;
+    input = { ...raw, expertIds: chosen.expertIds };
+  }
+  const brief = validateBrief(input, visitor ? CLOUDBITE_EXPERTS : undefined);
+  if (isInvalid(brief)) return json({ error: brief.invalid }, 400);
+  if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);
+  if (brief.mode === 'live') {
+    const missing = cloudbiteMissing(env, CLOUDBITE_EXPERTS.length);
+    if (missing.length) return json({ error: `live execution is not configured; missing: ${missing.join(', ')}` }, 503);
+  }
+  return { brief, ...(routing ? { routing } : {}), maxExperts: effectiveMaxExperts(session, brief.budget), session };
+}
+
+/**
+ * Follow-up round: the parent is bound ONLY by this request's own history actor (prepareHistory: owner credential or
+ * the visitor's history cookie) reading the parent through parentDO.historyRead; brief.revision.parentId is a claim.
+ * A foreign, deleted, expired or unfinished parent fails here, before any reservation or create.
+ */
+async function revisionRound(env: Env, brief: ProjectBrief, actor: string | undefined): Promise<ProjectPreviousRound | CbFail> {
+  if (!brief.revision) return { error: 'not a revision', status: 400 };
+  if (!actor) return { error: 'follow-up rounds need project history, which is not configured', status: 503 };
+  const parentId = brief.revision.parentId, owner = actor === 'owner';
+  let read: HistoryDetail | CbFail;
+  try { read = PROJECT_ID.test(parentId) ? await env.CLOUDBITE!.getByName(parentId).historyRead(actor, owner) as HistoryDetail | CbFail : { error: 'parent project not found', status: 404 }; }
+  catch { return { error: 'parent project could not be read; retry shortly', status: 503 }; }
+  // authorizeRoundParent's WeakSet authorization cannot cross RPC: authorize and build here, pass only the built round.
+  const auth = await authorizeRoundParent({ parentId, actor, owner, read, now: Date.now() });
+  return isRoundFail(auth) ? auth : buildProjectRound(auth, brief);
+}
 
 /**
  * Cloudbite API and worker callbacks. null = not a Cloudbite path (legacy routing continues).
@@ -114,7 +181,7 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);
     const session = visitor ? await accessSession(req, env) : null;
     if (visitor && session?.request?.id !== visitor.id) return json({ error: 'approved access required' }, 401);
-    const max = Math.max(1, Math.min(CB_MAX_EXPERTS, session?.request?.maxExperts ?? CB_MAX_EXPERTS));
+    const max = effectiveMaxExperts(session, query.budget);
     const router = ns.getByName('routing:' + await cbHash(owner ? 'owner' : 'visitor:' + visitor!.id));
     if (visitor && !session?.canCreate) {
       const cached = await router.routingRead(query, max);
@@ -123,7 +190,8 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     return result(json, await router.routingPlan(query, max));
   }
 
-  if (path === '/api/cloudbite/projects') {
+  if (path === '/api/cloudbite/projects' || path === '/api/cloudbite/preview') {
+    const previewing = path === '/api/cloudbite/preview';
     if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
     if (!strictOrigin()) return json({ error: 'bad origin' }, 403);
     if (!(req.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) return json({ error: 'content-type must be application/json' }, 415);
@@ -135,36 +203,44 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     const ownerSession = !hasAdmin && await ownerCookieValid(req, env, state);
     const visitor = hasAdmin || ownerSession ? null : await visitorGrant.check(req, env);
     if (hasAdmin ? !await isOwner(admin) : !ownerSession && !visitor) return json({ error: 'admin session required' }, 401);
-    let input = b.ok;
-    let routing: import('./cloudbite-contract').CloudbiteRoutingDecision | undefined;
-    if (input && typeof input === 'object' && !Array.isArray(input) && 'routing' in input) {
-      const { routing: kind, ...raw } = input as Record<string, unknown>;
-      if (kind !== 'jev') return json({ error: 'unknown routing mode' }, 400);
-      const query = routingQuery({ title: raw.title, objective: raw.objective, context: raw.context, requestId: raw.requestId,
-        ...('decision' in raw ? { decision: raw.decision } : {}), ...('documents' in raw ? { documents: raw.documents } : {}) });
-      if (isRoutingFailure(query)) return json({ error: query.error }, query.status);
-      if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);
-      const session = visitor ? await accessSession(req, env) : null;
-      if (visitor && session?.request?.id !== visitor.id) return json({ error: 'approved access required' }, 401);
-      const max = Math.max(1, Math.min(CB_MAX_EXPERTS, session?.request?.maxExperts ?? CB_MAX_EXPERTS));
-      const router = ns.getByName('routing:' + await cbHash(visitor ? 'visitor:' + visitor.id : 'owner'));
-      const chosen = await router.routingRead(query, max);
-      if (isCbFail(chosen)) return json({ error: chosen.error }, chosen.status);
-      if (raw.expertIds !== undefined && JSON.stringify(raw.expertIds) !== JSON.stringify(chosen.expertIds)) return json({ error: 'expert selection differs from the Jev routing decision' }, 409);
-      routing = chosen;
-      input = { ...raw, expertIds: chosen.expertIds };
-    }
-    const brief = validateBrief(input, visitor ? CLOUDBITE_EXPERTS : undefined);
-    if (isInvalid(brief)) return json({ error: brief.invalid }, 400);
+    const prepared = await prepareProject(req, env, b.ok, visitor, json);
+    if (prepared instanceof Response) return prepared;
+    const { brief, routing, maxExperts } = prepared;
     if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);
-    if (brief.mode === 'live') {
-      const missing = cloudbiteMissing(env, CLOUDBITE_EXPERTS.length);
-      if (missing.length) return json({ error: `live execution is not configured; missing: ${missing.join(', ')}` }, 503);
+    // Visitor: namespace the requestId by the grant (the project id derives from it).
+    if (visitor) brief.requestId = await visitorRequestId(visitor.id, brief.requestId);
+    const id = await cbProjectId(brief.requestId);
+    const history = await prepareHistory(req, env, visitor?.cred ?? null);
+    const created201 = (created: unknown) => {
+      const response = json(created, 201);
+      if (history?.cookie) response.headers.append('set-cookie', history.cookie);
+      return response;
+    };
+    // Revision parent and plan are validated before any visitor slot, live slot, sandbox or project write.
+    let round: ProjectPreviousRound | undefined;
+    if (brief.revision) {
+      const r = await revisionRound(env, brief, history?.actor);
+      if (isCbFail(r)) {
+        // An existing follow-up keeps its own copied reference even after its parent was deleted.
+        const replay = previewing ? null : await ns.getByName(id).create(id, brief, history?.actor, routing, { maxExperts, replayOnly: true });
+        if (replay && !isCbFail(replay)) return created201(replay);
+        return json({ error: r.error }, r.status);
+      }
+      round = r;
     }
-    // Visitor: namespace the requestId by the grant, then atomically reserve one of its project slots.
+    const plan = await ns.getByName(id).preview(brief, routing, { maxExperts, ...(round ? { round } : {}) });
+    if (previewing) {
+      if (isCbFail(plan)) return json({ error: plan.error }, plan.status);
+      if (visitor && !prepared.session?.canCreate) plan.warnings.push('This access grant has no project slot left; creating would be refused.');
+      return json(plan);
+    }
+    if (isCbFail(plan)) {
+      const replay = await ns.getByName(id).create(id, brief, history?.actor, routing, { maxExperts, replayOnly: true });
+      return replay && !isCbFail(replay) ? created201(replay) : json({ error: plan.error }, plan.status);
+    }
+    // Visitor: atomically reserve one of the grant's project slots.
     let hold: { id: string; scoped: string } | null = null;
     if (visitor) {
-      brief.requestId = await visitorRequestId(visitor.id, brief.requestId);
       const r = await visitorGrant.reserve(env, visitor.cred, brief.requestId, brief.expertIds.length);
       if (isCbFail(r)) return json({ error: r.error }, r.status);
       hold = { id: r.id, scoped: brief.requestId };
@@ -174,13 +250,11 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
       if (hold) await visitorGrant.release(env, hold.id, hold.scoped);
       return json({ error }, status);
     };
-    const id = await cbProjectId(brief.requestId);
     if (brief.mode === 'live') {
       const slot = await ns.getByName('registry').registryAcquire(id);
       if (isCbFail(slot)) return refused(slot.status, slot.error);
     }
-    const history = await prepareHistory(req, env, visitor?.cred ?? null);
-    const created = await ns.getByName(id).create(id, brief, history?.actor, routing);
+    const created = await ns.getByName(id).create(id, brief, history?.actor, routing, { maxExperts, ...(round ? { round } : {}) });
     // A failed first create must not hold a live slot. (Idempotent retries of an existing project return success.)
     if (isCbFail(created) && brief.mode === 'live' && created.status !== 409) await ns.getByName('registry').registryRelease(id);
     if (isCbFail(created)) {
@@ -190,12 +264,35 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
       return json({ error: created.error }, created.status);
     }
     if (hold) await visitorGrant.confirm(env, hold.id, hold.scoped);
-    const response = json(created, 201);
-    if (history?.cookie) response.headers.append('set-cookie', history.cookie);
+    return created201(created);
+  }
+
+  if (path === '/api/cloudbite/pmc/import') {
+    // Fixed PMC/NCBI import service only (src/cloudbite-pmc.ts); never a URL proxy. Authority before any external call.
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
+    if (!strictOrigin()) return json({ error: 'bad origin' }, 403);
+    if (!(req.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) return json({ error: 'content-type must be application/json' }, 415);
+    const owner = await ownerAuth();
+    const visitor = hasAdmin || owner ? null : await visitorGrant.check(req, env);
+    if (!owner && !visitor) return json({ error: 'admin session or approved access required' }, 401);
+    if (visitor) {
+      const session = await accessSession(req, env);
+      if (session?.request?.id !== visitor.id) return json({ error: 'approved access required' }, 401);
+      if (!session.canCreate) return json({ error: 'visitor project quota exhausted' }, 429);
+    }
+    const b = await readJson(req, PMC_BODY_MAX);
+    if ('error' in b) return json({ error: b.error }, b.status);
+    if (!isJsonObject(b.ok) || Object.keys(b.ok).length !== 1 || typeof b.ok.identifier !== 'string') return json({ error: 'request body must be {identifier: string}' }, 400);
+    if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);
+    const actor = owner ? 'owner' : 'v_' + await cbHash('cloudbite-pmc-actor|' + visitor!.id);
+    const r = await ns.getByName('pmc-import').pmcImport(actor, b.ok.identifier);
+    if (!isCbFail(r)) return json(r);
+    const response = json({ error: r.error, code: r.code }, r.status);
+    if (r.retryAfterSeconds !== undefined) response.headers.set('retry-after', String(r.retryAfterSeconds));
     return response;
   }
 
-  const m = path.match(/^\/api\/cloudbite\/projects\/([^/]+)(\/cancel|\/artifact|\/review)?$/);
+  const m = path.match(/^\/api\/cloudbite\/projects\/([^/]+)(\/cancel|\/artifact|\/review|\/memo)?$/);
   if (!m || !PROJECT_ID.test(m[1])) return json({ error: 'not found' }, 404);
   if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);
   const stub = ns.getByName(m[1]);
@@ -208,15 +305,15 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     if ('error' in b) return json({ error: b.error }, b.status);
     return result(json, await stub.cancel(token));
   }
-  if (m[2] === '/review') {
-    // Opt-in paid second pass (src/cloudbite-cross-review.ts): the body carries no options, only {}.
+  if (m[2] === '/review' || m[2] === '/memo') {
+    // Opt-in paid passes (src/cloudbite-cross-review.ts, src/cloudbite-memo.ts): the body carries no options, only {}.
     if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
     if (!strictOrigin()) return json({ error: 'bad origin' }, 403);
     if (!(req.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) return json({ error: 'content-type must be application/json' }, 415);
     const b = await readJson(req, 256);
     if ('error' in b) return json({ error: b.error }, b.status);
     if (typeof b.ok !== 'object' || b.ok === null || Array.isArray(b.ok) || Object.keys(b.ok).length) return json({ error: 'request body must be an empty JSON object' }, 400);
-    return result(json, await stub.crossReview(token));
+    return result(json, m[2] === '/memo' ? await stub.memo(token) : await stub.crossReview(token));
   }
   if (req.method !== 'GET') return json({ error: 'method not allowed' }, 405);
   if (m[2] === '/artifact') return result(json, await stub.artifact(token, url.searchParams.get('expert'), url.searchParams.get('path')));

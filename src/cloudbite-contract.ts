@@ -151,6 +151,8 @@ export interface ProjectRun {
   evidenceSignals?: import('./cloudbite-evidence').EvidenceSignals;
   /** Application-built evidence packets of completed experts, in completed order, under one total byte bound. */
   evidencePackets?: import('./cloudbite-evidence-packet').EvidencePacket[];
+  /** Follow-up round: bounded, labelled reference to the parent project (untrusted data, never fresh opinions). */
+  previousRound?: import('./cloudbite-revision').ProjectPreviousRound;
 }
 // Public mirrors of leaf types whose modules import server-only configuration (cloudbite-config → state), so the
 // browser build (tsconfig.client.json) can read them. src/cloudbite-project.ts asserts at compile time that each
@@ -205,7 +207,7 @@ export interface MemoCoverage {
   teamSize: number; completed: number; statusCounts: Partial<Record<ExpertStatus, number>>;
   statedDirections: Record<OpinionDirection, number>;
   experts: MemoExpertCoverage[]; documents: Array<{ id: string; includedBytes: number; originalBytes: number; truncated: boolean }>;
-  brief: { objectiveTruncated: boolean; contextTruncated: boolean; decisionItemsTruncated: number; decisionItemsOmitted: number };
+  brief: { objectiveTruncated: boolean; contextTruncated: boolean; decisionItemsTruncated: number; decisionItemsOmitted: number; revisionTruncated: boolean };
   reviews: MemoSectionCoverage & { reports: number };
   packets: MemoSectionCoverage & { invalid: number; metadataOnly: number };
   fullReportsReviewed: false; sourcePagesReviewed: false;

@@ -83,6 +83,8 @@ const brief = (over = {}) => ({ title: 'Visitor run', objective: 'Should we laun
 const create = (w, b, headers) => call(w, 'POST', '/api/cloudbite/projects', { body: b, headers: { ...ORIGIN, ...headers } });
 const read = (w, pid, token) => call(w, 'GET', `/api/cloudbite/projects/${pid}`, { headers: { authorization: `Bearer ${token}` } });
 const records = (w) => [...w.access.getByName('hacksprint-2026-10-18').storage.m];
+// A refused create may instantiate its (empty) project object for the pre-reservation plan check; count stored projects.
+const stored = (w) => [...w.projects.objects.values()].filter((o) => o.storage.m.has('project')).length;
 const status = (w, cookie, q = '') => call(w, 'GET', '/api/cloudbite/access/status' + q, { headers: { cookie } });
 const rec = (w, id) => w.access.getByName('hacksprint-2026-10-18').storage.m.get(`req:${id}`);
 const inboxOf = (w) => w.access.getByName('hacksprint-2026-10-18');
@@ -200,7 +202,7 @@ await check('pending blocks creation; approval lets the cookie create at most te
   const st = await call(w, 'GET', '/api/cloudbite/access/status', { headers: { cookie: v.cookie } });
   assert.equal(st.j.request.usedProjects, 10); assert.equal(st.j.canCreate, false); assert.equal('recovery' in st.j, false);
   assert.equal((await create(w, b, { cookie: v.cookie })).status, 201, 'a retry of a held id still works at full quota');
-  assert.equal(w.projects.objects.size, 10);
+  assert.equal(stored(w), 10);
   assert.equal((await read(w, c.j.project.id, c.j.accessToken)).status, 200);
   assert.equal(w.stateCalls.length, 0, 'visitor path never asks State');
   assert.equal(fetches, before, 'demo creation calls no provider');
@@ -272,14 +274,14 @@ await check('atomic quota: eleven concurrent creates yield ten projects; same-id
   const bs = Array.from({ length: 11 }, () => brief());
   const rs = await Promise.all(bs.map((x) => create(w, x, { cookie: v.cookie })));
   assert.deepEqual(rs.map((r) => r.status).sort(), [...Array(10).fill(201), 409]);
-  assert.equal(w.projects.objects.size, 10, 'ten project objects');
+  assert.equal(stored(w), 10, 'ten project objects');
   assert.equal(rec(w, v.id).projects.length, 10); assert.ok(rec(w, v.id).projects.every((b) => b.confirmed && b.holds === 0));
   // Retries of held ids at full quota, concurrently with a new id: the retries succeed and add no usage, the new id is refused.
   const held = bs.filter((_, i) => rs[i].status === 201).slice(0, 3);
   const rr = await Promise.all([...held.map((x) => create(w, x, { cookie: v.cookie })), create(w, brief(), { cookie: v.cookie })]);
   assert.deepEqual(rr.map((r) => r.status), [201, 201, 201, 409]);
   assert.deepEqual(rr.slice(0, 3).map((r) => r.j.project.id), held.map((x) => rs[bs.indexOf(x)].j.project.id));
-  assert.equal((await status(w, v.cookie)).j.request.usedProjects, 10); assert.equal(w.projects.objects.size, 10);
+  assert.equal((await status(w, v.cookie)).j.request.usedProjects, 10); assert.equal(stored(w), 10);
   // Same race directly on the DO, lockstep (storage yields on every call): exactly ten slots are bound.
   const z = await visitor(w); await act(w, z.id, 'approve');
   const inbox = w.access.getByName('hacksprint-2026-10-18');
@@ -555,7 +557,7 @@ await check('refund cap: at most 3 failed-run refunds per grant, then recovery=l
   assert.equal(st.j.canCreate, false); assert.equal(st.j.recovery, 'limit'); assert.equal(st.j.request.usedProjects, 10);
   assert.equal((await create(w, brief(), { cookie: v.cookie })).status, 409);
   assert.equal(rec(w, v.id).refunds, 3); assert.equal(rec(w, v.id).refunded.length, 3);
-  assert.equal(w.projects.objects.size, 13, 'ten slots plus three refunded runs per grant, never more');
+  assert.equal(stored(w), 13, 'ten slots plus three refunded runs per grant, never more');
   // Several refundable runs in one settle are cut at the cap, in order, without dropping the others.
   const m = await approvedWithProject(w);
   const mp = await fill(w, m);

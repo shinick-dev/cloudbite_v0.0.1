@@ -2,6 +2,7 @@
 // upstream bodies are never reflected, and the reply is reduced to one bounded text field.
 import { CB_INFERENCE_MAX_TOKENS, CB_INFERENCE_REPLY_MAX, CB_INFERENCE_TIMEOUT, type CloudbiteConfig } from './cloudbite-config';
 import type { Invalid } from './cloudbite-validate';
+import { CB_MEMO_MAX_TOKENS } from './cloudbite-memo';
 
 export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
 
@@ -47,9 +48,15 @@ export type InferenceResult = { content: string } | { error: string; status: num
 // OpenAI-compatible model keeps the plain shape.
 const THINKING_OFF_MODELS = new Set(['qwen/qwen3.8-27b']);
 
+/** Output budgets the server may request: every role/reviewer call, and the one fixed decision-memo value. */
+const MAX_TOKENS = new Set([CB_INFERENCE_MAX_TOKENS, CB_MEMO_MAX_TOKENS]);
+export interface ChatOptions { /** Server-chosen only (never user input); anything but an allowed value is refused. */ maxTokens?: number }
+
 /** The upstream request body: same budgets for every model, plus thinking-off and JSON mode for the models above. */
-export function chatRequestBody(model: string, messages: ChatMessage[]): Record<string, unknown> {
-  const body: Record<string, unknown> = { model, messages, max_tokens: CB_INFERENCE_MAX_TOKENS, temperature: 0.3, stream: false };
+export function chatRequestBody(model: string, messages: ChatMessage[], opts: ChatOptions = {}): Record<string, unknown> {
+  const maxTokens = opts.maxTokens ?? CB_INFERENCE_MAX_TOKENS;
+  if (!MAX_TOKENS.has(maxTokens)) throw new RangeError('unsupported max_tokens');
+  const body: Record<string, unknown> = { model, messages, max_tokens: maxTokens, temperature: 0.3, stream: false };
   if (THINKING_OFF_MODELS.has(model)) {
     body.chat_template_kwargs = { enable_thinking: false };
     body.response_format = { type: 'json_object' };
@@ -57,13 +64,14 @@ export function chatRequestBody(model: string, messages: ChatMessage[]): Record<
   return body;
 }
 
-export async function nosanaChat(cfg: CloudbiteConfig['nosana'], messages: ChatMessage[]): Promise<InferenceResult> {
+export async function nosanaChat(cfg: CloudbiteConfig['nosana'], messages: ChatMessage[], opts: ChatOptions = {}): Promise<InferenceResult> {
+  const body = JSON.stringify(chatRequestBody(cfg.model, messages, opts));
   let r: Response;
   try {
     r = await fetch(`${cfg.base}/chat/completions`, {
       method: 'POST',
       headers: { authorization: `Bearer ${cfg.key}`, 'content-type': 'application/json' },
-      body: JSON.stringify(chatRequestBody(cfg.model, messages)),
+      body,
       signal: AbortSignal.timeout(CB_INFERENCE_TIMEOUT),
     });
   } catch { return { error: 'inference upstream unavailable', status: 504 }; }
