@@ -350,6 +350,20 @@ await test('files: at most 3, 16 KiB decoded in total, flat safe names, no dupli
   assert.match(e.text(), /No files chosen/);
 });
 
+await test('switching private CPU files to public GPU jobs clears attachments for both dropdown and sample', async () => {
+  for (const sample of [false, true]) {
+    const { route } = api(); const e = env({ route }); await e.flush();
+    e.pickFiles([file('private.txt', [42])]);
+    if (sample) e.btn('GPU info').click();
+    else { e.byId('cj-provider').value = 'nosana'; e.byId('cj-provider').dispatch('change'); }
+    assert.match(e.text(), /Files removed when switching to public GPU jobs/);
+    assert.match(e.text(), /No files chosen/);
+    e.btn('Review').click(); await e.flush();
+    e.tick(0); e.tick(1); e.btn('Run').click(); await e.flush();
+    assert.equal(e.posts(RUN)[0].body.files, undefined);
+  }
+});
+
 await test('job list: honest statuses, raw output as bounded text, download link, provider state and cleanup shown', async () => {
   const big = 'x'.repeat(70000) + 'END';
   const { route } = api({ jobs: [

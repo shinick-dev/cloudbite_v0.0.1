@@ -1,6 +1,6 @@
 // Generated file — do not edit. Sources: client/cloudbite-computer-jobs.ts · client/cloudbite-computer-jobs.css
 // Rebuild: node tools/build-cloudbite-computer-jobs.mjs (--check verifies it is current)
-// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 39519d53db14a23867bb68c67d25de9a4fa7bb9fbdefb926c87892598b140f9a · css sha256 3a13885b68d49135887502f2f5e78c0b48418a812bc9f58425d163341f8c673f
+// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 32c33f6fda09b8e59063aa7101d654600e89bb17fb924164fd7ab706a20dba19 · css sha256 3a13885b68d49135887502f2f5e78c0b48418a812bc9f58425d163341f8c673f
 // Routing (runtime): GET CLOUDBITE_COMPUTER_JOBS_PATH → CLOUDBITE_COMPUTER_JOBS_HTML, CLOUDBITE_COMPUTER_JOBS_JS_PATH → CLOUDBITE_COMPUTER_JOBS_JS (text/javascript),
 // CLOUDBITE_COMPUTER_JOBS_CSS_PATH → CLOUDBITE_COMPUTER_JOBS_CSS (text/css). CSP script-src 'self'; style-src 'self' suffices (no inline).
 // The script calls /api/cloudbite/computer/jobs/* and GET /api/cloudbite/computer/nested/jobs same-origin with the existing cookie and links only to /cloudbite/computer.
@@ -212,6 +212,7 @@ export const CLOUDBITE_COMPUTER_JOBS_JS = [
   "    filesHint: `Up to ${MAX_FILES} files, ${MAX_FILE_BYTES / 1024} KiB in total. They are placed in the job's empty working folder. Only files you pick are sent.`,",
   "    filesNone: \"No files chosen.\",",
   "    filesClear: \"Remove files\",",
+  "    filesReset: \"Files removed when switching to public GPU jobs. Choose them again if you want to publish them.\",",
   "    fileLine: (n, b) => `${n} — ${b} bytes`,",
   "    fileTooMany: `Choose at most ${MAX_FILES} files.`,",
   "    fileTooBig: `The files are larger than ${MAX_FILE_BYTES / 1024} KiB in total.`,",
@@ -332,6 +333,7 @@ export const CLOUDBITE_COMPUTER_JOBS_JS = [
   "    filesHint: `최대 ${MAX_FILES}개, 합계 ${MAX_FILE_BYTES / 1024} KiB. 작업의 빈 작업 폴더에 놓입니다. 직접 고른 파일만 보냅니다.`,",
   "    filesNone: \"선택한 파일이 없습니다.\",",
   "    filesClear: \"파일 빼기\",",
+  "    filesReset: \"공개 GPU 작업으로 전환하여 첨부 파일을 비웠습니다. 공개할 파일은 다시 선택해 주세요.\",",
   "    fileLine: (n, b) => `${n} — ${b}바이트`,",
   "    fileTooMany: `파일은 ${MAX_FILES}개까지 고를 수 있습니다.`,",
   "    fileTooBig: `파일 합계가 ${MAX_FILE_BYTES / 1024} KiB 를 넘습니다.`,",
@@ -647,7 +649,7 @@ export const CLOUDBITE_COMPUTER_JOBS_JS = [
   "    return o;",
   "  });",
   "  providerSel.addEventListener(\"change\", () => {",
-  "    S.provider = providerSel.value === \"nosana\" ? \"nosana\" : \"daytona\";",
+  "    changeProvider(providerSel.value === \"nosana\" ? \"nosana\" : \"daytona\");",
   "    S.formMsg = null;",
   "    render();",
   "  });",
@@ -772,9 +774,17 @@ export const CLOUDBITE_COMPUTER_JOBS_JS = [
   "  const main = h(\"main\", \"cj-main\", h1, lead, gate, work);",
   "  root.replaceChildren(header, main);",
   "  const locked = () => S.reviewing || !!S.review || !!S.op;",
+  "  function changeProvider(next) {",
+  "    if (S.provider !== \"nosana\" && next === \"nosana\" && S.files.length) {",
+  "      S.files = [];",
+  "      filesIn.value = \"\";",
+  "      S.fileMsg = { text: () => T().filesReset, kind: \"warn\" };",
+  "    }",
+  "    S.provider = next;",
+  "  }",
   "  function applySample(s) {",
   "    if (locked()) return;",
-  "    S.provider = s.provider === \"nosana\" && !S.ctx?.selection ? \"daytona\" : s.provider;",
+  "    changeProvider(s.provider === \"nosana\" && !S.ctx?.selection ? \"daytona\" : s.provider);",
   "    imageIn.value = s.image === DEFAULT_IMAGE ? \"\" : s.image;",
   "    cmdIn.value = JSON.stringify(s.command);",
   "    S.formMsg = null;",

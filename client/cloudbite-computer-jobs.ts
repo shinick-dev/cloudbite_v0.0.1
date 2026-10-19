@@ -99,7 +99,7 @@ const DICT = {
     whyLong: 'the command is too long',
     timeout: 'Time limit', timeoutOpt: (s: number) => (s < 60 ? `${s} seconds` : `${s / 60} min`),
     files: 'Input files (optional)', filesHint: `Up to ${MAX_FILES} files, ${MAX_FILE_BYTES / 1024} KiB in total. They are placed in the job's empty working folder. Only files you pick are sent.`,
-    filesNone: 'No files chosen.', filesClear: 'Remove files', fileLine: (n: string, b: number) => `${n} — ${b} bytes`,
+    filesNone: 'No files chosen.', filesClear: 'Remove files', filesReset: 'Files removed when switching to public GPU jobs. Choose them again if you want to publish them.', fileLine: (n: string, b: number) => `${n} — ${b} bytes`,
     fileTooMany: `Choose at most ${MAX_FILES} files.`, fileTooBig: `The files are larger than ${MAX_FILE_BYTES / 1024} KiB in total.`,
     fileBadName: (n: string) => `File name not allowed: ${n}. Use letters, digits, dot, dash or underscore, up to 64 characters.`,
     fileDup: (n: string) => `Two files are named ${n}.`, fileRead: 'A file could not be read. Choose it again.',
@@ -154,7 +154,7 @@ const DICT = {
     whyLong: '명령이 너무 깁니다',
     timeout: '제한 시간', timeoutOpt: (s: number) => (s < 60 ? `${s}초` : `${s / 60}분`),
     files: '입력 파일 (선택)', filesHint: `최대 ${MAX_FILES}개, 합계 ${MAX_FILE_BYTES / 1024} KiB. 작업의 빈 작업 폴더에 놓입니다. 직접 고른 파일만 보냅니다.`,
-    filesNone: '선택한 파일이 없습니다.', filesClear: '파일 빼기', fileLine: (n: string, b: number) => `${n} — ${b}바이트`,
+    filesNone: '선택한 파일이 없습니다.', filesClear: '파일 빼기', filesReset: '공개 GPU 작업으로 전환하여 첨부 파일을 비웠습니다. 공개할 파일은 다시 선택해 주세요.', fileLine: (n: string, b: number) => `${n} — ${b}바이트`,
     fileTooMany: `파일은 ${MAX_FILES}개까지 고를 수 있습니다.`, fileTooBig: `파일 합계가 ${MAX_FILE_BYTES / 1024} KiB 를 넘습니다.`,
     fileBadName: (n: string) => `허용되지 않는 파일 이름: ${n}. 영문·숫자·점·대시·밑줄로 64자까지 쓰세요.`,
     fileDup: (n: string) => `같은 이름의 파일이 둘 있습니다: ${n}`, fileRead: '파일을 읽지 못했습니다. 다시 고르세요.',
@@ -402,7 +402,7 @@ function mount(root: HTMLElement): void {
   const providerLabel = h('label', 'cj-field-label'), providerSel = h('select', 'cj-select');
   providerSel.id = 'cj-provider'; providerLabel.setAttribute('for', 'cj-provider');
   const providerOpts = (['daytona', 'nosana'] as Provider[]).map(p => { const o = h('option'); o.value = p; providerSel.append(o); return o; });
-  providerSel.addEventListener('change', () => { S.provider = providerSel.value === 'nosana' ? 'nosana' : 'daytona'; S.formMsg = null; render(); });
+  providerSel.addEventListener('change', () => { changeProvider(providerSel.value === 'nosana' ? 'nosana' : 'daytona'); S.formMsg = null; render(); });
   const providerNote = h('p', 'cj-fine');
   const publicWarn = h('p', 'cj-callout');
   const samplesLabel = h('p', 'cj-field-label');
@@ -471,9 +471,16 @@ function mount(root: HTMLElement): void {
 
   // ── form ──
   const locked = (): boolean => S.reviewing || !!S.review || !!S.op;
+  function changeProvider(next: Provider): void {
+    if (S.provider !== 'nosana' && next === 'nosana' && S.files.length) {
+      S.files = []; filesIn.value = '';
+      S.fileMsg = { text: () => T().filesReset, kind: 'warn' };
+    }
+    S.provider = next;
+  }
   function applySample(s: Sample): void {
     if (locked()) return;
-    S.provider = s.provider === 'nosana' && !S.ctx?.selection ? 'daytona' : s.provider;
+    changeProvider(s.provider === 'nosana' && !S.ctx?.selection ? 'daytona' : s.provider);
     imageIn.value = s.image === DEFAULT_IMAGE ? '' : s.image;
     cmdIn.value = JSON.stringify(s.command);
     S.formMsg = null; render();
