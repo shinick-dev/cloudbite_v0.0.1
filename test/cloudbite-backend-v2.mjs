@@ -39,7 +39,7 @@ const memoReply = (ids) => JSON.stringify({
   options: [{ optionId: 'option-1', benefits: [claim('Fits the objective', [ids[0]])], risks: [], conditions: [] },
     { optionId: 'option-2', benefits: [], risks: [claim('Slower to start', [ids[1] ?? ids[0]])], conditions: [] }],
   dissent: [], criticalUnknowns: [], changeTriggers: [claim('Costs double')], nextActions: [claim('Confirm the cost', [ids[0]])] });
-const reviewReply = (data) => JSON.stringify({ summary: `Review by ${data.reviewerExpertId}`, findings: data.peers.map((p) => ({ targetExpertId: p.expertId, evidenceIndex: 0, verdict: 'supported', rationale: 'Evidence item read against the summary.' })) });
+const reviewReply = (data) => JSON.stringify({ summary: `Review by ${data.reviewerExpertId}`, findings: data.peers.map((p) => ({ targetExpertId: p.expertId, evidenceIndex: 0, verdict: 'supported', rationale: 'Evidence item read against the summary.', claimSupport: { status: 'insufficient', quotes: [], rationale: 'Evidence item read against the summary.' } })) });
 globalThis.fetch = async (u, init = {}) => {
   const url = new URL(typeof u === 'string' ? u : u.url);
   if (url.host === 'pmc.ncbi.nlm.nih.gov') {
@@ -537,7 +537,7 @@ const longKo = '검토자는 인용된 근거 항목을 요약과 대조해 읽�
 const reviewIn = (rationale, summary) => (kind, req) => {
   if (kind !== 'review') return 'turn reply';
   const data = JSON.parse(req.messages[1].content.replace(/^[^\n]*\n/, ''));
-  return JSON.stringify({ summary, findings: data.peers.map((p) => ({ targetExpertId: p.expertId, evidenceIndex: 0, verdict: 'supported', rationale })) });
+  return JSON.stringify({ summary, findings: data.peers.map((p) => ({ targetExpertId: p.expertId, evidenceIndex: 0, verdict: 'supported', rationale, claimSupport: { status: 'insufficient', quotes: [], rationale } })) });
 };
 await test('cross-review: replies are checked against the brief\'s response language; one paid attempt, opinions preserved', async () => {
   const w = world(), ko = '파일럿 계획을 진행해야 할까요?';

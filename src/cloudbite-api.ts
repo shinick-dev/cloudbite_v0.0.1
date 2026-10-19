@@ -9,6 +9,7 @@ import { CB_ACTIVITY_BODY_MAX, CB_COMPLETE_BODY_MAX, CB_CREATE_BODY_MAX, CB_INFE
 import { cbHash, cbProjectId, isCbFail, type CbFail } from './cloudbite-project';
 import type { PmcImportErrorCode } from './cloudbite-pmc';
 import { authorizeRoundParent, buildProjectRound, isRoundFail, type ProjectPreviousRound } from './cloudbite-revision';
+import { authorizeAuthorResponseParent, buildAuthorResponsePlan } from './cloudbite-author-response';
 import type { CloudbiteAccessSession } from './cloudbite-access-contract';
 import type { HistoryDetail } from './cloudbite-history-contract';
 import { JEV_MODEL, routingReady, routingQuery, isRoutingFailure } from './cloudbite-routing';
@@ -117,10 +118,20 @@ async function prepareProject(req: Request, env: Env, input: unknown, visitor: V
 async function revisionRound(env: Env, brief: ProjectBrief, actor: string | undefined): Promise<ProjectPreviousRound | CbFail> {
   if (!brief.revision) return { error: 'not a revision', status: 400 };
   if (!actor) return { error: 'follow-up rounds need project history, which is not configured', status: 503 };
+  if (brief.revision.reviewSnapshotHash && brief.mode !== 'live') return { error: 'an author response runs only as a live project', status: 400 };
   const parentId = brief.revision.parentId, owner = actor === 'owner';
   let read: HistoryDetail | CbFail;
   try { read = PROJECT_ID.test(parentId) ? await env.CLOUDBITE!.getByName(parentId).historyRead(actor, owner) as HistoryDetail | CbFail : { error: 'parent project not found', status: 404 }; }
   catch { return { error: 'parent project could not be read; retry shortly', status: 503 }; }
+  if (brief.revision.reviewSnapshotHash) {
+    const auth = await authorizeAuthorResponseParent({ parentId, actor, owner, read, now: Date.now() });
+    if (isRoundFail(auth)) return auth;
+    if (auth.snapshotHash !== brief.revision.reviewSnapshotHash) return { error: 'the requested parent cross-review is stale', status: 409 };
+    const plan = await buildAuthorResponsePlan(auth, brief);
+    if (isRoundFail(plan)) return plan;
+    const round = await buildProjectRound(auth.round, brief);
+    return isRoundFail(round) ? round : { ...round, authorResponse: plan };
+  }
   // authorizeRoundParent's WeakSet authorization cannot cross RPC: authorize and build here, pass only the built round.
   const auth = await authorizeRoundParent({ parentId, actor, owner, read, now: Date.now() });
   return isRoundFail(auth) ? auth : buildProjectRound(auth, brief);
@@ -301,12 +312,20 @@ export async function cloudbiteRoute(req: Request, env: Env, url: URL, state: Pi
     return response;
   }
 
-  const m = path.match(/^\/api\/cloudbite\/projects\/([^/]+)(\/cancel|\/artifact|\/review|\/memo)?$/);
+  const m = path.match(/^\/api\/cloudbite\/projects\/([^/]+)(\/cancel|\/artifact|\/review|\/memo|\/quantitative)?$/);
   if (!m || !PROJECT_ID.test(m[1])) return json({ error: 'not found' }, 404);
   if (!ns) return json({ error: 'Cloudbite is not configured' }, 503);
   const stub = ns.getByName(m[1]);
   const token = bearer(req);
   if (!token) return json({ error: 'project access token required' }, 401);
+  if (m[2] === '/quantitative') {
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
+    if (!strictOrigin()) return json({ error: 'bad origin' }, 403);
+    if (!(req.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) return json({ error: 'content-type must be application/json' }, 415);
+    const b = await readJson(req, 12 * 1024);
+    if ('error' in b) return json({ error: b.error }, b.status);
+    return result(json, await stub.quantitativeCheck(token, b.ok));
+  }
   if (m[2] === '/cancel') {
     if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
     if (!strictOrigin()) return json({ error: 'bad origin' }, 403);

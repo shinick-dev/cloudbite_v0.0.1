@@ -13,7 +13,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { build } from 'esbuild';
 
 const tmp = mkdtempSync(join(tmpdir(), 'cloudbite-cross-review-'));
-const built = await build({ stdin: { contents: `export { default, State, CloudbiteProject, CloudbiteAccess, CloudbiteHistory } from './src/index.ts'; export { CLOUDBITE_EXPERTS } from './src/cloudbite-personas.ts'; export * from './src/cloudbite-cross-review.ts';`, resolveDir: process.cwd(), loader: 'ts' },
+const built = await build({ stdin: { contents: `export { default, State, CloudbiteProject, CloudbiteAccess, CloudbiteHistory } from './src/index.ts'; export { CLOUDBITE_EXPERTS } from './src/cloudbite-personas.ts'; export * from './src/cloudbite-cross-review.ts'; export { CB_CLAIM_REVIEW_MAX_TOKENS } from './src/cloudbite-inference.ts';`, resolveDir: process.cwd(), loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'esm', loader: { '.ps1': 'text' }, plugins: [{ name: 'cf', setup(b) {
     b.onResolve({ filter: /^cloudflare:workers$/ }, () => ({ path: 'cf', namespace: 'stub' }));
     b.onLoad({ filter: /^cf$/, namespace: 'stub' }, () => ({ contents: 'export class DurableObject { constructor(ctx,env){this.ctx=ctx;this.env=env;} }' }));
@@ -43,7 +43,7 @@ globalThis.fetch = async (u, init = {}) => {
   const content = N.reply ? N.reply(data) : validReply(data);
   return new Response(JSON.stringify({ choices: [{ message: { content }, finish_reason: 'stop' }] }), { headers: { 'content-type': 'application/json' } });
 };
-const validReply = (data) => JSON.stringify({ summary: `Review by ${data.reviewerExpertId}`, findings: data.peers.map((p, i) => ({ targetExpertId: p.expertId, evidenceIndex: i % p.evidence.length, verdict: ['supported', 'challenged', 'insufficient'][i % 3], rationale: 'Evidence item read against the summary.' })) });
+const validReply = (data) => JSON.stringify({ summary: `Review by ${data.reviewerExpertId}`, findings: data.peers.map((p, i) => ({ targetExpertId: p.expertId, evidenceIndex: i % p.evidence.length, verdict: ['supported', 'challenged', 'insufficient'][i % 3], rationale: 'Evidence item read against the summary.', claimSupport: { status: 'insufficient', quotes: [], rationale: 'Evidence item read against the summary.' } })) });
 
 function storage() {
   const m = new Map(), db = new DatabaseSync(':memory:'); let alarm = null, queue = Promise.resolve();
@@ -129,7 +129,7 @@ await test('completed review: deterministic reviewers, only other opinions, sepa
   // Preferred role first, then completed order; at most three reviewers.
   assert.deepEqual(cr.reports.map((x) => x.reviewerExpertId), [ANALYST.id, OTHERS[0].id, OTHERS[1].id]);
   for (const c of N.calls) {
-    assert.equal(c.req.max_tokens, 1200);
+    assert.equal(c.req.max_tokens, M.CB_CLAIM_REVIEW_MAX_TOKENS);
     assert.equal(c.req.messages.length, 2); assert.equal(c.req.messages[0].role, 'system');
     const peerIds = c.data.peers.map((p) => p.expertId);
     assert.ok(peerIds.length <= 3 && peerIds.length >= 1);

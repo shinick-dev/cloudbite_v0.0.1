@@ -33,7 +33,11 @@ export type ResponseLanguage = 'ko' | 'en';
 /** Requested upper bounds (integers): maxExperts 1-100, maxModelCalls 1-804 in total, maxReviewCalls 0-3, maxMemoCalls 0-1. */
 export interface ProjectBudget { maxExperts: number; maxModelCalls: number; maxReviewCalls: number; maxMemoCalls: number }
 /** A user's claim that this brief revises an earlier project; parentId is not proof of ownership. */
-export interface ProjectRevision { parentId: string; changeSummary: string }
+export interface ProjectRevision {
+  parentId: string; changeSummary: string;
+  /** Explicit author-response round, bound to the authorized parent's completed cross-review. */
+  reviewSnapshotHash?: string;
+}
 /** Code-assembled work order for one selected role. optionIds are option-1..8 of the brief's decision snapshot. */
 export interface ExpertAssignment {
   expertId: string; stage: ProjectStage; question: string; optionIds: string[];
@@ -70,6 +74,32 @@ export interface EvidenceClaim {
 export interface CrossReviewFinding {
   targetExpertId: string; evidenceIndex: number; verdict: 'supported' | 'challenged' | 'insufficient';
   rationale: string;
+  /** Present only when the reply was parsed against a server claim-support packet; absent = not assessed. */
+  claimSupport?: ClaimSupportAssessment;
+}
+/** A reviewer model's reading of cited text against one claim; never truth verification or calibrated accuracy. */
+export type ClaimSupportStatus = 'supported' | 'partial' | 'contradicted' | 'insufficient';
+/**
+ * Where a passage's text came from. curated-card is a project-authored paraphrase, never the original source;
+ * imported-original-excerpt is a user-imported PMC excerpt (original wording, still user-supplied, not re-fetched);
+ * user-document and workspace-field are user statements.
+ */
+export type ClaimSupportTextOrigin = 'user-document' | 'imported-original-excerpt' | 'workspace-field' | 'curated-card';
+/** Cited text the server put in front of the reviewer for one slot, independent of what the model said. */
+export type ClaimSupportCitedText = 'available' | 'partial' | 'unavailable' | 'uncited' | 'not-in-packet';
+/** A quotation the server found verbatim in a known passage bound to the finding's evidence slot. */
+export interface ClaimSupportQuote {
+  passageId: string; ref: string; textOrigin: ClaimSupportTextOrigin; quote: string;
+  /** sha256 of the full passage source text; offsets are UTF-16 code units into it, lines 1-based. */
+  sourceSha256: string; startOffset: number; endOffset: number; startLine: number; endLine: number;
+}
+export interface ClaimSupportAssessment {
+  status: ClaimSupportStatus; quotes: ClaimSupportQuote[]; rationale: string;
+  basis: 'model-assessment';
+  /** Server check performed: each quote is an exact substring of a passage bound to this slot. Not a truth check. */
+  quoteCheck: 'exact-substring';
+  citedText: ClaimSupportCitedText;
+  packetSha256: string;
 }
 export interface CrossReviewReport { reviewerExpertId: string; findings: CrossReviewFinding[]; summary: string }
 export interface ProjectCrossReview {
@@ -81,6 +111,12 @@ export interface ProjectCrossReview {
   coverage?: CrossReviewCoverage; disclosure?: string;
   /** Per finding: which cited texts were actually in the reviewer's input. Never changes a verdict. */
   textAvailability?: CrossReviewTextAvailability[];
+  /** Exact stored artifact excerpts supplied to the reviewers. Reading is not execution or verification. */
+  artifactCoverage?: Array<{
+    expertId: string; packetSha256: string;
+    files: Array<{ path: string; sha256: string; startLine: number; endLine: number; totalLines: number; excerptTruncated: boolean; storedTruncated: boolean }>;
+    omitted: Array<{ path: string; reason: string }>;
+  }>;
 }
 export interface CloudbiteRoutingQuery {
   title: string; objective: string; context: string; requestId: string;
@@ -130,8 +166,12 @@ export interface ExpertRun {
   error?: string;
   updatedAt: number;
   assignment?: ExpertAssignment;
+  /** Response to parent review, separate from the unchanged six-key opinion and its completion status. */
+  authorResponse?: import('./cloudbite-author-response').AuthorResponseParsed | { invalid: string };
 }
 export interface ProjectRun {
+  /** App-computed records over explicit user inputs or this project's stored text. Never decision correctness. */
+  quantitativeChecks?: QuantitativeCheckRecord[];
   id: string;
   brief: ProjectBrief;
   status: ProjectStatus;
@@ -153,6 +193,18 @@ export interface ProjectRun {
   evidencePackets?: import('./cloudbite-evidence-packet').EvidencePacket[];
   /** Follow-up round: bounded, labelled reference to the parent project (untrusted data, never fresh opinions). */
   previousRound?: import('./cloudbite-revision').ProjectPreviousRound;
+  /** Epistemic origin and explicit user adoption; neither is independent fact verification. */
+  provenance?: { ledger: import('./cloudbite-provenance').ProvenanceLedger; state: import('./cloudbite-provenance').ProvenanceState };
+}
+export interface QuantitativeCheckRecord {
+  id: string;
+  projectId: string;
+  createdAt: number;
+  request: import('./cloudbite-quantitative').QuantitativeRequest;
+  result: Awaited<ReturnType<typeof import('./cloudbite-quantitative').runQuantitativeCheck>>;
+  source?: { kind: 'artifact'; expertId: string; path: string; sha256: string }
+    | { kind: 'document'; id: string; sha256: string };
+  execution: 'app-deterministic';
 }
 // Public mirrors of leaf types whose modules import server-only configuration (cloudbite-config → state), so the
 // browser build (tsconfig.client.json) can read them. src/cloudbite-project.ts asserts at compile time that each

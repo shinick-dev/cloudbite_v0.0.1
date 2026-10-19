@@ -8,6 +8,7 @@
 //        [--provenance observed-live|synthetic-qa|test-synthetic] [--ratings RATINGS.jsonl] [--out DIR]
 //   node tools/evaluate-cloudbite-quality.mjs compare --input A.json --input B.json --case CASE_ID
 //        [--documented-difference "why question/stage/material differ"] [--out DIR]
+// Batches of recorded exports (manifest, summary, failure taxonomy, blinded review packets): tools/cloudbite-quality-batch.mjs.
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { lstatSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
@@ -46,11 +47,11 @@ const SECRET_PATTERNS = [
   ['cookie-header', /\b(?:set-)?cookie\s*[:=]\s*\S+=/i], ['admin-header', /\bx-(?:admin|office)-token\b/i], ['aws-key', /\bAKIA[0-9A-Z]{16}\b/],
 ];
 const PRIVATE_PATTERNS = [['email', /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/], ['kr-resident-number', /\b\d{6}-[1-4]\d{6}\b/]];
-const FORBIDDEN_ARG = /^--(?:cookie|cookies|token|auth|authorization|header|bearer|session|password|live)(?:=|$)/i;
+export const FORBIDDEN_ARG = /^--(?:cookie|cookies|token|auth|authorization|header|bearer|session|password|live)(?:=|$)/i;
 
 const sha256 = (v) => createHash('sha256').update(v).digest('hex');
 const isRecord = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
-const canonical = (v) => Array.isArray(v) ? '[' + v.map(canonical).join(',') + ']'
+export const canonical = (v) => Array.isArray(v) ? '[' + v.map(canonical).join(',') + ']'
   : isRecord(v) ? '{' + Object.keys(v).sort().filter((k) => v[k] !== undefined).map((k) => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}'
   : JSON.stringify(v);
 const lower = (s) => String(s ?? '').toLowerCase();
@@ -527,7 +528,7 @@ export function resolveOutput(out, { allowOutsideRepo = false } = {}) {
   return dir;
 }
 
-function writeNew(path, data, force) {
+export function writeNew(path, data, force) {
   if (existsSync(path) && !force) throw new Error(`refusing to overwrite ${path}; pass --force`);
   writeFileSync(path, data, { flag: force ? 'w' : 'wx' });
 }

@@ -44,12 +44,15 @@ function validateBudget(raw: unknown): ProjectBudget | Invalid {
 
 function validateRevision(raw: unknown): ProjectRevision | Invalid {
   if (!isRecord(raw)) return { invalid: 'revision must be an object' };
-  if (Object.keys(raw).some((k) => k !== 'parentId' && k !== 'changeSummary')) return { invalid: 'unknown revision field' };
+  if (Object.keys(raw).some((k) => k !== 'parentId' && k !== 'changeSummary' && k !== 'reviewSnapshotHash')) return { invalid: 'unknown revision field' };
   if (typeof raw.parentId !== 'string' || !REVISION_PARENT_ID.test(raw.parentId)) return { invalid: 'revision.parentId must be a Cloudbite project id' };
   const summary = typeof raw.changeSummary === 'string' ? raw.changeSummary.replace(/\r\n?/g, '\n').trim() : '';
   if (typeof raw.changeSummary !== 'string' || CONTROL_ANY.test(raw.changeSummary) || !summary || summary.length > REVISION_LIMITS.changeSummary)
     return { invalid: `revision.changeSummary must be plain text of 1-${REVISION_LIMITS.changeSummary} characters` };
-  return { parentId: raw.parentId, changeSummary: summary };
+  if (own(raw, 'reviewSnapshotHash') && (typeof raw.reviewSnapshotHash !== 'string' || !/^[0-9a-f]{64}$/.test(raw.reviewSnapshotHash)))
+    return { invalid: 'revision.reviewSnapshotHash must be a SHA-256 hash' };
+  return { parentId: raw.parentId, changeSummary: summary,
+    ...(typeof raw.reviewSnapshotHash === 'string' ? { reviewSnapshotHash: raw.reviewSnapshotHash } : {}) };
 }
 
 /**
@@ -85,7 +88,8 @@ export function workflowHashFields(data: Pick<ProjectBrief, (typeof WORKFLOW_FIE
   if (data.stage && data.stage !== 'unspecified') out.stage = data.stage;
   if (data.responseLanguage) out.responseLanguage = data.responseLanguage;
   if (data.budget) out.budget = Object.fromEntries(BUDGET_FIELDS.map((f) => [f, data.budget![f]])) as unknown as ProjectBudget;
-  if (data.revision) out.revision = { parentId: data.revision.parentId, changeSummary: data.revision.changeSummary };
+  if (data.revision) out.revision = { parentId: data.revision.parentId, changeSummary: data.revision.changeSummary,
+    ...(data.revision.reviewSnapshotHash ? { reviewSnapshotHash: data.revision.reviewSnapshotHash } : {}) };
   return out;
 }
 
