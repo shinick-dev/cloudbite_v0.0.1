@@ -48,9 +48,18 @@ type ToolState = { status: ToolStatus | null; version: string; connected: boolea
 type NestedJob = { id: string; provider: string; status: string };
 type MachineState = {
   status: Status; error: string | null; machine: Machine | null; sessionEndsAt: string | null; snapshot: Snapshot | null;
-  tools: Map<string, ToolState> | null; configuredAccounts: Account[]; ready: boolean;
+  tools: Map<string, ToolState> | null; configuredAccounts: Account[]; ready: boolean; end: EndView | null;
 };
-type OpKind = 'start' | 'stop' | 'extend' | 'snapshot' | 'nested/configure' | 'resize';
+// Safe end as the server reports it: files (Cloud Files) and environment backup are separate states, never merged into "saved"
+type EndPhase = 'draining' | 'stopping' | 'backing_up' | 'done' | 'blocked' | 'failed' | 'cancelled';
+type EndFiles = 'not_configured' | 'unverified' | 'verifying' | 'verified' | 'blocked' | 'pending';
+type EndBackup = 'not_configured' | 'not_requested' | 'pending' | 'active' | 'coalesced' | 'failed' | 'blocked' | 'unknown';
+type EndView = { mode: 'disk_backup' | 'files_verified'; phase: EndPhase; files: EndFiles; filesVerifiedAt: string | null; backup: EndBackup; error: string | null };
+const END_PHASES: EndPhase[] = ['draining', 'stopping', 'backing_up', 'done', 'blocked', 'failed', 'cancelled'];
+const END_FILES: EndFiles[] = ['not_configured', 'unverified', 'verifying', 'verified', 'blocked', 'pending'];
+const END_BACKUPS: EndBackup[] = ['not_configured', 'not_requested', 'pending', 'active', 'coalesced', 'failed', 'blocked', 'unknown'];
+const END_ACTIVE: EndPhase[] = ['draining', 'stopping', 'backing_up'];
+type OpKind = 'start' | 'stop' | 'extend' | 'snapshot' | 'nested/configure' | 'resize' | 'end';
 type Op = { kind: OpKind; requestId: string; body: Record<string, unknown>; phase: 'sending' | 'uncertain' };
 // Performance card (GET performance, POST resize): live usage is null when the machine did not report it — never a fake zero
 type Plan = { cpu: number; memoryGiB: number; usdPerHour: number; deltaUsdPerHour: number };
@@ -181,7 +190,26 @@ const DICT = {
     openBad: 'The server returned an unexpected desktop address; it was not opened.', notReady: 'The desktop is not reported ready yet.',
     accountMissing: (a: string) => `The machine belongs to the ${a} account, which is not available now. Cloudbite will not switch accounts.`,
     done: { start: 'Start accepted.', stop: 'Stop accepted.', extend: 'Session extended.', snapshot: 'Snapshot accepted.', 'nested/configure': 'Nested compute setup accepted.',
-      resize: 'Size change sent. It counts only once the machine reports the new size — press Check now to see.' } as Record<OpKind, string>,
+      resize: 'Size change sent. It counts only once the machine reports the new size — press Check now to see.', end: 'End accepted. The steps below update as the server reports them.' } as Record<OpKind, string>,
+    endBackup: 'End and keep environment', endFiles: 'Check files are saved, then end',
+    endTitle: 'Ending the session',
+    endPhase: {
+      draining: 'Preparing to stop…', stopping: 'Stopping. The disk is kept.', backing_up: 'Stopped. Making a private environment backup…',
+      done: 'Ended. The disk is kept; nothing was deleted.', blocked: 'Not ended: files could not be confirmed saved. The computer keeps running.',
+      failed: 'The end did not finish. The disk is kept; nothing was deleted.', cancelled: 'The automatic end was called off because the session was extended.',
+    } as Record<EndPhase, string>,
+    endFilesState: {
+      not_configured: 'Cloud Files: not set up. Files stay on this computer\'s disk.', unverified: 'Cloud Files: not confirmed saved remotely. Files stay on the disk.',
+      verifying: 'Cloud Files: checking that every file is saved…', verified: 'Cloud Files: confirmed saved remotely at the check. Changes apps make afterwards are not included.',
+      blocked: 'Cloud Files: some files are not saved yet (being edited, open, uploading or in conflict). Stop keeps them on the disk.',
+      pending: 'Cloud Files: the session ended before saving was confirmed. Files stay on the disk.',
+    } as Record<EndFiles, string>,
+    endBackupState: {
+      not_configured: 'Environment backup: not set up.', not_requested: 'Environment backup: waits until the stop is confirmed.',
+      pending: 'Environment backup: in progress.', active: 'Environment backup: done. Private copy of the disk; open programs and memory (RAM) are not included.',
+      coalesced: 'Environment backup: no new copy this time; the recent backup is kept.', failed: 'Environment backup: failed. The disk is kept.',
+      blocked: 'Environment backup: paused by the backup limits. The disk is kept.', unknown: 'Environment backup: not confirmed.',
+    } as Record<EndBackup, string>,
     rejected: (code: string) => `Rejected: ${code}`,
     uncertain: 'No definite answer from the server. Retry sends the same request again, so it will not run twice.',
     retry: 'Retry same request', forget: 'Forget it', pending: 'Request in flight…',
@@ -206,7 +234,7 @@ const DICT = {
     connected: 'Signed in / key set', notConnected: 'Not connected',
     machineOffNote: 'Install status comes from the running machine; start it to check.',
     jobsOpen: 'Run CPU/GPU jobs on the web',
-    manageNav: 'Computer management', snapshotsOpen: 'Saved environments', latencyOpen: 'Connection latency', costsOpen: 'Costs and limits',
+    manageNav: 'Computer management', snapshotsOpen: 'Saved environments', latencyOpen: 'Connection latency', costsOpen: 'Costs and limits', filesOpen: 'Cloud Files',
     nestedTitle: 'Nested compute (Daytona, Nosana)', nestedLead: 'Asks the server to set up scoped Daytona and Nosana command-line access inside this machine. Only the server\'s answer says whether it worked.',
     nestedConfigure: 'Set up nested compute', nestedConfiguring: 'Setting up…', nestedJobs: 'Show nested jobs', nestedLoading: 'Loading jobs…',
     nestedNone: 'The server reports no nested jobs.', nestedFailed: 'Could not load nested jobs.', nestedNeedsRunning: 'Available while the machine is running.',
@@ -293,7 +321,26 @@ const DICT = {
     openBad: '서버가 예상과 다른 데스크톱 주소를 보내 열지 않았습니다.', notReady: '데스크톱이 아직 준비됐다고 보고되지 않았습니다.',
     accountMissing: (a: string) => `이 머신은 ${a} 계정 소속인데 지금 사용할 수 없습니다. Cloudbite 는 계정을 바꾸지 않습니다.`,
     done: { start: '시작 요청이 접수됐습니다.', stop: '중지 요청이 접수됐습니다.', extend: '세션을 연장했습니다.', snapshot: '스냅샷 요청이 접수됐습니다.', 'nested/configure': '중첩 컴퓨트 설정 요청이 접수됐습니다.',
-      resize: '크기 변경을 보냈습니다. 머신이 새 크기를 보고해야 적용된 것입니다 — 지금 확인을 눌러 보세요.' } as Record<OpKind, string>,
+      resize: '크기 변경을 보냈습니다. 머신이 새 크기를 보고해야 적용된 것입니다 — 지금 확인을 눌러 보세요.', end: '종료 요청이 접수됐습니다. 아래 단계는 서버가 알려 주는 대로 바뀝니다.' } as Record<OpKind, string>,
+    endBackup: '종료하고 환경 보관', endFiles: '파일 저장 확인 후 종료',
+    endTitle: '세션 종료',
+    endPhase: {
+      draining: '정지 준비 중…', stopping: '정지 중. 디스크는 남습니다.', backing_up: '정지됨. 비공개 환경 백업을 만드는 중…',
+      done: '종료됨. 디스크는 남아 있고 아무것도 삭제하지 않았습니다.', blocked: '종료하지 않았습니다: 파일 저장을 확인하지 못했습니다. 컴퓨터는 계속 실행 중입니다.',
+      failed: '종료가 끝나지 않았습니다. 디스크는 남아 있고 아무것도 삭제하지 않았습니다.', cancelled: '세션을 연장해서 자동 종료를 취소했습니다.',
+    } as Record<EndPhase, string>,
+    endFilesState: {
+      not_configured: '클라우드 파일: 설정 안 됨. 파일은 이 컴퓨터의 디스크에 남습니다.', unverified: '클라우드 파일: 원격 저장을 확인하지 않았습니다. 파일은 디스크에 남습니다.',
+      verifying: '클라우드 파일: 모든 파일이 저장됐는지 확인 중…', verified: '클라우드 파일: 확인 시점에 원격 저장을 확인했습니다. 그 뒤 앱이 바꾼 내용은 포함되지 않습니다.',
+      blocked: '클라우드 파일: 아직 저장되지 않은 파일이 있습니다 (편집·열림·업로드 중·충돌). 중지해도 디스크에는 남습니다.',
+      pending: '클라우드 파일: 저장 확인 전에 세션이 끝났습니다. 파일은 디스크에 남습니다.',
+    } as Record<EndFiles, string>,
+    endBackupState: {
+      not_configured: '환경 백업: 설정 안 됨.', not_requested: '환경 백업: 정지가 확인되면 시작합니다.',
+      pending: '환경 백업: 진행 중.', active: '환경 백업: 완료. 디스크의 비공개 사본이며 열린 프로그램과 메모리(RAM)는 포함되지 않습니다.',
+      coalesced: '환경 백업: 이번에는 새 사본을 만들지 않았고 최근 백업을 유지합니다.', failed: '환경 백업: 실패. 디스크는 남아 있습니다.',
+      blocked: '환경 백업: 백업 한도 때문에 멈췄습니다. 디스크는 남아 있습니다.', unknown: '환경 백업: 확인되지 않았습니다.',
+    } as Record<EndBackup, string>,
     rejected: (code: string) => `거부됨: ${code}`,
     uncertain: '서버에서 확실한 답을 받지 못했습니다. 다시 시도는 같은 요청을 보내므로 두 번 실행되지 않습니다.',
     retry: '같은 요청 다시 보내기', forget: '잊기', pending: '요청 처리 중…',
@@ -318,7 +365,7 @@ const DICT = {
     connected: '로그인 / 키 설정됨', notConnected: '연결 안 됨',
     machineOffNote: '설치 상태는 실행 중인 머신이 알려 줍니다. 확인하려면 시작하세요.',
     jobsOpen: '웹에서 CPU·GPU 작업 실행',
-    manageNav: '컴퓨터 관리', snapshotsOpen: '저장한 환경', latencyOpen: '연결 지연', costsOpen: '비용과 한도',
+    manageNav: '컴퓨터 관리', snapshotsOpen: '저장한 환경', latencyOpen: '연결 지연', costsOpen: '비용과 한도', filesOpen: '클라우드 파일',
     nestedTitle: '중첩 컴퓨트 (Daytona, Nosana)', nestedLead: '이 머신 안에 범위가 제한된 Daytona·Nosana 명령줄 접근을 설정해 달라고 서버에 요청합니다. 성공 여부는 서버 응답으로만 압니다.',
     nestedConfigure: '중첩 컴퓨트 설정', nestedConfiguring: '설정 중…', nestedJobs: '중첩 작업 보기', nestedLoading: '작업 불러오는 중…',
     nestedNone: '서버가 보고한 중첩 작업이 없습니다.', nestedFailed: '중첩 작업을 불러오지 못했습니다.', nestedNeedsRunning: '머신이 실행 중일 때 쓸 수 있습니다.',
@@ -431,7 +478,16 @@ function normalizeState(raw: unknown): MachineState | null {
     : [];
   const sessionEndsAt = typeof raw.sessionEndsAt === 'string' && Number.isFinite(Date.parse(raw.sessionEndsAt)) ? raw.sessionEndsAt : null;
   const errRaw = str(raw.error, 64);
-  return { status, error: errRaw && SAFE_CODE.test(errRaw) ? errRaw : (errRaw ? 'error' : null), machine, sessionEndsAt, snapshot, tools, configuredAccounts, ready: raw.ready === true };
+  return { status, error: errRaw && SAFE_CODE.test(errRaw) ? errRaw : (errRaw ? 'error' : null), machine, sessionEndsAt, snapshot, tools, configuredAccounts, ready: raw.ready === true, end: normalizeEnd(raw.end) };
+}
+
+/** Unknown phase/state values drop the whole end view rather than being guessed */
+function normalizeEnd(raw: unknown): EndView | null {
+  if (!isObj(raw) || !END_PHASES.includes(raw.phase as EndPhase) || !END_FILES.includes(raw.files as EndFiles) || !END_BACKUPS.includes(raw.environmentBackup as EndBackup)) return null;
+  const err = str(raw.error, 64);
+  return { mode: raw.mode === 'files_verified' ? 'files_verified' : 'disk_backup', phase: raw.phase as EndPhase, files: raw.files as EndFiles,
+    filesVerifiedAt: typeof raw.filesVerifiedAt === 'string' && Number.isFinite(Date.parse(raw.filesVerifiedAt)) ? raw.filesVerifiedAt : null,
+    backup: raw.environmentBackup as EndBackup, error: err && SAFE_CODE.test(err) ? err : null };
 }
 
 /** Only the separate desktop gateway, only the computer path, https, no embedded credentials */
@@ -651,6 +707,8 @@ function mount(root: HTMLElement, pair: PairLink): void {
     pairing: pair.present, paired: false, enrollBusy: false, enrollMsg: null as Msg,
     state: null as MachineState | null, stateFresh: false, offline: navigator.onLine === false, loading: false, loadMsg: null as Msg,
     account: '' as AccountId | '', op: null as Op | null, opMsg: null as Msg,
+    // safe end modes from GET end (read once per sign-in); null = not offered (route absent or nothing beyond the plain Stop)
+    endModes: null as { files: boolean; backup: boolean } | null, endChecked: false,
     // expired: this page saw the paid session run out (never set by an explicit Stop); extendCheck: an Extend answer still needs the new end time
     expired: false, extendCheck: false,
     launching: false, launchUrl: '', launchMsg: null as Msg, snapName: '', snapMsg: null as Msg, termOpen: false,
@@ -707,8 +765,13 @@ function mount(root: HTMLElement, pair: PairLink): void {
   const openBtn = button('cc-btn cc-primary', () => { void launch(); });
   const stopBtn = button('cc-btn', () => { begin('stop', {}); });
   const extendBtn = button('cc-btn', () => { begin('extend', {}); });
+  // one action; the mode follows what the server offers: checked file saving when wired, otherwise disk + environment backup
+  const endBtn = button('cc-btn', () => { if (S.endModes) begin('end', { mode: S.endModes.files ? 'files_verified' : 'disk_backup' }); });
   const refreshBtn = button('cc-btn cc-quiet', () => { polls = 0; void loadState(); });
-  const actions = h('div', 'cc-actions', startBtn, openBtn, stopBtn, extendBtn, refreshBtn);
+  const actions = h('div', 'cc-actions', startBtn, openBtn, endBtn, stopBtn, extendBtn, refreshBtn);
+  const endTitle = h('h3'), endPhaseLine = h('p', 'cc-msg'), endFilesLine = h('p', 'cc-fine'), endBackupLine = h('p', 'cc-fine');
+  endPhaseLine.setAttribute('role', 'status');
+  const endBox = h('div', 'cc-end', endTitle, endPhaseLine, endFilesLine, endBackupLine);
   const launchMsg = h('p', 'cc-msg'), launchLink = link('cc-btn cc-primary cc-launch', '#', true), launchHint = h('p', 'cc-fine');
   launchMsg.setAttribute('role', 'status');
   launchLink.addEventListener('click', () => { setTimeout(() => { S.launchUrl = ''; render(); }, 0); });
@@ -720,10 +783,11 @@ function mount(root: HTMLElement, pair: PairLink): void {
   loadMsg.setAttribute('role', 'status');
   const keepTitle = h('h3'), keepText = h('p', 'cc-muted');
   const snapshotsLink = link('cc-btn', '#', false), latencyLink = link('cc-btn', '#', false), costsLink = link('cc-btn', '#', false);
-  const manageNav = h('nav', 'cc-actions', snapshotsLink, latencyLink, costsLink);
+  const filesLink = link('cc-btn', '#', false);
+  const manageNav = h('nav', 'cc-actions', filesLink, snapshotsLink, latencyLink, costsLink);
   const machineCard = h('section', 'cc-card cc-machine',
     h('div', 'cc-machine-head', machineH, statusPill), statusLead, loadMsg, facts, sessionLine, sessionNote, sessionWarn, expiryMsg,
-    accountWrap, accountNote, actions, opBox, launchBox, h('div', 'cc-keep', keepTitle, keepText), manageNav);
+    accountWrap, accountNote, actions, opBox, endBox, launchBox, h('div', 'cc-keep', keepTitle, keepText), manageNav);
 
   const phoneTitle = h('h2'), phoneLead = h('p', 'cc-muted'), phonePaired = h('p', 'cc-msg cc-ok'), phoneMsg = h('p', 'cc-msg');
   phoneMsg.setAttribute('role', 'status');
@@ -930,6 +994,20 @@ function mount(root: HTMLElement, pair: PairLink): void {
     extendBtn.className = `cc-btn${phase === 'warn' || phase === 'over' ? ' cc-primary' : ''}`;
     extendBtn.textContent = S.op?.kind === 'extend' && S.op.phase === 'sending' ? d.extending : d.extend;
     extendBtn.disabled = busy;
+    const end = st?.end ?? null, ending = !!end && END_ACTIVE.includes(end.phase);
+    endBtn.hidden = !S.endModes || !(status === 'running' || status === 'starting') || ending;
+    endBtn.textContent = S.endModes?.files ? d.endFiles : d.endBackup;
+    endBtn.disabled = busy;
+    if (ending) stopBtn.disabled = stopBtn.disabled || end!.phase !== 'draining'; // the plain stop can only take over a drain
+    endBox.hidden = !end;
+    if (end) {
+      endTitle.textContent = d.endTitle;
+      setMsg(endPhaseLine, { text: () => d.endPhase[end.phase] + (end.phase === 'failed' && end.error ? ` (${end.error})` : ''),
+        kind: end.phase === 'done' ? 'ok' : end.phase === 'blocked' || end.phase === 'failed' ? 'warn' : 'info' });
+      endFilesLine.textContent = d.endFilesState[end.files] + (end.files === 'verified' && end.filesVerifiedAt
+        ? ` (${new Date(end.filesVerifiedAt).toLocaleTimeString(lang === 'ko' ? 'ko-KR' : 'en-US', { hour: '2-digit', minute: '2-digit' })})` : '');
+      endBackupLine.textContent = d.endBackupState[end.backup];
+    }
     refreshBtn.textContent = S.loading ? d.refreshing : d.refresh;
     refreshBtn.disabled = S.loading;
 
@@ -946,7 +1024,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
     launchLink.textContent = d.openLink; launchHint.textContent = d.openNewTab; launchHint.hidden = !S.launchUrl;
     keepTitle.textContent = d.keepTitle; keepText.textContent = d.keep;
     manageNav.setAttribute('aria-label', d.manageNav);
-    for (const [a, label, path] of [[snapshotsLink, d.snapshotsOpen, 'snapshots'], [latencyLink, d.latencyOpen, 'latency'], [costsLink, d.costsOpen, 'costs']] as const) {
+    for (const [a, label, path] of [[filesLink, d.filesOpen, 'files'], [snapshotsLink, d.snapshotsOpen, 'snapshots'], [latencyLink, d.latencyOpen, 'latency'], [costsLink, d.costsOpen, 'costs']] as const) {
       a.textContent = label; a.setAttribute('href', '/cloudbite/computer/' + path + '?lang=' + lang);
     }
 
@@ -1165,7 +1243,8 @@ function mount(root: HTMLElement, pair: PairLink): void {
   // ── polling: only while visible and something is pending ──
   function pendingWork(): boolean {
     const s = S.state?.status;
-    return !!S.op || (!!s && TRANSITIONAL.includes(s)) || (s === 'running' && (!S.state?.ready || sessionPhase() === 'over'));
+    return !!S.op || (!!s && TRANSITIONAL.includes(s)) || (s === 'running' && (!S.state?.ready || sessionPhase() === 'over'))
+      || (!!S.state?.end && END_ACTIVE.includes(S.state.end.phase));
   }
   function stopPoll(): void { if (pollTimer !== null) { clearTimeout(pollTimer); pollTimer = null; } }
   function schedule(): void {
@@ -1255,7 +1334,7 @@ function mount(root: HTMLElement, pair: PairLink): void {
   function signedOut(): void {
     stopPoll(); stopClock(); resetCapacity();
     authEpoch++; sessionSeq++; loadSeq++; launchSeq++; S.stateFresh = false; S.loading = false; S.launching = false;
-    S.auth = 'out'; S.state = null; S.expired = false; S.extendCheck = false; S.launchUrl = ''; S.paired = false; S.enrollMsg = null;
+    S.auth = 'out'; S.state = null; S.endModes = null; S.endChecked = false; S.expired = false; S.extendCheck = false; S.launchUrl = ''; S.paired = false; S.enrollMsg = null;
     void checkSession();
   }
 
@@ -1346,11 +1425,21 @@ function mount(root: HTMLElement, pair: PairLink): void {
     if (r.ok) {
       if (Number.isFinite(r.date)) { const k = r.date - Date.now(); skew = Math.abs(k) > 5000 ? k : 0; } // Date has 1 s resolution
       const st = normalizeState(r.body);
-      if (st) { applyState(st); S.stateFresh = true; S.loadMsg = null; }
+      if (st) { applyState(st); S.stateFresh = true; S.loadMsg = null; if (!S.endChecked) void loadEndModes(); }
       else S.loadMsg = { text: () => T().stateFailed, kind: 'warn' };
     } else if (r.status === 401 || r.status === 403) { signedOut(); return; }
     else S.loadMsg = { text: () => `${T().stateFailed} ${r.status === 0 ? T().netErr : r.code ? T().rejected(r.code) : T().httpErr(r.status)}`, kind: 'warn' };
     render(); schedule(); tickClock();
+  }
+
+  /** Which safe end the server offers. Read-only; a missing route or a refusal leaves only the plain Stop */
+  async function loadEndModes(): Promise<void> {
+    S.endChecked = true;
+    const epoch = authEpoch, r = await call(`${API}/end`);
+    if (epoch !== authEpoch || !r.ok || !isObj(r.body) || !isObj(r.body.modes)) return;
+    const files = r.body.modes.files_verified === true, backup = r.body.backupConfigured === true;
+    S.endModes = files || backup ? { files, backup } : null;
+    render();
   }
 
   function begin(kind: OpKind, extra: Record<string, unknown>): void {

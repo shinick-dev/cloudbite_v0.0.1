@@ -9,7 +9,8 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import vm from 'node:vm';
+import { createHash, randomBytes, randomUUID, webcrypto } from 'node:crypto';
 import { build } from 'esbuild';
 
 const tmp = mkdtempSync(join(tmpdir(), 'cloudbite-end-'));
@@ -314,6 +315,86 @@ await test('end on a stopped machine goes straight to the backup; endStatus make
   const s = await w.svc.endStatus(OWNER);
   assert.equal(s.ok, true); assert.equal(w.fake.calls.length, n);
   assert.equal((await w.svc.endStatus('other0001tag')).error.code, 'bad_request');
+});
+
+// ───────────────────────── main page (generated CLOUDBITE_COMPUTER_JS in a tiny fake DOM; not browser evidence) ─────────────────────────
+
+class El {
+  constructor(tag) { this.tagName = tag.toUpperCase(); this.children = []; this.attrs = {}; this.listeners = {}; this.parent = null;
+    this.className = ''; this._text = ''; this.value = ''; this.disabled = false; this.hidden = false; this.title = ''; this.id = ''; }
+  get parentElement() { return this.parent; }
+  get textContent() { return this._text + this.children.map((c) => typeof c === 'string' ? c : c.textContent).join(''); }
+  set textContent(v) { for (const c of this.children) if (typeof c !== 'string') c.parent = null; this.children = []; this._text = String(v); }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
+  addEventListener(t, f) { (this.listeners[t] ||= []).push(f); }
+  append(...ns) { for (const n of ns) { if (typeof n === 'string') { this.children.push(n); continue; } if (n.parent) n.remove(); n.parent = this; this.children.push(n); } }
+  replaceChildren(...ns) { for (const c of this.children) if (typeof c !== 'string') c.parent = null; this.children = []; this._text = ''; this.append(...ns); }
+  remove() { if (this.parent) { this.parent.children = this.parent.children.filter((c) => c !== this); this.parent = null; } }
+  click() { if (!this.disabled) for (const f of this.listeners.click || []) f({ type: 'click', target: this, preventDefault() {} }); }
+  *walk() { for (const c of this.children) if (typeof c !== 'string') { yield c; yield* c.walk(); } }
+  shown() { let n = this; while (n) { if (n.hidden) return false; n = n.parent; } return true; }
+}
+const { CLOUDBITE_COMPUTER_JS } = await import(pathToFileURL(join(process.cwd(), 'src/cloudbite-computer-page.ts')));
+const API = '/api/cloudbite/computer';
+const MACHINE_VIEW = { id: 'sb-1', name: 'cloudbite-computer-owner', account: 'primary', region: 'us', cpu: 4, memoryGiB: 8, diskGiB: 10 };
+const pageState = (o = {}) => ({ ok: true, status: 'running', error: null, machine: MACHINE_VIEW, sessionEndsAt: null, snapshot: null, ready: true,
+  configuredAccounts: [{ id: 'primary', label: 'Primary', available: true }], ...o });
+const reply = (status, body) => Promise.resolve({ ok: status >= 200 && status < 300, status, json: async () => body });
+function page({ search = '?lang=ko', endGet, onEnd }) {
+  const s = { cur: pageState() }, requests = [];
+  const doc = { title: '', documentElement: { lang: 'en' }, visibilityState: 'visible', listeners: {}, createElement: (t) => new El(t),
+    getElementById: (id) => (id === 'cb-computer' ? root : null), addEventListener(t, f) { (this.listeners[t] ||= []).push(f); } };
+  const root = new El('div');
+  const route = (r) => {
+    if (r.url === `${API}/auth/session`) return reply(200, { authenticated: true, hasCredentials: true });
+    if (r.url === `${API}/state`) return reply(200, s.cur);
+    if (r.url === `${API}/end` && r.method === 'GET') return endGet ? reply(200, endGet) : reply(404, { error: { code: 'not_found', message: 'x' } });
+    if (r.url === `${API}/end` && r.method === 'POST') return onEnd(r, s);
+    return reply(404, { error: { code: 'not_found', message: 'x' } });
+  };
+  const ctx = vm.createContext({ document: doc, location: { pathname: '/cloudbite/computer', search, hash: '' }, history: { replaceState() {} },
+    URLSearchParams, URL, atob, btoa, Date, Uint8Array, ArrayBuffer, AbortController, crypto: webcrypto, addEventListener() {},
+    navigator: { language: 'ko-KR', credentials: { get: async () => null, create: async () => null } }, PublicKeyCredential: function PublicKeyCredential() {},
+    setTimeout: () => 0, clearTimeout() {},
+    fetch: (url, init = {}) => { const r = { url, method: init.method || 'GET', body: init.body === undefined ? undefined : JSON.parse(init.body) }; requests.push(r); return route(r); } });
+  vm.runInContext(CLOUDBITE_COMPUTER_JS, ctx);
+  const visible = () => [...root.walk()].filter((e) => e.shown());
+  return { s, requests, flush: async () => { for (let i = 0; i < 40; i++) await new Promise((r) => setImmediate(r)); },
+    btn: (t) => visible().find((e) => e.tagName === 'BUTTON' && e.textContent === t), links: () => visible().filter((e) => e.tagName === 'A'),
+    text: () => visible().map((e) => e._text).filter(Boolean).join(' | ') };
+}
+const END_VIEW = (o) => ({ requestId: randomUUID(), mode: 'disk_backup', trigger: 'user', phase: 'draining', files: 'not_configured', filesVerifiedAt: null,
+  filesDetail: null, diskFlushed: null, machineStopped: false, environmentBackup: 'not_requested', backupName: null, error: null,
+  startedAt: '2026-10-19T03:00:00Z', updatedAt: '2026-10-19T03:00:00Z', ...o });
+
+await test('page: no end route -> only the plain Stop; Cloud Files link keeps ?lang', async () => {
+  const p = page({ endGet: null, onEnd: () => assert.fail('no end') });
+  await p.flush();
+  assert.ok(p.btn('중지')); assert.equal(p.btn('종료하고 환경 보관'), undefined); assert.equal(p.btn('파일 저장 확인 후 종료'), undefined);
+  assert.ok(p.links().some((a) => a.getAttribute('href') === '/cloudbite/computer/files?lang=ko' && a.textContent === '클라우드 파일'));
+  assert.equal(p.requests.filter((r) => r.url === `${API}/end`).length, 1, 'modes read once');
+});
+
+await test('page: backup-only config offers "종료하고 환경 보관" -> disk_backup; files and backup states stay separate', async () => {
+  const p = page({ endGet: { ok: true, end: null, autoEnd: null, modes: { disk_backup: true, files_verified: false }, backupConfigured: true, uploadsFrozen: false },
+    onEnd: (r, s) => { s.cur = pageState({ end: END_VIEW({ requestId: r.body.requestId }) }); return reply(200, { ok: true, end: s.cur.end }); } });
+  await p.flush();
+  p.btn('종료하고 환경 보관').click(); await p.flush();
+  const post = p.requests.find((r) => r.method === 'POST' && r.url === `${API}/end`);
+  assert.deepEqual(Object.keys(post.body).sort(), ['mode', 'requestId']); assert.equal(post.body.mode, 'disk_backup');
+  assert.match(p.text(), /정지 준비 중/); assert.match(p.text(), /클라우드 파일: 설정 안 됨/); assert.match(p.text(), /환경 백업: 정지가 확인되면/);
+  assert.equal(p.btn('종료하고 환경 보관'), undefined, 'no second end while one runs');
+});
+
+await test('page: files_verified config offers "파일 저장 확인 후 종료"; blocked says the computer keeps running', async () => {
+  const p = page({ endGet: { ok: true, end: null, autoEnd: null, modes: { disk_backup: true, files_verified: true }, backupConfigured: false, uploadsFrozen: false },
+    onEnd: (r, s) => { s.cur = pageState({ end: END_VIEW({ mode: 'files_verified', phase: 'blocked', files: 'blocked', environmentBackup: 'not_configured' }) }); return reply(200, { ok: true }); } });
+  await p.flush();
+  p.btn('파일 저장 확인 후 종료').click(); await p.flush();
+  assert.equal(p.requests.find((r) => r.method === 'POST' && r.url === `${API}/end`).body.mode, 'files_verified');
+  assert.match(p.text(), /계속 실행 중/); assert.match(p.text(), /아직 저장되지 않은 파일/);
+  assert.ok(p.btn('파일 저장 확인 후 종료'), 'a blocked end can be tried again');
 });
 
 console.log(`${passed} cloudbite-computer-end-session tests passed`);
