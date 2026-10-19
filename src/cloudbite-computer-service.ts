@@ -45,7 +45,9 @@ export interface ComputerBackupHook {
  * drain: combined agent prepare-end --flush + watcher report on the running owned machine (no start/stop).
  * resume: leaves draining. Called when an end is blocked or cancelled and the machine keeps running, and, because the agent
  * and the watcher keep draining across restarts, once the SAME drained machine is next observed running after a later start
- * (alarm only, bounded tries per run, retained across DO restarts until one call succeeds). It must be idempotent.
+ * (alarm only, bounded tries per run, retained across DO restarts until one call succeeds). A configured watcher dies with
+ * any stop, so an authorized start of the owned stopped machine also owes one resume of that run (same alarm path; requestId =
+ * the start's, or the earlier owed one). It must be idempotent.
  */
 export interface ComputerEndHooks {
   drain?(machine: ComputerMachineRef, requestId: string): Promise<ComputerDrainResult>;
@@ -426,7 +428,8 @@ export class ComputerService {
         if (r.status === 'starting') return this.view(r);
         if (r.status !== 'stopped') throw new ComputerError(r.status === 'unknown' ? 'unknown_outcome' : 'busy');
         r.status = 'starting'; r.error = null; r.sessionEndsAt = this.d.now() + COMPUTER_SESSION_MS; r.stopRefusals = 0;
-        await this.save(r); // ledger before mutation
+        this.oweStartResume(r, body.requestId as string);
+        await this.save(r); // ledger before mutation (also the owed resume, so a lost start answer or a restart still resumes)
         try { await this.d.daytona.start(this.dt(a), r.machine.id!); }
         catch (e) { this.unconfirmed(r, e); }
         return this.view(r);
@@ -770,6 +773,17 @@ export class ComputerService {
     if (!h?.resume || r.status !== 'running' || !r.machine?.id || !id) return;
     try { await h.resume(this.machineRef(r), id); r.resume = null; }
     catch { if (r.resume) r.resume.at = this.d.now(); } // still draining across restarts: resumeOwed retries it, one alarm later
+  }
+
+  /**
+   * A configured watcher/agent process dies with every stop, drained or not: an authorized start of this owned stopped machine
+   * owes it one resume of the coming run. Only the record is written (dispatched by the alarm once the same machine is observed
+   * running); an earlier owed resume of the same machine keeps its requestId. No hook: nothing changes.
+   */
+  private oweStartResume(r: Rec, requestId: string) {
+    const o = r.resume, id = r.machine?.id;
+    if (!this.d.end?.resume || r.machine?.created !== 'owned' || !id) return;
+    r.resume = { requestId: o && o.machineId === id ? o.requestId : requestId.toLowerCase(), machineId: id, tries: 0, epoch: r.desktopEpoch ?? 0, at: null };
   }
 
   /** An owed resume can run: the same owned machine that was drained is running, no end is active, this run has tries left. */

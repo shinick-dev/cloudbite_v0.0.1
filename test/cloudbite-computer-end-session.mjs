@@ -36,7 +36,7 @@ function fakeDaytona() {
     async create(c, body) { f.calls.push(['create']); const sb = { id: 'sb-' + randomBytes(6).toString('hex'), name: body.name, labels: body.labels, state: 'started', target: 'us', cpu: 4, memory: 8, disk: 10 };
       f.sandboxes.set(body.name, sb); return sb; },
     async get(c, idOrName) { f.calls.push(['get']); const e = err('get'); if (e) throw new M.ComputerDaytonaError(e.status, 'get'); return byId(idOrName); },
-    async start(c, id) { f.calls.push(['start', id]); byId(id).state = 'started'; },
+    async start(c, id) { f.calls.push(['start', id]); f.onStart?.(); byId(id).state = 'started'; },
     async stop(c, id) { f.calls.push(['stop', id]); f.onStop?.(); const e = err('stop'); if (e?.landed) byId(id).state = 'stopped'; if (e) throw new M.ComputerDaytonaError(e.status, 'stop'); byId(id).state = 'stopped'; },
     async createSnapshot(c, id, name) { f.calls.push(['createSnapshot', id, name]); f.snapshots.set(name, { name, state: 'snapshotting', sourceSandboxId: id }); },
     async getSnapshot(c, name) { f.calls.push(['getSnapshot', name]); return f.snapshots.get(name) ?? null; },
@@ -422,6 +422,73 @@ await test('owed resume survives a DO restart and a failing hook (bounded per ru
   await b.svc.end(OWNER, { requestId: randomUUID(), mode: 'files_verified' });
   await alarms(b, 1); assert.equal(rec(b).end.phase, 'blocked'); assert.equal(b.d.resumes, 0);
   await alarms(b, 1); assert.equal(b.d.resumes, 1); assert.equal(rec(b).resume, null);
+});
+
+await test('ordinary stop (no drain, no end) then start of the same machine owes and makes exactly one resume of that run', async () => {
+  const w = world({ drain: [CLEAN] }); await running(w);
+  assert.equal(rec(w).resume ?? null, null, 'creating a new machine owes nothing'); await alarms(w, 3); assert.equal(w.d.resumes, 0);
+  await w.svc.stop(OWNER, { requestId: randomUUID() }); await alarms(w, 2);
+  assert.equal(rec(w).status, 'stopped'); assert.equal(w.d.calls.length, 0, 'a plain stop never drains'); assert.equal(rec(w).end ?? null, null);
+  const seen = []; const ok = w.d.resume; w.svc.d.end.resume = async (m, id) => { seen.push({ m, id, saved: structuredClone(rec(w).resume) }); return ok(m, id); };
+  const sid = randomUUID();
+  w.fake.onStart = () => assert.equal(rec(w).resume.machineId, rec(w).machine.id, 'owed before the provider start');
+  assert.equal((await w.svc.start(OWNER, { requestId: sid, account: 'primary' })).ok, true);
+  assert.equal(w.d.resumes, 0, 'start itself does not call the hook');
+  for (let k = 0; k < 3; k++) await w.svc.state(OWNER);
+  assert.equal(w.d.resumes, 0, 'GET state never dispatches it');
+  await alarms(w, 1);
+  assert.equal(w.d.resumes, 1); assert.equal(seen[0].id, sid); assert.equal(seen[0].m.id, rec(w).machine.id); assert.equal(seen[0].m.status, 'running');
+  assert.equal(seen[0].saved.tries, 1, 'attempt persisted before the call'); assert.equal(rec(w).resume, null);
+  await alarms(w, 5); assert.equal(w.d.resumes, 1, 'once per run');
+  assert.equal(ops(w.fake, 'start').length, 1, 'no hidden provider start'); assert.equal(ops(w.fake, 'create').length, 1);
+  // an already-running start only extends the session: no new owed resume, no provider start or stop
+  const s2 = await w.svc.start(OWNER, { requestId: randomUUID(), account: 'primary' });
+  assert.equal(s2.status, 'running'); assert.equal(rec(w).resume, null);
+  await alarms(w, 3); assert.equal(w.d.resumes, 1);
+  assert.equal(ops(w.fake, 'start').length, 1); assert.equal(ops(w.fake, 'stop').length, 1);
+  // replay of the original start id changes nothing
+  await w.svc.start(OWNER, { requestId: sid, account: 'primary' }); assert.equal(rec(w).resume, null);
+  // the deadline stop is a stop too: the next start resumes once more
+  w.clock.now = rec(w).sessionEndsAt; await w.svc.alarm(); await alarms(w, 1); assert.equal(rec(w).status, 'stopped');
+  await w.svc.start(OWNER, { requestId: randomUUID(), account: 'primary' }); await alarms(w, 3);
+  assert.equal(w.d.resumes, 2); assert.equal(ops(w.fake, 'start').length, 2);
+});
+
+await test('start answer lost and DO restart: the owed resume persists and runs once the same machine is observed running; bounded, GET-free', async () => {
+  const shared = { kv: new Map(), clock: { now: 1_800_000_000_000, alarm: null }, fake: fakeDaytona() };
+  const w = world({ shared, drain: [CLEAN] }); await running(w);
+  await w.svc.stop(OWNER, { requestId: randomUUID() }); await alarms(w, 1);
+  const real = shared.fake.api.start; let landed = 0;
+  shared.fake.api.start = async (c, id) => { await real(c, id); landed++; shared.fake.sandboxes.forEach((s) => { s.state = 'starting'; }); throw new M.ComputerDaytonaError(0, 'start'); };
+  const sid = randomUUID();
+  await w.svc.start(OWNER, { requestId: sid, account: 'primary' });
+  assert.equal(landed, 1); assert.equal(rec(w).status, 'unknown'); assert.equal(rec(w).resume.requestId, sid);
+  shared.fake.api.start = real;
+  const w2 = world({ shared, drain: [CLEAN] }); // evicted DO, fresh instance
+  let calls = 0; w2.svc.d.end.resume = async () => { calls++; throw new Error('watcher not reachable yet'); };
+  await alarms(w2, 3); assert.equal(rec(w2).status, 'starting'); assert.equal(calls, 0, 'never while the machine is not running');
+  shared.fake.sandboxes.forEach((s) => { s.state = 'started'; });
+  for (let k = 0; k < 3; k++) await w2.svc.state(OWNER);
+  assert.equal(rec(w2).status, 'running'); assert.equal(calls, 0, 'GET observes running but never dispatches');
+  await alarms(w2, 20);
+  assert.equal(calls, 6, 'bounded tries in this run'); assert.ok(rec(w2).resume, 'still owed');
+  w2.svc.d.end.resume = w2.d.resume; await alarms(w2, 5); assert.equal(w2.d.resumes, 0, 'no more tries in the same run');
+  assert.equal(ops(shared.fake, 'start').length, 1, 'the lost start was never re-sent');
+  await w2.svc.stop(OWNER, { requestId: randomUUID() }); await alarms(w2, 1);
+  await w2.svc.start(OWNER, { requestId: randomUUID(), account: 'primary' }); await alarms(w2, 2);
+  assert.equal(w2.d.resumes, 1, 'the next run resumes'); assert.equal(rec(w2).resume, null);
+});
+
+await test('no resume hook: start/stop/start keeps the old behavior and records nothing owed', async () => {
+  const w = world({ backup: ['active'] }); await running(w);
+  await w.svc.stop(OWNER, { requestId: randomUUID() }); await alarms(w, 1);
+  await w.svc.start(OWNER, { requestId: randomUUID(), account: 'primary' });
+  assert.equal(rec(w).resume ?? null, null); await alarms(w, 3);
+  assert.equal(rec(w).status, 'running'); assert.equal(ops(w.fake, 'start').length, 1);
+  const p = world(); await running(p);
+  await p.svc.stop(OWNER, { requestId: randomUUID() }); await alarms(p, 1);
+  await p.svc.start(OWNER, { requestId: randomUUID(), account: 'primary' });
+  assert.equal(rec(p).resume ?? null, null);
 });
 
 await test('lost answer of the 12th drain after a restart: a user end turns blocked and resumes; a deadline end still stops at the deadline', async () => {

@@ -66,6 +66,18 @@ agent(`files-agent.py init`)와 watcher는 재시작해도 `draining`을 유지�
   머신의 다음 실행에서 다시 6회까지 시도한다. 머신이 사라지거나 다른 머신으로 바뀌면 빚을 버린다(새 머신은 drain된 적 없음).
 - 통합 쪽 `resume` hook은 멱등이어야 한다(같은 requestId로 여러 번 불릴 수 있음).
 
+### 일반 Stop 뒤 Start
+
+설정된 watcher 프로세스는 drain 여부와 상관없이 stop(사용자 중지·기한 정지·`disk_backup`·provider auto-stop)과 함께 죽는다.
+그래서 `resume` hook이 연결돼 있으면, 소유한 **정지(`stopped`)** 머신에 대한 승인된 `POST start`가 provider start를 보내기 **전에**
+같은 머신 id로 resume 빚을 기록한다(requestId는 그 start의 것, 같은 머신에 남은 빚이 있으면 그 requestId 유지; 시도 0회).
+
+- 기록은 provider start 직전 원장 저장에 함께 들어간다. start 응답이 사라지거나(`unknown`) DO가 재기동해도 빚은 남고,
+  같은 머신이 실행 중으로 관찰된 뒤 위와 같은 alarm 경로(실행당 최대 6회·10초 간격, 호출 전 저장)로 한 번 resume된다.
+- 이미 `running`/`starting`인 머신에 대한 start, 같은 requestId 재전송, GET은 빚을 새로 만들지 않는다. 새 provider start·재시작은 없다.
+- 새 머신 생성(create)은 빚을 만들지 않는다(새 id에는 이전 설정이 있을 수 없다).
+- hook이 없으면 동작은 예전과 같다(기록 없음). hook 시그니처는 그대로이며, R2·files writer가 그 머신인지 확인하는 것은 hook 쪽 몫이다.
+
 ## 루트 연결 계약
 
 - RPC: `computerEnd(ownerTag, {requestId, mode})`, `computerEndStatus(ownerTag)`(저장소 읽기만, provider 호출 없음),
