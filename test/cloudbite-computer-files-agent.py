@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -16,6 +17,7 @@ import time
 import types
 import unicodedata
 import urllib.parse
+import uuid
 from pathlib import Path
 
 AGENT_PATH = Path(__file__).resolve().parent.parent / "images/cloudbite-computer/files-agent.py"
@@ -498,6 +500,7 @@ class CoreFake:
         self.seen = []
         self.legacy = []
         self.faults = {}
+        self.gates = {}
         self.n = 0
 
     def rid(self, prefix):
@@ -633,6 +636,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 core.legacy.append(route)
             kind = "uploads" if route.startswith("uploads/") and route != "uploads/begin" else route
             fault = core.faults.pop((self.command, kind), None)
+            gate = core.gates.pop((self.command, kind), None)
+        if gate and gate[1] == "before":  # hold the request unanswered (outside the lock) until the test releases it
+            gate[0].wait(60)
+        with core.lock:
             if fault == "drop_before":
                 read_body()
                 return
@@ -655,7 +662,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("x-cloudbite-sha256", sha(body))
             self.send_header("x-cloudbite-version", query.get("versionId", [""])[0])
         self.end_headers()
-        self.wfile.write(raw)
+        if gate and gate[1] == "mid":  # send part of the body, then stall mid-transfer until released
+            with contextlib.suppress(OSError):
+                self.wfile.write(raw[:len(raw) * 4 // 5])
+                self.wfile.flush()
+            gate[0].wait(60)
+            raw = raw[len(raw) * 4 // 5:]
+        with contextlib.suppress(OSError):
+            self.wfile.write(raw)
 
     do_GET = do_POST = do_PUT = _go
 
@@ -940,9 +954,13 @@ def test_open_with_lease_id_is_idempotent():
         expect("request_conflict", e.agent.open, path="b.txt", lease_id=lease)
         for bad in ("A" * 32, "a" * 31, "x" * 32, 7):
             expect("invalid_argument", e.agent.open, path="b.txt", lease_id=bad)
-        e.agent.close_lease(lease)
+        assert e.agent.close_lease(lease) == {"closed": lease}
         assert e.agent.status()["openLeases"] == 0 and e.agent.prepare_end()["open"] == []
-        expect("not_found", e.agent.close_lease, lease)
+        # Duplicate close after a lost reply: desired state "not held" is already true, so it succeeds as a no-op.
+        assert e.agent.close_lease(lease) == {"closed": lease, "replayed": True}
+        assert e.agent.status()["openLeases"] == 0 and (e.root / "a.txt").read_bytes() == b"one"
+        for bad in ("A" * 32, "a" * 31, "x" * 32, "", None, 7):
+            expect("invalid_argument", e.agent.close_lease, bad)
 
 
 def test_http_backend_eviction_is_gated_and_keeps_clean_files():
@@ -1001,6 +1019,154 @@ def test_http_open_descriptor_gates_content_fetch():
         assert not (h.root / "b.txt").exists()
         a.open(path="b.txt")
         assert (h.root / "b.txt").read_bytes() == b"bee"
+
+
+def agent_cli(h, *args):
+    proc = subprocess.run([sys.executable, "-B", str(AGENT_PATH), "--state", str(h.state), "--capability", str(h.cap),
+                           *args], capture_output=True, timeout=60)
+    for blob in (proc.stdout, proc.stderr):
+        assert TOKEN.encode() not in blob, "capability never printed"
+    return proc.returncode, json.loads(proc.stdout.decode("utf-8").strip().splitlines()[-1])
+
+
+def agent_bg(h, *args):
+    return subprocess.Popen([sys.executable, "-B", str(AGENT_PATH), "--state", str(h.state), "--capability", str(h.cap),
+                             *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def wait_for(cond, what, timeout=30):
+    deadline = time.monotonic() + timeout
+    while not cond():
+        assert time.monotonic() < deadline, "timed out waiting for " + what
+        time.sleep(0.05)
+
+
+def journal(h, sql):
+    db = sqlite3.connect("file:%s?mode=ro" % (h.state / "journal.sqlite3").as_posix(), uri=True, timeout=10)
+    try:
+        return db.execute(sql).fetchall()
+    finally:
+        db.close()
+
+
+def fetch_temps(h):
+    sizes = {}
+    for name in os.listdir(h.state / "staging"):
+        if name.startswith("fetch-"):
+            with contextlib.suppress(FileNotFoundError):
+                sizes[name] = os.path.getsize(h.state / "staging" / name)
+    return sizes
+
+
+def write_manifest(h, entries):
+    path = h.state.parent / ("manifest-%s.json" % uuid.uuid4().hex)
+    path.write_text(json.dumps(entries))
+    return path
+
+
+def test_cli_commands_are_serialized_across_processes():
+    # Regression: each CLI invocation's constructor runs _recover (drops fetch temporaries, marks sending uploads
+    # unknown).  A second process (watcher mark-dirty, bridge status/close) must not do that to an in-flight command.
+    with http_env() as h:
+        big = h.core.seed("big.bin", os.urandom(1536 << 10))
+        (h.root / "note.txt").write_bytes(b"note")
+        assert agent_cli(h, "register", "--manifest", str(write_manifest(h, [big])))[0] == 0
+        lease = "5c2d9f0e8b7a4c3d9e1f2a3b4c5d6e7f"
+        gate = threading.Event()
+        h.core.gates[("GET", "content/" + big["fileId"])] = (gate, "mid")
+        first = agent_bg(h, "open", "--file-id=" + big["fileId"], "--version=" + big["versionId"], "--lease=" + lease)
+        try:
+            wait_for(lambda: any(size >= 1 << 20 for size in fetch_temps(h).values()), "a partly written fetch temp")
+            temps, rows = fetch_temps(h), journal(h, "SELECT row, temp FROM fetches")
+            assert len(rows) == 1
+            for args in (("status",), ("mark-dirty", "--path", "note.txt"), ("close", "--lease=" + lease)):
+                started = time.monotonic()
+                assert agent_cli(h, *args) == (2, {"ok": False, "code": "busy"}), args
+                assert time.monotonic() - started < 15, "bounded wait, then busy"
+            assert set(fetch_temps(h)) == set(temps) and journal(h, "SELECT row, temp FROM fetches") == rows
+            assert journal(h, "SELECT COUNT(*) FROM files WHERE path='note.txt'") == [(0,)], "busy changed nothing"
+        finally:
+            gate.set()
+        out, err = first.communicate(timeout=60)
+        assert first.returncode == 0, (out, err)
+        opened = json.loads(out.decode().strip())
+        assert opened["leaseId"] == lease and opened["fetchedBytes"] == big["size"] and opened["state"] == "clean"
+        assert sha((h.root / "big.bin").read_bytes()) == big["sha256"] and fetch_temps(h) == {}
+        assert agent_cli(h, "close", "--lease=" + lease) == (0, {"ok": True, "closed": lease})
+        assert agent_cli(h, "close", "--lease=" + lease) == (0, {"ok": True, "closed": lease, "replayed": True})
+
+        # An upload whose body PUT is in flight stays 'sending' while another invocation is refused.
+        assert agent_cli(h, "mark-dirty", "--path", "note.txt")[1]["state"] == "dirty"
+        gate = threading.Event()
+        h.core.gates[("PUT", "uploads")] = (gate, "before")
+        sender = agent_bg(h, "sync")
+        try:
+            wait_for(lambda: ("PUT", "uploads") not in h.core.gates, "the body PUT")
+            assert journal(h, "SELECT phase FROM ops") == [("sending",)]
+            assert agent_cli(h, "status") == (2, {"ok": False, "code": "busy"})
+            assert journal(h, "SELECT phase FROM ops") == [("sending",)], "sending is not rewritten to unknown"
+        finally:
+            gate.set()
+        out, err = sender.communicate(timeout=60)
+        assert sender.returncode == 0 and json.loads(out.decode())["results"][0]["state"] == "clean", (out, err)
+
+        # A killed owner releases the lock with its process; the next command recovers its orphan temp.
+        other = h.core.seed("other.bin", os.urandom(1536 << 10))
+        assert agent_cli(h, "register", "--manifest", str(write_manifest(h, [other])))[0] == 0
+        gate = threading.Event()
+        h.core.gates[("GET", "content/" + other["fileId"])] = (gate, "mid")
+        victim = agent_bg(h, "open", "--file-id=" + other["fileId"], "--version=" + other["versionId"])
+        try:
+            wait_for(lambda: any(size >= 1 << 20 for size in fetch_temps(h).values()), "the victim's fetch temp")
+            victim.kill()
+            victim.communicate(timeout=60)
+        finally:
+            gate.set()
+        assert fetch_temps(h) and journal(h, "SELECT COUNT(*) FROM fetches") == [(1,)], "orphan left by the kill"
+        code, status = agent_cli(h, "status")
+        assert code == 0 and status["openLeases"] == 0, status
+        assert fetch_temps(h) == {} and journal(h, "SELECT COUNT(*) FROM fetches") == [(0,)], "orphan recovered"
+        assert not (h.root / "other.bin").exists()
+        code, out = agent_cli(h, "open", "--file-id=" + other["fileId"], "--version=" + other["versionId"])
+        assert code == 0 and sha((h.root / "other.bin").read_bytes()) == other["sha256"], out
+
+
+def test_command_lock_validates_state_before_creating_files():
+    base = Path(tempfile.mkdtemp(prefix="cb-files-lock-"))
+    try:
+        expect("not_configured", lambda: fa.serialized(str(base / "missing")).__enter__())
+        assert not (base / "missing").exists(), "nothing is created for an unconfigured state"
+        (base / "ws").mkdir()
+        fa.FilesAgent.init(str(base / "st"), str(base / "ws"), "w1", "m1").close()
+
+        def cli(*args):
+            proc = subprocess.run([sys.executable, "-B", str(AGENT_PATH), "--state", str(base / "st"), *args],
+                                  capture_output=True, timeout=60)
+            return proc.returncode, json.loads(proc.stdout.decode("utf-8").strip().splitlines()[-1])
+        with fa.serialized(str(base / "st")):  # documented library serialization context
+            assert cli("status") == (2, {"ok": False, "code": "busy"})
+        assert cli("status")[0] == 0
+        lock = base / "st" / fa.LOCK_NAME
+        if os.name != "nt":
+            assert stat.S_IMODE(os.lstat(lock).st_mode) == 0o600
+            os.chmod(base / "st", 0o770)
+            assert cli("status") == (2, {"ok": False, "code": "state_insecure"})
+            os.chmod(base / "st", 0o700)
+            os.chmod(lock, 0o644)
+            assert cli("status") == (2, {"ok": False, "code": "state_insecure"})
+        else:
+            SKIPS.append("command lock: POSIX owner/mode checks (Windows host)")
+        lock.unlink()
+        decoy = base / "decoy"
+        try:
+            os.symlink(decoy, lock)
+        except (OSError, NotImplementedError):
+            SKIPS.append("command lock: symlinked lock file (symlink creation not permitted)")
+        else:
+            assert cli("status") == (2, {"ok": False, "code": "state_insecure"})
+            assert not decoy.exists(), "the lock never follows a symlink"
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 if __name__ == "__main__":

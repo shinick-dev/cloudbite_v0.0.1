@@ -3,7 +3,8 @@
 
 Works on one configured workspace root only.  It never walks the tree, never evaluates shell
 strings, refuses symlink crossings and path escapes, and never prints file contents or
-credentials.  The journal is SQLite (WAL, synchronous=FULL) under the --state directory.
+credentials.  The journal is SQLite (WAL, synchronous=FULL) under the --state directory; CLI commands
+on one state directory are serialized by an exclusive lock held for the whole command (``serialized``).
 
 Remote I/O goes through an injected backend (contract: docs/cloudbite/files-agent-contract.md).
 ``HttpBackend`` talks to the CloudBite app over HTTPS with one private, machine-scoped capability
@@ -63,6 +64,8 @@ AGENT_PREFIX = "/p/_cloudbite/computer/files/agent/v1"
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 MAX_JSON_BYTES = 1 << 20
 MAX_CAPABILITY_BYTES = 16 << 10
+LOCK_NAME = "agent.lock"
+LOCK_WAIT_S = 2.0
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -454,6 +457,79 @@ def _sha(value):
     return value
 
 
+def _try_lock(fd):
+    if os.name == "nt":
+        import msvcrt
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+    import fcntl
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def _unlock(fd):
+    with contextlib.suppress(OSError):
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def serialized(state_dir, wait=LOCK_WAIT_S):
+    """Exclusive inter-process lock on one state directory, held for a whole command.
+
+    Every CLI command runs under it, so another invocation (watcher mark-dirty, bridge status/close, a retried open)
+    never runs ``_recover`` - which discards fetch temporaries and marks sending uploads unknown - while this one's
+    download or upload is in flight.  It waits at most ``wait`` seconds and then raises ``busy``: retryable, nothing
+    was changed.  The lock dies with its process, so a killed owner's orphans are recovered by the next command.
+    Library callers that construct ``FilesAgent`` directly while other processes may use the same state must hold it.
+    The state directory and lock file are validated (private, not a link) before the lock file is created."""
+    state = os.path.realpath(state_dir)
+    try:
+        st, staging = os.lstat(state), os.lstat(os.path.join(state, "staging"))
+    except FileNotFoundError:
+        raise AgentError("not_configured") from None
+    if not stat.S_ISDIR(st.st_mode) or _is_link(staging) or not stat.S_ISDIR(staging.st_mode):
+        raise AgentError("not_configured")
+    if os.name != "nt" and (st.st_uid != os.getuid() or st.st_mode & 0o022):
+        raise AgentError("state_insecure")
+    path = os.path.join(state, LOCK_NAME)
+    with contextlib.suppress(FileNotFoundError):
+        st = os.lstat(path)
+        if _is_link(st) or not stat.S_ISREG(st.st_mode):
+            raise AgentError("state_insecure")
+    try:
+        fd = os.open(path, _open_flags(os.O_RDWR | os.O_CREAT) | getattr(os, "O_CLOEXEC", 0), 0o600)
+    except OSError:
+        raise AgentError("state_insecure") from None  # e.g. ELOOP: swapped for a symlink after the check
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or (os.name != "nt" and (st.st_uid != os.getuid() or st.st_mode & 0o077)):
+            raise AgentError("state_insecure")
+        deadline = time.monotonic() + wait
+        while not _try_lock(fd):
+            if time.monotonic() >= deadline:
+                raise AgentError("busy")
+            time.sleep(0.05)
+        try:
+            yield
+        finally:
+            _unlock(fd)
+    finally:
+        os.close(fd)
+
+
 class FilesAgent:
     def __init__(self, state_dir, backend=None, disk_free=None, clock=time.time):
         self.state_dir = os.path.realpath(state_dir)
@@ -484,7 +560,8 @@ class FilesAgent:
     # ---- setup -------------------------------------------------------------------------------
     @staticmethod
     def init(state_dir, root, workspace_id, machine_id, writer_epoch=1,
-             reserve_bytes=DEFAULT_RESERVE, max_transfer_bytes=DEFAULT_MAX_TRANSFER, auto_evict=False):
+             reserve_bytes=DEFAULT_RESERVE, max_transfer_bytes=DEFAULT_MAX_TRANSFER, auto_evict=False, serialize=False):
+        """With ``serialize`` the configuration write and the recovering constructor run under ``serialized``."""
         root = os.path.realpath(root)
         state = os.path.realpath(state_dir)
         home = os.path.realpath(os.path.expanduser("~"))
@@ -497,6 +574,7 @@ class FilesAgent:
                 return False
         if within(home, root) or within(state, root) or within(root, state):
             raise AgentError("path_forbidden")
+        os.makedirs(state, mode=0o700, exist_ok=True)
         os.makedirs(os.path.join(state, "staging"), mode=0o700, exist_ok=True)
         if os.stat(root).st_dev != os.stat(state).st_dev:
             raise AgentError("invalid_argument")
@@ -504,6 +582,12 @@ class FilesAgent:
                "writerEpoch": _int(writer_epoch, 1), "reserveBytes": _int(reserve_bytes),
                "maxTransferBytes": _int(max_transfer_bytes, 1), "autoEvict": bool(auto_evict),
                "draining": False}
+        with serialized(state) if serialize else contextlib.nullcontext():
+            FilesAgent._write_config(state, root, cfg)
+            return FilesAgent(state)
+
+    @staticmethod
+    def _write_config(state, root, cfg):
         db = sqlite3.connect(os.path.join(state, "journal.sqlite3"), isolation_level=None)
         try:
             db.execute("PRAGMA journal_mode=WAL")
@@ -526,7 +610,6 @@ class FilesAgent:
             db.execute("COMMIT")
         finally:
             db.close()
-        return FilesAgent(state)
 
     def _recover(self):
         """Discard only agent-owned temporaries; unconfirmed uploads become unknown, never clean."""
@@ -865,9 +948,13 @@ class FilesAgent:
                 db.execute("DELETE FROM fetches WHERE row=? AND temp=?", (row["id"], temp))
 
     def close_lease(self, lease_id):
+        """Desired state "not held": closing an absent (already closed) lease is a successful no-op marked
+        ``replayed``, so a retry after a lost reply clears the caller's lease.  Never touches a file."""
+        if not (isinstance(lease_id, str) and re.fullmatch(r"[0-9a-f]{32}", lease_id)):
+            raise AgentError("invalid_argument")
         with self._tx() as db:
             if not db.execute("DELETE FROM leases WHERE lease_id=?", (lease_id,)).rowcount:
-                raise AgentError("not_found")
+                return {"closed": lease_id, "replayed": True}
         return {"closed": lease_id}
 
     def set_pinned(self, path, pinned):
@@ -1269,53 +1356,55 @@ def main(argv=None, backend=None):
     args = parser.parse_args(argv)
     with contextlib.suppress(AttributeError):
         sys.stdout.reconfigure(encoding="utf-8")
-    agent = None
     try:
-        if args.command == "init":
-            agent = FilesAgent.init(args.state, args.root, args.workspace_id, args.machine_id, args.writer_epoch,
-                                    args.reserve_bytes, args.max_transfer_bytes, args.auto_evict)
-            result = {"configured": True}
-        else:
-            if backend is None and args.capability:
-                backend = HttpBackend.load(args.capability)
-            agent = FilesAgent(args.state, backend=backend)
-            if args.command == "register":
-                with open(args.manifest, "rb") as handle:
-                    raw = handle.read(16 << 20)
-                try:
-                    entries = json.loads(raw.decode("utf-8"))
-                except ValueError:
-                    raise AgentError("invalid_argument") from None
-                result = agent.register(entries)
-            else:
-                result = {
-                    "status": lambda: agent.status(),
-                    "list-local": lambda: agent.list_local(args.cursor, args.limit),
-                    "open": lambda: agent.open(args.path, args.file_id, args.version, args.lease),
-                    "close": lambda: agent.close_lease(args.lease),
-                    "pin": lambda: agent.set_pinned(args.path, True),
-                    "unpin": lambda: agent.set_pinned(args.path, False),
-                    "mark-dirty": lambda: agent.mark_dirty(args.path),
-                    "sync": lambda: agent.sync(args.limit),
-                    "reconcile": lambda: agent.reconcile(),
-                    "report-local": lambda: agent.report_local(args.limit),
-                    "create-dir": lambda: agent.create_dir(args.path),
-                    "evict": lambda: agent.evict(args.need_bytes),
-                    "prepare-end": lambda: agent.prepare_end(args.flush),
-                    "resume": lambda: agent.resume(),
-                }[args.command]()
+        with contextlib.ExitStack() as held:  # the agent is closed before the command lock is released
+            result = _run(args, backend, held)
     except AgentError as err:
         print(json.dumps({"ok": False, "code": err.code}))
         return 2
     except OSError:
         print(json.dumps({"ok": False, "code": "io_error"}))
         return 2
-    finally:
-        if agent:
-            agent.close()
     print(json.dumps(dict(ok=True, **result), ensure_ascii=False))
     return 0
 
+
+def _run(args, backend, held):
+    """One CLI command, serialized per state directory for its whole lifetime (``serialized``)."""
+    if args.command == "init":
+        agent = FilesAgent.init(args.state, args.root, args.workspace_id, args.machine_id, args.writer_epoch,
+                                args.reserve_bytes, args.max_transfer_bytes, args.auto_evict, serialize=True)
+        agent.close()
+        return {"configured": True}
+    held.enter_context(serialized(args.state))
+    if backend is None and args.capability:
+        backend = HttpBackend.load(args.capability)
+    agent = FilesAgent(args.state, backend=backend)
+    held.callback(agent.close)
+    if args.command == "register":
+        with open(args.manifest, "rb") as handle:
+            raw = handle.read(16 << 20)
+        try:
+            entries = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            raise AgentError("invalid_argument") from None
+        return agent.register(entries)
+    return {
+        "status": lambda: agent.status(),
+        "list-local": lambda: agent.list_local(args.cursor, args.limit),
+        "open": lambda: agent.open(args.path, args.file_id, args.version, args.lease),
+        "close": lambda: agent.close_lease(args.lease),
+        "pin": lambda: agent.set_pinned(args.path, True),
+        "unpin": lambda: agent.set_pinned(args.path, False),
+        "mark-dirty": lambda: agent.mark_dirty(args.path),
+        "sync": lambda: agent.sync(args.limit),
+        "reconcile": lambda: agent.reconcile(),
+        "report-local": lambda: agent.report_local(args.limit),
+        "create-dir": lambda: agent.create_dir(args.path),
+        "evict": lambda: agent.evict(args.need_bytes),
+        "prepare-end": lambda: agent.prepare_end(args.flush),
+        "resume": lambda: agent.resume(),
+    }[args.command]()
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -43,8 +43,8 @@ files-agent.py --state DIR list-local [--cursor N] [--limit N<=500]
 files-agent.py --state DIR register --manifest FILE        # [{fileId,path,versionId,size,sha256,mode?} | {kind:"dir",fileId,path}] 메타데이터만
 files-agent.py --state DIR create-dir --path P             # 등록된 부모 아래 원격 폴더 1개 (requestId 저널 후 전송)
 files-agent.py --state DIR report-local [--limit N]        # recordLocalState 보고
-files-agent.py --state DIR open (--path P | --file-id F) [--version V]
-files-agent.py --state DIR close --lease L
+files-agent.py --state DIR open (--path P | --file-id F) [--version V] [--lease L]
+files-agent.py --state DIR close --lease L                # L = 32 lowercase hex; 이미 없으면 성공 no-op
 files-agent.py --state DIR pin|unpin --path P
 files-agent.py --state DIR mark-dirty --path P
 files-agent.py --state DIR sync [--limit N]
@@ -58,8 +58,23 @@ files-agent.py --state DIR resume
 `not_configured, invalid_argument, path_invalid, path_forbidden, path_symlink, path_collision, path_ambiguous,
 parent_not_registered, not_found, version_mismatch, local_modified, local_modified_unrecorded, insufficient_space,
 transfer_too_large, size_mismatch, checksum_mismatch, receipt_mismatch, draining, busy, transport_not_configured,
-capability_invalid, capability_insecure, capability_expired, scope_mismatch, backend_error, base_version_conflict,
+state_insecure, capability_invalid, capability_insecure, capability_expired, scope_mismatch, backend_error, base_version_conflict,
 stale_writer_epoch, stale_writer, name_conflict, request_conflict, quota_exceeded` 및 core `FilesErrorCode` 통과값.
+
+**명령 직렬화.** CLI 명령(`init` 포함)은 state 디렉터리마다 `agent.lock`에 대한 배타 잠금을 잡고 명령이 끝날 때까지
+(내려받기·업로드 전송 포함) 유지한다. POSIX는 `flock`, Windows는 `msvcrt.locking`이다. 잠금은 복구(`_recover`)보다 먼저
+잡으므로, watcher의 `mark-dirty`나 bridge의 `status`/`close`/재시도 `open`이 진행 중인 다른 명령의 fetch 임시 파일을
+지우거나 `sending` op를 `unknown`으로 바꾸지 않는다. 최대 2초 기다린 뒤 `{"ok":false,"code":"busy"}`(종료코드 2)로 끝나며,
+이때 저널과 파일은 아무것도 바뀌지 않았다. `busy`는 **같은 요청을 나중에 다시 보내도 되는 안전한 재시도 신호**이지
+저장 성공·실패 확정이 아니다. watcher 시작이나 `status` GET도 다른 명령과 겹치면 `busy`를 받을 수 있다.
+잠금 파일을 만들기 전에 state 경로를 검사한다: 설정되지 않은 state(`staging/` 없음)는 아무것도 만들지 않고 `not_configured`,
+state 디렉터리가 본인 소유가 아니거나 group/other 쓰기 가능이면, 또는 잠금 경로가 symlink·일반 파일이 아니거나
+0600·본인 소유가 아니면 `state_insecure`(POSIX; 잠금 파일은 `O_NOFOLLOW`로 0600 생성). 잠금은 프로세스와 함께 풀리므로
+죽은 소유자가 남긴 임시 파일은 다음 명령이 복구한다. `FilesAgent`를 직접 만드는 라이브러리 호출자(시험 등)는 잠금을 잡지
+않는다. 다른 프로세스와 같은 state를 쓸 수 있으면 `with serialized(state_dir):` 안에서 만들고 쓴다.
+
+`close`는 원하는 상태("lease가 없음")에 대해 멱등이다. 형식이 맞는 lease가 이미 없으면(응답 유실 뒤 재시도 등)
+`{"closed": L, "replayed": true}`로 성공한다. 형식이 틀리면 `invalid_argument`다. 다른 lease를 만들거나 파일을 지우지 않는다.
 
 `init`은 같은 state에 다른 root/workspace/machine을 거절하고, writer epoch를 낮추는 재초기화를 `stale_writer_epoch`로 거절한다.
 
@@ -137,7 +152,7 @@ ETag·HEAD·로컬 쓰기 완료를 원격 저장 확인으로 취급하지 않�
 
 ## 6. 재시작 복구
 
-시작 시 `fetching` 임시 파일(에이전트 staging 소유)만 정리한다. `sending` op는 `unknown`이 되어 dirty를 유지한다.
+시작 시(명령 잠금을 잡은 뒤) `fetching` 임시 파일(에이전트 staging 소유)만 정리한다. `sending` op는 `unknown`이 되어 dirty를 유지한다.
 업로드용 staged 스냅샷은 op가 committed/conflict/rejected로 끝날 때까지 보존한다.
 
 ## 7. 남은 위험
@@ -148,11 +163,17 @@ ETag·HEAD·로컬 쓰기 완료를 원격 저장 확인으로 취급하지 않�
   주기 sync·사용 종료 lifecycle 연결은 아직 없다**(누가 언제 `sync`/`report-local`/`prepare-end`를 부르는지 미정).
 - 삭제·rename·폴더 이동의 로컬→원격 반영, 충돌 해결 UI는 범위 밖이다. 카탈로그 전체를 당겨오는 pull도 없다(서버가 만든 manifest만 등록).
 - open lease는 명시적 `close`까지 유지된다(재시작 후에도). 앱 프로세스 종료 자동 감지는 없다.
+- 명령 직렬화는 CLI에만 적용된다. 잠금 없이 `FilesAgent`를 직접 만드는 같은 state의 다른 프로세스는 막지 못한다.
+  긴 내려받기 동안 다른 명령은 `busy`를 받는다(대기열 없음, 최대 2초 대기). `close`의 `replayed`는 "지금 열려 있지 않음"만
+  뜻하며, 그 lease가 과거에 있었는지는 구분하지 않는다.
 - 업로드는 파일당 PUT 한 번이다(32 MiB 초기 한도 가정). 큰 파일 multipart·재개는 없다.
 - 미확정 begin 재전송은 만료된 업로드를 클라이언트 시계로 판정한다. 시계가 빠르면 새 op가 생기고 이전 예약은 TTL까지 남는다(데이터 손실은 없음).
 - writer epoch가 바뀌면 이전 epoch로 준비된 op는 `stale_writer` → conflict가 된다(내용 보존, 사용자 해결 필요).
 
 ## 8. 증거 수준
 
-증거는 합성 임시 디렉터리 + 가짜 backend + **loopback 가짜 HTTP 서버**(core 모양) 시험뿐이다. Windows 19 pass/3 skip,
-WSL Ubuntu(POSIX) 19 pass/0 skip. 실제 앱 route, 실제 R2/DO 저장 확인, 실제 VM 디스크, 성능·지연은 측정하지 않았다.
+증거는 합성 임시 디렉터리 + 가짜 backend + **loopback 가짜 HTTP 서버**(core 모양) 시험뿐이다. Windows 25 pass/5 skip,
+WSL Ubuntu(POSIX) 25 pass/0 skip. 명령 직렬화 시험은 실제 CLI 프로세스 두 개를 쓴다: 첫 프로세스의 내려받기를 중간에
+멈춘 채 두 번째 `status`/`mark-dirty`/`close`가 `busy`를 받고 임시 파일·`fetches` 행·`sending` op가 그대로인지 확인하고,
+소유 프로세스를 강제 종료한 뒤 다음 명령이 남은 임시 파일을 복구하는지 확인한다.
+실제 앱 route, 실제 R2/DO 저장 확인, 실제 VM 디스크, 성능·지연은 측정하지 않았다.
