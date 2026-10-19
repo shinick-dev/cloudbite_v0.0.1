@@ -14,7 +14,7 @@ A standalone mobile page at `/cloudbite/computer/latency` (`?lang=ko|en`) measur
 
 Browser and server values are on different clocks and are never added, subtracted or combined; `serverTime` from ping is informational. No distance, location or benchmark is derived from a round trip.
 
-The typing preview is local paint response only. It is not the time for input to reach the remote desktop (Photon). Measuring that needs a video loop (input → remote frame → decoded frame), which is not implemented.
+The typing preview measures input-event to the next local animation-frame callback, which runs before paint. It does not measure actual display latency or the full remote desktop response. That needs a separate input-to-frame video loop, which is not implemented.
 
 ## API (root-routed after owner authentication)
 

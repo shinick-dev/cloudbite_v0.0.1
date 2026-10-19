@@ -1,6 +1,6 @@
 // Generated file — do not edit. Sources: client/cloudbite-computer-latency.ts · client/cloudbite-computer-latency.css
 // Rebuild: node tools/build-cloudbite-computer-latency.mjs (--check verifies it is current)
-// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 394aac5e5f0c6dab7465cd0fa9fd29f2f3fa48565cb9cb23723b003eb5ac8ef9 · css sha256 bc678aaf507e48bcaee7d0dd1921478239d5bbfdf87b2f24f5f601644c5bf8d1
+// esbuild 0.28.1 transform (ES2022, unbundled) · ts sha256 a4ea02521b47c3a15522f2c5abaacc8c637e6f724ff0c5668ec2ef0fc459e808 · css sha256 bc678aaf507e48bcaee7d0dd1921478239d5bbfdf87b2f24f5f601644c5bf8d1
 // Routing (runtime): GET CLOUDBITE_COMPUTER_LATENCY_PATH → CLOUDBITE_COMPUTER_LATENCY_HTML, CLOUDBITE_COMPUTER_LATENCY_JS_PATH → CLOUDBITE_COMPUTER_LATENCY_JS (text/javascript),
 // CLOUDBITE_COMPUTER_LATENCY_CSS_PATH → CLOUDBITE_COMPUTER_LATENCY_CSS (text/css). CSP script-src 'self'; style-src 'self' suffices (no inline).
 // The script calls only GET /api/cloudbite/computer/latency/ping and /latency/backend same-origin with the existing cookie, from explicit buttons, and links only to /cloudbite/computer.
@@ -158,7 +158,7 @@ export const CLOUDBITE_COMPUTER_LATENCY_JS = [
   "    typeLabel: \"Type here\",",
   "    typeClear: \"Clear samples\",",
   "    typeNone: \"No samples yet.\",",
-  "    typeNote: \"This is local paint response only. It is not how long input takes to reach your remote desktop (Photon); measuring that needs a video loop, which is not implemented.\"",
+  "    typeNote: \"This measures the wait until the next local animation frame, before the screen is painted. The full response time of your remote desktop needs a separate measurement.\"",
   "  },",
   "  ko: {",
   "    title: \"Cloudbite — 지연 시간\",",
@@ -218,7 +218,7 @@ export const CLOUDBITE_COMPUTER_LATENCY_JS = [
   "    typeLabel: \"여기에 입력\",",
   "    typeClear: \"표본 지우기\",",
   "    typeNone: \"아직 표본이 없습니다.\",",
-  "    typeNote: \"이 값은 이 기기의 화면 반응일 뿐입니다. 입력이 원격 데스크톱(Photon)에 닿는 시간이 아니며, 그것을 재려면 아직 구현되지 않은 영상 루프가 필요합니다.\"",
+  "    typeNote: \"화면이 그려지기 전, 이 기기의 다음 애니메이션 프레임까지 기다린 시간입니다. 원격 데스크톱 화면 전체의 반응 시간은 별도로 측정해야 합니다.\"",
   "  }",
   "};",
   "function isObj(v) {",

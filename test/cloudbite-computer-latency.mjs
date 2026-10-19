@@ -249,7 +249,7 @@ await test('load and typing send nothing; typing shows local input→frame sampl
   assert.equal(p.requests.length, 0);
   const f = p.facts(p.byId('cl-typing').parent.parent.children.find(c => c.tagName === 'DL'));
   assert.deepEqual(f, { Samples: '5', 'Median (p50)': '12.0 ms', p95: '30.0 ms' });
-  assert.ok(p.text().includes('local paint response only') && p.text().includes('not implemented'));
+  assert.ok(p.text().includes('before the screen is painted') && p.text().includes('separate measurement'));
   p.byId('cl-typing-clear').click();
   assert.ok(p.text().includes('No samples yet.'));
   // more than 50 inputs keep only the last 50
@@ -359,7 +359,7 @@ await test('KO switch keeps the measured values and labels honestly', async () =
   p.byId('cl-backend-run').click(); await p.flush();
   assert.ok(p.text().includes('중앙값 (p50)') && p.text().includes('20.0 ms'));
   assert.ok(p.text().includes('측정 불가 — 컴퓨터가 실행 중이 아님'));
-  assert.ok(p.text().includes('Photon') && p.text().includes('영상 루프'));
+  assert.ok(p.text().includes('화면이 그려지기 전') && p.text().includes('별도로 측정'));
   p.all().find(e => e.tagName === 'BUTTON' && e.textContent === 'EN').click();
   assert.equal(p.doc.documentElement.lang, 'en');
   assert.ok(p.text().includes('Median (p50)') && p.text().includes('20.0 ms'));

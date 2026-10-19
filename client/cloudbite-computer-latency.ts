@@ -59,7 +59,7 @@ const DICT = {
     unknownReason: (c: string) => `unknown (${c})`,
     typeTitle: 'Typing preview on this device', typeLead: 'Type in the box. Each key is timed from the input event to the next animation frame here. No request is sent.',
     typeLabel: 'Type here', typeClear: 'Clear samples', typeNone: 'No samples yet.',
-    typeNote: 'This is local paint response only. It is not how long input takes to reach your remote desktop (Photon); measuring that needs a video loop, which is not implemented.',
+    typeNote: 'This measures the wait until the next local animation frame, before the screen is painted. The full response time of your remote desktop needs a separate measurement.',
   },
   ko: {
     title: 'Cloudbite — 지연 시간', brand: 'Cloudbite', sub: '지연 시간', back: '클라우드 컴퓨터',
@@ -88,7 +88,7 @@ const DICT = {
     unknownReason: (c: string) => `알 수 없음 (${c})`,
     typeTitle: '이 기기의 입력 미리보기', typeLead: '상자에 입력해 보세요. 키마다 입력 이벤트부터 다음 애니메이션 프레임까지를 이 기기에서 잽니다. 요청은 보내지 않습니다.',
     typeLabel: '여기에 입력', typeClear: '표본 지우기', typeNone: '아직 표본이 없습니다.',
-    typeNote: '이 값은 이 기기의 화면 반응일 뿐입니다. 입력이 원격 데스크톱(Photon)에 닿는 시간이 아니며, 그것을 재려면 아직 구현되지 않은 영상 루프가 필요합니다.',
+    typeNote: '화면이 그려지기 전, 이 기기의 다음 애니메이션 프레임까지 기다린 시간입니다. 원격 데스크톱 화면 전체의 반응 시간은 별도로 측정해야 합니다.',
   },
 };
 type Dict = typeof DICT.en;
